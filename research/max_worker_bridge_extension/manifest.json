@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "MAX Worker Bridge Feasibility",
+  "version": "0.1.0",
+  "description": "Read-only target discovery and CDP feasibility diagnostics for MAX Web.",
+  "permissions": ["debugger", "tabs", "storage"],
+  "host_permissions": ["https://web.max.ru/*", "https://max.ru/*"],
+  "action": {"default_title": "Scan MAX targets", "default_popup": "popup.html"},
+  "background": {"service_worker": "service_worker.js", "type": "module"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'self'"}
+}

@@ -1,0 +1,126 @@
+name: maxibot-vps
+
+services:
+  api:
+    image: maxibot-vps-api:20260813-landing1
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    env_file: .env
+    environment:
+      MAX_RUN_POLLING: "false"
+      MAX_UPDATES_MODE: "polling"
+      TRAFFIC_BOT_ATTRIBUTION_ENABLED: "true"
+      MAX_JOIN_REQUEST_SIGNAL: "true"
+    volumes:
+      - maxibot_uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "0.70"
+          memory: 512M
+    networks:
+      - maxibot_internal
+
+  worker:
+    image: maxibot-vps-api:20260813-landing1
+    restart: unless-stopped
+    command: ["python", "-m", "app.poller"]
+    env_file: .env
+    environment:
+      MAX_RUN_POLLING: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          cpus: "0.35"
+          memory: 256M
+    networks:
+      - maxibot_internal
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: maxibot
+      POSTGRES_USER: maxibot
+      POSTGRES_PASSWORD: maxibot
+    expose:
+      - "5432"
+    volumes:
+      - maxibot_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U maxibot -d maxibot"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 384M
+    networks:
+      - maxibot_internal
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    expose:
+      - "6379"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 96M
+    networks:
+      - maxibot_internal
+
+  https:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - maxibot_caddy_data:/data
+      - maxibot_caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: 96M
+    networks:
+      - maxibot_internal
+
+volumes:
+  maxibot_postgres_data:
+  maxibot_caddy_data:
+  maxibot_caddy_config:
+  maxibot_uploads:
+
+networks:
+  maxibot_internal:
+    name: maxibot-vps-internal
+    driver: bridge

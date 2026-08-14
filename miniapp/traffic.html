@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MAXIBOT Traffic PoC</title>
+  <style>body{font:16px system-ui,sans-serif;background:#0d0f12;color:#f2f3f5;margin:0;padding:24px}main{max-width:520px;margin:auto}button{width:100%;padding:14px;margin:8px 0;border:0;border-radius:12px;background:#2d8cff;color:#fff;font-size:16px}button:disabled{opacity:.5}.muted{color:#9da5b0}.ok{color:#52d273}.error{color:#ff8d8d}</style>
+</head>
+<body>
+<main>
+  <h1>Подписка</h1>
+  <p id="status" class="muted">Проверяем MAX-пользователя…</p>
+  <button id="open" disabled>Открыть канал</button>
+  <button id="check" disabled>Проверить подписку</button>
+</main>
+<script src="https://st.max.ru/js/max-web-app.js"></script>
+<script>
+const statusEl = document.querySelector('#status');
+const initData = window.WebApp?.initData || '';
+const api = (path, options = {}) => fetch(path, { ...options, headers: {'X-MAX-Init-Data': initData, ...(options.headers || {})} });
+let identified = false;
+async function identify() {
+  if (!initData) throw new Error('MAX initData не найден');
+  const response = await api('/api/traffic/identify', {method: 'POST'});
+  if (!response.ok) throw new Error('Не удалось подтвердить MAX identity');
+  const data = await response.json();
+  identified = true;
+  document.querySelector('#open').disabled = false;
+  document.querySelector('#check').disabled = false;
+  statusEl.textContent = `MAX user ${data.max_user_id} связан с рекламным визитом`;
+  statusEl.className = 'ok';
+}
+document.querySelector('#open').onclick = async () => {
+  const response = await api('/api/traffic/channel-open', {method: 'POST'});
+  if (!response.ok) return;
+  const data = await response.json();
+  window.location.href = data.target_url;
+};
+document.querySelector('#check').onclick = async () => {
+  if (!identified) return;
+  const response = await api('/api/traffic/check-subscription', {method: 'POST'});
+  const data = await response.json();
+  statusEl.textContent = data.membership ? '✅ Подписка подтверждена' : 'Пока не подписан';
+  statusEl.className = data.membership ? 'ok' : 'muted';
+};
+identify().catch(error => { statusEl.textContent = error.message; statusEl.className = 'error'; });
+</script>
+</body>
+</html>

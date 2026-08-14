@@ -1,0 +1,63 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "until alembic upgrade head; do sleep 2; done; python -m app.seed; uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "${QA_STAGING_PORT:-18000}:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    env_file: .env.staging
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - maxibot_staging_uploads:/app/uploads
+    networks:
+      - maxibot_staging
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: maxibot_staging
+      POSTGRES_USER: maxibot_staging
+      POSTGRES_PASSWORD: maxibot_staging_local_only
+    ports:
+      - "${QA_STAGING_DB_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U maxibot_staging -d maxibot_staging"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - maxibot_staging_postgres_data:/var/lib/postgresql/data
+    networks:
+      - maxibot_staging
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${QA_STAGING_REDIS_PORT:-56379}:6379"
+    volumes:
+      - maxibot_staging_redis_data:/data
+    networks:
+      - maxibot_staging
+
+volumes:
+  maxibot_staging_postgres_data:
+    name: maxibot_staging_postgres_data
+  maxibot_staging_redis_data:
+    name: maxibot_staging_redis_data
+  maxibot_staging_uploads:
+    name: maxibot_staging_uploads
+
+networks:
+  maxibot_staging:
+    name: maxibot_staging_network

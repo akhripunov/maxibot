@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MAXIBOT</title>
+  <link rel="stylesheet" href="/miniapp/style.css?v=1088">
+  <link rel="stylesheet" href="/miniapp/tuning.css?v=1092">
+</head>
+<body>
+  <main>
+    <header><h1>Диалоги</h1><div class="top-actions"><button id="theme" aria-label="Сменить тему">☾</button><button id="folder" aria-label="Папка"></button></div></header>
+    <div class="channels" id="channels"><button class="filter active" data-channel=""><span class="channel-avatar all-avatar">▦</span><span>Все</span></button></div>
+    <div class="search"><span>⌕</span><input id="search" placeholder="Поиск"></div>
+    <nav><button class="tab active" data-status="all">Все чаты</button><button class="tab" data-status="all">Рекламодатели</button></nav>
+    <section id="dialogs"></section>
+    <section id="conversation" hidden>
+      <div class="conversation-head">
+        <button id="back" class="icon-button" aria-label="Назад">‹</button>
+        <div class="chat-head"><div id="dialog-avatar" class="avatar">●</div><div><h2 id="dialog-title"></h2><small id="dialog-source"></small></div></div>
+        <div class="conversation-actions">
+          <button id="pin" class="icon-button action-pin" aria-label="Закрепить диалог" title="Закрепить диалог"></button>
+          <button id="tag" class="icon-button action-tag" aria-label="Метка" title="Метка"></button>
+          <button id="block" class="icon-button block-icon" aria-label="Заблокировать пользователя" title="Заблокировать пользователя"></button>
+        </div>
+      </div>
+      <div id="messages" aria-live="polite"></div>
+      <form id="reply" class="composer">
+        <button type="button" class="attach" aria-label="Прикрепить изображение" title="Прикрепить изображение"></button>
+        <input id="image-input" type="file" accept="image/jpeg,image/png,image/gif,image/tiff,image/bmp,image/heic" hidden>
+        <input required maxlength="4000" autocomplete="off" placeholder="Сообщение" aria-label="Сообщение">
+        <button type="submit" class="send" aria-label="Отправить"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.8 10.2c-.8.3-.8 1.5.1 1.8l6.6 2.2 2.2 6.7c.3.8 1.4.9 1.8.1L21 3Z"/><path d="m10.5 14.2 4.1-4.1"/></svg></button>
+      </form>
+    </section>
+  </main>
+  <script src="https://st.max.ru/js/max-web-app.js"></script>
+  <script src="/miniapp/app.js?v=1088"></script>
+</body>
+</html>

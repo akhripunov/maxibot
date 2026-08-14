@@ -1,0 +1,12 @@
+.env
+.env.staging
+research/max_ws_reproduction/private/*
+research/max_ws_reproduction/private/.gitignore
+*.auth-state.json
+auth-state.json
+.qa-logs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+uploads/*

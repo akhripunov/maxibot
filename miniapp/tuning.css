@@ -1,0 +1,90 @@
+:root {
+  --page-padding: 16px;
+  --title-size: 36px;
+  --source-size: 16px;
+  --avatar-size: 68px;
+  --source-diameter: 68px;
+  --source-gap: 5px;
+  --search-height: 50px;
+  --tabs-height: 54px;
+  --tabs-font: 20px;
+  --dialog-avatar-size: 64px;
+  --dialog-row-height: 86px;
+  --composer-height: 68px;
+}
+
+/* Reference calibration: 776px physical / DPR 2 = 388px CSS viewport. */
+@media (max-width: 600px) {
+  :root {
+    --page-padding: 16px;
+    --title-size: 28px;
+    --source-size: 15px;
+    --source-diameter: 56px;
+    --source-gap: 5px;
+    --search-height: 38px;
+    --tabs-height: 62px;
+    --tabs-font: 17px;
+    --dialog-avatar-size: 54px;
+    --dialog-row-height: 76px;
+  }
+
+  main { padding-left: var(--page-padding); padding-right: var(--page-padding); }
+  header { margin-bottom: 18px; }
+  header h1 { font-size: var(--title-size); }
+  .channels { gap: 18px; margin-bottom: 17px; }
+  .channel-avatar { width: var(--source-diameter); height: var(--source-diameter); }
+  .filter { gap: var(--source-gap); min-width: 68px; font-size: var(--source-size); }
+  .search { height: var(--search-height); margin-bottom: 15px; border-radius: 11px; padding: 0 11px; }
+  .search input { font-size: 17px; }
+  nav { min-height: var(--tabs-height); gap: 20px; }
+  .tab { font-size: var(--tabs-font); padding: 7px 2px 13px; }
+  .dialog { min-height: var(--dialog-row-height); gap: 10px; padding: 11px 0; }
+  .dialog .avatar { width: var(--dialog-avatar-size); height: var(--dialog-avatar-size); }
+  .dialog-main b { font-size: 20px; }
+  .last { font-size: 16px; }
+  .time { font-size: 15px; }
+}
+
+main { padding-left: var(--page-padding); padding-right: var(--page-padding); }
+header { margin-bottom: 14px; }
+header h1 { font-size: var(--title-size); }
+.top-actions { gap: 12px; }
+.top-actions button { width: 72px; height: 42px; font-size: 24px; }
+.top-actions #folder { width: 52px; height: 52px; }
+.top-actions #folder:before { left: 15px; top: 18px; width: 22px; height: 17px; border-width: 2px; }
+.top-actions #folder:after { left: 18px; top: 16px; width: 10px; height: 5px; border-width: 2px; }
+.channels { gap: 16px; padding-left: 1px; padding-right: 1px; margin-bottom: 16px; }
+.channel-avatar { width: var(--avatar-size); height: var(--avatar-size); }
+.filter { font-size: var(--source-size); }
+.filter { gap: 5px; min-width: 78px; }
+.search { height: var(--search-height); margin: 0 0 16px; border-radius: 15px; padding: 0 14px; }
+.search span { font-size: 26px; }
+.search input { font-size: 21px; }
+nav { margin-left: 0; margin-right: 0; min-height: var(--tabs-height); gap: 22px; }
+.tab { font-size: 20px; padding: 6px 3px 14px; }
+.dialog { gap: 12px; padding: 11px 0; }
+.dialog .avatar { width: var(--dialog-avatar-size); height: var(--dialog-avatar-size); }
+.dialog-main { padding-top: 2px; }
+.dialog-main b { font-size: 21px; margin-bottom: 4px; }
+.last { font-size: 16px; }
+.source { font-size: 14px; margin-top: 2px; }
+.time { font-size: 16px; }
+
+@media (min-width: 601px) {
+  #conversation { grid-template-rows: 76px minmax(0, 1fr) auto; }
+  .conversation-head { gap: 6px; padding: 8px 10px; }
+  .conversation-head #back { width: 38px; height: 52px; font-size: 48px; }
+  .conversation-head .chat-head { gap: 9px; }
+  .conversation-head .chat-head .avatar { width: 50px; height: 50px; }
+  .conversation-head h2 { font-size: 22px; }
+  .conversation-actions { gap: 1px; flex: 0 0 auto; }
+  .conversation-actions .icon-button { width: 30px; height: 46px; }
+  #messages { padding: 0 10px 14px; }
+  .bubble { width: fit-content; max-width: 80%; font-size: 16px; padding: 8px 11px 7px; }
+  .bubble:has(.message-image) { width: 80%; max-width: 598px; padding: 0 12px 7px; }
+  .bubble small { font-size: 13px; }
+  .composer { min-height: var(--composer-height); gap: 6px; padding: 6px 8px max(6px, env(safe-area-inset-bottom)); }
+  .composer input { height: 52px; font-size: 19px; padding: 0 15px; }
+  .attach { width: 36px; height: 46px; }
+  .send { width: 52px; height: 52px; }
+}

@@ -1,0 +1,4 @@
+raw/
+*.bin
+*.base64
+*.pcap

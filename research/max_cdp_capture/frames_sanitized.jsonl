@@ -1,0 +1,11 @@
+{"sequence":547,"direction":"meta","event":"Network.webSocketCreated","url":"wss://api.oneme.ru/websocket","requestId":"40067.168"}
+{"sequence":579,"direction":"meta","event":"Network.webSocketWillSendHandshakeRequest","requestId":"40067.168","headers":"not exposed"}
+{"sequence":580,"direction":"meta","event":"Network.webSocketHandshakeResponseReceived","requestId":"40067.168","status":101,"headers":"redacted"}
+{"sequence":582,"direction":"sent","length_bytes":342,"hex_head":"0a00000000060200014cf51282a9757365724167656e748b","fields":["userAgent","deviceType","pushD","locale","osVersion","headerUserAgent","isPwa","app","screen"]}
+{"sequence":583,"direction":"received","length_bytes":212,"hex_head":"0a0100000006010000caf0b985ad7765622d7077612d7072","fields":["web-pwa-promo","phone-auth-enabled","location","lang","reg-country-code"]}
+{"sequence":585,"direction":"sent","length_bytes":814,"hex_head":"0a000001001302000324f1ffffde87a5746f6b656eda02c7","fields":["token=[REDACTED]","chatsCount","interactive","Sync","presence","draftsSync"]}
+{"sequence":586,"direction":"received","length_bytes":23469,"hex_head":"0a010001001302005ba3f7358aa770726f66696c6583a763","fields":["profile","contact","chats"]}
+{"sequence":593,"direction":"sent","length_bytes":32,"hex_head":"0a00000200300000001681a76368617449647391c70901cf","fields":["chatIds"]}
+{"sequence":594,"direction":"received","length_bytes":177,"hex_head":"0a0100020030020000a7f43981a5636861747391de000aa2","fields":["chats","type","status","owner","participants"]}
+{"sequence":33,"direction":"sent","length_bytes":98,"hex_head":"0a000024004d01000058f04785a6636861744964c70901d3","fields":["opcode=77","chatId","userIds=[one user]","showHistory","operation=add","type=JOIN_REQUEST"]}
+{"sequence":34,"direction":"received","length_bytes":3637,"hex_head":"0a010024004d02000e2bf44081a463686174de001ca26964","fields":["opcode=77 response","same operation marker","checkResult","chat"]}
