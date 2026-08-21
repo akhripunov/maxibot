@@ -90,6 +90,10 @@ class MaxClient(ABC):
     async def get_member(self, chat_id: str, user_id: str) -> dict[str, Any] | None:
         return None
 
+    async def get_chat(self, chat_id: str) -> dict[str, Any]:
+        """Return chat metadata when the client supports the official endpoint."""
+        return {}
+
 
 class StubMaxClient(MaxClient):
     def __init__(self, fail_edits: bool = False):

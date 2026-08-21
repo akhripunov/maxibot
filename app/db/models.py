@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import uuid
 from typing import Optional
-from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Integer, UniqueConstraint, Sequence
+from datetime import date, datetime, timezone
+from sqlalchemy import String, Boolean, Date, DateTime, ForeignKey, Text, Integer, UniqueConstraint, Sequence
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 def uid(): return str(uuid.uuid4())
@@ -55,6 +55,7 @@ class Channel(Base):
     inbox_chat_connected_at: Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True))
     communication_mode: Mapped[str]=mapped_column(String(20), default="SYSTEM_INBOX", nullable=False)
     bot_connection_id: Mapped[Optional[str]]=mapped_column(String(36), index=True)
+    max_connection_kind: Mapped[str]=mapped_column(String(24), default="PRIMARY", server_default="PRIMARY", nullable=False)
     max_owner_user_id: Mapped[Optional[str]]=mapped_column(String(128), index=True)
     max_chat_metadata_json: Mapped[Optional[str]]=mapped_column(Text)
     connected_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
@@ -145,6 +146,25 @@ class TrafficMembership(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (UniqueConstraint("channel_id", "max_user_id"),)
 
+
+class DailyChannelReport(Base):
+    """One idempotent owner delivery for a channel and a Moscow calendar day."""
+    __tablename__ = "daily_channel_reports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    report_date: Mapped[date] = mapped_column(Date, nullable=False)
+    subscriber_count: Mapped[Optional[int]] = mapped_column(Integer)
+    subscriber_delta: Mapped[Optional[int]] = mapped_column(Integer)
+    subscribed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    unsubscribed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    invite_link_unsubscribed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    undetermined_unsubscribed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", nullable=False, index=True)
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("channel_id", "report_date", name="uq_daily_channel_report_date"),)
+
 class TrafficEvent(Base):
     __tablename__ = "traffic_events"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
@@ -198,6 +218,7 @@ class OfflineConversion(Base):
     visit_id: Mapped[str] = mapped_column(ForeignKey("traffic_visits.id", ondelete="CASCADE"), index=True)
     membership_id: Mapped[str] = mapped_column(ForeignKey("traffic_memberships.id", ondelete="CASCADE"), index=True)
     target: Mapped[str] = mapped_column(String(32), default="YANDEX")
+    goal: Mapped[str] = mapped_column(String(64), default="userDidSubscribe", server_default="userDidSubscribe", nullable=False)
     identifier_type: Mapped[Optional[str]] = mapped_column(String(32))
     identifier_value: Mapped[Optional[str]] = mapped_column(String(255))
     conversion_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

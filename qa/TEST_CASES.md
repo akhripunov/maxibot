@@ -34,9 +34,18 @@ This registry is layered over the preserved pre-existing suite listed in `qa/EXI
 | TC-TRAFFIC-007 | Traffic v2 scoring stays conservative | traffic/attribution | HIGH | REGRESSION | AUTOMATED | Scored candidate fixtures | Compare single and multiple candidates | Ambiguous candidates never become HIGH incorrectly | tests/test_traffic_v2.py | — | ACTIVE |
 | TC-TRAFFIC-008 | Invalid MAX target blocks redirect | traffic/redirect | CRITICAL | REGRESSION | AUTOMATED | Missing or hostile target | Attempt redirect | Request is blocked with no foreign fallback | tests/test_traffic_deep_link.py | — | ACTIVE |
 | TC-TRAFFIC-009 | Expired startapp visit is not reused | traffic/deep-link | CRITICAL | REGRESSION | AUTOMATED | Expired unbound visit | Open landing again | Old startapp token is expired and a fresh opaque token is created | tests/regression/test_landing_fresh_startapp_token.py | — | ACTIVE |
+| TC-TRAFFIC-010 | Exact user-added attribution is channel-scoped | traffic/attribution | CRITICAL | REGRESSION | AUTOMATED | Exact identity candidate fixtures | Resolve one or multiple visit candidates | One exact visit resolves; none or ambiguous candidates remain unattributed | tests/test_exact_user_added_attribution.py | — | ACTIVE |
+| TC-TRAFFIC-011 | Identity PoC binds YCLID to MAX user and join request | traffic/identity-poc | HIGH | REGRESSION | AUTOMATED | In-memory PoC fixtures | Create visit, resolve signed token, observe join | Only the bound user/channel produces attribution; token is signed and one-time | tests/test_identity_poc.py | — | ACTIVE |
 | TC-HEALTH-001 | Liveness endpoint responds | api/health | CRITICAL | SMOKE | AUTOMATED | App running | Request `/health/live` | HTTP 200 and alive status | app/main.py health routes; staging smoke | — | ACTIVE |
 | TC-HEALTH-002 | Critical worker starts | worker/poller | CRITICAL | SMOKE | SEMI_AUTOMATED | Staging deployment | Inspect worker container and logs | Worker is running without critical errors | docker-compose.vps.yml | — | ACTIVE |
 | TC-OPS-001 | Exactly one production poller is enabled | deployment/runtime | CRITICAL | REGRESSION | AUTOMATED | Application and VPS Compose files | Inspect polling defaults and worker override | Local/API containers have `MAX_RUN_POLLING=false`; only VPS worker has `true` and runs `app.poller` | tests/regression/test_single_poller_safety.py | — | ACTIVE |
+| TC-OPS-002 | Daily channel report is Moscow-time and fail-closed | worker/daily-reports | HIGH | REGRESSION | AUTOMATED | Report time and count fixtures | Calculate due date and render report | Prior Moscow day is selected; unknown counts/source are not guessed | tests/test_daily_reports.py | — | ACTIVE |
+| TC-MAX-006 | Channel MAX connection resolution is explicit | integrations/max-connection | HIGH | REGRESSION | AUTOMATED | Primary/custom/legacy row fixtures | Resolve channel transport | Primary and custom clients are selected explicitly; invalid states fail closed | tests/test_max_connection_resolution.py | — | ACTIVE |
+| TC-TRAFFIC-012 | Landing public ID is generated safely | traffic/landing | HIGH | REGRESSION | AUTOMATED | ID generator | Generate public landing ID | ID is a numeric 14-digit public identifier | tests/test_landing_public_id.py | — | ACTIVE |
+| TC-TRAFFIC-013 | iPhone MAX handoff keeps the real-device-proven platform branch | traffic/mobile-handoff | CRITICAL | REGRESSION | AUTOMATED | Current landing and Mini App source | Validate mobile landing, iOS anchor, Android and MAX Web branches | iPhone cannot fall through to `openMaxLink`; same startapp is used and no timer creates a second navigation | tests/regression/test_mobile_max_handoff_contract.py | 2026-08-21 | ACTIVE |
+| TC-TRAFFIC-014 | Fresh iPhone handoff from MAX opens the target channel | traffic/mobile-handoff | CRITICAL | SMOKE | MANUAL | Real iPhone/iPad, fresh promotion visit | Open promotion URL from a MAX chat | Mini App opens and then the intended channel opens without a required click | QA_PROCESS.md mobile MAX checklist | 2026-08-21 | ACTIVE |
+| TC-TRAFFIC-015 | Fresh iPhone handoff from Safari opens the target channel | traffic/mobile-handoff | CRITICAL | SMOKE | MANUAL | Real iPhone/iPad Safari, fresh promotion visit | Open promotion URL in Safari and accept the iOS MAX prompt | Mini App opens and then the intended channel opens without a required click | QA_PROCESS.md mobile MAX checklist | 2026-08-21 | ACTIVE |
+| TC-TRAFFIC-016 | Android handoff is separately accepted on a real device | traffic/mobile-handoff | CRITICAL | SMOKE | MANUAL | Real Android device, fresh promotion visit | Open promotion URL and follow Android branch | `window.location.replace(target_url)` reaches the intended channel; source checks alone do not pass this case | QA_PROCESS.md mobile MAX checklist | 2026-08-21 | BLOCKED until real Android E2E |
 | TC-BOT-009 | Promotion menu keeps approved navigation contract | bot/menu | HIGH | REGRESSION | AUTOMATED | Menu source and channel | Open promotion channel menu | Expected short Yandex, landing, analytics, settings and back items are present; MAX target check is not exposed | tests/regression/test_promotion_menu_contract.py | — | ACTIVE |
 | TC-BOT-010 | Promotion summaries render safe channel and Yandex state | bot/menu | HIGH | REGRESSION | AUTOMATED | Promotion summary fixtures | Render connected and unconnected summaries | Missing values use safe placeholders and no secrets/internal flags leak | tests/test_promotion_channel_summary.py, tests/test_promotion_yandex_summary.py | — | ACTIVE |
 | TC-OAUTH-001 | Yandex OAuth state and token exchange are safe | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Mock OAuth transport | Create state and exchange code | State is validated; secret is not exposed | tests/test_yandex_oauth.py | — | ACTIVE |
@@ -47,7 +56,7 @@ This registry is layered over the preserved pre-existing suite listed in `qa/EXI
 
 ## Critical regression set
 
-`TC-BOOT-001`, `TC-DB-001`, `TC-DB-002`, `TC-DB-003`, `TC-MAX-001`, `TC-MAX-004`, `TC-MAX-005`, `TC-TRAFFIC-001`, `TC-TRAFFIC-002`, `TC-TRAFFIC-003`, `TC-TRAFFIC-004`, `TC-TRAFFIC-005`, `TC-TRAFFIC-006`, `TC-TRAFFIC-008`, `TC-TRAFFIC-009`, `TC-HEALTH-001`, `TC-HEALTH-002`, `TC-OPS-001`, `TC-EXT-001`, `TC-EXT-002`.
+`TC-BOOT-001`, `TC-DB-001`, `TC-DB-002`, `TC-DB-003`, `TC-MAX-001`, `TC-MAX-004`, `TC-MAX-005`, `TC-TRAFFIC-001`, `TC-TRAFFIC-002`, `TC-TRAFFIC-003`, `TC-TRAFFIC-004`, `TC-TRAFFIC-005`, `TC-TRAFFIC-006`, `TC-TRAFFIC-008`, `TC-TRAFFIC-009`, `TC-TRAFFIC-010`, `TC-TRAFFIC-013`, `TC-TRAFFIC-014`, `TC-TRAFFIC-015`, `TC-TRAFFIC-016`, `TC-HEALTH-001`, `TC-HEALTH-002`, `TC-OPS-001`, `TC-EXT-001`, `TC-EXT-002`.
 
 ## Current verification status
 
@@ -83,9 +92,18 @@ Statuses below reflect the latest audit evidence, not the existence of implement
 | TC-TRAFFIC-007 | VERIFIED_WORKING | Automated traffic v2 regression |
 | TC-TRAFFIC-008 | VERIFIED_WORKING | Automated invalid target regression |
 | TC-TRAFFIC-009 | VERIFIED_WORKING | Automated expired startapp regression |
+| TC-TRAFFIC-010 | VERIFIED_WORKING | Automated exact attribution regression |
+| TC-TRAFFIC-011 | VERIFIED_WORKING | Automated signed identity PoC regression |
 | TC-HEALTH-001 | VERIFIED_WORKING | Staging `/health/live` |
 | TC-HEALTH-002 | WORKING_UNTESTED | QA stack has no dedicated worker service |
 | TC-OPS-001 | VERIFIED_WORKING | Automated compose/runtime safety regression |
+| TC-OPS-002 | VERIFIED_WORKING | Automated daily report regression |
+| TC-MAX-006 | VERIFIED_WORKING | Automated MAX connection resolution regression |
+| TC-TRAFFIC-012 | VERIFIED_WORKING | Automated public ID regression |
+| TC-TRAFFIC-013 | VERIFIED_WORKING | Six automated platform-contract checks plus two real owner iPhone recordings (MAX and Safari) on 2026-08-21 |
+| TC-TRAFFIC-014 | VERIFIED_WORKING | Owner recording: fresh iPhone entry from MAX, 2026-08-21 |
+| TC-TRAFFIC-015 | VERIFIED_WORKING | Owner recording: fresh iPhone entry from Safari, 2026-08-21 |
+| TC-TRAFFIC-016 | UNKNOWN | Real Android E2E evidence not available; source contract alone is insufficient |
 | TC-OAUTH-001 | VERIFIED_WORKING | Automated mocked OAuth regression |
 | TC-OAUTH-002 | VERIFIED_WORKING | Automated Yandex callback scoping regression |
 | TC-UI-001 | WORKING_UNTESTED | Static mini app route checked; signed MAX auth flow not run |

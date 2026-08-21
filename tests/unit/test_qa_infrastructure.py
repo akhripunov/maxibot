@@ -13,5 +13,5 @@ def test_staging_compose_does_not_use_production_env_or_volume():
 
 def test_landing_contract_has_no_required_continue_button():
     source = (ROOT / "app" / "main.py").read_text()
-    assert "location.replace(target)" in source
+    assert "window.location.replace(" in source
     assert 'id="continue"' not in source

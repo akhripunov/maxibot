@@ -44,6 +44,20 @@ def test_startapp_alias_is_supported_for_traffic_poc():
     assert MaxBotRuntime._start_payload(update) == "opaque-visitor-token"
 
 
+def test_ios_universal_link_payload_extracts_start_query():
+    update = MaxUpdate(
+        update_type="bot_started",
+        user_id="u1",
+        raw={"payload": "https://max.ru/maxibot?start=opaque-ios-token"},
+    )
+    assert MaxBotRuntime._start_payload(update) == "opaque-ios-token"
+
+
+def test_ios_query_shaped_payload_extracts_startapp_query():
+    update = MaxUpdate(update_type="bot_started", user_id="u1", raw={"payload": "startapp=opaque-ios-token"})
+    assert MaxBotRuntime._start_payload(update) == "opaque-ios-token"
+
+
 def test_start_payload_candidates_keep_current_message_start_after_wrapper_value():
     update = MaxUpdate(
         update_type="bot_started",

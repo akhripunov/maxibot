@@ -34,6 +34,34 @@ The current local staging stack uses `.env.staging`, API port `18000`, PostgreSQ
 
 The test inventory and audit are documented in `qa/TEST_CASES.md`, `qa/TEST_AUDIT.md`, and the preservation manifest `qa/EXISTING_TESTS_MANIFEST.md`. The host Python version is not a valid release runtime unless it satisfies `pyproject.toml`; the Docker image is the authoritative runtime for the local gate.
 
+## Mobile MAX handoff manual acceptance checklist
+
+This checklist is mandatory after any change to `app/main.py`,
+`app/traffic/deep_link.py`, or `miniapp/traffic.html`. Automated contract tests
+do not replace these real-device checks.
+
+Use a fresh promotion visit/token for each run. Do not record or publish raw
+tokens, cookies, MAX user IDs, or personal data.
+
+1. **iPhone from MAX — MANUAL / CRITICAL**: open the promotion URL from a MAX
+   chat on a real iPhone or iPad. Confirm the same visit reaches the MAX Mini
+   App and then the intended target channel without a required landing button
+   tap or Mini App button tap. Mark `VERIFIED_WORKING` only after the target
+   channel is visibly opened.
+2. **iPhone from Safari — MANUAL / CRITICAL**: open the promotion URL in Safari
+   on a real iPhone or iPad, accept the iOS “Открыть в MAX” prompt when shown,
+   and confirm the Mini App then opens the intended target channel. Mark
+   `VERIFIED_WORKING` only after the target channel is visibly opened.
+3. **Android — MANUAL / CRITICAL / BLOCKED**: keep this case `BLOCKED` until a
+   real Android E2E is performed. The expected branch is
+   `window.location.replace(target_url)`; do not infer PASS from source checks
+   or iPhone evidence.
+
+If either iPhone check fails, the release is `BLOCKED`/`NO_GO`; restore the
+last known-good handoff before trying another handoff variant. Attach only
+sanitized evidence (timestamp, device path, HTTP status, final result) to the
+Dev handoff.
+
 ## Test-case registry
 
 Before a GO, QA audits `qa/TEST_CASES.md`: affected cases, new cases, automation mode, and regression membership. The registry includes the critical set and manual cases that cannot yet be automated. The release status records total, automated, manual, critical, executed, passed, failed, blocked, and newly added case counts. A missing case for new functionality or a bug fix is a NO_GO.

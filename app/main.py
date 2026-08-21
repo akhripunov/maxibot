@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -18,7 +19,7 @@ from sqlalchemy.orm import selectinload
 from app.db.base import Base
 from app.db.session import engine, get_session
 from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion
-from app.domain.services import WELCOME, SENT, editable_welcome, render_channel_welcome_message, normalize_channel_welcome, normalize_channel_sent
+from app.domain.services import WELCOME, SENT, editable_welcome, render_channel_welcome_message, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
 from app.core.config import settings
@@ -26,13 +27,21 @@ from app.security import validate_max_init_data
 from app.integrations.yandex_oauth import authorize_url, configured, consume_state, create_state, exchange_code, get_encrypted_token, save_token
 from app.integrations.yandex_metrica import ensure_channel_setup
 from app.db.models import now as model_now
-from app.traffic.deep_link import build_bot_deep_link, new_attribution_token, valid_max_target
+from app.traffic.deep_link import build_native_miniapp_deep_link, build_web_miniapp_deep_link, new_attribution_token, valid_max_target
 import html
 import secrets
 
 client = RealMaxClient() if settings.is_real_max else StubMaxClient()
 bot_runtime: MaxBotRuntime | None = None
 logger = logging.getLogger(__name__)
+
+
+def _is_mobile_request(request: Request | None) -> bool:
+    """Return true for handheld MAX/browser traffic, not desktop browsers."""
+    if request is None:
+        return False
+    user_agent = (request.headers.get("user-agent") or "").lower()
+    return any(marker in user_agent for marker in ("iphone", "ipad", "ipod", "android", "mobile"))
 
 async def refresh_avatar_cache() -> None:
     if not isinstance(client, RealMaxClient):
@@ -297,7 +306,8 @@ async def max_webhook(request: Request):
 
 @app.get("/mini", response_class=FileResponse)
 async def mini():
-    return FileResponse(mini_dir / "index.html", headers={"Cache-Control": "no-store, max-age=0"})
+    """Production MAX Mini App URL used by the tracking startapp link."""
+    return FileResponse(mini_dir / "traffic.html", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.get("/traffic-test/app", response_class=FileResponse)
@@ -318,8 +328,40 @@ async def traffic_identify(
         "visitor_id": visit.visit_token,
         "max_user_id": str(identity["external_id"]),
         "channel_id": channel.external_id,
+        "channel_title": channel.title,
+        "channel_avatar_url": channel.avatar_url,
         "linked_at": link.linked_at,
         "next": "channel_open",
+    }
+
+
+@app.post("/api/traffic/resolve")
+async def traffic_resolve(
+    x_max_init_data: str | None = Header(default=None, alias="X-MAX-Init-Data"),
+    db: AsyncSession = Depends(get_session),
+):
+    """Atomically bind verified MAX identity and resolve its channel target."""
+    identity, visit, channel, _ = await _traffic_identity(x_max_init_data, db)
+    profile = await db.scalar(
+        select(TrafficProfile).where(
+            TrafficProfile.channel_id == channel.id,
+            TrafficProfile.enabled.is_(True),
+        )
+    )
+    target = profile.target_url if profile and valid_max_target(profile.target_url) else None
+    if not target:
+        raise HTTPException(503, "closed MAX channel target is not configured")
+
+    user_id = str(identity["external_id"])
+    await _traffic_event(db, visit, "max_identity_linked", user_id, {"source": "verified_init_data"})
+    changed = await _traffic_event(db, visit, "channel_open_clicked", user_id)
+    visit.to_channel_at = visit.to_channel_at or model_now()
+    await db.commit()
+    return {
+        "ok": True,
+        "recorded": changed,
+        "channel_id": channel.external_id,
+        "target_url": target,
     }
 
 
@@ -675,6 +717,24 @@ async def _landing_page(public_id: str, request: Request, db: AsyncSession):
     params = request.query_params
     token = request.cookies.get("maxibot_traffic_visit")
     visit = await db.scalar(select(TrafficVisit).where(TrafficVisit.visit_token == token, TrafficVisit.landing_page_id == landing.id)) if token else None
+    incoming_yclid = params.get("yclid")
+    # MAX Web/iOS can fetch the landing more than once without retaining the
+    # cookie.  A yclid is the ad-click identity, so reuse its one recent
+    # unbound visit instead of minting several competing bot payloads.
+    if visit and incoming_yclid and visit.yclid != incoming_yclid:
+        visit = None
+    if not visit and incoming_yclid:
+        visit = await db.scalar(
+            select(TrafficVisit)
+            .where(
+                TrafficVisit.landing_page_id == landing.id,
+                TrafficVisit.yclid == incoming_yclid,
+                TrafficVisit.max_user_id.is_(None),
+                TrafficVisit.landing_at >= model_now() - timedelta(minutes=15),
+            )
+            .order_by(TrafficVisit.landing_at.desc())
+            .limit(1)
+        )
     # The browser cookie is intentionally long-lived for UTM/yclid continuity,
     # while the opaque MAX bot token is short-lived.  Never reuse an expired
     # unbound bot token on a new landing open: create a fresh visitor record
@@ -725,34 +785,64 @@ async def _landing_page(public_id: str, request: Request, db: AsyncSession):
     if not target_is_valid:
         response = HTMLResponse("""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Переход в MAX</title>
 <main style="max-width:420px;margin:18vh auto;padding:28px;text-align:center;font:16px system-ui;background:#fff;border-radius:20px;box-shadow:0 10px 40px #0001"><h1>Переход в MAX</h1><p>Ссылка закрытого MAX-канала пока не настроена.</p></main>""", status_code=503)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
         response.set_cookie("maxibot_traffic_visit", token, max_age=60 * 60 * 24 * 30, httponly=True, samesite="lax", secure=True)
         return response
-    redirect_at = model_now()
-    visit.redirect_at = visit.redirect_at or redirect_at
-    visit.status = "BOT_REDIRECT_SENT" if settings.traffic_bot_attribution_enabled else "MAX_REDIRECT_SENT"
-    redirect_dedupe = f"redirect:{visit.id}"
-    if not await db.scalar(select(TrafficEvent.id).where(TrafficEvent.dedupe_key == redirect_dedupe)):
-        db.add(TrafficEvent(channel_id=visit.channel_id, visit_id=visit.id, event_type="MAX_REDIRECT_SENT",
-                            event_time=redirect_at, dedupe_key=redirect_dedupe,
-                            metadata_json=json.dumps({"delivery": "landing_auto_redirect", "destination": "max_bot" if settings.traffic_bot_attribution_enabled else "native_channel"}, ensure_ascii=False)))
-    await db.commit()
-    destination = target
+    # Approved production path: landing → opaque MAXIBOT tracking deep link.
+    # The bot_started event binds MAX user_id to this visit before the
+    # channel-scoped invite is delivered. Never use a shared channel link as
+    # proof of yclid attribution.
     if settings.traffic_bot_attribution_enabled:
-        if not visit.startapp_token:
-            visit.startapp_token = new_attribution_token()
-            await db.commit()
-        destination = build_bot_deep_link(settings.max_bot_username, visit.startapp_token)
-    token_json = json.dumps(token, ensure_ascii=False)
-    destination_json = json.dumps(destination, ensure_ascii=False)
-    destination_label = "Открываем MAX-бота…" if settings.traffic_bot_attribution_enabled else "Открываем закрытый канал…"
+        return await _traffic_redirect(landing.public_id, token, db, via_bot=True, request=request)
+
+    # Direct native fallback is allowed only when attribution is disabled;
+    # it must never claim an exact visitor-to-member binding.
+    return await _traffic_redirect(landing.public_id, token, db, request=request)
+
+async def _channel_preview(public_id: str, request: Request, db: AsyncSession):
+    landing = await db.scalar(select(LandingPage).where(LandingPage.public_id == public_id, LandingPage.is_active.is_(True)))
+    if not landing:
+        raise HTTPException(404, "landing not found")
+    channel = await db.get(Channel, landing.channel_id)
+    if not channel:
+        raise HTTPException(404, "channel not found")
+    token = request.cookies.get("maxibot_traffic_visit")
+    visit = await db.scalar(select(TrafficVisit).where(
+        TrafficVisit.visit_token == token,
+        TrafficVisit.landing_page_id == landing.id,
+    )) if token else None
+    if not visit:
+        raise HTTPException(400, "tracking visit is missing")
+    profile = await db.scalar(select(TrafficProfile).where(
+        TrafficProfile.channel_id == landing.channel_id,
+        TrafficProfile.enabled.is_(True),
+    ))
+    target = profile.target_url if profile else None
+    if not valid_max_target(target):
+        raise HTTPException(503, "closed MAX channel target is not configured")
+    title = html.escape(channel.title)
+    # Native invite paths are opaque and must never be presented as a fake
+    # public username.  A public handle can be added later from verified chat
+    # metadata; the title is always safe and channel-scoped.
+    handle_html = ""
+    avatar = html.escape(channel.avatar_url, quote=True) if channel.avatar_url else ""
+    avatar_html = f'<img class="avatar" src="{avatar}" alt="">' if avatar else '<div class="avatar fallback">•••</div>'
+    preview_click = f"/track/{landing.public_id}/click"
     response = HTMLResponse(f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Переход в MAX</title>
-<style>body{{margin:0;background:#f6f8fb;color:#172033;font:16px system-ui,-apple-system,sans-serif}}main{{max-width:420px;margin:18vh auto;padding:30px 26px;text-align:center;background:#fff;border-radius:20px;box-shadow:0 10px 40px #14213d18}}h1{{font-size:25px;margin:0 0 12px}}p{{color:#667085}}small{{display:block;margin-top:22px;color:#98a2b3}}</style></head>
-<body><main><h1>Переход в MAX</h1><p>{destination_label}</p><small>MAXIBOT</small></main>
-<script>const token={token_json}, target={destination_json};
-function send(type, raw={{}}) {{ const body=JSON.stringify({{visitor_token:token,event_type:type,client_timestamp:new Date().toISOString(),raw_signals:raw}}); if(navigator.sendBeacon) navigator.sendBeacon('/traffic/events/browser',new Blob([body],{{type:'application/json'}})); }}
-send('LANDING_VISIBLE'); setTimeout(()=>{{send('REDIRECT_STARTED'); location.replace(target)}},700);</script></body></html>""")
-    response.set_cookie("maxibot_traffic_visit", token, max_age=60 * 60 * 24 * 30, httponly=True, samesite="lax", secure=True)
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
+<style>
+body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#66aaf0;color:#101828;font:16px system-ui,-apple-system,sans-serif}}
+.card{{width:min(310px,calc(100vw - 48px));padding:38px 26px 34px;text-align:center;background:#fff;border-radius:28px;box-shadow:0 16px 40px #15569a30}}
+.avatar{{width:64px;height:64px;object-fit:cover;border-radius:18px;margin-bottom:20px}}.fallback{{display:grid;place-items:center;margin:0 auto 20px;background:#1677ff;color:#fff;font-size:24px;letter-spacing:3px}}
+h1{{font-size:24px;line-height:1.2;margin:0 0 6px}}.handle{{color:#667085;margin-bottom:30px}}
+a{{display:block;text-decoration:none}}.primary{{padding:14px 20px;border-radius:14px;background:#1677ff;color:#fff;font-weight:700}}.secondary{{margin-top:22px;color:#1677ff;font-weight:600}}
+</style></head><body><main class="card">{avatar_html}<h1>{title}</h1>{handle_html}
+<a class="primary" href="{preview_click}">Перейти в канал</a>
+<a class="secondary" href="{preview_click}">Открыть в браузере</a>
+</main></body></html>""")
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return response
 
 
@@ -818,13 +908,13 @@ async def traffic_test(request: Request, landing: str | None = Query(default=Non
 
 
 @app.get("/traffic-test/click")
-async def traffic_test_click(landing: str, token: str, db: AsyncSession = Depends(get_session)):
+async def traffic_test_click(landing: str, token: str, request: Request, db: AsyncSession = Depends(get_session)):
     # This route intentionally uses the same direct redirect as the normal
     # landing flow: no bot, mini app, extra screen, or startapp parameter.
-    return await _traffic_redirect(landing, token, db)
+    return await _traffic_redirect(landing, token, db, request=request)
 
 
-async def _traffic_redirect(public_id: str, token: str, db: AsyncSession) -> RedirectResponse:
+async def _traffic_redirect(public_id: str, token: str, db: AsyncSession, *, via_bot: bool = False, request: Request | None = None) -> HTMLResponse | RedirectResponse:
     landing = await db.scalar(select(LandingPage).where(LandingPage.public_id == public_id, LandingPage.is_active.is_(True)))
     visit = await db.scalar(select(TrafficVisit).where(TrafficVisit.visit_token == token, TrafficVisit.landing_page_id == landing.id)) if landing else None
     if not landing or not visit:
@@ -837,17 +927,44 @@ async def _traffic_redirect(public_id: str, token: str, db: AsyncSession) -> Red
     parsed = urlsplit(target)
     if parsed.scheme != "https" or parsed.netloc != "max.ru" or not parsed.path.strip("/"):
         raise HTTPException(503, "closed MAX channel target is not configured")
+    if via_bot and settings.traffic_bot_attribution_enabled and (
+        not settings.max_miniapp_url or not settings.max_bot_username
+    ):
+        raise HTTPException(503, "MAX attribution bridge is not configured")
     redirect_at = model_now()
     visit.redirect_at = visit.redirect_at or redirect_at
     visit.to_channel_at = visit.to_channel_at or redirect_at
-    visit.status = "MAX_REDIRECT_SENT"
+    visit.status = "BOT_REDIRECT_SENT" if via_bot else "MAX_REDIRECT_SENT"
     dedupe = f"redirect:{visit.id}"
     if not await db.scalar(select(TrafficEvent.id).where(TrafficEvent.dedupe_key == dedupe)):
         db.add(TrafficEvent(channel_id=visit.channel_id, visit_id=visit.id, event_type="MAX_REDIRECT_SENT",
                             event_time=redirect_at, dedupe_key=dedupe,
-                            metadata_json=json.dumps({"destination_url": target}, ensure_ascii=False)))
+                            metadata_json=json.dumps({"destination": "max_bot" if via_bot else "native_channel"}, ensure_ascii=False)))
     await db.commit()
-    return RedirectResponse(target, status_code=307)
+    destination = target
+    if via_bot and settings.traffic_bot_attribution_enabled:
+        if not visit.startapp_token:
+            visit.startapp_token = new_attribution_token()
+            await db.commit()
+        # Automatic iOS navigation to the HTTPS MAX profile stays in Safari
+        # and renders the public bot card. Use the native MAX protocol for the
+        # mobile zero-click handoff, matching the observed competitor runtime.
+        # Desktop remains on MAX Web. Both carry the same one-time token.
+        link_builder = build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link
+        handoff_destination = link_builder(settings.max_bot_username, visit.startapp_token)
+        channel_title = html.escape(channel.title or "Канал MAX")
+        channel_description = html.escape(promotion_landing_description(landing.description))
+        handoff_url = html.escape(handoff_destination, quote=True)
+        mobile_hint = ""
+        fallback_cta = f'<a class="primary" href="{handoff_url}">Перейти в канал</a>'
+        response = HTMLResponse(f'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Переход в MAX</title><meta name="description" content="Переход в MAX"><style>html,body{{margin:0;width:100%;min-height:100%;background:#f3f5f7;font-family:system-ui,-apple-system,sans-serif}}main{{box-sizing:border-box;max-width:460px;margin:18vh auto;padding:28px 24px;text-align:center;background:#fff;border-radius:24px;box-shadow:0 12px 40px #0001}}h1{{margin:0 0 12px;font-size:28px}}p{{margin:0 0 22px;color:#687386;line-height:1.45}}.hint{{font-size:14px}}.primary,.secondary{{display:block;padding:14px 22px;border-radius:14px;text-decoration:none;font-weight:700}}.primary{{background:#1677ff;color:#fff}}.secondary{{margin-top:12px;color:#1677ff;background:#eef4ff}}</style>
+<main><h1>Переход в MAX</h1><p>{channel_description}</p>{mobile_hint}{fallback_cta}</main>
+<script>window.location.replace({json.dumps(handoff_destination)});</script>
+''', status_code=200)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return response
+    return RedirectResponse(destination, status_code=307)
 
 
 @app.get("/go/{public_id}", response_class=HTMLResponse)
@@ -855,9 +972,24 @@ async def landing(public_id: str, request: Request, db: AsyncSession = Depends(g
     return await _landing_page(public_id, request, db)
 
 
+@app.get("/track/{public_id}", response_class=HTMLResponse)
+async def channel_tracking_preview(public_id: str, request: Request, db: AsyncSession = Depends(get_session)):
+    """Render the channel card after the landing's automatic redirect."""
+    return await _channel_preview(public_id, request, db)
+
+
+@app.get("/track/{public_id}/click")
+async def channel_tracking_preview_click(public_id: str, request: Request, db: AsyncSession = Depends(get_session)):
+    """Record the CTA and open this landing's native channel target."""
+    token = request.cookies.get("maxibot_traffic_visit")
+    if not token:
+        raise HTTPException(400, "tracking visit is missing")
+    return await _traffic_redirect(public_id, token, db, via_bot=settings.traffic_bot_attribution_enabled, request=request)
+
+
 @app.get("/go/{public_id}/click")
-async def landing_click(public_id: str, token: str, db: AsyncSession = Depends(get_session)):
-    return await _traffic_redirect(public_id, token, db)
+async def landing_click(public_id: str, token: str, request: Request, db: AsyncSession = Depends(get_session)):
+    return await _traffic_redirect(public_id, token, db, request=request)
 
 @app.post("/api/demo/menu")
 async def demo_menu(admin_id: str = "demo", screen: str = "home", message_id: str | None = None):
@@ -876,16 +1008,24 @@ async def demo_menu(admin_id: str = "demo", screen: str = "home", message_id: st
 from app.api.routes import router
 app.include_router(router)
 
+@app.get("/__poc/max-deeplink", response_class=HTMLResponse)
+async def max_deeplink_poc() -> HTMLResponse:
+    """Temporary read-only native-scheme A/B page; no JS or traffic records."""
+    return HTMLResponse(
+        '<!doctype html><meta charset="utf-8">'
+        '<a href="max://max.ru/se13802047_1_bot">OPEN MAX</a>'
+    )
+
 # The production traffic host points at the same app, so the public URL is
-# intentionally a single opaque path segment: https://go.maxibot.jobjin.ru/<public_id>.
+# intentionally a single opaque path segment: https://go.maxibot.pro/<public_id>.
 @app.get("/{public_id}", response_class=HTMLResponse)
 async def landing_root(public_id: str, request: Request, db: AsyncSession = Depends(get_session)):
     return await _landing_page(public_id, request, db)
 
 
 @app.get("/{public_id}/click")
-async def landing_root_click(public_id: str, token: str, db: AsyncSession = Depends(get_session)):
-    return await _traffic_redirect(public_id, token, db)
+async def landing_root_click(public_id: str, token: str, request: Request, db: AsyncSession = Depends(get_session)):
+    return await _traffic_redirect(public_id, token, db, request=request)
 
 from app.bot.texts import WELCOME as _WELCOME
 assert _WELCOME

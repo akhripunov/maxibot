@@ -12,14 +12,65 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent
-from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion
-from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent
+from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion, resolve_exact_identity_visit
+from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
 from app.traffic.deep_link import valid_max_target
 from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state
 from app.integrations.yandex_metrica import channel_setup_status
+from app.integrations.max_connection import PRIMARY, BOT_CONNECTION
 
 logger = logging.getLogger(__name__)
+
+
+def channel_connection_instructions() -> str:
+    """Single canonical copy used by every channel-connect entry point."""
+    return (
+        "📢 Подключение канала\n\n"
+        "Чтобы подключить канал, выполните следующие шаги:\n\n"
+        "1. Откройте настройки вашего канала\n"
+        "2. Перейдите в раздел «Подписчики»\n"
+        "3. Нажмите «Добавить подписчиков»\n"
+        "4. Найдите в поиске «MAXIBOT» и добавьте"
+    )
+
+
+def promotion_intro_text() -> str:
+    """Canonical promotion explanation shown before channel selection."""
+    return (
+        "📣 Продвижение\n\n"
+        "Привлекайте новых подписчиков в каналы MAX\n"
+        "через рекламу в Яндекс Директе.\n\n"
+        "MAXIBOT отслеживает переходы и подписки,\n"
+        "а Яндекс Директ обучается на реальных конверсиях.\n"
+        "Со временем это помогает находить более подходящую\n"
+        "аудиторию и снижать стоимость подписчика.\n\n"
+        "Выберите канал для продвижения:"
+    )
+
+
+def promotion_connect_text() -> str:
+    """Short instructions shown when the owner adds a promotion channel."""
+    return (
+        "📣 Подключение канала для продвижения\n\n"
+        "Добавьте MAXIBOT в канал — после этого он\n"
+        "автоматически появится в списке продвижения.\n\n"
+        "1. Откройте настройки вашего канала\n"
+        "2. Перейдите в раздел «Подписчики»\n"
+        "3. Нажмите «Добавить подписчиков»\n"
+        "4. Найдите в поиске «MAXIBOT» и добавьте"
+    )
+
+
+def home_menu_banner_media() -> list[dict]:
+    """Return the single decorative attachment used by the home screen.
+
+    The URL is derived from the configured public traffic host so staging and
+    production never cross-load one another's asset.  Other menu screens must
+    remain text-only.
+    """
+    asset_url = f"{settings.traffic_public_base_url.rstrip('/')}/static/images/maxibot_home_banner_compact.webp"
+    return [{"type": "image", "payload": {"url": asset_url}}]
 
 
 def _time(value) -> str:
@@ -64,6 +115,15 @@ def public_landing_url(public_id: str) -> str:
     return f"{settings.traffic_public_base_url.rstrip('/')}/{public_id.lstrip('/')}"
 
 
+def new_landing_public_id() -> str:
+    """Return a short, public, numeric landing identifier.
+
+    This identifier only addresses the landing. Per-visit attribution remains
+    protected by the separately generated one-time startapp token.
+    """
+    return str(secrets.randbelow(90_000_000_000_000) + 10_000_000_000_000)
+
+
 def promotion_channel_summary(channel_title: str, yandex_value: str | None,
                               counter_id: str | None, landing_url: str | None) -> str:
     """Render only channel-scoped, non-secret promotion readiness fields."""
@@ -101,6 +161,79 @@ async def traffic_stats(db: AsyncSession, channel_id: str) -> dict[str, int | fl
             "max_open_likely": likely, "max_open_confirmed": confirmed, "join_events": joins, **statuses}
 
 
+def official_bot_added_diagnostics(chat: dict, initiator_user_id: str | None) -> dict[str, object]:
+    """Return safe validation facts for a primary ``bot_added`` response.
+
+    This intentionally contains no raw owner ID or URL.  It is used for
+    production diagnostics when the fail-closed contract rejects metadata.
+    """
+    if not isinstance(chat, dict):
+        return {
+            "chat_is_dict": False,
+            "chat_type": None,
+            "owner_present": False,
+            "owner_type": None,
+            "initiator_present": bool(initiator_user_id),
+            "owner_matches_initiator": False,
+            "link_present": False,
+            "link_type": None,
+            "link_valid": False,
+        }
+    chat_type = chat.get("chat_type") or chat.get("type")
+    owner = chat.get("owner_id") or chat.get("owner_user_id")
+    if isinstance(owner, dict):
+        owner = owner.get("user_id") or owner.get("id")
+    if owner is None and isinstance(chat.get("owner"), dict):
+        owner = chat["owner"].get("user_id") or chat["owner"].get("id")
+    if owner is None and isinstance(chat.get("owner"), (str, int)):
+        owner = chat.get("owner")
+    link = chat.get("link")
+    return {
+        "chat_is_dict": True,
+        "chat_type": str(chat_type or "").lower() or None,
+        "owner_present": owner is not None,
+        "owner_type": type(owner).__name__ if owner is not None else None,
+        "initiator_present": bool(initiator_user_id),
+        "owner_matches_initiator": bool(owner and initiator_user_id and str(owner) == str(initiator_user_id)),
+        "link_present": bool(link),
+        "link_type": type(link).__name__ if link is not None else None,
+        "link_valid": bool(valid_max_target(link)),
+    }
+
+
+def official_bot_added_channel(chat: dict, initiator_user_id: str | None) -> dict | None:
+    """Validate the official channel metadata used by ``bot_added``.
+
+    ``bot_added.user`` is the authorized connector signal for this flow. MAX
+    does not guarantee ``owner_id`` for private channels. The link is accepted
+    only from the official chat response; user-provided URLs never enter this
+    flow.
+    """
+    if not isinstance(chat, dict) or not initiator_user_id:
+        return None
+    chat_type = chat.get("chat_type") or chat.get("type")
+    if str(chat_type or "").lower() != "channel":
+        return None
+    link = chat.get("link")
+    if not valid_max_target(link):
+        return None
+    return {
+        "owner_user_id": str(initiator_user_id),
+        "title": str(chat.get("title") or chat.get("name") or "Канал MAX"),
+        "avatar_url": chat.get("icon") if isinstance(chat.get("icon"), str) else None,
+        "target_url": str(link),
+        "is_public": bool(chat.get("is_public", chat.get("public", False))),
+        "metadata": json.dumps({
+            "title": chat.get("title") or chat.get("name"),
+            "icon_present": bool(chat.get("icon")),
+            "is_public": bool(chat.get("is_public", chat.get("public", False))),
+            "link_present": True,
+            "owner_id_present": bool(chat.get("owner_id") or chat.get("owner_user_id") or chat.get("owner")),
+            "participants_count": chat.get("participants_count") if isinstance(chat.get("participants_count"), int) else None,
+        }, ensure_ascii=False),
+    }
+
+
 async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id: str | None = None) -> tuple[str, list[list[dict]]]:
     channels = (await db.scalars(select(Channel).where(Channel.admin_id == admin.id).order_by(Channel.title))).all()
     if screen == "home":
@@ -110,33 +243,22 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         # only this value without changing the home UI.
         connected_bots = int(await db.scalar(select(func.count(BotConnection.id)).where(BotConnection.owner_admin_id == admin.id)) or 0)
         return menu_text(len(channels), connected_bots), buttons(
-            ("📋 Мои каналы", "channels"), ("🤖 Мои боты", "my_bots"), ("📣 Продвижение", "promotion"), ("ℹ️ О сервисе", "about"))
+            ("📢 Подключить канал", "connect_channel"),
+            ("📣 Продвижение", "promotion"),
+            ("📩 Обращения / Предложка", "channels"),
+            ("🤖 Мои боты", "my_bots"),
+            ("ℹ️ О сервисе", "about"),
+        )
+    if screen == "connect_channel":
+        return channel_connection_instructions(), buttons(("⬅️ Главное меню", "home"))
     if screen == "promotion":
         if not channels:
-            return (
-                "📢 Подключение канала\n\n"
-                "Чтобы подключить канал, выполните следующие шаги:\n\n"
-                "1. Откройте настройки вашего канала.\n"
-                "2. Перейдите в раздел «Подписчики».\n"
-                "3. Нажмите «Добавить подписчиков».\n"
-                "4. Найдите MAXIBOT и добавьте его в канал.\n\n"
-                "После добавления канал автоматически появится здесь.",
-                buttons(("⬅️ Назад", "home")),
-            )
+            return channel_connection_instructions(), buttons(("⬅️ Назад", "home"))
         rows = [[(f"📢 {channel.title}", f"promotion_channel:{channel.id}")] for channel in channels]
-        rows.extend([[ ("➕ Подключить ещё", "promotion_connect") ], [("⬅️ Назад", "home")]])
-        return "📣 Продвижение\n\nВыберите канал для продвижения:", buttons(*rows)
+        rows.extend([[ ("📣 Подключить ещё", "promotion_connect") ], [("⬅️ Назад", "home")]])
+        return promotion_intro_text(), buttons(*rows)
     if screen == "promotion_connect":
-        return (
-            "📢 Подключение канала\n\n"
-            "Чтобы подключить канал, выполните следующие шаги:\n\n"
-            "1. Откройте настройки вашего канала.\n"
-            "2. Перейдите в раздел «Подписчики».\n"
-            "3. Нажмите «Добавить подписчиков».\n"
-            "4. Найдите MAXIBOT и добавьте его в канал.\n\n"
-            "После добавления канал автоматически появится здесь.",
-            buttons(("⬅️ Назад", "promotion")),
-        )
+        return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
     if screen.startswith("promotion_channel:"):
         selected_id = screen.split(":", 1)[1]
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
@@ -149,7 +271,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         ))
         yandex = await connection_status(admin.external_id, channel.id)
         metrica = await channel_setup_status(admin.external_id, channel.id)
-        yandex_value = "Подключён" if yandex else None
+        yandex_value = metrica.get("owner_login") or ("Подключён" if yandex else None)
         counter_id = (profile.yandex_counter_id if profile else None) or metrica.get("counter_id")
         return (
             promotion_channel_summary(
@@ -307,7 +429,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return "Канал добавлен.", buttons(("📋 Мои каналы", "channels"), ("⬅️ Главное меню", "home"))
         return (
             f"✅ Канал **«{channel.title}»** успешно добавлен!\n\n📋 Ваши каналы: {len(channels)}",
-            buttons(("📋 Мои каналы", "channels"), ("➕ Добавить ещё", "add_channel"), ("⬅️ Главное меню", "home")),
+            buttons(("📋 Мои каналы", "channels"), ("📣 Подключить ещё", "add_channel"), ("⬅️ Главное меню", "home")),
         )
     if screen.startswith("delete_confirm:"):
         selected_id = screen.split(":", 1)[1] if ":" in screen else None
@@ -375,33 +497,16 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             buttons(("❌ Отмена", f"cancel_template:{selected_id}")),
         )
     if screen == "add_channel":
-        return (
-            "Чтобы добавить канал, нужно:\n\n"
-            "1) Сначала добавьте бота в подписчики канала\n"
-            "(ищите через **НАЗВАНИЕ** бота, а не\n"
-            "**СЫЛКОЙ**)\n\n"
-            "2) После, добавьте его в администраторы с\n"
-            "правом «Писать посты».\n\n"
-            "✅ Теперь, **ПЕРЕШЛИТЕ** сюда любой пост из\n"
-            "канала",
-            buttons(("⬅️ Назад", "channels")),
-        )
+        return channel_connection_instructions(), buttons(("⬅️ Назад", "channels"))
     if screen == "channels":
         if not channels:
-            return ("Чтобы добавить канал, нужно:\n\n"
-                    "1) Сначала добавьте бота в подписчики канала\n"
-                    "(ищите через **НАЗВАНИЕ** бота, а не\n"
-                    "**СЫЛКОЙ**)\n\n"
-                    "2) После, добавьте его в администраторы с\n"
-                    "правом «Писать посты».\n\n"
-                    "✅ Теперь, **ПЕРЕШЛИТЕ** сюда любой пост из\n"
-                    "канала"), buttons(("⬅️ Назад", "home"))
+            return channel_connection_instructions(), buttons(("⬅️ Назад", "home"))
         rows = [[(
             f"{'🔴' if not channel.accepting else '🟢' if channel.inbox_chat_id else '🟡'} {channel.title}",
             f"channel:{channel.id}",
         )] for channel in channels]
-        rows.extend([[("➕ Добавить канал", "add_channel")], [("⬅️ Назад", "home")]])
-        return ("📋 Мои каналы\n\nЗдесь ваши подключённые каналы.\n"
+        rows.extend([[("📣 Подключить ещё", "add_channel")], [("⬅️ Назад", "home")]])
+        return ("📩 Обращения / Предложка\n\nЗдесь ваши подключённые каналы.\n"
                 "Выберите канал для управления\nили добавьте новый."), buttons(*rows)
     if screen.startswith("channel:") or screen == "channel":
         selected_id = channel_id or (screen.split(":", 1)[1] if ":" in screen else None)
@@ -908,6 +1013,13 @@ class MenuRepository:
         async with self.session_factory() as db:
             return list((await db.scalars(select(BotConnection).where(BotConnection.status.in_(("ACTIVE", "WAITING_ADMIN_START"))))).all())
 
+    async def mark_custom_bot_invalid_token(self, bot_id: str) -> None:
+        async with self.session_factory() as db:
+            bot = await db.get(BotConnection, bot_id)
+            if bot and bot.status != "INVALID_TOKEN":
+                bot.status = "INVALID_TOKEN"
+                await db.commit()
+
     async def bot_by_id(self, bot_id: str | None):
         if not bot_id: return None
         async with self.session_factory() as db:
@@ -996,6 +1108,7 @@ class MenuRepository:
             if not channel: return False
             channel.bot_connection_id = None if channel.bot_connection_id == bot.id else bot.id
             channel.communication_mode = "CUSTOM_BOT" if channel.bot_connection_id else "SYSTEM_INBOX"
+            channel.max_connection_kind = BOT_CONNECTION if channel.bot_connection_id else PRIMARY
             await db.commit(); return True
 
     async def custom_channel_ids(self, external_id: str, bot_id: str):
@@ -1032,6 +1145,100 @@ class MenuRepository:
     async def channel_owned(self, external_id: str, channel_id: str) -> bool:
         async with self.session_factory() as db:
             return bool(await db.scalar(select(Channel.id).join(Admin).where(Channel.id == channel_id, Admin.external_id == external_id)))
+
+    async def connect_channel_from_bot_added(self, channel_external_id: str,
+                                             initiator_user_id: str | None,
+                                             chat: dict) -> dict:
+        """Create or refresh an owner-scoped channel from PRIMARY bot_added."""
+        payload = official_bot_added_channel(chat, initiator_user_id)
+        if not channel_external_id:
+            return {"status": "rejected", "reason": "missing_chat_id"}
+        if not payload:
+            return {"status": "rejected", "reason": "official_channel_owner_or_link_check_failed"}
+        owner_id = payload["owner_user_id"]
+        async with self.session_factory() as db:
+            channel = await db.scalar(select(Channel).where(Channel.external_id == str(channel_external_id)).with_for_update())
+            admin = await db.scalar(select(Admin).where(Admin.external_id == owner_id))
+            if channel:
+                current_admin = await db.get(Admin, channel.admin_id)
+                current_owner = str(channel.max_owner_user_id or (current_admin.external_id if current_admin else ""))
+                if current_owner and current_owner != owner_id:
+                    return {"status": "rejected", "reason": "channel_owned_by_another_admin"}
+                if current_admin and str(current_admin.external_id) != owner_id:
+                    return {"status": "rejected", "reason": "channel_admin_conflict"}
+                if not admin:
+                    admin = current_admin
+                if not admin:
+                    return {"status": "rejected", "reason": "owner_admin_unavailable"}
+                was_connected = bool(
+                    channel.max_owner_user_id == owner_id
+                    and channel.max_chat_metadata_json == payload["metadata"]
+                    and not channel.bot_connection_id
+                )
+                channel.max_owner_user_id = owner_id
+                channel.max_chat_metadata_json = payload["metadata"]
+                if not channel.bot_connection_id:
+                    channel.max_connection_kind = PRIMARY
+                profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel.id))
+                if not profile:
+                    db.add(TrafficProfile(
+                        channel_id=channel.id, enabled=True, target_url=payload["target_url"],
+                        attribution_window_hours=settings.traffic_attribution_window_hours,
+                        conversion_policy=settings.traffic_conversion_policy,
+                    ))
+                else:
+                    profile.target_url = payload["target_url"]
+                landing = await db.scalar(select(LandingPage).where(
+                    LandingPage.channel_id == channel.id, LandingPage.is_active.is_(True),
+                ))
+                if not landing:
+                    db.add(LandingPage(
+                        channel_id=channel.id, public_id=new_landing_public_id(),
+                        title=payload["title"], description=promotion_landing_description(None),
+                        avatar_url=payload["avatar_url"],
+                    ))
+                await db.commit()
+                return {"status": "duplicate" if was_connected and landing else "updated", "channel_id": channel.id, "title": channel.title}
+
+            if not admin:
+                admin = Admin(external_id=owner_id)
+                db.add(admin)
+                await db.flush()
+            registry = await db.scalar(select(ChannelSlugRegistry).where(
+                ChannelSlugRegistry.max_channel_external_id == str(channel_external_id)
+            ))
+            if registry:
+                slug = registry.public_slug
+                if await db.scalar(select(Channel.id).where(Channel.public_slug == slug)):
+                    return {"status": "rejected", "reason": "channel_slug_conflict"}
+                registry.last_connected_at = datetime.now(timezone.utc)
+                registry.disconnected_at = None
+            else:
+                slug = self._slug(payload["title"] or str(channel_external_id))
+                while await db.scalar(select(Channel.id).where(Channel.public_slug == slug)):
+                    slug = self._slug(payload["title"] or str(channel_external_id))
+                db.add(ChannelSlugRegistry(
+                    max_channel_external_id=str(channel_external_id), public_slug=slug,
+                    created_at=datetime.now(timezone.utc), last_connected_at=datetime.now(timezone.utc),
+                ))
+            channel = Channel(
+                admin_id=admin.id, external_id=str(channel_external_id), title=payload["title"],
+                avatar_url=payload["avatar_url"], public_slug=slug, max_connection_kind=PRIMARY,
+                max_owner_user_id=owner_id, max_chat_metadata_json=payload["metadata"],
+            )
+            db.add(channel)
+            await db.flush()
+            db.add(TrafficProfile(
+                channel_id=channel.id, enabled=True, target_url=payload["target_url"],
+                attribution_window_hours=settings.traffic_attribution_window_hours,
+                conversion_policy=settings.traffic_conversion_policy,
+            ))
+            db.add(LandingPage(
+                channel_id=channel.id, public_id=new_landing_public_id(), title=payload["title"],
+                description=promotion_landing_description(None), avatar_url=payload["avatar_url"],
+            ))
+            await db.commit()
+            return {"status": "created", "channel_id": channel.id, "title": payload["title"]}
 
     async def resolve_owned_channel_id(self, external_id: str, reference: str) -> str | None:
         """Resolve current and legacy channel references without crossing owners."""
@@ -1071,13 +1278,28 @@ class MenuRepository:
             "participants_count": chat.get("participants_count") if isinstance(chat.get("participants_count"), int) else None,
         }
         async with self.session_factory() as db:
-            query = select(Channel).where(Channel.external_id == str(channel_external_id))
-            if owner_user_id:
-                query = query.join(Admin).where(Admin.external_id == str(owner_user_id))
-            channel = await db.scalar(query)
+            channel = await db.scalar(select(Channel).where(Channel.external_id == str(channel_external_id)))
             if not channel:
                 return None
             chat_owner_id = chat.get("owner_id") or chat.get("owner_user_id")
+            if owner_user_id:
+                owner_admin = await db.scalar(select(Admin).where(Admin.external_id == str(owner_user_id)))
+                # A channel created by an earlier isolated/test bootstrap may
+                # have no MAX owner binding yet. Adopt it only when the
+                # official chat metadata confirms that the bot_added initiator
+                # is the channel owner. Existing owned channels never change
+                # owner through this path.
+                if owner_admin and channel.admin_id != owner_admin.id:
+                    if channel.max_owner_user_id and str(channel.max_owner_user_id) != str(owner_user_id):
+                        return None
+                    if str(chat_owner_id or "") != str(owner_user_id):
+                        return None
+                    channel.admin_id = owner_admin.id
+            # A bot_added event handled by the primary production client is
+            # the authoritative connection signal for this channel.  Custom
+            # bot bindings are never overwritten here.
+            if not channel.bot_connection_id:
+                channel.max_connection_kind = PRIMARY
             channel.max_owner_user_id = str(chat_owner_id or owner_user_id) if (chat_owner_id or owner_user_id) else channel.max_owner_user_id
             channel.max_chat_metadata_json = json.dumps(metadata, ensure_ascii=False)
             profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel.id))
@@ -1124,9 +1346,9 @@ class MenuRepository:
                 return landing
             landing = LandingPage(
                 channel_id=channel.id,
-                public_id=secrets.token_urlsafe(10).replace("-", "").replace("_", ""),
+                public_id=new_landing_public_id(),
                 title=channel.title,
-                description=channel.welcome_text or "Подписывайтесь на канал и следите за новыми публикациями.",
+                description=promotion_landing_description(None),
                 avatar_url=channel.avatar_url,
             )
             db.add(landing)
@@ -1163,11 +1385,56 @@ class MenuRepository:
             visit = await db.scalar(select(TrafficVisit).where(TrafficVisit.startapp_token == token))
             if not visit:
                 return None
-            if visit.landing_at and (datetime.now(timezone.utc) - visit.landing_at).total_seconds() > settings.traffic_startapp_ttl_seconds:
-                visit.status = "EXPIRED"
-                await db.commit()
-                return None
             existing = await db.scalar(select(MaxIdentityLink).where(MaxIdentityLink.visitor_id == visit.id))
+            if visit.landing_at and (datetime.now(timezone.utc) - visit.landing_at).total_seconds() > settings.traffic_startapp_ttl_seconds:
+                # iOS may replay a cached bot deep-link.  Reuse it only when
+                # it is already bound to this same MAX user.  If a current
+                # visit for that user/channel was already bound by the first
+                # delivery, route through it again instead of emitting the
+                # misleading "expired" message on MAX's duplicate delivery.
+                if not existing or existing.max_user_id != str(max_user_id):
+                    visit.status = "EXPIRED"
+                    await db.commit()
+                    return None
+                fresh_visits = (
+                    await db.scalars(
+                        select(TrafficVisit)
+                        .where(
+                            TrafficVisit.channel_id == visit.channel_id,
+                            TrafficVisit.max_user_id.is_(None),
+                            TrafficVisit.startapp_token != token,
+                            TrafficVisit.landing_at >= datetime.now(timezone.utc) - timedelta(minutes=15),
+                        )
+                        .order_by(TrafficVisit.landing_at.desc())
+                        .limit(2)
+                    )
+                ).all()
+                if len(fresh_visits) == 1:
+                    visit = fresh_visits[0]
+                    existing = await db.scalar(select(MaxIdentityLink).where(MaxIdentityLink.visitor_id == visit.id))
+                    logger.warning("TRAFFIC_STARTAPP_STALE_HANDOFF unique_fresh_visit=%s", True)
+                elif len(fresh_visits) == 0:
+                    recent_bound = await db.scalar(
+                        select(TrafficVisit)
+                        .where(
+                            TrafficVisit.channel_id == visit.channel_id,
+                            TrafficVisit.max_user_id == str(max_user_id),
+                            TrafficVisit.landing_at >= datetime.now(timezone.utc) - timedelta(minutes=15),
+                        )
+                        .order_by(TrafficVisit.landing_at.desc())
+                        .limit(1)
+                    )
+                    if not recent_bound:
+                        visit.status = "EXPIRED"
+                        await db.commit()
+                        return None
+                    visit = recent_bound
+                    existing = await db.scalar(select(MaxIdentityLink).where(MaxIdentityLink.visitor_id == visit.id))
+                    logger.warning("TRAFFIC_STARTAPP_STALE_HANDOFF recent_bound_visit=%s", True)
+                else:
+                    visit.status = "EXPIRED"
+                    await db.commit()
+                    return None
             if existing and existing.max_user_id != str(max_user_id):
                 return None
             if not existing:
@@ -1195,6 +1462,95 @@ class MenuRepository:
             target = profile.target_url if profile and valid_max_target(profile.target_url) else None
             await db.commit()
             return {"visit_id": visit.id, "visitor_id": visit.visit_token, "channel_id": channel.external_id, "channel_title": channel.title, "target_url": target, "status": visit.status}
+
+    async def recover_recent_traffic_start(self, max_user_id: str) -> dict | None:
+        """Recover only an immediate duplicate iOS handoff for one channel.
+
+        MAX Web can deliver a valid bot start and then hand an unrelated stale
+        payload to the native iOS app.  The recovery is intentionally narrow:
+        same authenticated MAX user, a binding no older than five minutes,
+        and exactly one channel represented by those recent bindings.
+        """
+        if not max_user_id:
+            return None
+        async with self.session_factory() as db:
+            visits = (
+                await db.scalars(
+                    select(TrafficVisit)
+                    .where(
+                        TrafficVisit.max_user_id == str(max_user_id),
+                        TrafficVisit.status == "BOT_STARTED",
+                        TrafficVisit.max_opened_at >= datetime.now(timezone.utc) - timedelta(minutes=5),
+                    )
+                    .order_by(TrafficVisit.max_opened_at.desc())
+                    .limit(10)
+                )
+            ).all()
+            channel_ids = {row.channel_id for row in visits}
+            if not visits or len(channel_ids) != 1:
+                return None
+            visit = visits[0]
+            channel = await db.get(Channel, visit.channel_id)
+            if not channel:
+                return None
+            profile = await db.scalar(
+                select(TrafficProfile).where(
+                    TrafficProfile.channel_id == channel.id,
+                    TrafficProfile.enabled.is_(True),
+                )
+            )
+            target = profile.target_url if profile and valid_max_target(profile.target_url) else None
+            if not target:
+                return None
+            return {
+                "visit_id": visit.id,
+                "visitor_id": visit.visit_token,
+                "channel_id": channel.external_id,
+                "channel_title": channel.title,
+                "target_url": target,
+                "status": visit.status,
+            }
+
+    async def resolve_bound_traffic_token(self, token: str, max_user_id: str) -> dict | None:
+        """Resolve an old token only when it already belongs to this MAX user.
+
+        This is routing-only recovery for MAX clients that replay an old bot
+        payload. It never attributes a new click or changes visit state.
+        """
+        if not token or not max_user_id:
+            return None
+        async with self.session_factory() as db:
+            visit = await db.scalar(select(TrafficVisit).where(TrafficVisit.startapp_token == token))
+            if not visit:
+                return None
+            identity = await db.scalar(
+                select(MaxIdentityLink).where(
+                    MaxIdentityLink.visitor_id == visit.id,
+                    MaxIdentityLink.max_user_id == str(max_user_id),
+                )
+            )
+            if not identity or visit.max_user_id != str(max_user_id):
+                return None
+            channel = await db.get(Channel, visit.channel_id)
+            if not channel:
+                return None
+            profile = await db.scalar(
+                select(TrafficProfile).where(
+                    TrafficProfile.channel_id == channel.id,
+                    TrafficProfile.enabled.is_(True),
+                )
+            )
+            target = profile.target_url if profile and valid_max_target(profile.target_url) else None
+            if not target:
+                return None
+            return {
+                "visit_id": visit.id,
+                "visitor_id": visit.visit_token,
+                "channel_id": channel.external_id,
+                "channel_title": channel.title,
+                "target_url": target,
+                "status": "ROUTING_ONLY",
+            }
 
     async def mark_traffic_to_channel(self, visit_id: str, max_user_id: str) -> str | None:
         async with self.session_factory() as db:
@@ -1302,6 +1658,44 @@ class MenuRepository:
             else:
                 membership.current_member = True
                 membership.joined_at = membership.joined_at or event_time
+                # Manual approval produces the official user_added event but
+                # not a pending event in Bot API. A verified MAX identity is
+                # deterministic evidence, provided this user resolves to one
+                # visit in this channel. Multiple identity links are
+                # intentionally left non-exact.
+                identity_visits = list((await db.scalars(
+                    select(TrafficVisit.id)
+                    .join(MaxIdentityLink, MaxIdentityLink.visitor_id == TrafficVisit.id)
+                    .where(
+                        TrafficVisit.channel_id == channel.id,
+                        MaxIdentityLink.max_user_id == str(max_user_id),
+                    )
+                )).all())
+                exact_visit_id = resolve_exact_identity_visit(identity_visits)
+                if event_type.lower() == "user_added" and exact_visit_id:
+                    membership.attribution_status = EXACT
+                    membership.attributed_visit_id = exact_visit_id
+                    membership.attribution_score = 100
+                    visit = await db.get(TrafficVisit, exact_visit_id)
+                    if visit:
+                        visit.converted_at = visit.converted_at or event_time
+                        if can_send_offline_conversion(EXACT, visit.yclid or visit.metrica_client_id):
+                            exists_outbox = await db.scalar(select(OfflineConversion.id).where(
+                                OfflineConversion.visit_id == visit.id,
+                                OfflineConversion.membership_id == membership.id,
+                                OfflineConversion.target == "YANDEX",
+                            ))
+                            if not exists_outbox:
+                                db.add(OfflineConversion(
+                                    visit_id=visit.id, membership_id=membership.id,
+                                    target="YANDEX", goal="userDidSubscribe",
+                                    identifier_type="yclid" if visit.yclid else "client_id",
+                                    identifier_value=visit.yclid or visit.metrica_client_id,
+                                    conversion_datetime=event_time,
+                                    status="dry_run" if settings.yandex_conversion_dry_run else "pending",
+                                ))
+                    await db.commit()
+                    return True
                 # A verified startapp identity is deterministic evidence for
                 # this visitor. Do not mix it with the old temporal-candidate
                 # path used when MAX sends a bare user_added event.
@@ -1387,6 +1781,58 @@ class MenuRepository:
         async with self.session_factory() as db:
             return bool(await db.scalar(select(Admin.id).where(Admin.external_id == external_id)))
 
+    async def ensure_exact_user_added_attribution(self, channel_external_id: str,
+                                                  max_user_id: str,
+                                                  event_time: datetime | None = None) -> bool:
+        """Promote an already-recorded official member event by exact identity.
+
+        This is intentionally idempotent and channel-scoped. It is useful for
+        replay-safe reconciliation when the membership event was persisted
+        before the exact-identity rule was deployed.
+        """
+        if not channel_external_id or not max_user_id:
+            return False
+        event_time = event_time or datetime.now(timezone.utc)
+        async with self.session_factory() as db:
+            channel = await db.scalar(select(Channel).where(Channel.external_id == str(channel_external_id)))
+            if not channel:
+                return False
+            membership = await db.scalar(select(TrafficMembership).where(
+                TrafficMembership.channel_id == channel.id,
+                TrafficMembership.max_user_id == str(max_user_id),
+            ))
+            identity_visits = list((await db.scalars(
+                select(TrafficVisit.id)
+                .join(MaxIdentityLink, MaxIdentityLink.visitor_id == TrafficVisit.id)
+                .where(TrafficVisit.channel_id == channel.id, MaxIdentityLink.max_user_id == str(max_user_id))
+            )).all())
+            exact_visit_id = resolve_exact_identity_visit(identity_visits)
+            if not membership or not exact_visit_id:
+                return False
+            visit = await db.get(TrafficVisit, exact_visit_id)
+            if not visit or not (visit.yclid or visit.metrica_client_id):
+                return False
+            membership.attribution_status = EXACT
+            membership.attributed_visit_id = exact_visit_id
+            membership.attribution_score = 100
+            visit.converted_at = visit.converted_at or event_time
+            exists_outbox = await db.scalar(select(OfflineConversion.id).where(
+                OfflineConversion.visit_id == visit.id,
+                OfflineConversion.membership_id == membership.id,
+                OfflineConversion.target == "YANDEX",
+            ))
+            if not exists_outbox:
+                db.add(OfflineConversion(
+                    visit_id=visit.id, membership_id=membership.id,
+                    target="YANDEX", goal="userDidSubscribe",
+                    identifier_type="yclid" if visit.yclid else "client_id",
+                    identifier_value=visit.yclid or visit.metrica_client_id,
+                    conversion_datetime=event_time,
+                    status="dry_run" if settings.yandex_conversion_dry_run else "pending",
+                ))
+            await db.commit()
+            return True
+
     async def render(self, external_id: str, screen: str, channel_id: str | None = None):
         # Use the existing idempotent repository operation before opening the
         # read transaction used for rendering. It also enforces ownership.
@@ -1400,9 +1846,10 @@ class MenuRepository:
                 db.add(admin)
                 await db.flush()
             text, keyboard = await render_screen(db, admin, screen, channel_id)
+            # Banner delivery is temporarily disabled; keep the render flow
+            # text-only on every screen until a final MAX media layout is
+            # approved.
             media = []
-            if screen.startswith("settings"):
-                media = [{"type": "image", "payload": {"url": settings.max_public_url.rstrip("/") + "/static/images/user_messages_example-v2.png"}}]
             return text, keyboard, admin.service_message_id, media
 
     async def save_service_message(self, external_id: str, message_id: str):
@@ -1859,6 +2306,26 @@ class MenuRepository:
             admin.pending_inbox_channel_id = None
             await db.commit()
             return True
+
+    async def unbind_inbox_chat(self, chat_id: str) -> dict | None:
+        """Clear one saved inbox binding after an official ``bot_removed``."""
+        async with self.session_factory() as db:
+            row = await db.execute(
+                select(Channel, Admin.external_id)
+                .join(Admin, Channel.admin_id == Admin.id)
+                .where(Channel.inbox_chat_id == str(chat_id))
+                .with_for_update()
+            )
+            channel, admin_external_id = row.first() or (None, None)
+            if not channel:
+                return None
+            title = channel.inbox_chat_title or channel.title
+            channel.inbox_chat_id = None
+            channel.inbox_chat_title = None
+            channel.inbox_chat_connected_at = None
+            channel.accepting = False
+            await db.commit()
+            return {"admin_external_id": str(admin_external_id), "title": title}
 
     async def channel_by_inbox_chat(self, chat_id: str):
         async with self.session_factory() as db:

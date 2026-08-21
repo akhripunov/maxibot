@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MAXIBOT MAX deeplink matrix</title>
+<style>
+  body { font: 16px system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 20px; }
+  code { word-break: break-all; }
+  li { margin: 18px 0; }
+  a { margin-left: 8px; }
+  input { width: 100%; padding: 8px; margin: 8px 0 16px; }
+</style>
+<h1>MAXIBOT deeplink matrix</h1>
+<p>Открывать ссылки по одной в Safari на том же Mac. Не использовать Chrome.</p>
+<ol>
+  <li><code>max://max.ru/se13802047_1_bot</code> <a href="max://max.ru/se13802047_1_bot">Открыть A</a></li>
+  <li><code>max://max.ru/se13802047_1_bot?startapp=a</code> <a href="max://max.ru/se13802047_1_bot?startapp=a">Открыть B</a></li>
+  <li><code>max://max.ru/se13802047_1_bot?startapp=12345678901234567</code> <a href="max://max.ru/se13802047_1_bot?startapp=12345678901234567">Открыть C</a></li>
+  <li>
+    <label for="token">Вставьте текущий 32-char token только локально:</label>
+    <input id="token" pattern="[A-Za-z0-9_-]{32}" placeholder="32-char startapp token">
+    <code id="d-url">max://max.ru/se13802047_1_bot?startapp=&lt;token&gt;</code>
+    <a id="d-link" href="#">Открыть D</a>
+  </li>
+</ol>
+<script>
+  const input = document.querySelector('#token');
+  const code = document.querySelector('#d-url');
+  const link = document.querySelector('#d-link');
+  input.addEventListener('input', () => {
+    const token = input.value;
+    const url = `max://max.ru/se13802047_1_bot?startapp=${encodeURIComponent(token)}`;
+    code.textContent = url;
+    link.href = /^[A-Za-z0-9_-]{32}$/.test(token) ? url : '#';
+  });
+</script>

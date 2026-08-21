@@ -1,5 +1,6 @@
 from app.bot.runtime import MaxBotRuntime
 from app.integrations.max_client import MaxMessage, MaxUpdate, RealMaxClient
+import pytest
 
 
 def test_manual_start_and_deep_link_are_distinct_entrypoints():
@@ -7,6 +8,87 @@ def test_manual_start_and_deep_link_are_distinct_entrypoints():
     deep_link = MaxUpdate("bot_started", user_id="u1", raw={"payload": "peterburg-24"})
     assert manual.message.text.strip().lower() == "/start"
     assert MaxBotRuntime._start_payload(deep_link) == "peterburg-24"
+
+
+def test_admin_command_is_distinct_from_start_payload_and_supports_bot_suffix():
+    assert MaxBotRuntime._is_admin_command("/admin") is True
+    assert MaxBotRuntime._is_admin_command("/admin@maxibot") is True
+    assert MaxBotRuntime._is_admin_command("/admin opaque-payload") is True
+    assert MaxBotRuntime._is_admin_command("/start opaque-payload") is False
+    assert MaxBotRuntime._is_admin_command("admin") is False
+
+
+def test_admin_command_routes_through_database_admin_check_and_denies_non_admin():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    section = source[source.index("    async def _message("):source.index("    async def _deliver_inbox_message(")]
+    assert "if self._is_admin_command(normalized_text):" in section
+    assert "await self.repo.is_admin(target_id)" in section
+    assert "Раздел администратора доступен только администраторам." in section
+    assert 'await self._render(target_id, "owner_admin")' in section
+    assert "OWNER_ADMIN_NOT_CONFIGURED" not in section
+
+
+class _AdminCommandRepo:
+    def __init__(self, admin: bool):
+        self.admin = admin
+        self.reset = []
+        self.cleared = []
+
+    async def is_admin(self, external_id):
+        return self.admin
+
+    async def reset_navigation(self, external_id):
+        self.reset.append(external_id)
+
+    async def clear_support_input(self, external_id):
+        self.cleared.append(external_id)
+
+
+class _AdminCommandClient:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, target, text, *args, **kwargs):
+        self.sent.append((target, text))
+        return "message-1"
+
+
+@pytest.mark.asyncio
+async def test_admin_command_admin_user_opens_owner_menu():
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = _AdminCommandRepo(admin=True)
+    runtime.client = _AdminCommandClient()
+    rendered = []
+
+    async def render(target, screen, *args, **kwargs):
+        rendered.append((target, screen))
+
+    runtime._render = render
+    update = MaxUpdate(
+        "message_created", user_id="admin-1",
+        message=MaxMessage("m-admin", "admin-1", "Admin", "/admin"),
+    )
+    await runtime._message(update)
+    assert rendered == [("admin-1", "owner_admin")]
+    assert runtime.client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_admin_command_non_admin_gets_explicit_denial():
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = _AdminCommandRepo(admin=False)
+    runtime.client = _AdminCommandClient()
+    runtime._render = None
+    update = MaxUpdate(
+        "message_created", user_id="user-1",
+        message=MaxMessage("m-user", "user-1", "User", "/admin"),
+    )
+    await runtime._message(update)
+    assert runtime.client.sent == [
+        ("user-1", "⛔ Раздел администратора доступен только администраторам.")
+    ]
 
 
 def test_real_message_link_recovers_forwarded_source_channel():
@@ -31,13 +113,13 @@ def test_start_payload_does_not_accept_local_query_string():
     assert MaxBotRuntime._start_payload(update) is None
 
 
-def test_traffic_start_uses_one_neutral_channel_cta_without_warning_copy():
+def test_traffic_start_binds_silently_without_channel_cta():
     from pathlib import Path
 
     root = Path(__file__).parents[1]
     source = (root / "app" / "bot" / "runtime.py").read_text()
-    assert 'f"Нажмите кнопку ниже, чтобы открыть канал «{traffic[\'channel_title\']}»."' in source
-    assert '"Открыть канал"' in source
+    assert "TRAFFIC_STARTAPP_BOUND_SILENT" in source
+    assert '"Открыть канал"' not in source
     assert "Этот канал сейчас не принимает обращения через MAXIBOT" not in "\n".join(
         path.read_text() for path in (root / "app").rglob("*.py")
     )
@@ -47,8 +129,18 @@ def test_traffic_start_uses_one_neutral_channel_cta_without_warning_copy():
 def test_duplicate_logical_start_is_claimed_once():
     runtime = MaxBotRuntime.__new__(MaxBotRuntime)
     runtime._recent_start_keys = {}
+    runtime._recent_start_users = {}
     assert runtime._claim_start("user-1", "opaque-token") is True
     assert runtime._claim_start("user-1", "opaque-token") is False
+
+
+def test_bot_started_and_message_start_are_one_logical_launch():
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime._recent_start_keys = {}
+    runtime._recent_start_users = {}
+
+    assert runtime._claim_start("user-1", "opaque-token") is True
+    assert runtime._claim_start("user-1", None) is False
 
 
 def test_normal_start_replaces_old_service_panel_with_fresh_bottom_copy():
@@ -71,8 +163,85 @@ def test_stale_promotion_navigation_is_not_discarded():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
-    assert 'navigation_action = action == "promotion" or action.startswith(("promotion_", "channels", "channel:"))' in source
+    assert 'navigation_action = action == "promotion" or action.startswith(("promotion_", "channels", "channel:", "settings:"))' in source
     assert "and not navigation_action" in source
+
+
+def test_message_settings_navigation_is_not_discarded_as_stale_callback():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    assert 'action.startswith(("promotion_", "channels", "channel:", "settings:"))' in source
+    assert 'return ("⚙️ Настройка сообщений пользователя' in (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+
+
+def test_navigation_callback_returns_the_rendered_screen_to_active_max_client():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    section = source[source.index("    async def _navigation_callback("):source.index("    async def _callback(")]
+    assert "replacement = self._callback_replacement_body(text, keyboard, media)" in section
+    assert "await self.client.answer_callback(update.callback_id, replacement)" in section
+    assert "await self.client.delete_message" not in section
+    assert "await self.client.edit_message" not in section
+    assert 'if screen.startswith("settings:"):' in section
+    assert "MAX_SETTINGS_PANEL_CREATED" in section
+
+
+def test_message_settings_does_not_send_an_unuploaded_image_url():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    assert 'payload": {"url": settings.max_public_url' not in source
+
+
+@pytest.mark.asyncio
+async def test_settings_callback_resolves_owned_channel_and_renders_settings_screen():
+    class Repo:
+        async def resolve_owned_channel_id(self, user_id, reference):
+            assert (user_id, reference) == ("admin-1", "legacy-channel")
+            return "channel-1"
+
+        async def render(self, user_id, screen, channel_id=None):
+            return "settings", [], "service-1", []
+
+        async def service_message_id(self, user_id):
+            return "service-1"
+
+        async def save_service_message(self, user_id, message_id):
+            assert (user_id, message_id) == ("admin-1", "service-2")
+
+    class Client:
+        def __init__(self):
+            self.edited = []
+            self.answered = []
+            self.sent = []
+
+        async def edit_message(self, target, message_id, text, keyboard, media=None):
+            self.edited.append((target, message_id, text, keyboard, media))
+
+        async def answer_callback(self, callback_id, message=None):
+            self.answered.append(callback_id)
+
+        async def send_message(self, target, text, keyboard=None, media=None):
+            self.sent.append((target, text, keyboard, media))
+            return "service-2"
+
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    runtime.client = Client()
+    runtime._recent_callback_ids = {}
+    update = MaxUpdate(
+        "message_callback", chat_id="admin-1", user_id="admin-1",
+        callback_id="cb-settings", button_payload="settings:legacy-channel",
+        message=MaxMessage("service-1", "admin-1", "Admin", "old"),
+    )
+
+    await runtime._callback(update)
+
+    assert runtime.client.answered == ["cb-settings"]
+    assert runtime.client.edited == []
+    assert runtime.client.sent[0][0:2] == ("admin-1", "settings")
 
 
 def test_dynamic_channel_lists_do_not_create_replacement_messages():

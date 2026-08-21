@@ -117,6 +117,11 @@ landing получает yclid/UTM
 ## Эксплуатационное правило: MAX updates читаются в одном месте
 
 - Production MAX updates читает только выделенный VPS `worker`.
+- Единственный production host для polling: `135.106.166.46`.
+- Legacy VPS `37.252.10.67` не должен запускать
+  `maxibot-vps-worker-1`; контейнер обязан оставаться остановленным с
+  restart policy `no`. После любого deploy проверять оба VPS, а не только
+  локальный Docker и новый production host.
 - VPS `api` и локальный `docker-compose` обязаны иметь
   `MAX_RUN_POLLING=false`; единственный VPS worker явно имеет `true`.
 - Нельзя запускать локальный MAXIBOT с production MAX token и polling.
@@ -124,3 +129,33 @@ landing получает yclid/UTM
   не удалять пользовательские сообщения и не менять модели каналов как обход.
 - Подробная процедура закреплена в
   `research/MAXIBOT_SINGLE_POLLER_RUNBOOK.md`.
+
+## Зафиксированный production-контракт mobile MAX handoff
+
+Рабочий iPhone-путь подтверждён двумя реальными записями владельца 2026-08-21:
+
+```text
+mobile landing
+  → max://max.ru/<bot>?startapp=<same opaque token>
+  → MAX Mini App
+  → POST /api/traffic/resolve
+  → iPhone: обычный HTTPS channel invite через programmatic anchor target=_blank
+  → нужный MAX-канал
+```
+
+Этот контракт нельзя менять как косметический рефакторинг:
+
+- iPhone/iPad Mini App не переводить на безусловный `WebApp.openMaxLink()` —
+  реальный iOS-клиент молча оставался на экране «Открываем канал…»;
+- Android сохраняет `window.location.replace(target_url)`;
+- MAX Web/desktop может использовать `WebApp.openMaxLink(target_url)` только
+  при исключённом Apple mobile user agent;
+- один и тот же `startapp` token обязан сохраняться от landing до Mini App;
+- нельзя добавлять новый visit/token, timer-navigation, iframe или обязательный
+  пользовательский клик;
+- любые изменения `app/main.py`, `app/traffic/deep_link.py` или
+  `miniapp/traffic.html`, затрагивающие handoff, требуют прохождения
+  `tests/regression/test_mobile_max_handoff_contract.py` и двух свежих ручных
+  smoke на настоящем iPhone: (1) ссылка из MAX, (2) ссылка из Safari;
+- пока оба real-device smoke не завершились переходом в целевой канал, статус
+  релиза `BLOCKED`, а предыдущий production handoff должен быть восстановлен.

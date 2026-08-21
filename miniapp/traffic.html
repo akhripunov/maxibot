@@ -3,47 +3,88 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MAXIBOT Traffic PoC</title>
-  <style>body{font:16px system-ui,sans-serif;background:#0d0f12;color:#f2f3f5;margin:0;padding:24px}main{max-width:520px;margin:auto}button{width:100%;padding:14px;margin:8px 0;border:0;border-radius:12px;background:#2d8cff;color:#fff;font-size:16px}button:disabled{opacity:.5}.muted{color:#9da5b0}.ok{color:#52d273}.error{color:#ff8d8d}</style>
+  <title>Переход в канал</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;background:#fff;font-family:system-ui,-apple-system,sans-serif}
+    main{display:grid;box-sizing:border-box;min-height:100%;place-items:center;text-align:center;padding:32px;color:#687386;visibility:hidden}
+    main.visible{visibility:visible}
+    .spinner{width:32px;height:32px;margin:0 auto 18px;border:3px solid #dbe7f7;border-top-color:#1677ff;border-radius:50%;animation:spin .8s linear infinite}
+    #fallback{display:none;margin-top:20px;padding:13px 22px;border-radius:14px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700}
+    main.delayed #fallback{display:inline-block}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
 </head>
 <body>
 <main>
-  <h1>Подписка</h1>
-  <p id="status" class="muted">Проверяем MAX-пользователя…</p>
-  <button id="open" disabled>Открыть канал</button>
-  <button id="check" disabled>Проверить подписку</button>
+  <div>
+  <div class="spinner"></div>
+  <p id="status">Открываем канал…</p>
+  <a id="fallback" href="#">Перейти в канал</a>
+  </div>
 </main>
 <script src="https://st.max.ru/js/max-web-app.js"></script>
 <script>
 const statusEl = document.querySelector('#status');
-const initData = window.WebApp?.initData || '';
+const mainEl = document.querySelector('main');
+const fallbackEl = document.querySelector('#fallback');
+const webApp = window.WebApp;
+const initData = webApp?.initData || '';
 const api = (path, options = {}) => fetch(path, { ...options, headers: {'X-MAX-Init-Data': initData, ...(options.headers || {})} });
-let identified = false;
-async function identify() {
-  if (!initData) throw new Error('MAX initData не найден');
-  const response = await api('/api/traffic/identify', {method: 'POST'});
-  if (!response.ok) throw new Error('Не удалось подтвердить MAX identity');
-  const data = await response.json();
-  identified = true;
-  document.querySelector('#open').disabled = false;
-  document.querySelector('#check').disabled = false;
-  statusEl.textContent = `MAX user ${data.max_user_id} связан с рекламным визитом`;
-  statusEl.className = 'ok';
+
+// Successful traffic resolves normally leave the Mini App before this fires.
+// Keep the bridge screen visually silent during that fast path; reveal status
+// only when the MAX handoff is genuinely taking longer.
+const slowTimer = setTimeout(() => mainEl.classList.add('visible'), 1600);
+const fallbackTimer = setTimeout(() => mainEl.classList.add('visible', 'delayed'), 3200);
+
+function openViaAnchor(targetUrl) {
+  const link = document.createElement('a');
+  link.href = targetUrl;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
-document.querySelector('#open').onclick = async () => {
-  const response = await api('/api/traffic/channel-open', {method: 'POST'});
-  if (!response.ok) return;
+
+function openChannel(targetUrl) {
+  fallbackEl.href = targetUrl;
+  const platform = webApp?.platform || '';
+  // MAX on iPhone may expose the Mini App platform as `web`, while its
+  // bridge openMaxLink call still does not open channel invite links.  The
+  // normal anchor handoff below is the path verified by the real iPhone
+  // production smoke.
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  if (platform === 'android') {
+    window.location.replace(targetUrl);
+    return;
+  }
+
+  if (!isAppleMobile && typeof webApp?.openMaxLink === 'function') {
+    webApp.openMaxLink(targetUrl);
+    return;
+  }
+
+  // On iOS this opens the native channel/request sheet. It is also the
+  // last-resort fallback for non-MAX contexts without the bridge.
+  openViaAnchor(targetUrl);
+}
+
+async function resolveChannel() {
+  if (!initData) throw new Error('MAX initData не найден');
+  const response = await api('/api/traffic/resolve', {method: 'POST'});
+  if (!response.ok) throw new Error('Не удалось открыть MAX-канал');
   const data = await response.json();
-  window.location.href = data.target_url;
-};
-document.querySelector('#check').onclick = async () => {
-  if (!identified) return;
-  const response = await api('/api/traffic/check-subscription', {method: 'POST'});
-  const data = await response.json();
-  statusEl.textContent = data.membership ? '✅ Подписка подтверждена' : 'Пока не подписан';
-  statusEl.className = data.membership ? 'ok' : 'muted';
-};
-identify().catch(error => { statusEl.textContent = error.message; statusEl.className = 'error'; });
+  openChannel(data.target_url);
+}
+resolveChannel().catch(error => {
+  clearTimeout(slowTimer);
+  clearTimeout(fallbackTimer);
+  mainEl.classList.add('visible', 'delayed');
+  statusEl.textContent = error.message;
+  statusEl.className = 'error';
+});
 </script>
 </body>
 </html>

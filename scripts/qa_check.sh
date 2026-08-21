@@ -38,6 +38,15 @@ PRODUCTION="NOT_DEPLOYED"; PRODUCTION_SMOKE="NOT_RUN"; PRODUCTION_CHANGED="NO"
 CURRENT_PROD_SHA="UNAVAILABLE"; ROLLBACK_SHA="UNAVAILABLE"; ROLLBACK="NOT_RUN"
 VERDICT="NO_GO"
 IMAGE_BUILT=0
+QA_DOCKER_BUILD_NETWORK="${QA_DOCKER_BUILD_NETWORK:-}"
+
+docker_build() {
+  if [ -n "$QA_DOCKER_BUILD_NETWORK" ]; then
+    docker build --network="$QA_DOCKER_BUILD_NETWORK" -t "$IMAGE" .
+  else
+    docker build -t "$IMAGE" .
+  fi
+}
 
 read_case_registry() {
   local values
@@ -233,7 +242,7 @@ EOF
 
 run_static || fail_gate
 if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
-  if ! command -v docker >/dev/null 2>&1 || ! docker build -t "$IMAGE" . >"$LOG_DIR/build.log" 2>&1; then BUILD="FAIL"; fail_gate; fi
+  if ! command -v docker >/dev/null 2>&1 || ! docker_build >"$LOG_DIR/build.log" 2>&1; then BUILD="FAIL"; fail_gate; fi
   BUILD="PASS"; IMAGE_BUILT=1
 fi
 run_tests unit tests -q || { UNIT="FAIL"; fail_gate; }
@@ -246,7 +255,7 @@ EXECUTED_CASES="$AUTOMATED_CASES"
 PASSED_CASES="$AUTOMATED_CASES"
 
 if [ "$IMAGE_BUILT" != "1" ]; then
-  if ! command -v docker >/dev/null 2>&1 || ! docker build -t "$IMAGE" . >"$LOG_DIR/build.log" 2>&1; then BUILD="FAIL"; fail_gate; fi
+  if ! command -v docker >/dev/null 2>&1 || ! docker_build >"$LOG_DIR/build.log" 2>&1; then BUILD="FAIL"; fail_gate; fi
   BUILD="PASS"
 fi
 
@@ -254,7 +263,12 @@ if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
   if ! command -v docker >/dev/null 2>&1 || ! docker compose version >"$LOG_DIR/docker-compose-version.log" 2>&1; then
     STAGING="FAIL"; fail_gate
   fi
-  if ! docker compose -p "$QA_COMPOSE_PROJECT" -f "$QA_COMPOSE_FILE" up -d --build >"$LOG_DIR/staging-up.log" 2>&1; then
+  if [ -n "${QA_STAGING_IMAGE:-}" ]; then
+    staging_up_args=(up -d --no-build)
+  else
+    staging_up_args=(up -d --build)
+  fi
+  if ! docker compose -p "$QA_COMPOSE_PROJECT" -f "$QA_COMPOSE_FILE" "${staging_up_args[@]}" >"$LOG_DIR/staging-up.log" 2>&1; then
     STAGING="FAIL"; fail_gate
   fi
   QA_STAGING_URL="${QA_STAGING_URL:-http://127.0.0.1:$QA_STAGING_PORT}"

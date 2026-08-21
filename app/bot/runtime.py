@@ -5,15 +5,16 @@ import hashlib
 import json
 import logging
 import time
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.bot.menu import MenuRepository
+from app.bot.menu import MenuRepository, official_bot_added_diagnostics
 from app.db.models import Admin, Channel, Conversation, Message
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
+from app.daily_reports import send_due_daily_reports
 from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMaxClient, MaxApiError
 from app.security_tokens import decrypt_token, encrypt_token
 
@@ -45,11 +46,15 @@ class MaxBotRuntime:
         self._user_channels: dict[str, str] = {}
         self._recent_update_keys: dict[str, float] = {}
         self._recent_start_keys: dict[str, float] = {}
+        self._recent_start_users: dict[str, float] = {}
+        self._recent_traffic_routes: dict[str, tuple[float, dict]] = {}
+        self._recent_traffic_replays: dict[str, float] = {}
         self._recent_callback_ids: dict[str, float] = {}
         self._message_locks: dict[str, asyncio.Lock] = {}
         self._custom_markers: dict[str, int | None] = {}
         self._custom_clients: dict[str, RealMaxClient] = {}
         self._custom_poll_task: asyncio.Task | None = None
+        self._daily_report_task: asyncio.Task | None = None
         self._broadcast_drafts: dict[str, str] = {}
 
     async def stop(self):
@@ -57,10 +62,17 @@ class MaxBotRuntime:
         if self._custom_poll_task and not self._custom_poll_task.done():
             self._custom_poll_task.cancel()
             await asyncio.gather(self._custom_poll_task, return_exceptions=True)
+        if self._daily_report_task and not self._daily_report_task.done():
+            self._daily_report_task.cancel()
+            await asyncio.gather(self._daily_report_task, return_exceptions=True)
         for client in self._custom_clients.values():
             await client.close()
 
     async def run_forever(self):
+        # This task lives in the same dedicated worker as the only official
+        # MAX polling loop.  It never opens another update stream.
+        if self._daily_report_task is None or self._daily_report_task.done():
+            self._daily_report_task = asyncio.create_task(self._daily_report_loop())
         while not self._stop.is_set():
             try:
                 updates, next_marker = await self.client.updates(self.marker)
@@ -84,6 +96,22 @@ class MaxBotRuntime:
             except Exception:
                 logger.exception("MAX update cycle failed")
                 await asyncio.sleep(3)
+
+    async def _daily_report_loop(self):
+        """Catch up safely after a worker restart, then check once a minute."""
+        while not self._stop.is_set():
+            try:
+                delivered = await send_due_daily_reports(self.client, self.session_factory)
+                if delivered:
+                    logger.info("DAILY_REPORTS_SENT count=%s", delivered)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("DAILY_REPORT_CYCLE_FAILED")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                pass
 
     async def handle(self, update: MaxUpdate):
         logger.warning(
@@ -172,11 +200,20 @@ class MaxBotRuntime:
         now = time.monotonic()
         self._recent_start_keys = {
             item: seen for item, seen in self._recent_start_keys.items()
-            if now - seen < 3
+            if now - seen < 30
         }
-        if key in self._recent_start_keys:
+        recent_start_users = getattr(self, "_recent_start_users", {})
+        self._recent_start_users = {
+            item: seen for item, seen in recent_start_users.items()
+            if now - seen < 5
+        }
+        # MAX may describe one tap as bot_started(payload) and then as a
+        # message_created(/start) without that payload.  Those events need a
+        # short user-level guard in addition to the longer exact-key guard.
+        if key in self._recent_start_keys or user_id in self._recent_start_users:
             return False
         self._recent_start_keys[key] = now
+        self._recent_start_users[user_id] = now
         return True
 
     @staticmethod
@@ -200,6 +237,14 @@ class MaxBotRuntime:
                 for update in updates:
                     update.bot_connection_id = bot.id
                     await self.handle(update)
+            except MaxApiError as exc:
+                if exc.status_code == 401:
+                    await self.repo.mark_custom_bot_invalid_token(bot.id)
+                    self._custom_clients.pop(bot.id, None)
+                    self._custom_markers.pop(bot.id, None)
+                    logger.warning("CUSTOM_BOT_TOKEN_INVALID bot_connection_id=%s", bot.id)
+                    continue
+                logger.exception("CUSTOM_BOT_POLL_FAILED bot_connection_id=%s status=%s", bot.id, exc.status_code)
             except Exception:
                 logger.exception("CUSTOM_BOT_POLL_FAILED bot_connection_id=%s", bot.id)
 
@@ -335,20 +380,36 @@ class MaxBotRuntime:
             for traffic_token in start_payloads:
                 traffic = await self.repo.bind_traffic_startapp(traffic_token, str(user_id), update.user_name)
                 if not traffic:
+                    traffic = await self.repo.resolve_bound_traffic_token(traffic_token, str(user_id))
+                    if traffic:
+                        logger.warning("TRAFFIC_STARTAPP_BOUND_TOKEN_ROUTE routing_only=%s", True)
+                if not traffic:
                     continue
                 if not traffic.get("target_url"):
-                    await self.client.send_message(
-                        user_id,
-                        "⚠️ Канал для этой рекламной ссылки пока не настроен. Попробуйте позже.",
-                    )
                     logger.warning("TRAFFIC_STARTAPP_CHANNEL_TARGET_MISSING")
                     return
-                await self.client.send_message(
-                    user_id,
-                    f"Нажмите кнопку ниже, чтобы открыть канал «{traffic['channel_title']}».",
-                    [[{"type": "link", "text": "Открыть канал", "url": traffic["target_url"]}]],
-                )
-                logger.warning("TRAFFIC_STARTAPP_LINKED channel=%s user_present=%s", bool(traffic.get("channel_id")), bool(user_id))
+                logger.warning("TRAFFIC_STARTAPP_BOUND_SILENT channel=%s user_present=%s", bool(traffic.get("channel_id")), bool(user_id))
+                return
+            # MAX Web on iOS can first deliver the correct bot_started token
+            # and then immediately open the native app with an unrelated
+            # cached payload. Recover only from this same user's single
+            # channel binding made in the last five minutes.
+            recovered = await self.repo.recover_recent_traffic_start(str(user_id))
+            if recovered:
+                logger.warning("TRAFFIC_STARTAPP_IOS_RECOVERED_SILENT single_recent_channel=%s", True)
+                return
+            # MAX may append another bot_started event with a stale/foreign
+            # payload after the valid event was already handled. Never send a
+            # contradictory "expired" message on top of a channel CTA that
+            # was successfully delivered to the same user moments ago.
+            now = time.monotonic()
+            self._recent_traffic_routes = {
+                key: item for key, item in self._recent_traffic_routes.items()
+                if now - item[0] < 300
+            }
+            recent_route = self._recent_traffic_routes.get(str(user_id))
+            if recent_route:
+                logger.warning("TRAFFIC_STARTAPP_DUPLICATE_STALE_IGNORED recent_success=%s", True)
                 return
             logger.warning(
                 "TRAFFIC_STARTAPP_BIND_MISS candidates=%s lengths=%s",
@@ -447,6 +508,11 @@ class MaxBotRuntime:
             screen, channel_id = "channels", None
         elif action == "promotion":
             screen, channel_id = "promotion", None
+        elif action.startswith("settings:"):
+            reference = action.split(":", 1)[1]
+            channel_id = await self.repo.resolve_owned_channel_id(user_id, reference)
+            screen = f"settings:{channel_id}" if channel_id else "channels"
+            channel_id = channel_id if screen != "channels" else None
         elif action.startswith("channel:"):
             reference = action.split(":", 1)[1]
             channel_id = await self.repo.resolve_owned_channel_id(user_id, reference)
@@ -465,29 +531,28 @@ class MaxBotRuntime:
             len(keyboard),
             sum(len(row) for row in keyboard),
         )
-        # Persist the new screen on the exact message that supplied the
-        # callback. A callback replacement is only a client-side response in
-        # some MAX clients and can leave the saved service message with an
-        # older keyboard; that makes «Мои каналы» and «Продвижение» appear to
-        # alternate between different versions. PUT is the canonical update.
+        # MAX documents POST /answers with ``message`` as the atomic way to
+        # replace the message whose button was pressed.  Do not combine it
+        # with DELETE/PUT: MAX Web can then remove the card from the visible
+        # timeline even though both HTTP calls return success.
         clicked_mid = update.message.external_message_id if update.message else None
         canonical_mid = await self.repo.service_message_id(user_id)
         if clicked_mid and canonical_mid and clicked_mid != canonical_mid:
-            # The callback came from an obsolete MAXIBOT panel. It is safe to
-            # remove this exact source message because it contains our own
-            # callback keyboard; keep the user's messages untouched.
-            try:
-                await self.client.delete_message(clicked_mid)
-                logger.warning("MAX_STALE_SERVICE_PANEL_REMOVED")
-            except Exception:
-                logger.info("MAX stale service panel removal failed")
-            clicked_mid = canonical_mid
-        if clicked_mid:
-            target = str(update.chat_id or user_id)
-            await self.client.edit_message(target, clicked_mid, text, keyboard, media)
-        else:
-            await self._render(user_id, screen, channel_id)
-        await self.client.answer_callback(update.callback_id)
+            # Continue navigation on the panel the owner actually used,
+            # without deleting either bot panel or any user message.
+            await self.repo.save_service_message(user_id, clicked_mid)
+        if screen.startswith("settings:"):
+            # MAX Web currently hides an in-place callback replacement when
+            # this particular screen is opened (the API still returns 200).
+            # Acknowledge the callback, then create one fresh functional
+            # settings panel at the bottom. Do not delete any message.
+            await self.client.answer_callback(update.callback_id)
+            new_id = await self.client.send_message(user_id, text, keyboard, media)
+            await self.repo.save_service_message(user_id, new_id)
+            logger.warning("MAX_SETTINGS_PANEL_CREATED message=%s", bool(new_id))
+            return
+        replacement = self._callback_replacement_body(text, keyboard, media)
+        await self.client.answer_callback(update.callback_id, replacement)
         logger.warning(
             "MAX_CALLBACK_MESSAGE_EDITED screen=%s clicked_mid_present=%s",
             screen,
@@ -510,7 +575,7 @@ class MaxBotRuntime:
         # was pressed.  Prefer this for navigation; editing a separately
         # stored message id leaves an old keyboard visible in some clients.
         navigation = action in {"home", "channels", "promotion"}
-        navigation = navigation or action.startswith(("channel:", "promotion_channel:", "promotion_landing:"))
+        navigation = navigation or action.startswith(("channel:", "settings:", "promotion_channel:", "promotion_landing:"))
         if navigation and update.callback_id:
             await self._navigation_callback(update, str(user_id), action)
             return
@@ -548,12 +613,14 @@ class MaxBotRuntime:
         callback_message_id = update.message.external_message_id if update.message else ""
         current_message_id = await self.repo.service_message_id(user_id)
         action = update.button_payload or "home"
-        navigation_action = action == "promotion" or action.startswith(("promotion_", "channels", "channel:"))
+        navigation_action = action in {"promotion", "connect_channel"} or action.startswith(("promotion_", "channels", "channel:", "settings:"))
         if callback_message_id and current_message_id and callback_message_id != current_message_id and not navigation_action:
             logger.info("MAX stale callback ignored")
             return
         screen, channel_id = self._action_parts(action)
-        if action == "promotion":
+        if action == "connect_channel":
+            await self._render(user_id, "connect_channel")
+        elif action == "promotion":
             await self._render(user_id, "promotion")
         elif action == "promotion_connect":
             await self._render(user_id, "promotion_connect")
@@ -1187,7 +1254,7 @@ class MaxBotRuntime:
             logger.exception("MAX live native feed delivery failed")
 
     async def _bot_added(self, update: MaxUpdate):
-        if not update.chat_id:
+        if not update.chat_id or update.bot_connection_id:
             return
         logger.warning(
             "BOT_ADDED_CHAT_DISCOVERY chat_id=%s initiator_present=%s pending_inbox=%s",
@@ -1195,31 +1262,109 @@ class MaxBotRuntime:
             bool(update.user_id),
             bool(await self.repo.pending_inbox_channel(update.user_id)) if update.user_id else False,
         )
-        if (update.raw or {}).get("is_channel") or (update.raw or {}).get("chat_type") == "channel":
+        raw = update.raw or {}
+        nested_chat = raw.get("chat") if isinstance(raw.get("chat"), dict) else {}
+        is_channel_event = bool(
+            raw.get("is_channel")
+            or raw.get("chat_type") == "channel"
+            or raw.get("type") == "channel"
+            or nested_chat.get("type") == "channel"
+            or nested_chat.get("chat_type") == "channel"
+        )
+        if is_channel_event:
             if update.update_type == "bot_removed":
                 await self.repo.mark_max_channel_removed(update.chat_id, update.user_id)
                 logger.info("MAX bot removed from channel chat_id=%s", update.chat_id)
                 return
             try:
                 chat = await self.client.get_chat(update.chat_id)
-                synced = await self.repo.sync_max_chat_metadata(update.chat_id, update.user_id, chat)
-                logger.warning("MAX_CHANNEL_SYNC chat_found=%s target_discovered=%s public=%s",
-                               bool(synced), bool(synced and synced.get("link_present")),
-                               bool(synced and synced.get("is_public")))
+                admin_read_status = 200
+                try:
+                    admins = await self.client.get_admins(update.chat_id)
+                except MaxApiError as exc:
+                    # Admin listing is diagnostic only.  A 403 must not turn
+                    # the fail-closed channel validation into a sync error.
+                    admins = {}
+                    admin_read_status = exc.status_code
+                admin_members = admins.get("members", []) if isinstance(admins, dict) else []
+                initiator_in_admins = any(
+                    isinstance(member, dict)
+                    and str(member.get("user_id") or member.get("id")) == str(update.user_id)
+                    for member in admin_members
+                ) if isinstance(admin_members, list) else False
+                initiator_is_owner = any(
+                    isinstance(member, dict)
+                    and str(member.get("user_id") or member.get("id")) == str(update.user_id)
+                    and bool(member.get("is_owner"))
+                    for member in admin_members
+                ) if isinstance(admin_members, list) else False
+                facts = official_bot_added_diagnostics(chat, update.user_id)
+                facts.update({
+                    "admins_read": isinstance(admin_members, list),
+                    "admins_read_status": admin_read_status,
+                    "admin_count": len(admin_members) if isinstance(admin_members, list) else None,
+                    "initiator_in_admins": initiator_in_admins,
+                    "initiator_is_owner": initiator_is_owner,
+                })
+                logger.warning(
+                    "MAX_CHANNEL_AUTO_CONNECT_DIAGNOSTICS chat_id=%s facts=%s",
+                    update.chat_id,
+                    facts,
+                )
+                result = await self.repo.connect_channel_from_bot_added(update.chat_id, update.user_id, chat)
+                logger.warning("MAX_CHANNEL_AUTO_CONNECT status=%s reason=%s",
+                               result.get("status"), result.get("reason"))
+                if result.get("status") in {"created", "updated"} and update.user_id:
+                    await self.client.send_message(
+                        str(update.user_id),
+                        f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.\n\n"
+                        "Он уже доступен в разделах «Мои каналы» и «Продвижение».",
+                    )
+                    await self._render(str(update.user_id), "channels")
             except Exception:
                 logger.exception("MAX_CHANNEL_SYNC_FAILED")
             return
         initiator = update.user_id
+        if update.update_type == "bot_removed":
+            result = await self.repo.unbind_inbox_chat(update.chat_id)
+            if result and result.get("admin_external_id"):
+                await self.client.send_message(
+                    result["admin_external_id"],
+                    f"ℹ️ MAXIBOT удалён из чата «{result.get('title') or update.chat_id}».\n\n"
+                    "Чат для обращений отключён. Его можно подключить заново в настройках канала.",
+                )
+            return
+        if raw.get("is_channel") is not False:
+            logger.info("MAX group bot_added rejected: is_channel flag is not false chat_id=%s", update.chat_id)
+            if initiator:
+                await self.client.send_message(initiator, "Не удалось определить групповой чат. Откройте «Подключить чат» и повторите добавление MAXIBOT.")
+            return
+        try:
+            chat = await self.client.get_chat(update.chat_id)
+        except Exception:
+            logger.exception("MAX_GROUP_CHAT_METADATA_FAILED")
+            if initiator:
+                await self.client.send_message(initiator, "Не удалось получить данные чата MAX. Чат не подключён.")
+            return
+        chat_type = chat.get("chat_type") or chat.get("type") if isinstance(chat, dict) else None
+        if str(chat_type or "").lower() not in {"chat", "group"}:
+            logger.info("MAX group bot_added rejected: invalid chat type=%s chat_id=%s", chat_type, update.chat_id)
+            if initiator:
+                await self.client.send_message(initiator, "Этот объект MAX не является групповым чатом. Чат не подключён.")
+            return
         pending_channel = await self.repo.pending_inbox_channel(initiator) if initiator else None
         if pending_channel:
             await self._bind_inbox_chat(initiator, pending_channel, update.chat_id)
             return
         candidates = await self.repo.pending_inbox_candidates()
-        if len(candidates) > 1:
-            buttons = [[{"text": title, "callback_data": f"inbox_bind:{channel_id}"}] for channel_id, title, _ in candidates]
-            await self.client.send_chat_message(update.chat_id, "💬 К какому каналу подключить этот чат?", buttons=buttons)
+        if len(candidates) != 0:
+            logger.info("MAX group bot_added rejected: pending channel belongs to another/ambiguous owner chat_id=%s candidates=%s", update.chat_id, len(candidates))
+            if initiator:
+                await self.client.send_message(initiator, "Чат не подключён: сначала выберите конкретный канал в разделе «Мои каналы» → «Подключить чат».")
             return
-        logger.info("MAX group chat added without matching pending inbox chat chat_id=%s", update.chat_id)
+        logger.info("MAX group bot_added rejected: no pending inbox channel chat_id=%s", update.chat_id)
+        if initiator:
+            await self.client.send_message(initiator, "Чат не подключён: сначала выберите канал и нажмите «Подключить чат».")
 
     async def _bind_inbox_from_callback(self, update: MaxUpdate, channel_id: str) -> None:
         admin_id = self._event_user_id(update)
@@ -1279,23 +1424,24 @@ class MaxBotRuntime:
             logger.warning("MAX message skipped: no text or forwarded source")
             return
         normalized_text = (message.text or "").strip().lower()
+        actor_id = self._event_user_id(update)
         if self._is_start_command(normalized_text):
             logger.warning("MAX start command handled")
             await self._start(update)
             return
-        actor_id = self._event_user_id(update)
-        if normalized_text == "/admin":
-            owner_id = (settings.maxibot_owner_user_id or "").strip()
-            if not owner_id:
-                logger.warning("OWNER_ADMIN_NOT_CONFIGURED")
+        if self._is_admin_command(normalized_text):
+            target_id = str(actor_id or update.chat_id or "")
+            if not target_id or not await self.repo.is_admin(target_id):
+                await self.client.send_message(
+                    target_id or update.chat_id,
+                    "⛔ Раздел администратора доступен только администраторам.",
+                )
+                logger.warning("ADMIN_COMMAND_DENIED")
                 return
-            if str(actor_id or "") != owner_id:
-                logger.warning("OWNER_ADMIN_ACCESS_DENIED user_id=%s", actor_id)
-                return
-            await self.repo.reset_navigation(owner_id)
-            await self.repo.clear_support_input(owner_id)
-            await self._render(owner_id, "owner_admin")
-            logger.warning("OWNER_ADMIN_OPENED owner_user_id=%s", owner_id)
+            await self.repo.reset_navigation(target_id)
+            await self.repo.clear_support_input(target_id)
+            await self._render(target_id, "owner_admin")
+            logger.warning("ADMIN_COMMAND_OPENED")
             return
         admin_id = actor_id if await self.repo.is_admin(actor_id) else None
         if admin_id and message.text:
@@ -1312,7 +1458,12 @@ class MaxBotRuntime:
                     await self.repo.set_custom_bot_state(admin_id, None)
                     await self._render(admin_id, f"custom_bot_template_view:{bot_id}:{kind}")
                 return
-            if custom_state == "waiting_custom_bot_token" or (custom_state or "").startswith("refresh:"):
+            # Refresh stores the bot id in the dedicated pending field because
+            # Admin.custom_bot_state is intentionally compact.  The previous
+            # startswith("refresh:") check could therefore never match and
+            # silently routed the submitted token to the generic message
+            # flow.
+            if custom_state in {"waiting_custom_bot_token", "refresh"}:
                 token = message.text.strip()
                 try:
                     if not isinstance(self.client, RealMaxClient):
@@ -1556,9 +1707,31 @@ class MaxBotRuntime:
             if not isinstance(value, str):
                 return
             value = unquote(value).strip()
-            if not value or value.startswith(("http://", "https://", "/start")) or value in values:
+            if not value or value in values:
                 return
-            values.append(value)
+            # iOS universal-link delivery can wrap the original MAX start
+            # parameter in the URL or a query-shaped payload. Extract only
+            # the documented start fields; never treat an arbitrary URL as a
+            # traffic token.
+            if value.startswith(("http://", "https://")):
+                query = parse_qs(urlsplit(value).query)
+                for key in ("start", "startapp", "start_param"):
+                    for candidate in query.get(key, []):
+                        append(candidate)
+                return
+            if value.startswith(("?start=", "?startapp=", "?start_param=", "start=", "startapp=", "start_param=")):
+                query = parse_qs(value[1:] if value.startswith("?") else value)
+                for key in ("start", "startapp", "start_param"):
+                    for candidate in query.get(key, []):
+                        append(candidate)
+                return
+            if value.startswith("/start"):
+                rest = value[6:].strip()
+                if rest and not rest.startswith("?"):
+                    append(rest)
+                return
+            if value not in values:
+                values.append(value)
 
         def collect(value: object, depth: int = 0) -> None:
             if depth > 4 or value in (None, ""):
@@ -1591,6 +1764,13 @@ class MaxBotRuntime:
         if not text.startswith("/start"):
             return False
         return len(text) == 6 or text[6] in " @?=" or text[6].isspace()
+
+    @staticmethod
+    def _is_admin_command(text: str) -> bool:
+        """Recognize the admin command without consuming start payloads."""
+        command = (text or "").split(maxsplit=1)[0]
+        name = command.split("@", 1)[0]
+        return name == "/admin"
 
     @staticmethod
     def _reply_link_id(raw: dict) -> str | None:

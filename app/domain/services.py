@@ -57,29 +57,34 @@ def render_channel_welcome_message(text: str | None) -> str:
     return f"{body}\n\n{footer}"
 
 
+def promotion_landing_description(text: str | None) -> str:
+    """Keep Suggestion/custom-bot copy out of traffic landing pages."""
+    value = (text or "").strip()
+    if "Бот создан с помощью" in value or "[Предложка]" in value:
+        return "Переходим в MAX…"
+    return value or "Переходим в MAX…"
+
+
 def menu_text(channels, bots_or_accepting, bots=None):
     # Keep the historical three-argument contract used by the demo/tests while
-    # allowing the production menu to omit the optional accepting counter.
+    # allowing older callers to pass the former accepting counter.
     if bots is None:
         bots = bots_or_accepting
-        accepting = None
-    else:
-        accepting = bots_or_accepting
+    # ``bots_or_accepting`` is retained for call compatibility only.
     return (
-    "🤖 MAXIBOT\n\n"
-    "Настройте обратную связь для ваших каналов MAX.\n\n"
-    "📋 Каналы — подключайте каналы и получайте обращения подписчиков "
-    "в отдельные рабочие чаты.\n\n"
-    "🤖 Боты — подключайте собственных ботов, чтобы подписчики писали "
-    "и получали ответы от имени вашего бренда.\n\n"
-    f"📚 Подключено каналов: {channels}\n"
-    + (f"✅ Принимают сообщения: {accepting}\n" if accepting is not None else "")
-    + f"🤖 Подключено своих ботов: {bots}"
+    "🤖  MAXIBOT\n\n"
+    "Всё для управления и продвижения каналов MAX:\n\n"
+    "📣  Продвижение - Создавайте лендинг для канала, запускайте рекламу\n"
+    "в Яндекс Директе и отслеживайте подписки.\n\n"
+    "📩  Обращения / Предложка - Подключайте каналы и получайте обращения подписчиков в отдельные рабочие чаты.\n\n"
+    "🤖  Мои боты - Подключайте собственных ботов, чтобы подписчики писали и получали ответы от имени вашего бренда.\n\n"
+    f"📚 Каналов подключено: {channels}\n"
+    f"🤖 Собственных ботов: {bots}"
 )
 def channel_card_text(title, accepting, users, messages, connected_at, public_url):
     icon="🟢" if accepting else "⛔"; status="принимает сообщения" if accepting else "не принимает сообщения"
     return f"📕 {title}\n\n{icon} Статус: {status}\n👥 Пользователей: {users}\n💬 Всего сообщений: {messages}\n📅 Подключён: {connected_at}\n\n🔗 Персональная ссылка:\n{public_url}"
 WELCOME=default_channel_welcome()
 SENT=default_sent()
-NO_CHANNELS="📋 Мои каналы\n\nУ вас пока нет подключённых каналов.\n\nЧтобы подключить канал:\n\n1. Добавьте MAXIBOT в подписчики канала\n   через название бота.\n\n2. Назначьте его администратором\n   с правом «Редактировать сообщения».\n\n3. Перешлите сюда любой пост из канала.\n\nПосле этого канал появится в списке."
+NO_CHANNELS="📩 Обращения / Предложка\n\nУ вас пока нет подключённых каналов."
 SETTINGS="⚙️ Настройка сообщений пользователя\n\nВыберите, какой текст нужно изменить."

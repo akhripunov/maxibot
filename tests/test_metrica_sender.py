@@ -11,6 +11,10 @@ class FakeMetrica:
         self.calls.append(args)
         return {"ok": True}
 
+    async def ensure_action_goal(self, counter_id, goal_name):
+        self.calls.append(("goal", counter_id, goal_name))
+        return 909
+
 
 @pytest.mark.asyncio
 async def test_sender_requires_verified_membership_and_yclid(monkeypatch):
@@ -37,4 +41,15 @@ async def test_sender_uploads_only_after_gate(monkeypatch):
     monkeypatch.setattr("app.traffic.metrica_sender.settings.yandex_conversion_dry_run", False)
     result = await send_user_subscribed(client, counter_id=101, yclid="yclid-A", conversion_datetime="2026-08-13T00:00:00Z", verified_membership=True)
     assert result.status == "sent"
-    assert client.calls == [(101, "yclid-A", "userDidSubscribe", "2026-08-13T00:00:00Z")]
+    assert client.calls == [("goal", 101, "userDidSubscribe"), (101, "yclid-A", 909, "2026-08-13T00:00:00Z")]
+
+
+@pytest.mark.asyncio
+async def test_max_subscriber_sender_is_dry_run_by_default(monkeypatch):
+    from app.traffic.metrica_sender import send_max_subscriber
+    client = FakeMetrica()
+    monkeypatch.setattr("app.traffic.metrica_sender.settings.yandex_conversion_dry_run", True)
+    result = await send_max_subscriber(client, counter_id=101, yclid="yclid-A",
+                                       conversion_datetime="2026-08-13T00:00:00Z", exact_membership=True)
+    assert result.status == "dry_run"
+    assert client.calls == []

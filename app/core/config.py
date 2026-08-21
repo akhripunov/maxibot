@@ -10,9 +10,9 @@ class Settings(BaseSettings):
     max_bot_token: str | None = None
     max_bot_username: str = "maxibot"
     max_miniapp_url: str | None = None
-    max_public_url: str = "https://maxibot.jobjin.ru"
-    traffic_public_base_url: str = "https://go.maxibot.jobjin.ru"
-    max_landing_base_url: str = "https://go.maxibot.jobjin.ru"
+    max_public_url: str = "https://go.maxibot.pro"
+    traffic_public_base_url: str = "https://go.maxibot.pro"
+    max_landing_base_url: str = "https://go.maxibot.pro"
     traffic_attribution_window_hours: int = 72
     traffic_conversion_policy: str = "CONSERVATIVE"
     traffic_bot_attribution_enabled: bool = False

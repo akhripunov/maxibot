@@ -9,6 +9,12 @@ MEDIUM = "MEDIUM"
 AMBIGUOUS = "AMBIGUOUS"
 UNATTRIBUTED = "UNATTRIBUTED"
 
+
+def resolve_exact_identity_visit(visit_ids: list[str]) -> str | None:
+    """Return a visit only when the MAX identity maps to exactly one visit."""
+    unique = {str(value) for value in visit_ids if value}
+    return next(iter(unique)) if len(unique) == 1 else None
+
 SINGLE_CANDIDATE = HIGH
 PROBABLE = MEDIUM
 

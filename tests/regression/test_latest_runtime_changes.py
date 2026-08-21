@@ -45,8 +45,10 @@ async def test_navigation_callback_replaces_only_the_clicked_service_message():
     await runtime._navigation_callback(update, "admin-1", "channels")
 
     assert client.answers[0][0] == "callback-1"
-    assert client.answers[0][1] is None
-    assert client.messages[("admin-1", "mid-42")][0] == "Rendered screen"
+    replacement = client.answers[0][1]
+    assert replacement["text"] == "Rendered screen"
+    assert replacement["attachments"]
+    assert ("admin-1", "mid-42") not in client.messages
 
 
 def test_duplicate_message_created_is_suppressed_by_external_message_id():

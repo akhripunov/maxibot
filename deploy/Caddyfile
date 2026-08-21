@@ -1,7 +1,3 @@
-maxibot.jobjin.ru {
-    reverse_proxy api:8000
-}
-
-go.maxibot.jobjin.ru {
+go.maxibot.pro {
     reverse_proxy api:8000
 }

@@ -1,8 +1,10 @@
 services:
   api:
+    image: "${QA_STAGING_IMAGE:-maxibot-staging:latest}"
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.staging
+      network: host
     command: sh -c "until alembic upgrade head; do sleep 2; done; python -m app.seed; uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "${QA_STAGING_PORT:-18000}:8000"
