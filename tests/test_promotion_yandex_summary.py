@@ -1,4 +1,11 @@
-from app.bot.menu import promotion_yandex_summary
+from app.bot.menu import promotion_yandex_summary, yandex_connection_instructions
+
+
+def test_yandex_connection_instructions_are_canonical():
+    text = yandex_connection_instructions()
+    assert "*Подключение Яндекс.Директ*" in text
+    assert '1. Нажмите кнопку «Авторизоваться в Яндекс»' in text
+    assert "4. Вы будете автоматически возвращены в бота" in text
 
 
 def test_yandex_summary_for_unconnected_channel_is_plain_and_safe():

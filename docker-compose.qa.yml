@@ -3,7 +3,7 @@ services:
     image: "${QA_STAGING_IMAGE:-maxibot-staging:latest}"
     build:
       context: .
-      dockerfile: Dockerfile.staging
+      dockerfile: "${QA_STAGING_DOCKERFILE:-Dockerfile.staging}"
       network: host
     command: sh -c "until alembic upgrade head; do sleep 2; done; python -m app.seed; uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:

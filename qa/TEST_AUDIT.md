@@ -36,3 +36,27 @@ The latest runtime delta was specifically added to coverage: promoting the click
 The single-poller safety improvement is covered by `TC-OPS-001`, with the operational rule in `research/MAXIBOT_SINGLE_POLLER_RUNBOOK.md` and the mandatory project instruction in `AGENTS.md`.
 
 Manual MAX join/member confirmation remains `MANUAL` because it requires a dedicated MAX account/channel and owner approval.
+
+## Current candidate delta audit — 2026-08-28
+
+The latest developer handoffs added or changed the following covered areas:
+
+- mobile MAX handoff contract and real-device acceptance: `TC-TRAFFIC-013` through `TC-TRAFFIC-016`;
+- browser/Mini App diagnostic telemetry and confirmed handoff stages: `TC-TRAFFIC-017` and `TC-TRAFFIC-018`;
+- exact verified conversion and funnel reporting gates: `TC-TRAFFIC-019`;
+- official `bot_added` owner/link safety: `TC-MAX-007`;
+- system MAXIBOT owner-scoped promotion: `TC-BOT-011`;
+- Yandex offline target and Direct API error handling: `TC-YANDEX-003` and `TC-YANDEX-004`;
+- exact-count OAuth recovery: `TC-OAUTH-003`.
+
+These cases are mapped to the current automated tests in the registry and are
+included by the full `tests`/`tests/regression` commands. Sanitized owner
+evidence then verified the external MAX join/member flow and Android handoff;
+an isolated local production-like candidate deploy and rollback also passed.
+The iPhone MAX/Safari cases remain manual evidence-backed cases and were not
+replayed by this QA session. Legacy VPS verification remains operationally
+separate and must not be inferred from local staging.
+
+Manual evidence, source-level assertions and local rollback are recorded
+separately; none is substituted for a different environment or live production
+verification.

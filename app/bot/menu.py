@@ -4,23 +4,57 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
+import os
+import socket
 import secrets
 from zoneinfo import ZoneInfo
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent
+from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, SystemTrafficVisit, SystemTrafficEvent, SystemConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent
 from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion, resolve_exact_identity_visit
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
 from app.traffic.deep_link import valid_max_target
-from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state
-from app.integrations.yandex_metrica import channel_setup_status
+from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, system_connection_status
+from app.integrations.yandex_metrica import channel_setup_status, YandexMetricaClient
+from app.security_tokens import decrypt_token
+from app.traffic.metrica_sender import send_user_subscribed
 from app.integrations.max_connection import PRIMARY, BOT_CONNECTION
+from app.traffic.join_intent import consume_single_active_join_intent
+from app.traffic.analytics import traffic_stats_for_channels
+from app.ads.service import can_access_ads, campaigns_for_channel, latest_view
+from app.ads.memory import set_status
+from app.db.models import AdsAiRun, AdsMemory, AdsRecommendation, AdsV2Outcome
+from app.ads.storage_health import diagnostics as storage_diagnostics, human_size, ui_time
 
 logger = logging.getLogger(__name__)
+
+MAXIBOT_CHANNEL_URL = "https://max.ru/channel_maxibot"
+MOSCOW = ZoneInfo("Europe/Moscow")
+YANDEX_UTM_TEMPLATE = "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_name_lat}.{campaign_id}.{gbid}&utm_content={creative_id}.{ad_id}.{retargeting_id}&utm_term={keyword}"
+PROMOTION_VIDEO_URL = f"{settings.traffic_public_base_url.rstrip('/')}/video-instruction"
+
+
+def support_profile_url() -> str | None:
+    """Return an HTTPS personal-profile link accepted by MAX buttons."""
+    url = (settings.maxibot_support_url or "").strip()
+    return url if url.startswith(("https://", "http://")) else None
+
+
+def support_button() -> dict:
+    """Build the support control: direct owner chat, with legacy fallback."""
+    url = support_profile_url()
+    return ({"text": "💬 Написать в поддержку", "type": "link", "url": url}
+            if url else {"text": "💬 Написать в поддержку", "callback_data": "support_start"})
+
+
+def is_maxibot_owner(admin: Admin) -> bool:
+    """Expose system MAXIBOT promotion only to its configured owner."""
+    owner_id = (settings.maxibot_owner_user_id or "").strip()
+    return bool(owner_id and owner_id == str(admin.external_id))
 
 
 def channel_connection_instructions() -> str:
@@ -31,20 +65,27 @@ def channel_connection_instructions() -> str:
         "1. Откройте настройки вашего канала\n"
         "2. Перейдите в раздел «Подписчики»\n"
         "3. Нажмите «Добавить подписчиков»\n"
-        "4. Найдите в поиске «MAXIBOT» и добавьте"
+        "4. Найдите в поиске «MAXIBOT» и добавьте\n"
+        "5. Перейдите в раздел «Администраторы» и добавьте «MAXIBOT» в администраторы канала"
     )
 
 
 def promotion_intro_text() -> str:
     """Canonical promotion explanation shown before channel selection."""
     return (
-        "📣 Продвижение\n\n"
-        "Привлекайте новых подписчиков в каналы MAX\n"
-        "через рекламу в Яндекс Директе.\n\n"
-        "MAXIBOT отслеживает переходы и подписки,\n"
-        "а Яндекс Директ обучается на реальных конверсиях.\n"
-        "Со временем это помогает находить более подходящую\n"
-        "аудиторию и снижать стоимость подписчика.\n\n"
+        "📖 **Как запустить рекламу**\n\n"
+        "1. Выберите нужный канал из списка ниже.\n"
+        "2. Откройте его карточку и скопируйте ссылку для Директа.\n"
+        "3. Нажмите кнопку «Яндекс.Директ».\n"
+        "4. Авторизуйтесь в аккаунте Яндекс и разрешите доступ.\n"
+        "5. Создайте рекламную кампанию в Яндекс.Директе.\n"
+        "6. Вставьте ссылку на лендинг в поле «Ссылка на сайт».\n"
+        "7. Выберите счётчик Яндекс.Метрики, созданный MAXIBOT для этого канала, и конверсию **`userDidSubscribe`**.\n"
+        "8. Добавьте к ссылке UTM-метку:\n\n"
+        f"{YANDEX_UTM_TEMPLATE}\n"
+        "\n9. Запустите рекламу.\n\n"
+        "⚠️ Используйте именно ссылку на лендинг канала, а не прямую ссылку на канал.\n\n"
+        f"🎥 [Видеоинструкция по настройке рекламы]({PROMOTION_VIDEO_URL})\n\n"
         "Выберите канал для продвижения:"
     )
 
@@ -58,8 +99,91 @@ def promotion_connect_text() -> str:
         "1. Откройте настройки вашего канала\n"
         "2. Перейдите в раздел «Подписчики»\n"
         "3. Нажмите «Добавить подписчиков»\n"
-        "4. Найдите в поиске «MAXIBOT» и добавьте"
+        "4. Найдите в поиске «MAXIBOT» и добавьте\n"
+        "5. Перейдите в раздел «Администраторы» и добавьте «MAXIBOT» в администраторы канала"
     )
+
+
+async def _send_exact_conversion(db: AsyncSession, conversion: OfflineConversion, membership: TrafficMembership, channel: Channel) -> str:
+    """Deliver one exact conversion immediately after official user_added.
+
+    The caller has already committed the exact identity link and outbox row.
+    This function is deliberately fail-closed: only an EXACT row with a yclid
+    is sent, and failures leave a retryable non-sent status without affecting
+    membership attribution.
+    """
+    if settings.yandex_conversion_dry_run:
+        return "dry_run"
+    if membership.attribution_status != EXACT or not conversion.identifier_value:
+        return "blocked"
+    client = None
+    try:
+        visit = await db.get(TrafficVisit, conversion.visit_id)
+        # Yandex offline conversions are keyed by yclid. Older queue logic
+        # could create a row from ClientID alone, but the sender rejects that
+        # payload. Mark such legacy rows explicitly instead of leaving them
+        # looking retryable forever.
+        if not visit or not visit.yclid:
+            conversion.status = "blocked"
+            conversion.last_error = "yclid_required"
+            await db.commit()
+            return "blocked"
+        metrica_hit_confirmed = bool(visit and await db.scalar(select(TrafficEvent.id).where(
+            TrafficEvent.visit_id == visit.id,
+            TrafficEvent.event_type == "METRICA_HIT_CONFIRMED",
+        )))
+        if not visit or not metrica_hit_confirmed or not visit.metrica_client_id:
+            conversion.status = "blocked"
+            conversion.last_error = "metrica_visit_unconfirmed"
+            await db.commit()
+            return "blocked"
+        admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id))
+        profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel.id))
+        setup = await channel_setup_status(admin_external_id, channel.id)
+        counter_value = (profile.yandex_counter_id if profile else None) or setup.get("counter_id")
+        if not counter_value or not str(counter_value).isdigit():
+            conversion.status = "blocked"
+            conversion.last_error = "yandex_counter_missing"
+            await db.commit()
+            return "blocked"
+        encrypted_token = await get_encrypted_token(admin_external_id, channel.id, db=db)
+        if not encrypted_token:
+            conversion.status = "blocked"
+            conversion.last_error = "yandex_oauth_missing"
+            await db.commit()
+            return "blocked"
+        counter_id = int(counter_value)
+        client = YandexMetricaClient(decrypt_token(encrypted_token))
+        result = await send_user_subscribed(
+            client,
+            counter_id=counter_id,
+            yclid=visit.yclid,
+            client_id=visit.metrica_client_id,
+            # Yandex Offline Conversions CSV requires DateTime as a Unix
+            # timestamp, not an ISO-8601 string.
+            conversion_datetime=str(int(conversion.conversion_datetime.timestamp())),
+            verified_membership=True,
+        )
+        if result.status == "sent":
+            uploading = (result.response or {}).get("uploading") or {}
+            conversion.status = "uploaded"
+            conversion.metrica_upload_id = str(uploading.get("id")) if uploading.get("id") is not None else None
+            conversion.metrica_upload_status = str(uploading.get("status")) if uploading.get("status") else None
+            conversion.metrica_upload_checked_at = datetime.now(timezone.utc)
+            conversion.attempts = int(conversion.attempts or 0) + 1
+            conversion.last_error = None
+            await db.commit()
+        return result.status
+    except Exception as exc:
+        logger.warning("exact_conversion_send_failed category=%s", type(exc).__name__)
+        conversion.status = "pending"
+        conversion.attempts = int(conversion.attempts or 0) + 1
+        conversion.last_error = type(exc).__name__
+        await db.commit()
+        return "failed"
+    finally:
+        if client:
+            await client.close()
 
 
 def home_menu_banner_media() -> list[dict]:
@@ -69,7 +193,7 @@ def home_menu_banner_media() -> list[dict]:
     production never cross-load one another's asset.  Other menu screens must
     remain text-only.
     """
-    asset_url = f"{settings.traffic_public_base_url.rstrip('/')}/static/images/maxibot_home_banner_compact.webp"
+    asset_url = f"{settings.traffic_public_base_url.rstrip('/')}/static/images/maxibot_home_banner_fit.webp"
     return [{"type": "image", "payload": {"url": asset_url}}]
 
 
@@ -78,6 +202,78 @@ def _time(value) -> str:
         return ""
     normalized = value.astimezone(timezone.utc) if value.tzinfo else value
     return normalized.strftime("%H:%M")
+
+
+def _ru_number(value, decimals: int = 2) -> str:
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    formatted = f"{number:,.{decimals}f}"
+    return formatted.replace(",", "\u0000").replace(".", ",").replace("\u0000", " ")
+
+
+def _metric(key: str, value) -> str:
+    if value is None:
+        return "—"
+    if key in {"cost_7d", "actual_cpa_7d"}:
+        return f"{_ru_number(value)} ₽"
+    if key == "conversions_7d":
+        return _ru_number(value, 0)
+    if key == "maxibot_qualified_membership_rate":
+        return f"{_ru_number(float(value) * 100)}%"
+    return _ru_number(value)
+
+
+def format_trend_block(trends: dict | None) -> str:
+    """Render at most three deterministic, evidence-backed trend findings."""
+    findings = (trends or {}).get("findings") or []
+    if not findings:
+        return ""
+    states = {"IMPROVING": "улучшается", "STABLE": "стабильно", "DEGRADING": "ухудшается", "VOLATILE": "нестабильно", "RECOVERED": "восстановилось", "NEW_SIGNAL": "новый сигнал"}
+    metrics = {"cpa": "CPA", "cvr": "CVR", "cpc": "CPC", "conversions": "конверсии"}
+    lines = []
+    for finding in findings[:3]:
+        state = states.get(finding.get("trend_state"), "мало истории")
+        metric = metrics.get(finding.get("metric"), finding.get("metric", "метрика"))
+        entity = finding.get("entity") or "кампания"
+        relative = finding.get("relative_delta")
+        change = f" ({float(relative) * 100:+.1f}%)" if relative is not None else ""
+        lines.append(f"• {metric} {entity}: {state}{change}")
+    return "📈 Динамика\n" + "\n".join(lines) + "\n"
+
+
+def format_ads_result(*, headline: str, channel_title: str, direct_connected: bool, campaign_name: str | None, ai_status: str, checked_at, fact_values: dict, diagnosis: str = "—", recommendation: str = "—", confidence: str = "—", performance_confidence: str = "—", attribution_confidence: str = "—", completed: bool = False, trends: dict | None = None, campaign_specific_matching: str | bool = "UNKNOWN") -> str:
+    """Single user-facing renderer for every AI dashboard/result path."""
+    checked = checked_at.astimezone(MOSCOW).strftime("%d.%m %H:%M") if checked_at else "—"
+    confidence_label = {"LOW": "низкая", "MEDIUM": "средняя", "HIGH": "высокая"}.get(confidence, confidence)
+    result = (
+        f"{headline}\n\n📢 Канал: {channel_title}\n\n"
+        f"Яндекс.Директ: {'✅ Подключён' if direct_connected else '⚠️ Не подключён'}\n"
+        f"Кампания: {campaign_name or 'Не выбрана'}\n"
+        f"AI-анализ: {ai_status}\nПоследняя проверка: {checked}\n\n"
+    )
+    if completed:
+        qualified = fact_values.get("qualified_subscriptions")
+        visits = fact_values.get("landing_visits")
+        rate = fact_values.get("maxibot_qualified_membership_rate")
+        if rate is None and qualified is not None and visits:
+            rate = qualified / visits
+        maxibot_metric = (f"📊 Данные MaxiBot\n{_ru_number(qualified, 0)} подтверждённых подписок из {_ru_number(visits, 0)} визитов\nКонверсия визит → подписка: {_metric('maxibot_qualified_membership_rate', rate)}" if qualified is not None and visits is not None else f"📊 Данные MaxiBot\nКонверсия визит → подписка: {_metric('maxibot_qualified_membership_rate', rate)}")
+        campaign_scope = "недоступно" if campaign_specific_matching in (False, "UNKNOWN", None) else "доступно"
+        result += (
+            f"Расход 7 дней: {_metric('cost_7d', fact_values.get('cost_7d'))}\n"
+            f"Конверсии: {_metric('conversions_7d', fact_values.get('conversions_7d'))}\n"
+            f"CPA: {_metric('actual_cpa_7d', fact_values.get('actual_cpa_7d'))}\n"
+            f"{maxibot_metric}\nСопоставление с конкретной рекламной кампанией: {campaign_scope}\n\n"
+            f"🤖 Вывод AI\n{diagnosis}\n\n{format_trend_block(trends)}\nРекомендация:\n{recommendation}\n"
+            f"Уверенность: {confidence_label}\n"
+            f"Уверенность в данных Яндекса: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая'}.get(performance_confidence, performance_confidence))}\n"
+            f"Уверенность в сопоставлении MaxiBot: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая', 'INSUFFICIENT': 'недостаточно данных'}.get(attribution_confidence, attribution_confidence))}\n\n"
+        )
+    return result + "🔒 Теневой режим\nAI анализирует и советует, но ничего автоматически не изменяет."
 
 
 def _author_color(user_external_id: str) -> str:
@@ -115,6 +311,19 @@ def public_landing_url(public_id: str) -> str:
     return f"{settings.traffic_public_base_url.rstrip('/')}/{public_id.lstrip('/')}"
 
 
+def bot_landing_url(public_id: str) -> str:
+    """Build a stable URL for a bot-scoped landing."""
+    return public_landing_url(public_id)
+
+
+def yandex_direct_oauth_url(admin_external_id: str, channel_id: str) -> str:
+    """Build the channel-scoped OAuth entry point for Yandex Direct."""
+    return (
+        f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/direct/start"
+        f"?admin_id={quote(admin_external_id, safe='')}&channel_id={quote(channel_id, safe='')}"
+    )
+
+
 def new_landing_public_id() -> str:
     """Return a short, public, numeric landing identifier.
 
@@ -145,20 +354,21 @@ def promotion_yandex_summary(channel_title: str, connected: bool,
     )
 
 
+def yandex_connection_instructions() -> str:
+    """Canonical explanation shown above the Yandex authorization button."""
+    return (
+        "*Подключение Яндекс.Директ*\n\n"
+        "Для настройки рекламных кампаний необходимо авторизоваться в Яндекс.\n\n"
+        "*Инструкция:*\n"
+        "1. Нажмите кнопку «Авторизоваться в Яндекс»\n"
+        "2. Войдите в аккаунт Яндекс\n"
+        "3. Разрешите доступ приложению\n"
+        "4. Вы будете автоматически возвращены в бота"
+    )
+
+
 async def traffic_stats(db: AsyncSession, channel_id: str) -> dict[str, int | float]:
-    visits = int(await db.scalar(select(func.count(TrafficVisit.id)).where(TrafficVisit.channel_id == channel_id)) or 0)
-    opens = int(await db.scalar(select(func.count(TrafficVisit.id)).where(TrafficVisit.channel_id == channel_id, TrafficVisit.max_opened_at.is_not(None))) or 0)
-    to_channel = int(await db.scalar(select(func.count(TrafficVisit.id)).where(TrafficVisit.channel_id == channel_id, TrafficVisit.to_channel_at.is_not(None))) or 0)
-    new_members = int(await db.scalar(select(func.count(TrafficMembership.id)).where(TrafficMembership.channel_id == channel_id)) or 0)
-    unsubscribed = int(await db.scalar(select(func.count(TrafficMembership.id)).where(TrafficMembership.channel_id == channel_id, TrafficMembership.current_member.is_(False))) or 0)
-    statuses = {}
-    for status in ("EXACT", "HIGH", "MEDIUM", "AMBIGUOUS", "UNATTRIBUTED"):
-        statuses[status] = int(await db.scalar(select(func.count(TrafficMembership.id)).where(TrafficMembership.channel_id == channel_id, TrafficMembership.attribution_status == status)) or 0)
-    likely = int(await db.scalar(select(func.count(TrafficEvent.id)).where(TrafficEvent.channel_id == channel_id, TrafficEvent.event_type == "MAX_OPEN_LIKELY")) or 0)
-    confirmed = int(await db.scalar(select(func.count(TrafficEvent.id)).where(TrafficEvent.channel_id == channel_id, TrafficEvent.event_type == "MAX_OPEN_CONFIRMED")) or 0)
-    joins = int(await db.scalar(select(func.count(TrafficEvent.id)).where(TrafficEvent.channel_id == channel_id, TrafficEvent.event_type.in_(["join_request_created", "join_request"]))) or 0)
-    return {"visits": visits, "opens": opens, "to_channel": to_channel, "new_members": new_members, "unsubscribed": unsubscribed,
-            "max_open_likely": likely, "max_open_confirmed": confirmed, "join_events": joins, **statuses}
+    return await traffic_stats_for_channels(db, [channel_id])
 
 
 def official_bot_added_diagnostics(chat: dict, initiator_user_id: str | None) -> dict[str, object]:
@@ -244,23 +454,200 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         connected_bots = int(await db.scalar(select(func.count(BotConnection.id)).where(BotConnection.owner_admin_id == admin.id)) or 0)
         return menu_text(len(channels), connected_bots), buttons(
             ("📢 Подключить канал", "connect_channel"),
-            ("📣 Продвижение", "promotion"),
-            ("📩 Обращения / Предложка", "channels"),
-            ("🤖 Мои боты", "my_bots"),
+            ("📚 Мои каналы", "promotion"),
             ("ℹ️ О сервисе", "about"),
+        )
+    if screen == "ads_storage":
+        if not is_maxibot_owner(admin):
+            return "⛔ Раздел доступен только владельцу MAXIBOT.", buttons(("⬅️ Главное меню", "home"))
+        try:
+            storage = await storage_diagnostics(db)
+        except Exception:
+            return "💾 Хранилище ADS\n\n⚠️ Данные хранилища временно недоступны.", buttons(("⬅️ Назад", "owner_admin"))
+        periodic = storage["periodic"]
+        status = {"NORMAL": "🟢 Норма", "WARNING": "🟡 Внимание", "CRITICAL": "🔴 Критично", "UNKNOWN": "⚠️ Недоступно"}.get(storage["status"], "⚠️ Недоступно")
+        table_lines = {
+            "ads_v2_observations": "наблюдения", "ads_v2_entities": "сущности",
+            "ads_v2_report_runs": "отчёты", "ads_v2_outcomes": "outcomes",
+            "ads_v2_collection_runs": "collection runs", "ads_v2_daily_aggregates": "дневные агрегаты",
+        }
+        rows = "\n".join(f"• {label}: {human_size(storage['tables'][table]['total'])}" for table, label in table_lines.items())
+        last = ui_time(periodic.get("last_successful_collection"))
+        next_due = ui_time(periodic.get("next_due_collection"))
+        return (
+            f"💾 Хранилище ADS\n\n{status}\n\n"
+            f"PostgreSQL: {human_size(storage['database']['total'])}\n"
+            f"ADS/V2: {human_size(storage['ads_total'])}\n{rows}\n\n"
+            f"VPS: всего {human_size(storage['disk']['total'])}, свободно {human_size(storage['disk']['free'])} ({storage['disk']['free_percent']:.1f}%)\n\n"
+            f"Рост 7 дней: н/д\nРост 30 дней: н/д\nПрогноз: недостаточно данных\n\n"
+            f"Сбор данных: {'✅ включён' if periodic.get('enabled') else '⏸ выключен'}\n"
+            f"Кампаний в сборе: {periodic.get('eligible_campaigns', 0)}\n"
+            f"Последний успешный сбор: {last}\nСледующий сбор: {next_due}\n"
+            f"Задержка: {'нет' if not periodic.get('stale_campaigns', 0) else 'есть'}\nОшибки: {periodic.get('failed_runs', 0)}\n"
+            f"Повторных попыток в очереди: {periodic.get('retry_backlog', 0)}\n"
+            f"Кампаний с устаревшими данными: {periodic.get('stale_campaigns', 0)}\n\n"
+            f"Почасовая история: {settings.ads_hourly_retention_days} дней\n"
+            f"Старые данные: дневные агрегаты\nАрхивация данных: подготовлена, удаление не включено\n"
+            f"К архивации: н/д\nЗащищённых строк: н/д"
+        ), buttons(("⬅️ Назад", "owner_admin"))
+    if screen == "onboarding":
+        return (
+            "🤖 MAXIBOT\n\n"
+            "Умный сервис для управления каналами в MAX\n\n"
+            "👋 Добро пожаловать!\n\n"
+            "MAXIBOT помогает владельцам каналов MAX:\n"
+            "• подключать каналы и видеть статистику;\n"
+            "• создавать лендинги для привлечения подписчиков;\n"
+            "• отслеживать эффективность рекламы и подписки.\n\n"
+            "Начните с подключения первого канала:",
+            buttons(("📢 Подключить канал", "connect_channel"), ("💎 О сервисе", "about")),
         )
     if screen == "connect_channel":
         return channel_connection_instructions(), buttons(("⬅️ Главное меню", "home"))
     if screen == "promotion":
-        if not channels:
+        if not channels and not is_maxibot_owner(admin):
             return channel_connection_instructions(), buttons(("⬅️ Назад", "home"))
-        rows = [[(f"📢 {channel.title}", f"promotion_channel:{channel.id}")] for channel in channels]
-        rows.extend([[ ("📣 Подключить ещё", "promotion_connect") ], [("⬅️ Назад", "home")]])
+        rows = [[(channel.title, f"promotion_channel:{channel.id}")] for channel in channels]
+        if is_maxibot_owner(admin):
+            rows.append([("🤖 MAXIBOT", "promotion_maxibot")])
+        bot_rows = (await db.scalars(
+            select(BotConnection)
+            .where(BotConnection.owner_admin_id == admin.id)
+            .order_by(BotConnection.display_name)
+        )).all()
+        rows.extend([
+            [(f"🤖 {bot.display_name or bot.username}", f"promotion_bot:{bot.id}")]
+            for bot in bot_rows
+        ])
+        rows.extend([
+            [("📣 Подключить ещё канал", "promotion_connect")],
+            [("🤖 Добавить бота", "connect_bot")],
+            [("⬅️ Главное меню", "home")],
+        ])
         return promotion_intro_text(), buttons(*rows)
     if screen == "promotion_connect":
         return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
+    if screen == "promotion_maxibot":
+        if not is_maxibot_owner(admin):
+            return await render_screen(db, admin, "promotion")
+        profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
+        system_yandex = (profile.yandex_owner_login if profile and profile.yandex_owner_login else ("Подключён" if profile and profile.yandex_oauth_token_encrypted else "-"))
+        system_counter = profile.yandex_counter_id if profile and profile.yandex_counter_id else "-"
+        system_landing = profile.landing_url if profile and profile.landing_url else "-"
+        keyboard = buttons(("⚡ Яндекс", "promotion_maxibot_yandex"),
+                           ("📊 Аналитика", "promotion_maxibot_analytics"),
+                           ("⬅️ Назад", "promotion"))
+        return (
+            f"📣 Продвижение\n\nКанал: MAXIBOT\n\n"
+            f"Яндекс: {system_yandex}\n"
+            f"Метрика: {system_counter}\n"
+            f"Лендинг: {system_landing}",
+            keyboard,
+        )
+    if screen in {"promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}:
+        if not is_maxibot_owner(admin):
+            return await render_screen(db, admin, "promotion")
+        profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
+        if screen == "promotion_maxibot_landing":
+            detail = f"🔗 {profile.landing_url}" if profile and profile.landing_url else "⛔ Системный landing ещё не настроен."
+            body = f"📄 Лендинг\n\n🤖 MAXIBOT\n\n{detail}\n\nАтрибуция обычных каналов сюда не переносится."
+        elif screen == "promotion_maxibot_yandex":
+            counter = profile.yandex_counter_id if profile and profile.yandex_counter_id else "не настроен"
+            goal = profile.yandex_goal_name if profile and profile.yandex_goal_name else "не настроена"
+            status = await system_connection_status(db=db)
+            body = f"⚡ Яндекс\n\n🤖 MAXIBOT\n\nСтатус: {'подключено' if status else 'не подключено'}\nСистемный счётчик: {counter}\nЦель: {goal}\n\nИспользуется только отдельная system-scoped конфигурация."
+            if configured():
+                system_oauth_url = f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/system/start?admin_id={quote(str(admin.external_id), safe='')}"
+                oauth_label = "🔄 Переподключить Яндекс" if status else "🔐 Подключить Яндекс"
+                return (body, [[{"text": oauth_label, "type": "link", "url": system_oauth_url}], [{"text": "⬅️ Назад", "callback_data": "promotion_maxibot"}]])
+        elif screen == "promotion_maxibot_analytics":
+            body = "📊 Аналитика\n\n🤖 MAXIBOT\n\nСистемный tracking ещё не активирован. Данные обычных каналов здесь не показываются."
+        else:
+            target = profile.target_url if profile and profile.target_url else MAXIBOT_CHANNEL_URL
+            enabled = "включена" if profile and profile.enabled else "не включена"
+            body = f"⚙️ Настройки продвижения\n\n🤖 MAXIBOT\n\nTarget: {target}\nСистемная конфигурация: {enabled}\n\nОбычные Channel/TrafficProfile не используются."
+        return (body, buttons(("⬅️ MAXIBOT", "promotion_maxibot"), ("⬅️ Продвижение", "promotion")))
+    if screen.startswith("promotion_bot:"):
+        bot_id = screen.split(":", 1)[1]
+        bot = await db.scalar(select(BotConnection).where(
+            BotConnection.id == bot_id,
+            BotConnection.owner_admin_id == admin.id,
+        ))
+        if not bot:
+            return await render_screen(db, admin, "promotion")
+        username = f"@{bot.username.lstrip('@')}" if bot.username else "не указан"
+        bot_channels = list((await db.scalars(select(Channel).where(
+            Channel.admin_id == admin.id,
+            Channel.bot_connection_id == bot.id,
+        ))).all())
+        bot_yandex_connected = any(
+            await connection_status(admin.external_id, channel.id, db=db)
+            for channel in bot_channels
+        )
+        yandex_button = "🔗 Яндекс.Директ ✅" if bot_yandex_connected else "🔗 Яндекс.Директ ❌"
+        status = {
+            "ACTIVE": "работает",
+            "WAITING_ADMIN_START": "ожидает запуска владельцем",
+            "DISABLED": "отключён",
+            "INVALID_TOKEN": "ошибка токена",
+            "ERROR": "ошибка",
+        }.get(bot.status, bot.status.lower())
+        return (
+            f"📣 Продвижение\n\n🤖 Бот: {bot.display_name or username}\n"
+            f"{username}\n\nСтатус: {status}\n\n"
+            "Это отдельная bot-scoped конфигурация. Данные каналов и MAXIBOT сюда не подставляются.",
+            buttons(
+                ("✏️ Тексты", f"custom_bot_texts:{bot.id}"),
+                ("📣 Рассылка", f"custom_bot_broadcast:{bot.id}"),
+                ("📊 Статистика", f"custom_bot_stats:{bot.id}"),
+                ("🔑 Обновить токен", f"custom_bot_refresh:{bot.id}"),
+                ("⛔ Отключить бота", f"custom_bot_disable:{bot.id}"),
+                (yandex_button, f"promotion_bot_yandex:{bot.id}"),
+                ("📊 Аналитика", f"promotion_bot_analytics:{bot.id}"),
+                ("⬅️ Назад", "promotion"),
+            ),
+        )
+    if screen.startswith(("promotion_bot_landing:", "promotion_bot_yandex:", "promotion_bot_analytics:", "promotion_bot_settings:")):
+        bot_id = screen.split(":", 1)[1]
+        bot = await db.scalar(select(BotConnection).where(
+            BotConnection.id == bot_id,
+            BotConnection.owner_admin_id == admin.id,
+        ))
+        if not bot:
+            return await render_screen(db, admin, "promotion")
+        if screen.startswith("promotion_bot_analytics:"):
+            channel_ids = list((await db.scalars(select(Channel.id).where(
+                Channel.admin_id == admin.id,
+                Channel.bot_connection_id == bot.id,
+            ))).all())
+            stats = await traffic_stats_for_channels(db, channel_ids)
+            title = bot.display_name or (f"@{bot.username.lstrip('@')}" if bot.username else "Бот")
+            return (f"📊 Аналитика\n\n🤖 {title}\n\n"
+                    f"👀 Посещений лендинга: {stats['visits']}\n"
+                    f"📢 Перешли в MAX: {stats['to_channel']}\n👥 Всего новых участников: {stats['new_members']}\n"
+                    f"↩️ Отписок: {stats['unsubscribed']}\n\nMAX signals:\n"
+                    f"MAX_OPEN_LIKELY: {stats['max_open_likely']}\nMAX_OPEN_CONFIRMED: {stats['max_open_confirmed']}\n"
+                    f"JOIN_REQUEST: {stats['join_events']}\n\nАтрибуция:\n"
+                    f"EXACT: {stats['EXACT']}\nHIGH: {stats['HIGH']}\n"
+                    f"MEDIUM: {stats['MEDIUM']}\nAMBIGUOUS: {stats['AMBIGUOUS']}\nUNATTRIBUTED: {stats['UNATTRIBUTED']}\n\n"
+                    "В Яндекс отправляются только EXACT/HIGH; отправка по умолчанию в dry-run.",
+                    buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
+        labels = {
+            "promotion_bot_landing": ("📄 Лендинг", "Лендинг для этого бота ещё не настроен."),
+            "promotion_bot_yandex": ("", yandex_connection_instructions()),
+            "promotion_bot_analytics": ("📊 Аналитика", "Системные и канальные данные здесь не показываются. Аналитика этого бота ещё не активирована."),
+            "promotion_bot_settings": ("⚙️ Настройки", "Настройки продвижения этого бота ещё не созданы."),
+        }
+        title, detail = labels[screen.split(":", 1)[0]]
+        return (f"{title}\n\n🤖 {bot.display_name or bot.username}\n\n{detail}",
+                buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
     if screen.startswith("promotion_channel:"):
-        selected_id = screen.split(":", 1)[1]
+        screen_parts = screen.split(":")
+        selected_id = screen_parts[1]
+        try:
+            offset = max(0, int(screen_parts[2])) if len(screen_parts) > 2 else 0
+        except ValueError:
+            offset = 0
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
         if not channel:
             return await render_screen(db, admin, "promotion")
@@ -269,10 +656,32 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             LandingPage.channel_id == channel.id,
             LandingPage.is_active.is_(True),
         ))
-        yandex = await connection_status(admin.external_id, channel.id)
+        yandex = await connection_status(admin.external_id, channel.id, db=db)
         metrica = await channel_setup_status(admin.external_id, channel.id)
         yandex_value = metrica.get("owner_login") or ("Подключён" if yandex else None)
         counter_id = (profile.yandex_counter_id if profile else None) or metrica.get("counter_id")
+        yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ❌"
+        controls = [(yandex_button, f"promotion_yandex:{channel.id}")]
+        if can_access_ads(admin.external_id):
+            controls.append(("🤖 AI Продвижение", f"ads:{channel.id}"))
+        controls.extend([
+            ("📊 Аналитика", f"promotion_analytics:{channel.id}"),
+            ("📩 Обращения / Предложка", f"channel:{channel.id}"),
+            ("🗑 Удалить канал", f"delete:{channel.id}"),
+            ("⬅️ Назад", "promotion"),
+        ])
+        logger.warning(
+            "ADS_MENU_TRACE screen=promotion_channel instance=%s host=%s pid=%s "
+            "owner=%s ads_enabled=%s ads_admin_only=%s can_access_ads=%s buttons=%s",
+            f"{socket.gethostname()}:{os.getpid()}",
+            socket.gethostname(),
+            os.getpid(),
+            bool(settings.maxibot_owner_user_id and str(admin.external_id) == str(settings.maxibot_owner_user_id)),
+            settings.ads_enabled,
+            settings.ads_admin_only,
+            can_access_ads(str(admin.external_id)),
+            [label for label, _ in controls],
+        )
         return (
             promotion_channel_summary(
                 channel.title,
@@ -280,11 +689,144 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 counter_id,
                 public_landing_url(landing.public_id) if landing else None,
             ),
-            buttons(("📄 Лендинг", f"promotion_landing:{channel.id}"),
-                    ("⚡ Яндекс", f"promotion_yandex:{channel.id}"),
-                    ("📊 Аналитика", f"promotion_analytics:{channel.id}"), ("⚙️ Настройки", f"promotion_settings:{channel.id}"),
-                    ("⬅️ Назад", "promotion")),
+            buttons(*controls),
         )
+    if screen.startswith("ads:"):
+        selected_id = screen.split(":", 1)[1]
+        channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
+        if not channel or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        view = await latest_view(db, channel.id)
+        health = view["health"]; ai = view["ai"]; rec = view["recommendation"]
+        # Dashboard readiness must reflect the existing secure OAuth
+        # connection, not a prior ADS snapshot. Requiring DIRECT_SYNC here
+        # incorrectly showed "not connected" until the first AI check.
+        direct_connected = bool(await connection_status(admin.external_id, channel.id, db=db))
+        facts = view["facts"] or {}
+        campaign = facts.get("campaign") or {}
+        fact_values = facts.get("facts") or {}
+        confidence_axes = facts.get("confidence_axes") or {}
+        status_map = {"WAITING_FOR_CODEX": "⏳ Ожидает Codex Worker", "CODEX_PROCESSING": "⚙️ Codex анализирует рекламу", "CODEX_COMPLETED": "✅ Завершён", "CODEX_FAILED": "🔴 Не завершён"}
+        ai_status = status_map.get(ai.status, "AI-анализ ещё не выполнялся.") if ai else "AI-анализ ещё не выполнялся."
+        if ai and ai.status == "CODEX_COMPLETED" and ai.validated_output_json:
+            result = json.loads(ai.validated_output_json); diagnosis = result.get("summary") or "—"; recommendation = (result.get("recommendation") or {}).get("reason") or "—"; confidence = result.get("confidence") or "—"
+            headline = "🟢 Анализ завершён"
+        elif ai and ai.status == "CODEX_FAILED":
+            result = {}; diagnosis = "Ответ AI не прошёл проверку или worker недоступен."; recommendation = "Попробуйте запустить проверку снова."; confidence = "—"; headline = "🔴 AI-анализ не завершён"
+        else:
+            result = {}; diagnosis = "—"; recommendation = "—"; confidence = "—"; headline = "🤖 AI Продвижение"
+        body = format_ads_result(
+            headline=headline,
+            channel_title=channel.title,
+            direct_connected=direct_connected,
+            campaign_name=campaign.get("name"),
+            ai_status=ai_status,
+            checked_at=view["checked_at"],
+            fact_values=fact_values,
+            diagnosis=diagnosis,
+            recommendation=recommendation,
+            confidence=confidence,
+            performance_confidence=confidence_axes.get("performance_confidence", confidence),
+            attribution_confidence=confidence_axes.get("attribution_confidence", "—"),
+            completed=bool(ai and ai.status == "CODEX_COMPLETED"),
+            trends=facts.get("TRENDS"),
+            campaign_specific_matching=(facts.get("MAXIBOT_METRICS") or {}).get("campaign_specific", {}).get("value", "UNKNOWN"),
+        )
+        return (body, buttons(
+            (("🔄 Проверить снова" if ai and ai.status == "CODEX_COMPLETED" else "🔄 Проверить рекламу"), f"ads_check:{channel.id}"),
+            (("🔄 Обновить статус", f"ads_status:{channel.id}") if ai and ai.status in {"WAITING_FOR_CODEX", "CODEX_PROCESSING"} else ("💡 Подробнее", f"ads_recommendations:{channel.id}")),
+            ("🎯 Кампания", f"ads_campaigns:{channel.id}"),
+            ("💡 Рекомендации", f"ads_recommendations:{channel.id}"),
+            ("🧠 Память AI", f"ads_memory:{channel.id}"),
+            ("🔎 Что видел AI", f"ads_context:{channel.id}"),
+            ("📜 История решений", f"ads_history:{channel.id}"),
+            ("⚠️ Data Health", f"ads_health:{channel.id}"),
+            ("⬅️ Назад", f"promotion_channel:{channel.id}"),
+        ))
+    if screen.startswith("ads_campaigns:"):
+        screen_parts = screen.split(":")
+        selected_id = screen_parts[1]
+        try:
+            offset = max(0, int(screen_parts[2])) if len(screen_parts) > 2 else 0
+        except ValueError:
+            offset = 0
+        channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
+        if not channel or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        campaigns = await campaigns_for_channel(db, channel.id)
+        if not campaigns:
+            return (f"🎯 Кампании канала\n\n📢 {channel.title}\n\nКампаний пока нет в локальном read-only снимке. Нажмите «Проверить сейчас» в AI Продвижении.", buttons(("⬅️ AI Продвижение", f"ads:{channel.id}")))
+        page_size = 10
+        page = campaigns[offset:offset + page_size]
+        rows = [(f"{'✅' if linked else '◻️'} {campaign.name[:42]}", f"ads_campaign_select:{channel.id}:{campaign.id}") for campaign, linked in page]
+        if offset:
+            rows.append(("⬅️ Предыдущие", f"ads_campaigns:{channel.id}:{max(0, offset - page_size)}"))
+        if offset + page_size < len(campaigns):
+            rows.append(("Следующие ➡️", f"ads_campaigns:{channel.id}:{offset + page_size}"))
+        rows.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+        return (f"🎯 Кампании канала\n\n📢 {channel.title}\n\nПоказано {offset + 1}–{min(offset + page_size, len(campaigns))} из {len(campaigns)}. Выберите кампанию вручную. Связка явная и не меняет кампании в Яндекс.Директе.", buttons(*rows))
+    if screen.startswith("ads_context:") or screen.startswith("ads_history:") or screen.startswith("ads_recommendations:") or (screen.startswith("ads_memory:") and not screen.startswith("ads_memory_detail:")) or screen.startswith("ads_health:"):
+        selected_id = screen.split(":", 1)[1]
+        channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
+        if not channel or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        view = await latest_view(db, channel.id)
+        if screen.startswith("ads_memory:"):
+            rows = view["memories"]
+            detail = "\n".join(f"• [{row.status}] {row.content}\n  ID: {row.id}" for row in rows) or "Пока нет сохранённых наблюдений."
+            title = "🧠 Память AI"
+        elif screen.startswith("ads_health:"):
+            health = view["health"]
+            v2 = (view["facts"] or {}).get("V2") or {}
+            detail = f"Статус: {health.get('status', 'UNKNOWN')}\n\n" + "\n".join(f"• {name}: {value}" for name, value in health.get("checks", {}).items())
+            detail += f"\n\nV2 entities: {v2.get('entities', {})}\nV2 dimensions: {v2.get('dimensions', {})}\nMissing: {', '.join(v2.get('missing_data', [])) or 'нет'}"
+            title = "⚠️ Data Health"
+        elif screen.startswith("ads_context:"):
+            ai = await db.scalar(select(AdsAiRun).where(AdsAiRun.channel_id == channel.id).order_by(AdsAiRun.created_at.desc()))
+            raw = json.loads(ai.safe_context_json) if ai and ai.safe_context_json else {}
+            v2 = raw.get("FACTS", {}).get("V2_ANALYSIS") or {}
+            sections = v2.get("sections") or {}
+            selection = v2.get("selection") or {}
+            findings = v2.get("findings") or {}
+            trends = raw.get("FACTS", {}).get("TRENDS") or {}
+            counts = trends.get("counts") or {}
+            detail = (f"Run: {ai.id if ai else '-'}\nМодель: {ai.model if ai else '-'}\nСтатус: {ai.status if ai else '-'}\n\n"
+                      f"Facts: {len(raw.get('FACTS', {}).get('evidence', {}))}\n"
+                      f"Память использована: {len(raw.get('RETRIEVED_PRIVATE_MEMORIES', []))}\n"
+                      f"Недостаёт: {', '.join(raw.get('MISSING_DATA', [])) or 'нет'}\n"
+                      f"Достаточность: {raw.get('DATA_SUFFICIENCY', 'UNKNOWN')}\n"
+                      f"\nAI получил:\n"
+                      f"• объявлений: {selection.get('ad', {}).get('rows_included', 0)} из {selection.get('ad', {}).get('rows_available', 0)}\n"
+                      f"• площадок: {selection.get('placement', {}).get('rows_included', 0)} из {selection.get('placement', {}).get('rows_available', 0)}\n"
+                      f"• регионов: {selection.get('region', {}).get('rows_included', 0)} из {selection.get('region', {}).get('rows_available', 0)}\n"
+                      f"• устройств: {selection.get('device', {}).get('rows_included', 0)} из {selection.get('device', {}).get('rows_available', 0)}\n"
+                      f"• аудиторий: {selection.get('demographics', {}).get('rows_included', 0)} из {selection.get('demographics', {}).get('rows_available', 0)}\n"
+                      f"\nТренды: история {trends.get('history_days_available', 0)} дн.; улучшение {counts.get('IMPROVING', 0)}, ухудшение {counts.get('DEGRADING', 0)}, нестабильно {counts.get('VOLATILE', 0)}, мало данных {0 if trends.get('history_sufficient') else 1}\n"
+                      f"Значимые findings: +{len(findings.get('positive', []))}, watch {len(findings.get('watch', []))}, недостаточно данных {findings.get('insufficient_rows', 0)}\n"
+                      f"Бюджет контекста: {v2.get('context_budget', {})}")
+            title = "🔎 Последний контекст AI"
+        elif screen.startswith("ads_history:"):
+            rows = list((await db.scalars(select(AdsAiRun).where(AdsAiRun.channel_id == channel.id).order_by(AdsAiRun.created_at.desc()).limit(10))).all())
+            detail = "\n".join(f"• {row.created_at:%d.%m %H:%M} — {row.status} — NOT EXECUTED" for row in rows) or "Истории запусков пока нет."
+            recommendation_ids = [row.id for row in rows]
+            outcomes = list((await db.scalars(select(AdsV2Outcome).join(AdsRecommendation, AdsV2Outcome.recommendation_id == AdsRecommendation.id).where(AdsRecommendation.ai_run_id.in_(recommendation_ids)))).all()) if recommendation_ids else []
+            if outcomes:
+                detail += "\n\nOutcomes:\n" + "\n".join(f"• {item.horizon}: {item.status}" for item in outcomes)
+            title = "📜 История решений"
+        else:
+            rec = await db.scalar(select(AdsRecommendation).where(AdsRecommendation.channel_id == channel.id, AdsRecommendation.status == "OPEN").order_by(AdsRecommendation.created_at.desc()))
+            detail = (f"Диагноз: {rec.title}\nУверенность: {rec.confidence}\nДанные: {rec.data_sufficiency}\n\nРекомендация: {rec.action_code}\n{rec.rationale or ''}\n\n⚠️ Только рекомендация. Автоматические изменения отключены." if rec else "Нет valid recommendation. Сначала нужны достаточные данные и доступный AI provider.")
+            title = "💡 Рекомендации"
+        controls = [(f"🔎 {row.id[:8]}", f"ads_memory_detail:{channel.id}:{row.id}") for row in view["memories"]] if screen.startswith("ads_memory:") else []
+        controls.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+        return (f"{title}\n\n📢 {channel.title}\n\n{detail}", buttons(*controls))
+    if screen.startswith("ads_memory_detail:"):
+        _, _, channel_id_value, memory_id = screen.split(":", 3)
+        channel = await db.scalar(select(Channel).where(Channel.id == channel_id_value, Channel.admin_id == admin.id))
+        memory = await db.scalar(select(AdsMemory).where(AdsMemory.id == memory_id, AdsMemory.channel_id == channel_id_value))
+        if not channel or not memory or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        return (f"🧠 Память AI\n\nID: {memory.id}\nСтатус: {memory.status}\nИсточник: {memory.source_type}\nУверенность: {memory.confidence}\n\n{memory.content}\n\nEvidence: {memory.evidence_ids_json}", buttons(("✅ Подтвердить", f"ads_memory_status:{channel.id}:{memory.id}:VALIDATED"), ("❌ Отклонить", f"ads_memory_status:{channel.id}:{memory.id}:REJECTED"), ("⬅️ Память", f"ads_memory:{channel.id}")))
     if screen.startswith("promotion_landing:"):
         selected_id = screen.split(":", 1)[1]
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
@@ -324,7 +866,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return await render_screen(db, admin, "promotion")
         profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == selected_id))
         oauth_configured = configured()
-        status_data = await connection_status(admin.external_id, selected_id) if oauth_configured else None
+        status_data = await connection_status(admin.external_id, selected_id, db=db) if oauth_configured else None
         metrica = await channel_setup_status(admin.external_id, selected_id)
         counter_id = (profile.yandex_counter_id if profile else None) or metrica.get("counter_id")
         conversions = int(await db.scalar(
@@ -332,7 +874,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             .join(TrafficMembership, OfflineConversion.membership_id == TrafficMembership.id)
             .where(TrafficMembership.channel_id == selected_id)
         ) or 0)
-        text = promotion_yandex_summary(channel.title, bool(status_data), counter_id, conversions)
+        # Keep the same explanatory copy for both first-time and already-connected
+        # flows; connection status and metrics remain available via the button flow.
+        text = yandex_connection_instructions()
         if status_data:
             if oauth_configured:
                 state = await create_state(admin.external_id, selected_id)
@@ -383,24 +927,33 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 buttons(("⬅️ Назад", f"promotion_settings:{channel.id}")))
     if screen == "about":
         return (
-            "ℹ️ О MAXIBOT\n\n"
-            "MAXIBOT помогает владельцам каналов MAX принимать обращения подписчиков "
-            "и отвечать на них из отдельных рабочих чатов.\n\n"
-            "Можно использовать системного MAXIBOT или подключить собственного бота "
-            "с вашим названием и аватаром.\n\n"
-            "Если возник вопрос по подключению или работе сервиса — напишите в поддержку.",
-            buttons(("💬 Написать в поддержку", "support_start"), ("⬅️ Назад", "home")),
+            "💎 **О сервисе**\n\n"
+            "🤖 **MAXIBOT** — умный сервис для продвижения и управления каналами в MAX.\n\n"
+            "**Наша цель:** помочь владельцам каналов находить свою аудиторию и привлекать подписчиков эффективнее.\n\n"
+            "🌐 **Наш сайт:** [maxibot.pro](https://maxibot.jobjin.ru)",
+            [
+                [{"text": "📣 Наш MAX-канал", "type": "link", "url": MAXIBOT_CHANNEL_URL}],
+                [support_button()],
+                [{"text": "⬅️ Назад", "callback_data": "home"}],
+            ],
         )
     if screen == "owner_admin":
         stats = await owner_admin_stats(db)
+        try:
+            storage = await storage_diagnostics(db)
+            status_icon = {"NORMAL": "🟢", "WARNING": "🟡", "CRITICAL": "🔴", "UNKNOWN": "⚠️"}.get(storage["status"], "⚠️")
+            storage_line = f"💾 ADS: {human_size(storage['ads_total'])} · {status_icon} свободно {human_size(storage['disk']['free'])}"
+        except Exception:
+            storage_line = "💾 ADS: ⚠️ данные хранилища недоступны"
         return (
             "🔐 MAXIBOT · Администратор\n\n"
             f"👤 Клиентов всего: {stats['clients_total']}\n"
             f"🆕 Новых сегодня: {stats['clients_today']}\n\n"
             f"📋 Подключено каналов: {stats['channels_total']}\n"
             f"🤖 Подключено своих ботов: {stats['custom_bots_total']}\n\n"
-            f"🎫 Открытых тикетов: {stats['open_tickets']}",
-            buttons(("⬅️ Назад", "home")),
+            f"🎫 Открытых тикетов: {stats['open_tickets']}\n\n"
+            f"{storage_line}",
+            buttons(("💾 Хранилище ADS", "ads_storage"), ("⬅️ Назад", "home")),
         )
     if screen == "support_prompt":
         return (
@@ -410,11 +963,17 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             "Мы получим обращение и ответим вам здесь.",
             buttons(("❌ Отмена", "support_cancel")),
         )
+    if screen == "support_direct":
+        return (
+            "💬 Поддержка MAXIBOT\n\n"
+            "Нажмите кнопку ниже, чтобы открыть личный диалог с поддержкой.",
+            [[support_button()], [{"text": "⬅️ Назад", "callback_data": "about"}]],
+        )
     if screen.startswith("support_existing:"):
         ticket_id = screen.split(":", 1)[1]
         ticket = await db.scalar(select(SupportTicket).where(SupportTicket.id == ticket_id, SupportTicket.max_user_id == admin.external_id))
         if not ticket:
-            return "ℹ️ О MAXIBOT", buttons(("💬 Написать в поддержку", "support_start"), ("⬅️ Назад", "home"))
+            return "ℹ️ О MAXIBOT", [[support_button()], [{"text": "⬅️ Назад", "callback_data": "home"}]]
         return (
             f"🎫 У вас уже есть открытое обращение #{ticket.display_number}.\n\n"
             "Вы можете дополнить его новым сообщением.",
@@ -438,7 +997,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return "Канал уже удалён.", buttons(("📋 Мои каналы", "channels"))
         return (
             "🗑 Удаление канала\n\n"
-            f"Вы действительно хотите удалить\n«{channel.title}» из MAXIBOT?\n\n"
+                f"Вы действительно хотите удалить\n«{channel.title}» из MAXIBOT?\n\n"
             "Будут удалены:\n\n"
             "• подключение канала;\n"
             "• подключение чата для обращений;\n"
@@ -453,12 +1012,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         )
     if screen.startswith("channel_deleted:"):
         title = unquote(screen.split(":", 1)[1]) if ":" in screen else "Канал"
-        return (
-            f"✅ Канал «{title}» удалён из MAXIBOT.\n\n"
-            "MAXIBOT больше не подключён к каналу\n"
-            "и чату для обращений.",
-            buttons(("📋 Мои каналы", "channels")),
-        )
+        next_button = ("📚 Мои каналы", "channels") if channels else ("📢 Подключить канал", "connect_channel")
+        return f"✅ Канал «{title}» удалён из MAXIBOT.", buttons(next_button)
     if screen.startswith("channel_delete_failed:"):
         title = unquote(screen.split(":", 1)[1]) if ":" in screen else "канала"
         return (
@@ -551,7 +1106,6 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             (inbox_action[0], inbox_action[1]),
             *((toggle,) if channel.inbox_chat_id else ()),
             ("⚙️ Настройка сообщений пользователя", f"settings:{channel.id}"),
-            ("🗑 Удалить канал", f"delete:{channel.id}"),
             ("⬅️ Назад", "channels"),
         )
     if screen.startswith("inbox_connect:") or screen.startswith("inbox_change:"):
@@ -726,11 +1280,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             ("2️⃣ Уведомление об отправке", f"template_view:{selected_id}:sent"),
             ("⬅️ Назад", f"channel:{selected_id}" if selected_id else "channels"))
     if screen == "bots":
-        return (
-            "🤖 Боты\n\nУправляйте подключёнными ботами или добавьте нового.",
-            buttons(("🤖 Мои боты", "my_bots"), ("➕ Добавить бота", "connect_bot"), ("⬅️ Назад", "home")),
-        )
+        # Backward-compatible screen alias: the old overview duplicated the
+        # `my_bots` screen and should no longer be rendered.
+        return await render_screen(db, admin, "my_bots")
     if screen == "my_bots":
+        # The separate bot list is retired. Connected bots are shown only in
+        # the unified Мои каналы screen.
+        return await render_screen(db, admin, "promotion")
         bot_rows = (await db.scalars(select(BotConnection).where(BotConnection.owner_admin_id == admin.id).order_by(BotConnection.display_name))).all()
         if not bot_rows:
             return ("🤖 Мои боты\n\n"
@@ -759,7 +1315,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 "Такой бот можно использовать для обратной связи, поддержки клиентов, приёма вопросов и обращений.\n\n"
                 "MAXIBOT работает в фоне и обеспечивает доставку сообщений между вами и пользователями.\n\n"
                 "ℹ️ Важно: создать собственного бота в MAX могут юридические лица, ИП и самозанятые — резиденты РФ.",
-                buttons(("✅ Продолжить подключение", "custom_bot_token"), ("⬅️ Назад", "my_bots")))
+                buttons(("✅ Продолжить подключение", "custom_bot_token"), ("⬅️ Назад", "promotion")))
     if screen == "connect_bot":
         return ("🤖 Добавить своего бота\n\n"
                 "Перейдите на MAX для бизнеса — business.max.ru\n"
@@ -805,12 +1361,12 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
     if screen == "custom_bot_activation_error":
         return ("❌ Не удалось автоматически подключить бота.\n\n"
                 "Попробуйте повторить подключение позже. Если ошибка повторится, обратитесь в поддержку.",
-                buttons(("🤖 Мои боты", "my_bots")))
+                buttons(("📢 Мои каналы", "promotion")))
     if screen.startswith("custom_bot_active:"):
         bot_id = screen.split(":", 1)[1]
         bot = await db.scalar(select(BotConnection).where(BotConnection.id == bot_id, BotConnection.owner_admin_id == admin.id))
         if not bot: return "Бот не найден.", buttons(("⬅️ Назад", "my_bots"))
-        return (f"✅ Бот подключён\n\n🤖 {bot.display_name}\n@{bot.username}\n\nВаш бот готов к работе.\n\n🔗 Ссылка для пользователей:\nhttps://max.ru/{bot.username.lstrip('@')}", buttons(("🤖 Мои боты", "my_bots")))
+        return (f"✅ Бот подключён\n\n🤖 {bot.display_name}\n@{bot.username}\n\nВаш бот готов к работе.\n\n🔗 Ссылка для пользователей:\nhttps://max.ru/{bot.username.lstrip('@')}", buttons(("📢 Мои каналы", "promotion")))
     if screen.startswith("custom_bot:"):
         bot_id = screen.split(":", 1)[1]
         bot = await db.scalar(select(BotConnection).where(BotConnection.id == bot_id, BotConnection.owner_admin_id == admin.id))
@@ -823,7 +1379,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return (f"🤖 Управление ботом\n\n{bot.display_name}\n@{username}\n\n🔴 Статус: Ошибка токена.", buttons(("🔑 Обновить токен", f"custom_bot_refresh:{bot.id}"), ("🗑 Удалить бота", f"custom_bot_delete:{bot.id}"), ("⬅️ Мои боты", "my_bots")))
         if bot.status != "ACTIVE":
             return (f"🤖 Управление ботом\n\n{bot.display_name}\n@{username}\n\n🟡 Статус: Настройка не завершена\n\nОткройте своего бота от аккаунта владельца и нажмите «Начать».", [[{"text": "🤖 Открыть бота", "type": "link", "url": f"https://max.ru/{username}"}], [{"text": "🗑 Удалить бота", "callback_data": f"custom_bot_delete:{bot.id}"}], [{"text": "⬅️ Мои боты", "callback_data": "my_bots"}]])
-        return (f"🤖 Управление ботом\n\n{bot.display_name}\n@{username}\n\n🟢 Статус: Работает", buttons(("✏️ Тексты", f"custom_bot_texts:{bot.id}"), ("📣 Рассылка", f"custom_bot_broadcast:{bot.id}"), ("📊 Статистика", f"custom_bot_stats:{bot.id}"), ("🔑 Обновить токен", f"custom_bot_refresh:{bot.id}"), ("⛔ Отключить бота", f"custom_bot_disable:{bot.id}"), ("⬅️ Мои боты", "my_bots")))
+        return (f"🤖 Управление ботом\n\n{bot.display_name}\n@{username}\n\n🟢 Статус: Работает", buttons(("⬅️ Мои боты", "my_bots")))
     if screen.startswith("custom_bot_settings:"):
         bot_id = screen.split(":", 1)[1]
         bot = await db.scalar(select(BotConnection).where(BotConnection.id == bot_id, BotConnection.owner_admin_id == admin.id))
@@ -957,6 +1513,55 @@ async def owner_admin_stats(db: AsyncSession) -> dict[str, int]:
 
 
 class MenuRepository:
+    async def bind_system_startapp(self, token: str, max_user_id: str) -> bool:
+        if not token or not max_user_id:
+            return False
+        async with self.session_factory() as db:
+            visit = await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == token))
+            if not visit:
+                return False
+            if visit.max_user_id and visit.max_user_id != str(max_user_id):
+                return False
+            visit.max_user_id = str(max_user_id)
+            visit.started_at = visit.started_at or datetime.now(timezone.utc)
+            visit.status = "BOT_STARTED"
+            dedupe = f"system-telemetry:{visit.id}:SYSTEM_BOT_STARTED"
+            if not await db.scalar(select(SystemTrafficEvent.id).where(SystemTrafficEvent.dedupe_key == dedupe)):
+                db.add(SystemTrafficEvent(visit_id=visit.id, event_type="SYSTEM_BOT_STARTED",
+                                          event_time=datetime.now(timezone.utc), metadata_json="{}", dedupe_key=dedupe))
+            exists_conversion = await db.scalar(select(SystemConversion.id).where(SystemConversion.visit_id == visit.id))
+            if not exists_conversion:
+                db.add(SystemConversion(visit_id=visit.id, max_user_id=str(max_user_id), goal="bot_started", status="pending"))
+            await db.commit()
+            return True
+
+    async def queue_system_channel_connected(self, max_user_id: str) -> str:
+        """Queue a bot-branch conversion only after an official channel connect."""
+        if not max_user_id:
+            return "blocked_no_identity"
+        async with self.session_factory() as db:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.traffic_attribution_window_hours)
+            visit = await db.scalar(select(SystemTrafficVisit).where(
+                SystemTrafficVisit.max_user_id == str(max_user_id),
+                SystemTrafficVisit.status == "BOT_STARTED",
+                SystemTrafficVisit.created_at >= cutoff,
+            ).order_by(SystemTrafficVisit.created_at.desc()))
+            if not visit:
+                return "blocked_no_system_visit"
+            exists_conversion = await db.scalar(select(SystemConversion.id).where(
+                SystemConversion.visit_id == visit.id,
+                SystemConversion.goal == "maxibot_channel_connected",
+            ))
+            if exists_conversion:
+                return "already_queued"
+            db.add(SystemConversion(
+                visit_id=visit.id,
+                max_user_id=str(max_user_id),
+                goal="maxibot_channel_connected",
+                status="pending",
+            ))
+            await db.commit()
+            return "queued"
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
@@ -1000,6 +1605,7 @@ class MenuRepository:
                     max_bot_id=str(profile.get("user_id") or profile.get("id") or profile.get("bot_id") or "unknown"),
                     username=str(profile.get("username") or profile.get("name") or "bot"),
                     display_name=str(profile.get("name") or profile.get("display_name") or profile.get("username") or "MAX-бот"),
+                    public_id=new_landing_public_id(),
                     encrypted_token=encrypted_token, status="WAITING_ADMIN_START")
                 db.add(bot)
             await db.commit(); await db.refresh(bot)
@@ -1191,9 +1797,15 @@ class MenuRepository:
                 landing = await db.scalar(select(LandingPage).where(
                     LandingPage.channel_id == channel.id, LandingPage.is_active.is_(True),
                 ))
+                registry = await db.scalar(select(ChannelSlugRegistry).where(
+                    ChannelSlugRegistry.max_channel_external_id == str(channel.external_id)
+                ))
+                if registry and landing and not registry.landing_public_id:
+                    registry.landing_public_id = landing.public_id
                 if not landing:
+                    stable_public_id = registry.landing_public_id if registry and registry.landing_public_id else new_landing_public_id()
                     db.add(LandingPage(
-                        channel_id=channel.id, public_id=new_landing_public_id(),
+                        channel_id=channel.id, public_id=stable_public_id,
                         title=payload["title"], description=promotion_landing_description(None),
                         avatar_url=payload["avatar_url"],
                     ))
@@ -1221,6 +1833,10 @@ class MenuRepository:
                     max_channel_external_id=str(channel_external_id), public_slug=slug,
                     created_at=datetime.now(timezone.utc), last_connected_at=datetime.now(timezone.utc),
                 ))
+                registry = None
+            stable_public_id = registry.landing_public_id if registry and registry.landing_public_id else new_landing_public_id()
+            if registry:
+                registry.landing_public_id = stable_public_id
             channel = Channel(
                 admin_id=admin.id, external_id=str(channel_external_id), title=payload["title"],
                 avatar_url=payload["avatar_url"], public_slug=slug, max_connection_kind=PRIMARY,
@@ -1234,7 +1850,7 @@ class MenuRepository:
                 conversion_policy=settings.traffic_conversion_policy,
             ))
             db.add(LandingPage(
-                channel_id=channel.id, public_id=new_landing_public_id(), title=payload["title"],
+                channel_id=channel.id, public_id=stable_public_id, title=payload["title"],
                 description=promotion_landing_description(None), avatar_url=payload["avatar_url"],
             ))
             await db.commit()
@@ -1658,6 +2274,11 @@ class MenuRepository:
             else:
                 membership.current_member = True
                 membership.joined_at = membership.joined_at or event_time
+                # Replayed official events must not overwrite a previously
+                # confirmed exact attribution after its intent was consumed.
+                if event_type.lower() == "user_added" and membership.attribution_status == EXACT and membership.attributed_visit_id:
+                    await db.commit()
+                    return True
                 # Manual approval produces the official user_added event but
                 # not a pending event in Bot API. A verified MAX identity is
                 # deterministic evidence, provided this user resolves to one
@@ -1671,34 +2292,55 @@ class MenuRepository:
                         MaxIdentityLink.max_user_id == str(max_user_id),
                     )
                 )).all())
-                exact_visit_id = resolve_exact_identity_visit(identity_visits)
+                exact_visit_id = None
+                exact_reason = None
+                if event_type.lower() == "user_added":
+                    exact_visit_id = await consume_single_active_join_intent(
+                        db, channel_id=channel.id, max_user_id=str(max_user_id), now=event_time,
+                    )
+                    if exact_visit_id:
+                        exact_reason = "EXACT_VERIFIED_CHANNEL_OPEN_INTENT"
+                if not exact_visit_id:
+                    exact_visit_id = resolve_exact_identity_visit(identity_visits)
+                    if exact_visit_id:
+                        exact_reason = "EXACT_VERIFIED_STARTAPP_IDENTITY"
                 if event_type.lower() == "user_added" and exact_visit_id:
                     membership.attribution_status = EXACT
+                    membership.attribution_reason = exact_reason
                     membership.attributed_visit_id = exact_visit_id
                     membership.attribution_score = 100
                     visit = await db.get(TrafficVisit, exact_visit_id)
+                    queued_conversion = None
                     if visit:
                         visit.converted_at = visit.converted_at or event_time
-                        if can_send_offline_conversion(EXACT, visit.yclid or visit.metrica_client_id):
+                        if can_send_offline_conversion(EXACT, visit.yclid):
                             exists_outbox = await db.scalar(select(OfflineConversion.id).where(
                                 OfflineConversion.visit_id == visit.id,
                                 OfflineConversion.membership_id == membership.id,
                                 OfflineConversion.target == "YANDEX",
                             ))
                             if not exists_outbox:
-                                db.add(OfflineConversion(
+                                queued_conversion = OfflineConversion(
                                     visit_id=visit.id, membership_id=membership.id,
                                     target="YANDEX", goal="userDidSubscribe",
                                     identifier_type="yclid" if visit.yclid else "client_id",
                                     identifier_value=visit.yclid or visit.metrica_client_id,
                                     conversion_datetime=event_time,
                                     status="dry_run" if settings.yandex_conversion_dry_run else "pending",
-                                ))
+                                )
+                                db.add(queued_conversion)
                     await db.commit()
+                    if queued_conversion:
+                        await _send_exact_conversion(db, queued_conversion, membership, channel)
                     return True
                 # A verified startapp identity is deterministic evidence for
                 # this visitor. Do not mix it with the old temporal-candidate
                 # path used when MAX sends a bare user_added event.
+                membership.attribution_reason = (
+                    "NO_VERIFIED_STARTAPP_IDENTITY"
+                    if not identity_visits
+                    else "MULTIPLE_VERIFIED_IDENTITY_VISITS"
+                )
                 request_signal = await db.scalar(select(TrafficEvent).where(
                     TrafficEvent.channel_id == channel.id,
                     TrafficEvent.max_user_id == str(max_user_id),
@@ -1754,11 +2396,14 @@ class MenuRepository:
                 membership.attribution_status = decision.status
                 membership.attributed_visit_id = decision.visit_id
                 membership.attribution_score = decision.score
-                if decision.status in {EXACT, HIGH} and decision.visit_id:
+                # Temporal matching is retained solely for diagnostics.  It
+                # must never queue a Yandex conversion: only the exact branch
+                # above has verified startapp -> MAX identity evidence.
+                if decision.status == EXACT and decision.visit_id:
                     visit = await db.get(TrafficVisit, decision.visit_id)
                     if visit:
                         visit.converted_at = visit.converted_at or event_time
-                        if can_send_offline_conversion(decision.status, visit.yclid or visit.metrica_client_id):
+                        if can_send_offline_conversion(decision.status, visit.yclid):
                             exists_outbox = await db.scalar(select(OfflineConversion.id).where(
                                 OfflineConversion.visit_id == visit.id,
                                 OfflineConversion.membership_id == membership.id,
@@ -1780,6 +2425,16 @@ class MenuRepository:
             return False
         async with self.session_factory() as db:
             return bool(await db.scalar(select(Admin.id).where(Admin.external_id == external_id)))
+
+    async def is_platform_admin(self, external_id: str | None) -> bool:
+        """Return true only for the configured MAXIBOT administrator.
+
+        ``is_admin`` is intentionally a per-user workspace/owner lookup and
+        is true for every user who has a workspace row.  The hidden /admin
+        command must use the separate platform-owner allowlist instead.
+        """
+        configured_owner = (settings.maxibot_owner_user_id or "").strip()
+        return bool(external_id and configured_owner and str(external_id) == configured_owner)
 
     async def ensure_exact_user_added_attribution(self, channel_external_id: str,
                                                   max_user_id: str,
@@ -1810,9 +2465,10 @@ class MenuRepository:
             if not membership or not exact_visit_id:
                 return False
             visit = await db.get(TrafficVisit, exact_visit_id)
-            if not visit or not (visit.yclid or visit.metrica_client_id):
+            if not visit or not visit.yclid:
                 return False
             membership.attribution_status = EXACT
+            membership.attribution_reason = "EXACT_VERIFIED_STARTAPP_IDENTITY"
             membership.attributed_visit_id = exact_visit_id
             membership.attribution_score = 100
             visit.converted_at = visit.converted_at or event_time
@@ -1846,11 +2502,34 @@ class MenuRepository:
                 db.add(admin)
                 await db.flush()
             text, keyboard = await render_screen(db, admin, screen, channel_id)
-            # Banner delivery is temporarily disabled; keep the render flow
-            # text-only on every screen until a final MAX media layout is
-            # approved.
+            # Keep the first-run screen text-only; established menu screens
+            # remain unchanged as well.
             media = []
             return text, keyboard, admin.service_message_id, media
+
+    async def onboarding_seen(self, external_id: str) -> bool:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
+            return bool(admin and admin.onboarding_seen)
+
+    async def mark_onboarding_seen(self, external_id: str) -> bool:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
+            if not admin:
+                admin = Admin(external_id=external_id)
+                db.add(admin)
+            admin.onboarding_seen = True
+            await db.commit()
+            return True
+
+    async def reset_onboarding(self, external_id: str) -> bool:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
+            if not admin:
+                return False
+            admin.onboarding_seen = False
+            await db.commit()
+            return True
 
     async def save_service_message(self, external_id: str, message_id: str):
         async with self.session_factory() as db:
@@ -2249,9 +2928,15 @@ class MenuRepository:
                 registry = ChannelSlugRegistry(
                     max_channel_external_id=channel.external_id,
                     public_slug=channel.public_slug,
+                    landing_public_id=None,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(registry)
+            landing = await db.scalar(select(LandingPage).where(
+                LandingPage.channel_id == channel.id, LandingPage.is_active.is_(True),
+            ))
+            if landing and not registry.landing_public_id:
+                registry.landing_public_id = landing.public_id
             registry.last_connected_at = datetime.now(timezone.utc)
             registry.disconnected_at = datetime.now(timezone.utc)
             snapshot = {

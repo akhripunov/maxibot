@@ -94,6 +94,12 @@ class MaxClient(ABC):
         """Return chat metadata when the client supports the official endpoint."""
         return {}
 
+    async def get_me(self) -> dict[str, Any]:
+        return {}
+
+    async def get_admins(self, chat_id: str) -> dict[str, Any]:
+        return {}
+
 
 class StubMaxClient(MaxClient):
     def __init__(self, fail_edits: bool = False):
@@ -218,8 +224,12 @@ class RealMaxClient(MaxClient):
             data["format"] = format
         elif "**" in text or "[Предложка]" in text:
             data["format"] = "markdown"
+        elif "<b>" in text or "<strong>" in text:
+            data["format"] = "html"
         if disable_link_preview is not None:
             data["disable_link_preview"] = disable_link_preview
+        elif "vkvideo.ru" in text:
+            data["disable_link_preview"] = True
         merged_attachments = list(attachments or []) + self._attachments(buttons)
         if merged_attachments:
             data["attachments"] = merged_attachments
@@ -243,6 +253,8 @@ class RealMaxClient(MaxClient):
         data: dict[str, Any] = {"text": text}
         if "**" in text or "[Предложка]" in text:
             data["format"] = "markdown"
+        elif "<b>" in text or "<strong>" in text:
+            data["format"] = "html"
         merged = list(attachments or [])
         merged.extend(self._attachments(buttons))
         if merged:
@@ -307,11 +319,15 @@ class RealMaxClient(MaxClient):
         data = {"text": text}
         if "**" in text or "[Предложка]" in text:
             data["format"] = "markdown"
+        elif "<b>" in text or "<strong>" in text:
+            data["format"] = "html"
         # MAX keeps the old inline keyboard when `attachments` is omitted.
         # Send an explicit empty list when the new screen has no buttons, so
         # a previous HOME keyboard cannot remain attached to the feed header.
         merged_attachments = list(attachments or []) + self._attachments(buttons)
         data["attachments"] = merged_attachments
+        if "vkvideo.ru" in text:
+            data["disable_link_preview"] = True
         logging.getLogger(__name__).warning(
             "MAX PUT /messages payload=%s",
             json.dumps(data, ensure_ascii=False, separators=(",", ":")),

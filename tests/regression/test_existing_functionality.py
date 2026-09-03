@@ -15,5 +15,5 @@ def test_tc_traffic_004_bot_deep_link_keeps_opaque_payload_contract():
 
 
 def test_tc_bot_001_main_menu_and_channel_card_remain_renderable():
-    assert "MAXIBOT" in menu_text(1, 1, 1)
+    assert "МАКСИБОТ" in menu_text(1, 1, 1)
     assert "Regression channel" in channel_card_text("Regression channel", True, 0, 0, "2026-08-13", "https://max.ru/regression")

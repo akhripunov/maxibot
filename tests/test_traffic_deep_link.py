@@ -1,4 +1,4 @@
-from app.traffic.deep_link import build_bot_deep_link, build_miniapp_deep_link, build_native_miniapp_deep_link, build_web_miniapp_deep_link, new_attribution_token, valid_max_target
+from app.traffic.deep_link import build_bot_deep_link, build_miniapp_deep_link, build_native_miniapp_deep_link, build_web_bot_deep_link, build_web_miniapp_deep_link, new_attribution_token, valid_max_target
 
 
 def test_attribution_token_is_opaque_and_short_enough_for_max_payload():
@@ -12,6 +12,13 @@ def test_attribution_token_is_opaque_and_short_enough_for_max_payload():
 def test_bot_deep_link_contains_only_encoded_opaque_token():
     link = build_bot_deep_link("@maxibot", "opaque-token-A")
     assert link == "https://max.ru/maxibot?start=opaque-token-A"
+    assert "yclid" not in link
+    assert "channel_id" not in link
+
+
+def test_web_bot_deep_link_is_browser_compatible_and_keeps_opaque_token():
+    link = build_web_bot_deep_link("@maxibot", "opaque-token-A")
+    assert link == "https://web.max.ru/maxibot?start=opaque-token-A"
     assert "yclid" not in link
     assert "channel_id" not in link
 
@@ -99,6 +106,16 @@ def test_atomic_traffic_resolve_binds_identity_and_returns_strict_target():
     assert "f\"https://max.ru/{channel.external_id" not in section
 
 
+def test_verified_resolve_creates_only_a_server_side_join_intent_after_target_validation():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "main.py").read_text()
+    section = source[source.index("async def traffic_resolve"):source.index('@app.post("/api/traffic/miniapp-event")')]
+    assert "await activate_join_intent(" in section
+    assert section.index("if not target:") < section.index("await activate_join_intent(")
+    assert "startapp_token" not in section[section.index("await activate_join_intent("):]
+
+
 def test_traffic_miniapp_is_silent_and_opens_channel_automatically():
     from pathlib import Path
 
@@ -133,4 +150,5 @@ def test_production_miniapp_alias_is_present_for_registered_startapp_url():
     assert '@app.get("/mini", response_class=FileResponse)' in source
     mini = source[source.index('@app.get("/mini", response_class=FileResponse)'):source.index('@app.get("/traffic-test/app"')]
     assert 'FileResponse(mini_dir / "traffic.html"' in mini
-    assert 'FileResponse(mini_dir / "index.html"' not in mini
+    assert 'FileResponse(mini_dir / "index.html"' in mini
+    assert 'if not startapp:' in mini

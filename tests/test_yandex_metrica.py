@@ -17,7 +17,11 @@ async def test_metrica_counter_and_goals_are_mockable_and_idempotent():
         if request.url.path.endswith("/counters") and request.method == "GET":
             return httpx.Response(200, json={"counters": [{"id": 101, "name": "MAXIBOT"}]})
         if request.url.path.endswith("/goals") and request.method == "GET":
-            return httpx.Response(200, json={"goals": [{"id": 201, "name": "toChannel"}, {"id": 202, "name": "userDidSubscribe"}]})
+            return httpx.Response(200, json={"goals": [
+                {"id": 201, "name": "toChannel"},
+                {"id": 202, "name": "userDidOpenMax"},
+                {"id": 203, "name": "userDidSubscribe"},
+            ]})
         raise AssertionError("duplicate create call")
 
     client = YandexMetricaClient("opaque", "https://metrics.test")
@@ -25,7 +29,7 @@ async def test_metrica_counter_and_goals_are_mockable_and_idempotent():
     client._client = httpx.AsyncClient(base_url="https://metrics.test", transport=httpx.MockTransport(handler))
     assert (await client.list_counters())[0]["id"] == 101
     goals = await client.list_goals(101)
-    assert {goal["name"] for goal in goals} == {"toChannel", "userDidSubscribe"}
+    assert {goal["name"] for goal in goals} == {"toChannel", "userDidOpenMax", "userDidSubscribe"}
     await client.close()
     assert all("opaque" not in str(call) for call in calls)
 
@@ -64,19 +68,19 @@ async def test_create_action_goal_sends_event_condition():
 
 
 @pytest.mark.asyncio
-async def test_upload_offline_conversion_uses_goal_id_in_csv():
+async def test_upload_offline_conversion_uses_goal_identifier_in_csv():
     def handler(request: httpx.Request):
         assert request.method == "POST"
-        assert b"Yclid,DateTime,Target" in request.content
-        assert b"yclid-A,1700000000,909" in request.content
-        assert b"909" in request.content
+        assert b"ClientId,Yclid,DateTime,Target" in request.content
+        assert b"123456,yclid-A,1700000000,userDidSubscribe" in request.content
+        assert b"userDidSubscribe" in request.content
         assert b"max_subscriber" not in request.content
         return httpx.Response(200, json={"id": 1, "status": "UPLOADED"})
 
     client = YandexMetricaClient("opaque", "https://metrics.test")
     await client._client.aclose()
     client._client = httpx.AsyncClient(base_url="https://metrics.test", transport=httpx.MockTransport(handler))
-    result = await client.upload_offline_conversion(303, "yclid-A", 909, "1700000000")
+    result = await client.upload_offline_conversion(303, "yclid-A", "123456", "userDidSubscribe", "1700000000")
     assert result["status"] == "UPLOADED"
     await client.close()
 
@@ -91,7 +95,7 @@ async def test_upload_error_logs_safe_status_body_headers_and_hash(caplog):
     client._client = httpx.AsyncClient(base_url="https://metrics.test", transport=httpx.MockTransport(handler))
     with caplog.at_level("ERROR"):
         with pytest.raises(httpx.HTTPStatusError):
-            await client.upload_offline_conversion(303, "yclid-secret", 909, "1700000000")
+            await client.upload_offline_conversion(303, "yclid-secret", "123456", 909, "1700000000")
     message = " ".join(record.getMessage() for record in caplog.records)
     assert "400" in str(caplog.records[0].http_status)
     assert caplog.records[0].response_body == '{"error":"bad csv"}'
@@ -106,21 +110,21 @@ async def test_exact_membership_sender_targets_user_did_subscribe(monkeypatch):
         def __init__(self):
             self.goal_names = []
 
-        async def ensure_action_goal(self, _counter_id, goal_name):
+        async def ensure_action_goal_identifier(self, _counter_id, goal_name):
             self.goal_names.append(goal_name)
-            return 909
+            return goal_name
 
-        async def upload_offline_conversion(self, _counter_id, _yclid, goal_id, _timestamp):
-            assert goal_id == 909
+        async def upload_offline_conversion(self, _counter_id, _yclid, _client_id, goal_identifier, _timestamp):
+            assert goal_identifier == "userDidSubscribe"
             return {"status": "UPLOADED"}
 
     monkeypatch.setattr(settings, "yandex_conversion_dry_run", False)
     client = Client()
     result = await send_user_subscribed(
-        client, counter_id=303, yclid="yclid-A", conversion_datetime="1700000000", verified_membership=True
+        client, counter_id=303, yclid="yclid-A", client_id="123456", conversion_datetime="1700000000", verified_membership=True
     )
     alias_result = await send_max_subscriber(
-        client, counter_id=303, yclid="yclid-B", conversion_datetime="1700000001", exact_membership=True
+        client, counter_id=303, yclid="yclid-B", client_id="123457", conversion_datetime="1700000001", exact_membership=True
     )
     assert result.status == alias_result.status == "sent"
     assert client.goal_names == ["userDidSubscribe", "userDidSubscribe"]

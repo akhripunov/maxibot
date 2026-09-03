@@ -58,6 +58,20 @@ def test_android_and_non_apple_web_keep_their_proven_branches():
     assert "webApp.openMaxLink(targetUrl)" in handoff
 
 
+def test_miniapp_handoff_telemetry_is_best_effort_and_precedes_platform_branch():
+    handoff = _section(MINI_SOURCE, "function openChannel(targetUrl)", "async function resolveChannel")
+
+    assert "miniappSignal('MINIAPP_CHANNEL_HANDOFF_STARTED')" in handoff
+    assert handoff.index("miniappSignal('MINIAPP_CHANNEL_HANDOFF_STARTED')") < handoff.index("const platform")
+    assert "setTimeout" not in handoff
+    assert "window.location.replace(targetUrl)" in handoff
+
+    pre_handoff = MINI_SOURCE[: MINI_SOURCE.index("function openViaAnchor")]
+    assert "keepalive: true" in pre_handoff
+    assert ".catch(() => {})" in pre_handoff
+    assert "catch (_) {}" in pre_handoff
+
+
 def test_miniapp_resolves_identity_once_before_channel_open():
     resolve = _section(MINI_SOURCE, "async function resolveChannel", "resolveChannel().catch")
 

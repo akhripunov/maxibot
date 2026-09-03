@@ -33,7 +33,7 @@ def test_promotion_connect_uses_short_exact_copy_only_on_connect_screen():
     assert "Добавьте MAXIBOT в канал — после этого он" in source
     assert "автоматически появится в списке продвижения." in source
     assert 'if screen == "promotion":' in source
-    assert "return promotion_intro_text(), buttons(*rows)" in source
+    assert 'return promotion_intro_text(), buttons(*rows)' in source
 
 
 def test_custom_bot_refresh_state_reaches_token_probe_and_result_screens():
@@ -119,15 +119,57 @@ def test_main_menu_order_and_channel_setup_copy():
     services = Path("app/domain/services.py").read_text()
     expected = [
         '("📢 Подключить канал", "connect_channel")',
-        '("📣 Продвижение", "promotion")',
-        '("📩 Обращения / Предложка", "channels")',
-        '("🤖 Мои боты", "my_bots")',
+        '("📚 Мои каналы", "promotion")',
         '("ℹ️ О сервисе", "about")',
     ]
     section = menu[menu.index('return menu_text(len(channels)'):menu.index('if screen == "connect_channel"')]
     assert [section.index(item) for item in expected] == sorted(section.index(item) for item in expected)
     assert "if screen == \"connect_channel\":" in menu
     assert "Перешлите" not in services[services.index('NO_CHANNELS='):]
+
+
+def test_main_menu_renames_promotion_button_without_changing_callback():
+    menu = Path("app/bot/menu.py").read_text()
+    section = menu[menu.index('return menu_text(len(channels)'):menu.index('if screen == "connect_channel"')]
+    assert '("📚 Мои каналы", "promotion")' in section
+    assert '("📣 Продвижение", "promotion")' not in section
+
+
+def test_channel_promotion_opens_its_own_feedback_settings():
+    menu = Path("app/bot/menu.py").read_text()
+    start = menu.index('if screen.startswith("promotion_channel:")')
+    end = menu.index('if screen.startswith("promotion_landing:")', start)
+    section = menu[start:end]
+    assert '("📩 Обращения / Предложка", f"channel:{channel.id}")' in section
+    assert section.index('("📩 Обращения / Предложка"') < section.index('("⬅️ Назад", "promotion")')
+
+
+def test_channel_delete_button_is_moved_to_promotion_channel_screen():
+    menu = Path("app/bot/menu.py").read_text()
+    promotion = menu[menu.index('if screen.startswith("promotion_channel:")'):menu.index('if screen.startswith("promotion_landing:")')]
+    inbox = menu[menu.index('if screen.startswith("channel:") or screen == "channel"'):menu.index('if screen.startswith("inbox_connect:")')]
+    assert '("🗑 Удалить канал", f"delete:{channel.id}")' in promotion
+    assert promotion.index('("🗑 Удалить канал"') < promotion.index('("⬅️ Назад", "promotion")')
+    assert '("🗑 Удалить канал", f"delete:{channel.id}")' not in inbox
+
+
+def test_channel_deleted_routes_to_remaining_channels_or_connect_instructions():
+    menu = Path("app/bot/menu.py").read_text()
+    deleted = menu[menu.index('if screen.startswith("channel_deleted:")'):menu.index('if screen.startswith("channel_delete_failed:")')]
+    assert 'f"✅ Канал «{title}» удалён из MAXIBOT."' in deleted
+    assert 'next_button = ("📚 Мои каналы", "channels") if channels else ("📢 Подключить канал", "connect_channel")' in deleted
+
+
+def test_about_screen_has_compact_maxibot_copy_and_site_link():
+    menu = Path("app/bot/menu.py").read_text()
+    about = menu[menu.index('if screen == "about":'):menu.index('if screen == "owner_admin":')]
+    assert '"💎 **О сервисе**\\n\\n"' in about
+    assert '"🤖 **MAXIBOT** — умный сервис для продвижения и управления каналами в MAX.\\n\\n"' in about
+    assert '"**Наша цель:** помочь владельцам каналов находить свою аудиторию и привлекать подписчиков эффективнее.\\n\\n"' in about
+    assert '"🌐 **Наш сайт:** [maxibot.pro](https://maxibot.jobjin.ru)"' in about
+    assert '"text": "📣 Наш MAX-канал", "type": "link", "url": MAXIBOT_CHANNEL_URL' in about
+    assert '"text": "💬 Написать в поддержку", "type": "link", "url": url' in about or 'support_button()' in about
+    assert '"text": "⬅️ Назад", "callback_data": "home"' in about
 
 
 def test_connect_channel_screen_has_exact_approved_text():
@@ -139,6 +181,7 @@ def test_connect_channel_screen_has_exact_approved_text():
         "2. Перейдите в раздел «Подписчики»",
         "3. Нажмите «Добавить подписчиков»",
         "4. Найдите в поиске «MAXIBOT» и добавьте",
+        "5. Перейдите в раздел «Администраторы» и добавьте «MAXIBOT» в администраторы канала",
     ):
         assert line in menu
     assert "Перейдите в раздел «Подписатели»" not in menu
@@ -154,24 +197,45 @@ def test_all_channel_connect_screens_use_one_helper():
 
 def test_channel_add_buttons_have_exact_label_and_legacy_callbacks():
     menu = Path("app/bot/menu.py").read_text()
-    assert '("📣 Подключить ещё", "promotion_connect")' in menu
+    assert '("📣 Подключить ещё канал", "promotion_connect")' in menu
     assert '("📣 Подключить ещё", "add_channel")' in menu
     assert "➕ Добавить канал" not in menu
     assert "➕ Добавить ещё" not in menu
+
+
+def test_my_bots_button_is_only_on_promotion_list_after_channel_connect_button():
+    menu = Path("app/bot/menu.py").read_text()
+    home = menu[menu.index('return menu_text(len(channels)'):menu.index('if screen == "connect_channel"')]
+    promotion = menu[menu.index('if screen == "promotion":'):menu.index('if screen == "promotion_connect":')]
+    assert '("🤖 Мои боты", "my_bots")' not in home
+    assert promotion.index('(\"📣 Подключить ещё канал\"') < promotion.index('(\"🤖 Добавить бота\"')
+    assert '("🤖 Добавить бота", "connect_bot")' in promotion
+    assert '("⬅️ Главное меню", "home")' in promotion
+
+
+def test_promotion_channel_rows_show_only_the_channel_name():
+    menu = Path("app/bot/menu.py").read_text()
+    assert '[(channel.title, f"promotion_channel:{channel.id}")]' in menu
+    assert 'f"📢 {channel.title}"' not in menu
 
 
 def test_promotion_selection_uses_exact_approved_copy():
     menu = Path("app/bot/menu.py").read_text()
     assert "def promotion_intro_text()" in menu
     for line in (
-        "📣 Продвижение",
-        "Привлекайте новых подписчиков в каналы MAX",
-        "через рекламу в Яндекс Директе.",
-        "MAXIBOT отслеживает переходы и подписки,",
-        "а Яндекс Директ обучается на реальных конверсиях.",
-        "Со временем это помогает находить более подходящую",
-        "аудиторию и снижать стоимость подписчика.",
+        "📖 **Как запустить рекламу**",
+        "Выберите нужный канал из списка ниже.",
+        "Нажмите кнопку «Яндекс.Директ».",
+        "Авторизуйтесь в аккаунте Яндекс и разрешите доступ.",
+        "Вставьте ссылку на лендинг в поле «Ссылка на сайт».",
+        "Выберите счётчик Яндекс.Метрики, созданный MAXIBOT для этого канала, и конверсию **`userDidSubscribe`**.",
+        "8. Добавьте к ссылке UTM-метку:",
+        "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_name_lat}.{campaign_id}.{gbid}&utm_content={creative_id}.{ad_id}.{retargeting_id}&utm_term={keyword}",
         "Выберите канал для продвижения:",
     ):
         assert line in menu
+    assert '"type": "clipboard"' not in menu
+    assert '"text": "📋 Скопировать UTM-метку"' not in menu
+    assert 'PROMOTION_VIDEO_URL = f"{settings.traffic_public_base_url.rstrip(\'/\')}/video-instruction"' in menu
+    assert 'f"🎥 [Видеоинструкция по настройке рекламы]({PROMOTION_VIDEO_URL})\\n\\n"' in menu
     assert menu.count("promotion_intro_text()") >= 2

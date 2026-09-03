@@ -22,7 +22,7 @@ def test_no_candidate_is_unattributed():
 
 
 def test_offline_conversion_requires_exact_and_identifier():
-    assert can_send_offline_conversion(HIGH, "yclid")
+    assert not can_send_offline_conversion(HIGH, "yclid")
     assert not can_send_offline_conversion("EXACT", None)
     assert can_send_offline_conversion("EXACT", "yclid")
 

@@ -39,12 +39,13 @@ CURRENT_PROD_SHA="UNAVAILABLE"; ROLLBACK_SHA="UNAVAILABLE"; ROLLBACK="NOT_RUN"
 VERDICT="NO_GO"
 IMAGE_BUILT=0
 QA_DOCKER_BUILD_NETWORK="${QA_DOCKER_BUILD_NETWORK:-}"
+QA_DOCKERFILE="${QA_DOCKERFILE:-Dockerfile}"
 
 docker_build() {
   if [ -n "$QA_DOCKER_BUILD_NETWORK" ]; then
-    docker build --network="$QA_DOCKER_BUILD_NETWORK" -t "$IMAGE" .
+    docker build --network="$QA_DOCKER_BUILD_NETWORK" -f "$QA_DOCKERFILE" -t "$IMAGE" .
   else
-    docker build -t "$IMAGE" .
+    docker build -f "$QA_DOCKERFILE" -t "$IMAGE" .
   fi
 }
 

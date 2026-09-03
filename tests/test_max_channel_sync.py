@@ -21,6 +21,13 @@ def test_primary_bot_added_marks_primary_connection_without_fake_bot_row():
     assert 'if not channel.bot_connection_id' in source
 
 
+def test_bot_added_prompts_for_admin_before_final_confirmation():
+    source = Path("app/bot/runtime.py").read_text()
+    assert '⚠️ Бот добавлен, но не является администратором.' in source
+    assert 'channel_admin_done:' in source
+    assert 'async def _channel_admin_done' in source
+
+
 def test_custom_toggle_keeps_custom_connection_kind():
     source = Path("app/bot/menu.py").read_text()
     assert 'channel.max_connection_kind = BOT_CONNECTION if channel.bot_connection_id else PRIMARY' in source
@@ -31,6 +38,16 @@ def test_user_added_exact_identity_creates_dry_run_user_did_subscribe_queue():
     assert 'event_type.lower() == "user_added" and exact_visit_id' in source
     assert 'goal="userDidSubscribe"' in source
     assert 'status="dry_run" if settings.yandex_conversion_dry_run else "pending"' in source
+    assert "can_send_offline_conversion(EXACT, visit.yclid)" in source
+
+
+def test_user_added_exact_identity_delivers_pending_conversion_automatically():
+    source = Path("app/bot/menu.py").read_text()
+    assert "async def _send_exact_conversion" in source
+    assert "await _send_exact_conversion(db, queued_conversion, membership, channel)" in source
+    assert "membership.attribution_status != EXACT" in source
+    assert "str(int(conversion.conversion_datetime.timestamp()))" in source
+    assert 'conversion.last_error = "yclid_required"' in source
 
 
 def test_user_added_exact_identity_is_idempotent_for_conversion_queue():

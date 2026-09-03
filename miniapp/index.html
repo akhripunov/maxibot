@@ -6,9 +6,14 @@
   <title>MAXIBOT</title>
   <link rel="stylesheet" href="/miniapp/style.css?v=1088">
   <link rel="stylesheet" href="/miniapp/tuning.css?v=1092">
+  <link rel="stylesheet" href="/miniapp/owner.css?v=4">
 </head>
 <body>
-  <main>
+  <main class="owner-home-mode">
+    <section id="owner-home" aria-live="polite">
+      <header class="owner-header"><h1>Ваши проекты</h1><p class="owner-subtitle">Выберите свой канал, группу или бота, чтобы посмотреть аналитику.</p></header>
+      <div id="owner-content" class="owner-content"><div class="owner-loading">Загружаем ваши каналы…</div></div>
+    </section>
     <header><h1>Диалоги</h1><div class="top-actions"><button id="theme" aria-label="Сменить тему">☾</button><button id="folder" aria-label="Папка"></button></div></header>
     <div class="channels" id="channels"><button class="filter active" data-channel=""><span class="channel-avatar all-avatar">▦</span><span>Все</span></button></div>
     <div class="search"><span>⌕</span><input id="search" placeholder="Поиск"></div>
@@ -34,6 +39,6 @@
     </section>
   </main>
   <script src="https://st.max.ru/js/max-web-app.js"></script>
-  <script src="/miniapp/app.js?v=1088"></script>
+  <script src="/miniapp/app.js?v=1090"></script>
 </body>
 </html>

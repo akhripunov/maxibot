@@ -58,6 +58,20 @@ def test_traffic_redirect_is_device_aware():
     assert 'class=\"primary\"' in redirect
 
 
+def test_landing_emits_nonblocking_browser_handoff_diagnostics_before_navigation():
+    redirect = MAIN_SOURCE[MAIN_SOURCE.index("async def _traffic_redirect"):MAIN_SOURCE.index('@app.get("/go/{public_id}"')]
+
+    assert "navigator.sendBeacon" in redirect
+    assert "catch (_) {{}}" in redirect
+    assert "trafficSignal('JS_LANDING_STARTED')" in redirect
+    assert "trafficSignal('MAX_LINK_ASSIGNED')" in redirect
+    assert "'PAGE_HIDDEN' : 'PAGE_VISIBLE_AGAIN'" in redirect
+    assert redirect.index("trafficSignal('MAX_LINK_ASSIGNED')") < redirect.index("window.location.replace")
+    assert "setTimeout" not in redirect
+    assert "fetch(" not in redirect
+    assert "<iframe" not in redirect
+
+
 def test_landing_target_is_scoped_to_its_channel_and_has_no_fallback():
     landing_start = MAIN_SOURCE.index("async def _landing_page")
     landing_source = MAIN_SOURCE[landing_start : MAIN_SOURCE.index("@app.post(\"/traffic/events/browser\")")]

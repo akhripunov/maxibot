@@ -22,6 +22,16 @@ services:
       MAX_UPDATES_MODE: "polling"
       TRAFFIC_BOT_ATTRIBUTION_ENABLED: "true"
       MAX_JOIN_REQUEST_SIGNAL: "true"
+      MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"
+      MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"
+      ADS_AI_CONTEXT_MAX_BYTES: "75000"
+      ADS_AI_EVIDENCE_MAX_ENTRIES: "120"
+      ADS_AI_MAX_PLACEMENT_FACTS: "30"
+      ADS_PERIODIC_COLLECTION_ENABLED: "true"
+      ADS_PERIODIC_COLLECTION_CANARY_CAMPAIGNS: "msk365_rsya_msk_click_test1"
+      ADS_HOURLY_RETENTION_DAYS: "60"
+      ADS_DAILY_RETENTION_DAYS: "0"
+      ADS_COLLECTION_RAW_DEBUG_ENABLED: "false"
     volumes:
       - maxibot_uploads:/app/uploads
     depends_on:
@@ -44,6 +54,16 @@ services:
     env_file: .env
     environment:
       MAX_RUN_POLLING: "true"
+      MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"
+      MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"
+      ADS_AI_CONTEXT_MAX_BYTES: "75000"
+      ADS_AI_EVIDENCE_MAX_ENTRIES: "120"
+      ADS_AI_MAX_PLACEMENT_FACTS: "30"
+      ADS_PERIODIC_COLLECTION_ENABLED: "true"
+      ADS_PERIODIC_COLLECTION_CANARY_CAMPAIGNS: "msk365_rsya_msk_click_test1"
+      ADS_HOURLY_RETENTION_DAYS: "60"
+      ADS_DAILY_RETENTION_DAYS: "0"
+      ADS_COLLECTION_RAW_DEBUG_ENABLED: "false"
     depends_on:
       db:
         condition: service_healthy
@@ -84,8 +104,13 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # No host port is published; only containers on maxibot_internal can
+    # reach Redis. Protected mode would also reject that private Docker traffic.
+    command: ["redis-server", "--appendonly", "yes", "--protected-mode", "no"]
     expose:
       - "6379"
+    volumes:
+      - maxibot_redis_data:/data
     deploy:
       resources:
         limits:
@@ -120,6 +145,7 @@ volumes:
   maxibot_caddy_data:
   maxibot_caddy_config:
   maxibot_uploads:
+  maxibot_redis_data:
 
 networks:
   maxibot_internal:

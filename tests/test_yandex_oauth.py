@@ -8,14 +8,15 @@ from app.core.config import settings
 from app.integrations import yandex_oauth
 
 
-def test_authorize_url_contains_minimal_scope_and_no_secret(monkeypatch):
+def test_authorize_url_uses_registered_redirect_and_no_secret(monkeypatch):
     monkeypatch.setattr(settings, "yandex_oauth_client_id", "client-123")
     monkeypatch.setattr(settings, "yandex_oauth_client_secret", "secret-value")
     monkeypatch.setattr(settings, "yandex_oauth_redirect_uri", "https://maxibot.jobjin.ru/oauth/yandex/callback")
     monkeypatch.setattr(settings, "yandex_oauth_scope", "metrika:read metrika:write")
     query = parse_qs(urlsplit(yandex_oauth.authorize_url("state-abc")).query)
+    assert query["response_type"] == ["code"]
     assert query["client_id"] == ["client-123"]
-    assert query["redirect_uri"] == ["https://maxibot.jobjin.ru/oauth/yandex/callback"]
+    assert "redirect_uri" not in query
     assert query["scope"] == ["metrika:read metrika:write"]
     assert "direct:api" not in query["scope"][0]
     assert query["state"] == ["state-abc"]
@@ -50,3 +51,9 @@ def test_configured_requires_all_oauth_credentials(monkeypatch):
     monkeypatch.setattr(settings, "yandex_oauth_client_secret", None)
     monkeypatch.setattr(settings, "yandex_oauth_redirect_uri", "https://example.test/callback")
     assert yandex_oauth.configured() is False
+
+
+def test_combined_scope_includes_direct_api_only_when_configured(monkeypatch):
+    monkeypatch.setattr(yandex_oauth.settings, "yandex_oauth_scope", "metrika:read metrika:write direct:api")
+    assert yandex_oauth.combined_scope() == "metrika:read metrika:write direct:api"
+    assert yandex_oauth.direct_scope() == "direct:api"

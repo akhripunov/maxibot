@@ -159,3 +159,21 @@ mobile landing
   smoke на настоящем iPhone: (1) ссылка из MAX, (2) ссылка из Safari;
 - пока оба real-device smoke не завершились переходом в целевой канал, статус
   релиза `BLOCKED`, а предыдущий production handoff должен быть восстановлен.
+
+# Canonical Codex orchestration
+
+- `ARCHITECT CODEX` — единственный общий технический orchestrator MAXIBOT.
+- Рабочие роли проекта: `DEV`, `WEBDEV`, `ДИРЕКТОЛОГ`, `QA / ТЕСТИРОВЩИК`.
+  Старые Codex tasks/chats не считаются дополнительными ролями.
+- `ARCHITECT CODEX` выбирает minimum sufficient team, принимает финальное
+  техническое решение и после handoff проводит integration review.
+- `DEV` отвечает за backend/bot/DB/API/workers, `WEBDEV` — за сайт и frontend,
+  `ДИРЕКТОЛОГ` — consultative по Direct/Metrika/attribution, `QA` — независимый
+  release gate. Specialist roles не принимают финальные архитектурные решения.
+- `Ads Codex Worker` — отдельный bounded runtime-контур рекламной аналитики,
+  не общий development orchestrator.
+- Для подробного ROLE REGISTRY и routing использовать
+  [`docs/ROLE_REGISTRY.md`](docs/ROLE_REGISTRY.md) и
+  [`docs/ORCHESTRATION_PROTOCOL.md`](docs/ORCHESTRATION_PROTOCOL.md).
+- Перед существенной задачей обязателен repository preflight; `UNKNOWN` и
+  `UNVERIFIED` нельзя выдавать за `PASS`.

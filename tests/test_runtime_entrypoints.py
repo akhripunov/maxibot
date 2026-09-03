@@ -163,7 +163,7 @@ def test_stale_promotion_navigation_is_not_discarded():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
-    assert 'navigation_action = action == "promotion" or action.startswith(("promotion_", "channels", "channel:", "settings:"))' in source
+    assert 'navigation_action = action in {"promotion", "connect_channel"} or action.startswith(("promotion_", "channels", "channel:", "settings:"))' in source
     assert "and not navigation_action" in source
 
 

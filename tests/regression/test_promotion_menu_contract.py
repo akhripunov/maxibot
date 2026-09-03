@@ -5,7 +5,8 @@ MENU_SOURCE = (Path(__file__).resolve().parents[2] / "app/bot/menu.py").read_tex
 
 
 def test_promotion_channel_menu_has_short_yandex_label():
-    assert '("⚡ Яндекс", f"promotion_yandex:{channel.id}")' in MENU_SOURCE
+    assert 'yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ❌"' in MENU_SOURCE
+    assert '(yandex_button, f"promotion_yandex:{channel.id}")' in MENU_SOURCE
     assert "Подключить Яндекс.Метрику" not in MENU_SOURCE
 
 
@@ -29,3 +30,10 @@ def test_yandex_screen_offers_reconnect_after_a_real_connection():
     yandex_screen = MENU_SOURCE[MENU_SOURCE.index('if screen.startswith("promotion_yandex:")'):MENU_SOURCE.index('if screen.startswith("promotion_settings:")')]
     assert "🔄 Переподключить Яндекс" in yandex_screen
     assert "if oauth_configured:" in yandex_screen
+
+
+def test_yandex_direct_oauth_is_not_exposed_in_the_menu():
+    yandex_screen = MENU_SOURCE[MENU_SOURCE.index('if screen.startswith("promotion_yandex:")'):MENU_SOURCE.index('if screen.startswith("promotion_settings:")')]
+    assert "🔐 Подключить Яндекс Директ" not in yandex_screen
+    assert "yandex_direct_oauth_url(admin.external_id, selected_id)" not in yandex_screen
+    assert "/oauth/yandex/direct/start" in MENU_SOURCE

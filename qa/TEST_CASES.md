@@ -46,6 +46,14 @@ This registry is layered over the preserved pre-existing suite listed in `qa/EXI
 | TC-TRAFFIC-014 | Fresh iPhone handoff from MAX opens the target channel | traffic/mobile-handoff | CRITICAL | SMOKE | MANUAL | Real iPhone/iPad, fresh promotion visit | Open promotion URL from a MAX chat | Mini App opens and then the intended channel opens without a required click | QA_PROCESS.md mobile MAX checklist | 2026-08-21 | ACTIVE |
 | TC-TRAFFIC-015 | Fresh iPhone handoff from Safari opens the target channel | traffic/mobile-handoff | CRITICAL | SMOKE | MANUAL | Real iPhone/iPad Safari, fresh promotion visit | Open promotion URL in Safari and accept the iOS MAX prompt | Mini App opens and then the intended channel opens without a required click | QA_PROCESS.md mobile MAX checklist | 2026-08-21 | ACTIVE |
 | TC-TRAFFIC-016 | Android handoff is separately accepted on a real device | traffic/mobile-handoff | CRITICAL | SMOKE | MANUAL | Real Android device, fresh promotion visit | Open promotion URL and follow Android branch | `window.location.replace(target_url)` reaches the intended channel; source checks alone do not pass this case | QA_PROCESS.md mobile MAX checklist | 2026-08-21 | BLOCKED until real Android E2E |
+| TC-TRAFFIC-017 | Traffic diagnostic stages are safe, idempotent and non-converting | traffic/diagnostics | HIGH | REGRESSION | AUTOMATED | Sanitized telemetry fixtures | Record landing/Mini App stages and inspect aggregate diagnostics | Allowlisted, bounded, idempotent diagnostics never create attribution or conversion | tests/regression/test_traffic_diagnostic_stages.py | 2026-08-28 | ACTIVE |
+| TC-TRAFFIC-018 | Confirmed MAX handoff records proof without minting a new visit | traffic/diagnostics | HIGH | REGRESSION | AUTOMATED | Handoff attempt/confirmation fixtures | Record browser and Mini App handoff stages | Confirmation requires the real Mini App route and remains tied to the existing visit | tests/regression/test_confirmed_max_handoff.py | 2026-08-28 | ACTIVE |
+| TC-TRAFFIC-019 | Exact verified identity is the only conversion queue gate | traffic/conversion | CRITICAL | REGRESSION | AUTOMATED | Funnel and exact identity fixtures | Evaluate matching, ambiguous and payloadless memberships | Only exact verified startapp identity queues one Yandex conversion; diagnostics do not mutate conversion state | tests/regression/test_promotion_reporting_and_exact_gate.py, tests/test_funnel_reporting.py | 2026-08-28 | ACTIVE |
+| TC-MAX-007 | Official bot-added channel connection fails closed and remains owner-scoped | integrations/max/channel-sync | CRITICAL | REGRESSION | AUTOMATED | Official bot-added payload fixtures | Process valid, conflicting, non-channel and invalid-link events | Only authorized channel metadata with a valid official link is connected; conflicts and invalid links are rejected | tests/test_bot_added_auto_connect.py | 2026-08-28 | ACTIVE |
+| TC-BOT-011 | System MAXIBOT promotion remains owner-scoped | bot/promotion | HIGH | REGRESSION | AUTOMATED | System promotion fixtures | Render system promotion and callbacks | System bot, Yandex and landing scopes are isolated and unauthorized callbacks are blocked | tests/regression/test_owner_maxibot_promotion.py | 2026-08-28 | ACTIVE |
+| TC-YANDEX-003 | Offline conversion target uses the configured goal identifier | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Offline target source contract | Build conversion upload payload | Configured target/goal identifier is used; numeric goal ID is not substituted | tests/regression/test_yandex_offline_target_contract.py | 2026-08-28 | ACTIVE |
+| TC-YANDEX-004 | Direct API errors are explicit and read-only | integrations/yandex-direct | HIGH | REGRESSION | AUTOMATED | Mock Direct API responses | Fetch campaign and handle HTTP/body errors | Read failures are surfaced and no error is treated as empty success | tests/test_yandex_direct.py | 2026-08-28 | ACTIVE |
+| TC-OAUTH-003 | OAuth recovery retry is exact and count-guarded | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Exact recovery batch fixtures | Attempt a bounded recovery retry | Only the approved exact row can retry; duplicate/bulk retry is blocked | tests/test_oauth_recovery_exact_batch.py | 2026-08-28 | ACTIVE |
 | TC-BOT-009 | Promotion menu keeps approved navigation contract | bot/menu | HIGH | REGRESSION | AUTOMATED | Menu source and channel | Open promotion channel menu | Expected short Yandex, landing, analytics, settings and back items are present; MAX target check is not exposed | tests/regression/test_promotion_menu_contract.py | — | ACTIVE |
 | TC-BOT-010 | Promotion summaries render safe channel and Yandex state | bot/menu | HIGH | REGRESSION | AUTOMATED | Promotion summary fixtures | Render connected and unconnected summaries | Missing values use safe placeholders and no secrets/internal flags leak | tests/test_promotion_channel_summary.py, tests/test_promotion_yandex_summary.py | — | ACTIVE |
 | TC-OAUTH-001 | Yandex OAuth state and token exchange are safe | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Mock OAuth transport | Create state and exchange code | State is validated; secret is not exposed | tests/test_yandex_oauth.py | — | ACTIVE |
@@ -56,7 +64,7 @@ This registry is layered over the preserved pre-existing suite listed in `qa/EXI
 
 ## Critical regression set
 
-`TC-BOOT-001`, `TC-DB-001`, `TC-DB-002`, `TC-DB-003`, `TC-MAX-001`, `TC-MAX-004`, `TC-MAX-005`, `TC-TRAFFIC-001`, `TC-TRAFFIC-002`, `TC-TRAFFIC-003`, `TC-TRAFFIC-004`, `TC-TRAFFIC-005`, `TC-TRAFFIC-006`, `TC-TRAFFIC-008`, `TC-TRAFFIC-009`, `TC-TRAFFIC-010`, `TC-TRAFFIC-013`, `TC-TRAFFIC-014`, `TC-TRAFFIC-015`, `TC-TRAFFIC-016`, `TC-HEALTH-001`, `TC-HEALTH-002`, `TC-OPS-001`, `TC-EXT-001`, `TC-EXT-002`.
+`TC-BOOT-001`, `TC-DB-001`, `TC-DB-002`, `TC-DB-003`, `TC-MAX-001`, `TC-MAX-004`, `TC-MAX-005`, `TC-MAX-007`, `TC-TRAFFIC-001`, `TC-TRAFFIC-002`, `TC-TRAFFIC-003`, `TC-TRAFFIC-004`, `TC-TRAFFIC-005`, `TC-TRAFFIC-006`, `TC-TRAFFIC-008`, `TC-TRAFFIC-009`, `TC-TRAFFIC-010`, `TC-TRAFFIC-013`, `TC-TRAFFIC-014`, `TC-TRAFFIC-015`, `TC-TRAFFIC-016`, `TC-TRAFFIC-019`, `TC-HEALTH-001`, `TC-HEALTH-002`, `TC-OPS-001`, `TC-EXT-001`, `TC-EXT-002`.
 
 ## Current verification status
 
@@ -103,12 +111,20 @@ Statuses below reflect the latest audit evidence, not the existence of implement
 | TC-TRAFFIC-013 | VERIFIED_WORKING | Six automated platform-contract checks plus two real owner iPhone recordings (MAX and Safari) on 2026-08-21 |
 | TC-TRAFFIC-014 | VERIFIED_WORKING | Owner recording: fresh iPhone entry from MAX, 2026-08-21 |
 | TC-TRAFFIC-015 | VERIFIED_WORKING | Owner recording: fresh iPhone entry from Safari, 2026-08-21 |
-| TC-TRAFFIC-016 | UNKNOWN | Real Android E2E evidence not available; source contract alone is insufficient |
+| TC-TRAFFIC-016 | VERIFIED_WORKING | Sanitized owner evidence: Android handoff reached target channel |
+| TC-TRAFFIC-017 | VERIFIED_WORKING | Automated telemetry safety and diagnostic-stage regression |
+| TC-TRAFFIC-018 | VERIFIED_WORKING | Automated confirmed-handoff regression |
+| TC-TRAFFIC-019 | VERIFIED_WORKING | Automated exact conversion gate and funnel regressions |
+| TC-MAX-007 | VERIFIED_WORKING | Automated bot-added owner/link safety regressions |
+| TC-BOT-011 | VERIFIED_WORKING | Automated system MAXIBOT promotion regressions |
+| TC-YANDEX-003 | VERIFIED_WORKING | Automated offline target regression |
+| TC-YANDEX-004 | VERIFIED_WORKING | Automated Direct API error/read-only regressions |
+| TC-OAUTH-003 | VERIFIED_WORKING | Automated exact recovery guard regression |
 | TC-OAUTH-001 | VERIFIED_WORKING | Automated mocked OAuth regression |
 | TC-OAUTH-002 | VERIFIED_WORKING | Automated Yandex callback scoping regression |
 | TC-UI-001 | WORKING_UNTESTED | Static mini app route checked; signed MAX auth flow not run |
-| TC-EXT-001 | UNKNOWN | Dedicated external MAX bot/channel and member confirmation unavailable |
-| TC-EXT-002 | UNKNOWN | Production-like deploy/rollback intentionally not run |
+| TC-EXT-001 | VERIFIED_WORKING | Sanitized owner evidence: join request completed and member confirmed |
+| TC-EXT-002 | VERIFIED_WORKING | Isolated local candidate deploy and rollback smoke passed on 18100/55532/56479; live production untouched |
 
 ## Change log
 

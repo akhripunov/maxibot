@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import re
 import time
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -11,12 +13,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.bot.menu import MenuRepository, official_bot_added_diagnostics
-from app.db.models import Admin, Channel, Conversation, Message
+from app.db.models import Admin, AdsAiRun, Channel, Conversation, MaxPollingCheckpoint, Message
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
 from app.daily_reports import send_due_daily_reports
 from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMaxClient, MaxApiError
 from app.security_tokens import decrypt_token, encrypt_token
+from app.ads.service import can_access_ads, run_check, toggle_campaign_link
+from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,8 @@ class MaxBotRuntime:
         self._custom_clients: dict[str, RealMaxClient] = {}
         self._custom_poll_task: asyncio.Task | None = None
         self._daily_report_task: asyncio.Task | None = None
+        self._ads_ai_event_task: asyncio.Task | None = None
+        self._ads_ai_seen_events: set[tuple[str, str]] = set()
         self._broadcast_drafts: dict[str, str] = {}
 
     async def stop(self):
@@ -65,6 +71,9 @@ class MaxBotRuntime:
         if self._daily_report_task and not self._daily_report_task.done():
             self._daily_report_task.cancel()
             await asyncio.gather(self._daily_report_task, return_exceptions=True)
+        if self._ads_ai_event_task and not self._ads_ai_event_task.done():
+            self._ads_ai_event_task.cancel()
+            await asyncio.gather(self._ads_ai_event_task, return_exceptions=True)
         for client in self._custom_clients.values():
             await client.close()
 
@@ -73,6 +82,9 @@ class MaxBotRuntime:
         # MAX polling loop.  It never opens another update stream.
         if self._daily_report_task is None or self._daily_report_task.done():
             self._daily_report_task = asyncio.create_task(self._daily_report_loop())
+        if self._ads_ai_event_task is None or self._ads_ai_event_task.done():
+            self._ads_ai_event_task = asyncio.create_task(self._ads_ai_event_loop())
+        self.marker = await self._load_primary_marker()
         while not self._stop.is_set():
             try:
                 updates, next_marker = await self.client.updates(self.marker)
@@ -84,6 +96,7 @@ class MaxBotRuntime:
                 # Advance only after every update in this response has gone
                 # through the handler, so a parser/runtime failure cannot
                 # silently hide the rest of the batch.
+                await self._store_primary_marker(next_marker)
                 self.marker = next_marker
                 # Keep custom-bot long polling independent.  Waiting here
                 # would block the main MAXIBOT polling loop for the full
@@ -96,6 +109,25 @@ class MaxBotRuntime:
             except Exception:
                 logger.exception("MAX update cycle failed")
                 await asyncio.sleep(3)
+
+    async def _load_primary_marker(self) -> int | None:
+        """Load the durable cursor before the first MAX /updates request."""
+        async with self.session_factory() as db:
+            checkpoint = await db.get(MaxPollingCheckpoint, "primary")
+            return int(checkpoint.marker) if checkpoint and checkpoint.marker is not None else None
+
+    async def _store_primary_marker(self, marker: int | None) -> None:
+        """Advance the cursor only after this response was fully handled."""
+        if marker is None:
+            return
+        async with self.session_factory() as db:
+            checkpoint = await db.get(MaxPollingCheckpoint, "primary")
+            if checkpoint is None:
+                checkpoint = MaxPollingCheckpoint(source="primary", marker=int(marker))
+                db.add(checkpoint)
+            else:
+                checkpoint.marker = int(marker)
+            await db.commit()
 
     async def _daily_report_loop(self):
         """Catch up safely after a worker restart, then check once a minute."""
@@ -112,6 +144,65 @@ class MaxBotRuntime:
                 await asyncio.wait_for(self._stop.wait(), timeout=60)
             except asyncio.TimeoutError:
                 pass
+
+    async def _ads_ai_event_loop(self):
+        """Consume committed terminal AI events in the existing MAX worker."""
+        from redis.asyncio import Redis
+
+        while not self._stop.is_set():
+            redis = Redis.from_url(settings.redis_url, decode_responses=True)
+            try:
+                pubsub = redis.pubsub(ignore_subscribe_messages=True)
+                await pubsub.subscribe(ADS_AI_RUN_EVENTS)
+                async for message in pubsub.listen():
+                    if self._stop.is_set():
+                        break
+                    event = parse_ai_run_event(message.get("data"))
+                    if event:
+                        await self._handle_ads_ai_event(*event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("ADS_AI_EVENT_LISTENER_FAILED")
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+            finally:
+                await redis.aclose()
+
+    async def _handle_ads_ai_event(self, run_id: str, status: str):
+        key = (run_id, status)
+        if key in self._ads_ai_seen_events:
+            return
+        async with self.session_factory() as db:
+            run = await db.scalar(select(AdsAiRun).where(AdsAiRun.id == run_id))
+            if not run or run.status != status or not run.ui_admin_external_id or not run.ui_message_id:
+                logger.info("ADS_AI_UI_UPDATE_SKIPPED run_id=%s reason=missing_origin_or_state", run_id)
+                return
+            channel = await db.scalar(
+                select(Channel).join(Admin, Channel.admin_id == Admin.id).where(
+                    Channel.id == run.channel_id,
+                    Admin.external_id == run.ui_admin_external_id,
+                )
+            )
+            if not channel:
+                logger.warning("ADS_AI_UI_UPDATE_SKIPPED run_id=%s reason=missing_channel", run_id)
+                return
+            text, keyboard, _, media = await self.repo.render(
+                run.ui_admin_external_id, f"ads:{run.channel_id}", run.channel_id
+            )
+        try:
+            await self.client.edit_message(run.ui_admin_external_id, run.ui_message_id, text, keyboard, media)
+        except Exception:
+            # The result remains committed and the dashboard will render it
+            # on the next open. Never create a second notification here.
+            logger.exception("ADS_AI_UI_UPDATE_FAILED run_id=%s status=%s", run_id, status)
+            return
+        self._ads_ai_seen_events.add(key)
+        if len(self._ads_ai_seen_events) > 2048:
+            self._ads_ai_seen_events.clear()
+        logger.info("ADS_AI_UI_UPDATE_OK run_id=%s status=%s", run_id, status)
 
     async def handle(self, update: MaxUpdate):
         logger.warning(
@@ -136,7 +227,7 @@ class MaxBotRuntime:
             await self._callback(update)
         elif update.update_type == "bot_started":
             await self._start(update)
-        elif update.update_type in {"bot_added", "bot_removed"}:
+        elif update.update_type in {"bot_added", "bot_removed", "dialog_removed", "bot_stopped"}:
             await self._bot_added(update)
         elif update.update_type in {"user_added", "user_removed", "join_request_created", "join_request"}:
             await self._traffic_membership(update)
@@ -378,6 +469,17 @@ class MaxBotRuntime:
             # /start value.  A server-side traffic visit match is the only
             # authority, so try all explicitly payload-shaped candidates.
             for traffic_token in start_payloads:
+                if await self.repo.bind_system_startapp(traffic_token, str(user_id)):
+                    logger.warning("SYSTEM_STARTAPP_BOUND user_present=%s", True)
+                    # System promotion must land on the normal MAXIBOT home
+                    # menu after the conversion is recorded.  The previous
+                    # confirmation-only message left the user in a dead-end
+                    # chat panel and made the system landing look broken.
+                    await self.repo.reset_navigation(user_id, preserve_service_message=True)
+                    self._user_channels.pop(str(user_id), None)
+                    await self._render(user_id, "home", force_new=True)
+                    logger.warning("SYSTEM_START_MENU_RENDERED")
+                    return
                 traffic = await self.repo.bind_traffic_startapp(traffic_token, str(user_id), update.user_name)
                 if not traffic:
                     traffic = await self.repo.resolve_bound_traffic_token(traffic_token, str(user_id))
@@ -476,7 +578,8 @@ class MaxBotRuntime:
         # obsolete keyboards visible in MAX Web and makes channel lists look
         # inconsistent. _claim_start prevents duplicate replacements when
         # MAX retries the same logical start event.
-        message_id = await self._render(user_id, "home", force_new=True)
+        first_screen = "home" if await self.repo.onboarding_seen(str(user_id)) else "onboarding"
+        message_id = await self._render(user_id, first_screen, force_new=True)
         logger.warning("MAX start menu completed message=%s", bool(message_id))
 
     @staticmethod
@@ -498,7 +601,14 @@ class MaxBotRuntime:
         attachments = list(media or [])
         if rows:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": rows}})
-        return {"text": text, "attachments": attachments}
+        body = {"text": text, "attachments": attachments}
+        if "**" in text or "[Предложка]" in text:
+            body["format"] = "markdown"
+        elif "<b>" in text or "<strong>" in text:
+            body["format"] = "html"
+        if "vkvideo.ru" in text:
+            body["disable_link_preview"] = True
+        return body
 
     async def _navigation_callback(self, update: MaxUpdate, user_id: str, action: str) -> None:
         """Replace exactly the service message that supplied the callback."""
@@ -508,6 +618,12 @@ class MaxBotRuntime:
             screen, channel_id = "channels", None
         elif action == "promotion":
             screen, channel_id = "promotion", None
+        elif action == "owner_admin":
+            screen, channel_id = "owner_admin", None
+        elif action == "promotion_maxibot":
+            screen, channel_id = "promotion_maxibot", None
+        elif action in {"promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}:
+            screen, channel_id = action, None
         elif action.startswith("settings:"):
             reference = action.split(":", 1)[1]
             channel_id = await self.repo.resolve_owned_channel_id(user_id, reference)
@@ -531,6 +647,12 @@ class MaxBotRuntime:
             len(keyboard),
             sum(len(row) for row in keyboard),
         )
+        if screen.startswith("promotion_channel:"):
+            logger.warning(
+                "ADS_MENU_OUTBOUND_TRACE screen=promotion_channel instance_pid=%s buttons=%s",
+                os.getpid(),
+                [button.get("text") for row in keyboard for button in row],
+            )
         # MAX documents POST /answers with ``message`` as the atomic way to
         # replace the message whose button was pressed.  Do not combine it
         # with DELETE/PUT: MAX Web can then remove the card from the visible
@@ -565,8 +687,55 @@ class MaxBotRuntime:
             logger.warning("MAX callback skipped: no valid user id")
             return
         action = update.button_payload or "home"
+        logger.warning(
+            "MAX_CALLBACK_RECEIVED payload_present=%s payload_kind=%s callback_id_present=%s",
+            bool(update.button_payload),
+            (update.button_payload or "").split(":", 1)[0] or "<none>",
+            bool(update.callback_id),
+        )
+        if action.startswith("ads_campaigns:"):
+            selected_id = action.split(":", 1)[1].split(":", 1)[0]
+            if selected_id and can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, selected_id):
+                if update.callback_id:
+                    await self.client.answer_callback(update.callback_id)
+                await self._render(user_id, action, selected_id)
+                return
+        if action.startswith("ads_campaign_select") and not re.match(
+            r"^ads_campaign_select:[0-9a-f-]{20,}:[0-9a-f-]{20,}$", action
+        ):
+            if update.callback_id:
+                await self.client.answer_callback(update.callback_id)
+            logger.info("MAX malformed campaign selection callback ignored")
+            return
+        if action.startswith("ads_campaigns") and not re.match(
+            r"^ads_campaigns:[0-9a-f-]{20,}(:\d+)?$", action
+        ):
+            current_text = update.message.text if update.message else ""
+            match = re.search(r"(?:Канал:|📢)\s*(.+?)(?:\n|$)", current_text)
+            channel_title = match.group(1).strip() if match else ""
+            logger.warning(
+                "MAX_CAMPAIGN_RECOVERY text_len=%s title_present=%s channel_id_present=%s",
+                len(current_text),
+                bool(channel_title),
+                bool(update.message and update.message.channel_id),
+            )
+            if channel_title:
+                async with self.session_factory() as db:
+                    recovered = await db.scalar(
+                        select(Channel).join(Admin).where(
+                            Channel.title == channel_title,
+                            Admin.external_id == str(user_id),
+                        )
+                    )
+                if recovered and can_access_ads(str(user_id)):
+                    if update.callback_id:
+                        await self.client.answer_callback(update.callback_id)
+                    await self._render(user_id, f"ads_campaigns:{recovered.id}", str(recovered.id))
+                    return
+        if action in {"connect_channel", "about"}:
+            await self.repo.mark_onboarding_seen(str(user_id))
         if update.callback_id:
-            if update.callback_id in self._recent_callback_ids:
+            if update.callback_id in self._recent_callback_ids and not action.startswith("ads_campaigns"):
                 logger.info("MAX duplicate callback ignored callback_id=%s", update.callback_id)
                 await self.client.answer_callback(update.callback_id)
                 return
@@ -574,8 +743,8 @@ class MaxBotRuntime:
         # MAX callback responses can replace exactly the message whose button
         # was pressed.  Prefer this for navigation; editing a separately
         # stored message id leaves an old keyboard visible in some clients.
-        navigation = action in {"home", "channels", "promotion"}
-        navigation = navigation or action.startswith(("channel:", "settings:", "promotion_channel:", "promotion_landing:"))
+        navigation = action in {"home", "channels", "promotion", "promotion_maxibot", "promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}
+        navigation = navigation or action.startswith(("channel:", "settings:", "promotion_channel:", "promotion_landing:", "ads:"))
         if navigation and update.callback_id:
             await self._navigation_callback(update, str(user_id), action)
             return
@@ -591,13 +760,25 @@ class MaxBotRuntime:
             if not await self.repo.channel_owned(user_id, stale_channel_id):
                 await self._render(user_id, "channels")
                 return
-        if action.startswith("promotion_channel:") or action.startswith("promotion_landing:"):
+        if action.startswith("promotion_channel:") or action.startswith("promotion_landing:") or action.startswith("ads:"):
             stale_channel_id = action.split(":", 1)[1]
             if not await self.repo.channel_owned(user_id, stale_channel_id):
                 await self._render(user_id, "promotion")
                 return
+        if action.startswith("promotion_bot"):
+            bot_id = action.split(":", 1)[1] if ":" in action else None
+            if bot_id and not await self.repo.bot_owned(user_id, bot_id):
+                await self._render(user_id, "promotion")
+                return
         if action.startswith("inbox_bind:"):
             await self._bind_inbox_from_callback(update, action.split(":", 1)[1])
+            return
+        if action.startswith("channel_admin_done:"):
+            await self._channel_admin_done(str(user_id), action.split(":", 1)[1])
+            return
+        if action.startswith("channel_admin_cancel:"):
+            await self.client.send_message(str(user_id), "❌ Подключение канала отменено.")
+            await self._render(str(user_id), "channels")
             return
         if action.startswith("support_take:") or action.startswith("support_close:"):
             await self._support_status_callback(update, action)
@@ -613,11 +794,30 @@ class MaxBotRuntime:
         callback_message_id = update.message.external_message_id if update.message else ""
         current_message_id = await self.repo.service_message_id(user_id)
         action = update.button_payload or "home"
-        navigation_action = action in {"promotion", "connect_channel"} or action.startswith(("promotion_", "channels", "channel:", "settings:"))
+        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "ads_storage"} or action.startswith(("promotion_", "channels", "channel:", "settings:", "channel_admin_", "ads"))
         if callback_message_id and current_message_id and callback_message_id != current_message_id and not navigation_action:
             logger.info("MAX stale callback ignored")
             return
         screen, channel_id = self._action_parts(action)
+        if screen == "ads_campaigns" and not channel_id:
+            # Some MAX clients emit the callback label without the channel
+            # id. Recover the channel from the current dashboard/list text.
+            current_text = update.message.text if update.message else ""
+            match = re.search(r"(?:Канал:|📢)\s*(.+?)(?:\n|$)", current_text)
+            channel_title = match.group(1).strip() if match else ""
+            if channel_title:
+                async with self.session_factory() as db:
+                    recovered = await db.scalar(
+                        select(Channel).join(Admin).where(
+                            Channel.title == channel_title,
+                            Admin.external_id == str(user_id),
+                        )
+                    )
+                if recovered and can_access_ads(str(user_id)):
+                    await self._render(user_id, f"ads_campaigns:{recovered.id}", str(recovered.id))
+                    return
+            logger.info("MAX malformed campaign callback ignored")
+            return
         if action == "connect_channel":
             await self._render(user_id, "connect_channel")
         elif action == "promotion":
@@ -625,9 +825,67 @@ class MaxBotRuntime:
         elif action == "promotion_connect":
             await self._render(user_id, "promotion_connect")
         elif action.startswith("promotion_channel:"):
-            selected_id = action.split(":", 1)[1]
+            selected_id = action.split(":", 1)[1].split(":", 1)[0]
             if await self.repo.channel_owned(user_id, selected_id):
                 await self._render(user_id, action, selected_id)
+        elif action.startswith("ads_check:"):
+            selected_id = action.split(":", 1)[1]
+            if can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, selected_id):
+                async with self.session_factory() as db:
+                    try:
+                        origin_message_id = update.message.external_message_id if update.message else None
+                        await run_check(
+                            db,
+                            admin_external_id=str(user_id),
+                            channel_id=selected_id,
+                            ui_message_id=origin_message_id,
+                        )
+                    except Exception:
+                        logger.exception("ADS_MANUAL_CHECK_FAILED channel_id=%s", selected_id)
+                await self._render(user_id, f"ads:{selected_id}", selected_id)
+                return
+        elif action.startswith("ads_status:"):
+            selected_id = action.split(":", 1)[1]
+            if can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, selected_id):
+                await self._render(user_id, f"ads:{selected_id}", selected_id)
+        elif action == "ads_campaigns":
+            # MAX may deliver a stale callback with the action prefix only
+            # after the valid paginated screen has already been rendered.
+            # Do not overwrite the working campaign list with a dead-end
+            # "function unavailable" screen.
+            logger.info("MAX stale campaign callback ignored")
+            return
+        elif action.startswith("ads_campaigns:") or action.startswith(("ads_recommendations:", "ads_memory:", "ads_context:", "ads_history:", "ads_health:")):
+            selected_id = action.split(":", 1)[1].split(":", 1)[0]
+            ads_allowed = can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, selected_id)
+            logger.warning(
+                "MAX_CAMPAIGN_ROUTE allowed=%s selected_id_present=%s",
+                ads_allowed,
+                bool(selected_id),
+            )
+            if ads_allowed:
+                await self._render(user_id, action, selected_id)
+        elif action.startswith("ads_memory_detail:"):
+            _, _, channel_id, _ = action.split(":", 3)
+            if can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, channel_id):
+                await self._render(user_id, action, channel_id)
+        elif action.startswith("ads_memory_status:"):
+            _, _, channel_id, memory_id, status = action.split(":", 4)
+            if can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, channel_id):
+                async with self.session_factory() as db:
+                    await set_status(db, memory_id=memory_id, channel_id=channel_id, status=status)
+                await self._render(user_id, f"ads_memory_detail:{channel_id}:{memory_id}", channel_id)
+        elif action.startswith("ads_campaign_select:"):
+            _, channel_id, campaign_id = action.split(":", 2)
+            if can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, channel_id):
+                async with self.session_factory() as db:
+                    await toggle_campaign_link(db, channel_id=channel_id, campaign_id=campaign_id)
+                await self._render(user_id, f"ads_campaigns:{channel_id}", channel_id)
+                return
+        elif action.startswith("promotion_bot"):
+            bot_id = action.split(":", 1)[1] if ":" in action else None
+            if bot_id and await self.repo.bot_owned(user_id, bot_id):
+                await self._render(user_id, action)
         elif action.startswith("promotion_landing:"):
             selected_id = action.split(":", 1)[1]
             if await self.repo.channel_owned(user_id, selected_id):
@@ -646,7 +904,8 @@ class MaxBotRuntime:
             if await self.repo.channel_owned(user_id, selected_id):
                 await self._render(user_id, action, selected_id)
         elif action == "connect_bot":
-            await self.repo.set_custom_bot_state(user_id, None)
+            # Show the explanatory bot screen before entering token setup.
+            # The token-waiting state is set only after the owner continues.
             await self._render(user_id, "connect_bot_intro")
         elif action == "custom_bot_token":
             if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):
@@ -657,10 +916,11 @@ class MaxBotRuntime:
             await self._render(user_id, "custom_bot_help")
         elif action == "bots":
             await self.repo.set_custom_bot_state(user_id, None)
-            await self._render(user_id, "my_bots")
+            # Bots are listed only in the unified promotion screen.
+            await self._render(user_id, "promotion")
         elif action == "my_bots":
             await self.repo.set_custom_bot_state(user_id, None)
-            await self._render(user_id, "my_bots")
+            await self._render(user_id, "promotion")
         elif action.startswith("custom_bot_texts:") or action.startswith("custom_bot_dialogs:") or action.startswith("custom_bot_stats:"):
             bot_id = action.split(":", 1)[1]
             if await self.repo.bot_owned(user_id, bot_id):
@@ -815,17 +1075,13 @@ class MaxBotRuntime:
         elif action == "about":
             await self._render(user_id, "about")
         elif action == "support_start":
-            active = await self.repo.active_support_ticket(user_id)
-            if active:
-                await self._render(user_id, f"support_existing:{active.id}")
-            elif await self.repo.set_support_input(user_id):
-                logger.warning("SUPPORT_MODE_STARTED admin_id=%s", user_id)
-                await self._render(user_id, "support_prompt")
+            # Keep old callback messages safe: route them to the same direct
+            # personal-support screen instead of reopening the legacy ticket.
+            await self._render(user_id, "support_direct")
         elif action.startswith("support_continue:"):
-            ticket_id = action.split(":", 1)[1]
-            if await self.repo.set_support_input(user_id, ticket_id):
-                logger.warning("SUPPORT_MODE_STARTED admin_id=%s ticket_id=%s", user_id, ticket_id)
-                await self._render(user_id, "support_prompt")
+            # Old ticket cards may still be visible in users' histories.
+            # They must not reopen the retired ticket workflow.
+            await self._render(user_id, "support_direct")
         elif action == "support_cancel":
             await self.repo.clear_support_input(user_id)
             await self._render(user_id, "about")
@@ -1253,6 +1509,39 @@ class MaxBotRuntime:
         except Exception:
             logger.exception("MAX live native feed delivery failed")
 
+    async def _channel_admin_done(self, owner_id: str, channel_external_id: str) -> None:
+        """Finish channel onboarding after the owner grants admin rights."""
+        try:
+            chat = await self.client.get_chat(channel_external_id)
+            admins = await self.client.get_admins(channel_external_id)
+            bot_profile = await self.client.get_me()
+        except Exception:
+            await self.client.send_message(owner_id, "⚠️ Не удалось проверить права бота. Попробуйте нажать «Готово» ещё раз.")
+            return
+        bot_id = bot_profile.get("user_id") or bot_profile.get("id") if isinstance(bot_profile, dict) else None
+        members = admins.get("members", []) if isinstance(admins, dict) else []
+        is_admin = bool(bot_id) and any(
+            isinstance(member, dict) and str(member.get("user_id") or member.get("id")) == str(bot_id)
+            for member in members
+        ) if isinstance(members, list) else False
+        if not is_admin:
+            await self.client.send_message(
+                owner_id,
+                "⚠️ Бот всё ещё не является администратором.\n\n"
+                "Назначьте MAXIBOT администратором канала и нажмите «Готово» ещё раз.",
+                [[
+                    {"text": "✅ Готово", "callback_data": f"channel_admin_done:{channel_external_id}"},
+                    {"text": "❌ Отмена", "callback_data": f"channel_admin_cancel:{channel_external_id}"},
+                ]],
+            )
+            return
+        result = await self.repo.connect_channel_from_bot_added(channel_external_id, owner_id, chat)
+        if result.get("status") in {"created", "updated", "duplicate"}:
+            await self.client.send_message(owner_id, f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.")
+            await self._render(owner_id, "channels")
+        else:
+            await self.client.send_message(owner_id, "⚠️ Не удалось завершить подключение канала. Попробуйте ещё раз.")
+
     async def _bot_added(self, update: MaxUpdate):
         if not update.chat_id or update.bot_connection_id:
             return
@@ -1287,6 +1576,16 @@ class MaxBotRuntime:
                     admins = {}
                     admin_read_status = exc.status_code
                 admin_members = admins.get("members", []) if isinstance(admins, dict) else []
+                try:
+                    bot_profile = await self.client.get_me()
+                except Exception:
+                    bot_profile = {}
+                primary_bot_id = bot_profile.get("user_id") or bot_profile.get("id") if isinstance(bot_profile, dict) else None
+                bot_is_admin = any(
+                    isinstance(member, dict)
+                    and str(member.get("user_id") or member.get("id")) == str(primary_bot_id)
+                    for member in admin_members
+                ) if isinstance(admin_members, list) and primary_bot_id else False
                 initiator_in_admins = any(
                     isinstance(member, dict)
                     and str(member.get("user_id") or member.get("id")) == str(update.user_id)
@@ -1314,18 +1613,46 @@ class MaxBotRuntime:
                 result = await self.repo.connect_channel_from_bot_added(update.chat_id, update.user_id, chat)
                 logger.warning("MAX_CHANNEL_AUTO_CONNECT status=%s reason=%s",
                                result.get("status"), result.get("reason"))
-                if result.get("status") in {"created", "updated"} and update.user_id:
+                if result.get("status") in {"created", "updated", "duplicate"} and update.user_id:
+                    system_conversion_status = await self.repo.queue_system_channel_connected(str(update.user_id))
+                    logger.info("SYSTEM_CHANNEL_CONNECTED_CONVERSION status=%s", system_conversion_status)
+                if result.get("status") in {"created", "updated", "duplicate"} and update.user_id:
+                    if admin_read_status == 200 and not bot_is_admin:
+                        await self.client.send_message(
+                            str(update.user_id),
+                            "⚠️ Бот добавлен, но не является администратором.\n\n"
+                            "Пожалуйста, назначьте MAXIBOT администратором канала и нажмите «Готово».",
+                            [[
+                                {"text": "✅ Готово", "callback_data": f"channel_admin_done:{update.chat_id}"},
+                                {"text": "❌ Отмена", "callback_data": f"channel_admin_cancel:{update.chat_id}"},
+                            ]],
+                        )
+                        return
                     await self.client.send_message(
                         str(update.user_id),
-                        f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.\n\n"
-                        "Он уже доступен в разделах «Мои каналы» и «Продвижение».",
+                        f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.",
                     )
                     await self._render(str(update.user_id), "channels")
             except Exception:
                 logger.exception("MAX_CHANNEL_SYNC_FAILED")
             return
         initiator = update.user_id
-        if update.update_type == "bot_removed":
+        if update.update_type in {"bot_removed", "dialog_removed", "bot_stopped"}:
+            # Removing MAXIBOT from the private bot dialog starts a new
+            # onboarding cycle. Channel/group removal must never reset it.
+            # MAX emits either dialog_removed or bot_stopped for the same
+            # private-bot deletion depending on the client.  Channel events
+            # have already returned through the is_channel_event branch, so
+            # resetting here is limited to the private MAXIBOT dialog.
+            private_dialog_event = update.update_type in {"dialog_removed", "bot_stopped"}
+            private_bot_removed = (
+                update.update_type == "bot_removed"
+                and update.user_id and update.chat_id
+                and str(update.user_id) == str(update.chat_id)
+            )
+            if private_dialog_event or private_bot_removed:
+                await self.repo.reset_onboarding(str(update.user_id))
+                logger.info("MAX_PRIVATE_DIALOG_REMOVED_ONBOARDING_RESET event=%s", update.update_type)
             result = await self.repo.unbind_inbox_chat(update.chat_id)
             if result and result.get("admin_external_id"):
                 await self.client.send_message(
@@ -1431,7 +1758,7 @@ class MaxBotRuntime:
             return
         if self._is_admin_command(normalized_text):
             target_id = str(actor_id or update.chat_id or "")
-            if not target_id or not await self.repo.is_admin(target_id):
+            if not target_id or not await self.repo.is_platform_admin(target_id):
                 await self.client.send_message(
                     target_id or update.chat_id,
                     "⛔ Раздел администратора доступен только администраторам.",

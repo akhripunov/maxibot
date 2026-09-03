@@ -21,6 +21,14 @@ def build_bot_deep_link(username: str, token: str) -> str:
     return f"https://max.ru/{username}?start={quote(token, safe='')}"
 
 
+def build_web_bot_deep_link(username: str, token: str) -> str:
+    """Build the browser-compatible MAX Web bot link for desktop sessions."""
+    username = (username or "").lstrip("@").strip()
+    if not username or not token:
+        raise ValueError("bot username and attribution token are required")
+    return f"https://web.max.ru/{username}?start={quote(token, safe='')}"
+
+
 def build_miniapp_deep_link(username: str, token: str) -> str:
     """Build the MAX Mini App link that carries an opaque startapp token."""
     username = (username or "").lstrip("@").strip()

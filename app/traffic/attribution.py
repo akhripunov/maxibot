@@ -42,7 +42,13 @@ def decide(candidate_count: int, best_visit_id: str | None = None, best_score: i
 
 
 def can_send_offline_conversion(status: str, identifier: str | None) -> bool:
-    return status in {EXACT, HIGH} and bool(identifier and identifier.strip())
+    """Allow delivery only for a deterministic MAX identity binding.
+
+    A temporal candidate is useful for owner diagnostics, but it cannot prove
+    that a particular Yandex click belongs to the MAX member.  In particular,
+    ``HIGH`` is a ranking result, not an identity proof.
+    """
+    return status == EXACT and bool(identifier and identifier.strip())
 
 
 def score_time_distance(delta_seconds: float, window_seconds: int) -> int:

@@ -12,6 +12,68 @@ const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, char => ({'
 const avatar = (url, fallback, className = '') => url ? `<img class="${className}" src="${encodeURI(url)}" alt="">` : fallback;
 const api = (url, options = {}) => fetch(url, {...options, headers: {'X-MAX-Init-Data': initData, ...(options.headers || {})}});
 const time = value => new Date(value).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
+let ownerChannels = [], ownerBots = [];
+
+function ownerInstructions(state) {
+  return '';
+}
+
+function renderOwnerState(state) {
+  ownerChannels = state.channels || [];
+  ownerBots = state.bots || [];
+  const content = $('#owner-content');
+  const projects = [
+    ...ownerChannels.map(item => ({...item, projectType: 'channel', meta: 'Канал подключён', fallback: '📢'})),
+    ...ownerBots.map(item => ({...item, projectType: 'bot', meta: 'Бот подключён', fallback: '🤖'})),
+  ];
+  if (!projects.length) {
+    content.innerHTML = '<div class="owner-empty">Каналов и ботов пока нет.<br><span>Откройте MAXIBOT в чате и подключите первый канал или бота.</span></div>';
+    return;
+  }
+  const cards = projects.map(item => `<button class="owner-channel" data-owner-project="${escapeHtml(item.projectType)}:${escapeHtml(item.id)}" data-owner-channel="${item.projectType === 'channel' ? escapeHtml(item.id) : ''}"><span class="owner-channel-avatar">${avatar(item.avatar_url, item.fallback)}</span><span class="owner-channel-info"><span class="owner-channel-title">${escapeHtml(item.title)}</span><span class="owner-channel-meta">${item.meta}</span></span><span class="owner-chevron" aria-hidden="true">›</span></button>`).join('');
+  content.innerHTML = `<div class="owner-list">${cards}</div>`;
+  document.querySelectorAll('[data-owner-project]').forEach(button => button.onclick = () => {
+    const [projectType, projectId] = button.dataset.ownerProject.split(':', 2);
+    openOwnerAnalytics(projectType, projectId);
+  });
+}
+
+async function openOwnerHome() {
+  const response = await api('/api/miniapp/owner-state');
+  if (!response.ok) {
+    $('#owner-content').innerHTML = response.status === 403
+      ? '<div class="owner-error">У этого MAX-пользователя нет доступа к каналам.</div>'
+      : '<div class="owner-error">Не удалось загрузить каналы. Закройте Mini App и откройте его снова кнопкой «Открыть».</div>';
+    return;
+  }
+  renderOwnerState(await response.json());
+}
+
+async function openOwnerAnalytics(projectType, projectId) {
+  const response = await api(`/api/miniapp/analytics/${encodeURIComponent(projectType)}/${encodeURIComponent(projectId)}`);
+  if (!response.ok) {
+    $('#owner-content').innerHTML = '<div class="owner-error">Не удалось загрузить аналитику проекта.</div><button class="owner-back" onclick="closeOwnerCrm()">← Назад</button>';
+    return;
+  }
+  const result = await response.json();
+  const stats = result.stats || {};
+  $('#owner-content').innerHTML = `<section class="owner-analytics"><h2>📊 Аналитика</h2><h3>${escapeHtml(result.project_type === 'bot' ? '🤖 ' : '📢 ')}${escapeHtml(result.title)}</h3><p>👀 Посещений лендинга: ${stats.visits || 0}</p><p>📢 Перешли в MAX: ${stats.to_channel || 0}</p><p>👥 Всего новых участников: ${stats.new_members || 0}</p><p>↩️ Отписок: ${stats.unsubscribed || 0}</p><p>MAX signals:<br>MAX_OPEN_LIKELY: ${stats.max_open_likely || 0}<br>MAX_OPEN_CONFIRMED: ${stats.max_open_confirmed || 0}<br>JOIN_REQUEST: ${stats.join_events || 0}</p><p>Атрибуция:<br>EXACT: ${stats.EXACT || 0}<br>HIGH: ${stats.HIGH || 0}<br>MEDIUM: ${stats.MEDIUM || 0}<br>AMBIGUOUS: ${stats.AMBIGUOUS || 0}<br>UNATTRIBUTED: ${stats.UNATTRIBUTED || 0}</p><p class="owner-note">В Яндекс отправляются только EXACT/HIGH; отправка по умолчанию в dry-run.</p></section><button class="owner-back" onclick="closeOwnerCrm()">← Назад</button>`;
+}
+
+async function openOwnerChannel(channelId) {
+  channel = channelId;
+  $('main').classList.remove('owner-home-mode');
+  $('#owner-home').hidden = true;
+  await loadChannels();
+  document.querySelectorAll('.filter').forEach(item => item.classList.toggle('active', item.dataset.channel === channelId));
+  await load();
+}
+
+function closeOwnerCrm() {
+  $('#owner-home').hidden = false;
+  $('main').classList.add('owner-home-mode');
+  openOwnerHome();
+}
 
 async function loadChannels() {
   const response = await api('/api/channels'); if (!response.ok) return showApiError(response);
@@ -48,4 +110,4 @@ $('#pin').onclick = event => event.currentTarget.classList.toggle('is-active');
 $('#tag').onclick = event => event.currentTarget.classList.toggle('is-active');
 $('.attach').onclick = () => $('#image-input').click();
 $('#image-input').onchange = async event => { const file = event.target.files?.[0]; if (!file || !current) return; const attach = $('.attach'); attach.disabled = true; try { const response = await api('/api/dialogs/' + current.id + '/image', {method:'POST', headers:{'Content-Type': file.type, 'X-Upload-Filename': encodeURIComponent(file.name)}, body:file}); if (!response.ok) return; current.messages.push(await response.json()); renderMessages(true); } finally { event.target.value = ''; attach.disabled = false; } };
-loadChannels(); load();
+openOwnerHome();

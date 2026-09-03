@@ -85,12 +85,19 @@ class YandexMetricaClient:
         )
         return int((data.get("goal") or {}).get("id") or data["id"])
 
-    async def upload_offline_conversion(self, counter_id: int, yclid: str, goal_id: int | str, timestamp: str) -> dict:
-        """Upload one CSV row; Yandex requires Target to be the goal ID."""
+    async def upload_offline_conversion(
+        self,
+        counter_id: int,
+        yclid: str | None,
+        client_id: str | None,
+        goal_identifier: str,
+        timestamp: str,
+    ) -> dict:
+        """Upload one CSV row with verified Direct and Metrica identifiers."""
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["Yclid", "DateTime", "Target"])
-        writer.writerow([yclid, timestamp, str(goal_id)])
+        writer.writerow(["ClientId", "Yclid", "DateTime", "Target"])
+        writer.writerow([client_id or "", yclid or "", timestamp, goal_identifier])
         response = await self._client.post(
             f"/management/v1/counter/{counter_id}/offline_conversions/upload",
             files={"file": ("conversion.csv", output.getvalue(), "text/csv")},
@@ -102,6 +109,13 @@ class YandexMetricaClient:
             raise
         return response.json()
 
+    async def get_offline_conversion_upload(self, counter_id: int, upload_id: str) -> dict:
+        """Return Metrica's asynchronous processing state for one upload."""
+        return await self._request(
+            "GET",
+            f"/management/v1/counter/{counter_id}/offline_conversions/uploading/{upload_id}",
+        )
+
     async def goal_id_by_name(self, counter_id: int, goal_name: str) -> int | None:
         goals = await self.list_goals(counter_id)
         row = next((goal for goal in goals if goal.get("name") == goal_name), None)
@@ -110,6 +124,12 @@ class YandexMetricaClient:
     async def ensure_action_goal(self, counter_id: int, goal_name: str) -> int:
         existing = await self.goal_id_by_name(counter_id, goal_name)
         return existing if existing is not None else await self.create_action_goal(counter_id, goal_name)
+
+    async def ensure_action_goal_identifier(self, counter_id: int, goal_name: str) -> str:
+        """Return the identifier required in offline CSV Target."""
+        if await self.goal_id_by_name(counter_id, goal_name) is None:
+            await self.create_action_goal(counter_id, goal_name)
+        return goal_name
 
 
 async def ensure_channel_setup(admin_external_id: str, channel_id: str, encrypted_token: str, channel_title: str) -> dict[str, int | str]:
@@ -124,7 +144,11 @@ async def ensure_channel_setup(admin_external_id: str, channel_id: str, encrypte
             counter = await client.get_counter(counter_id)
         goals = await client.list_goals(counter_id)
         ids = {"counter_id": counter_id}
-        for key, goal_name in (("to_channel_goal_id", "toChannel"), ("user_subscribe_goal_id", "userDidSubscribe")):
+        for key, goal_name in (
+            ("to_channel_goal_id", "toChannel"),
+            ("user_open_max_goal_id", "userDidOpenMax"),
+            ("user_subscribe_goal_id", "userDidSubscribe"),
+        ):
             goal = next((row for row in goals if row.get("name") == goal_name), None)
             ids[key] = int(goal["id"]) if goal else await client.create_action_goal(counter_id, goal_name)
         redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -141,6 +165,33 @@ async def ensure_channel_setup(admin_external_id: str, channel_id: str, encrypte
         await client.close()
 
 
+async def ensure_system_setup(encrypted_token: str) -> dict[str, int | str]:
+    client = YandexMetricaClient(decrypt_token(encrypted_token), settings.yandex_metrica_api_url)
+    try:
+        name = "MAXIBOT · System"
+        counter = next((row for row in await client.list_counters() if row.get("name") == name), None)
+        counter_id = int(counter["id"]) if counter else await client.create_counter(name, settings.traffic_public_base_url)
+        if not (counter or {}).get("owner_login"):
+            counter = await client.get_counter(counter_id)
+        goal_name = "bot_started"
+        goal_id = await client.ensure_action_goal(counter_id, goal_name)
+        channel_goal_name = "maxibot_channel_connected"
+        channel_goal_id = await client.ensure_action_goal(counter_id, channel_goal_name)
+        result: dict[str, int | str] = {
+            "counter_id": counter_id,
+            "goal_id": goal_id,
+            "goal_name": goal_name,
+            "channel_goal_id": channel_goal_id,
+            "channel_goal_name": channel_goal_name,
+        }
+        owner_login = (counter or {}).get("owner_login")
+        if isinstance(owner_login, str) and owner_login.strip():
+            result["owner_login"] = owner_login.strip()
+        return result
+    finally:
+        await client.close()
+
+
 async def channel_setup_status(admin_external_id: str, channel_id: str) -> dict[str, str]:
     """Return non-secret Metrica IDs for one owner/channel pair only."""
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -149,7 +200,13 @@ async def channel_setup_status(admin_external_id: str, channel_id: str) -> dict[
         return {
             key: value
             for key, value in values.items()
-            if key in {"counter_id", "to_channel_goal_id", "user_subscribe_goal_id", "owner_login"}
+            if key in {
+                "counter_id",
+                "to_channel_goal_id",
+                "user_open_max_goal_id",
+                "user_subscribe_goal_id",
+                "owner_login",
+            }
         }
     except Exception:
         return {}

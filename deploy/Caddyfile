@@ -1,3 +1,7 @@
-go.maxibot.pro {
+api.maxibot.pro, go.maxibot.pro {
+    reverse_proxy api:8000
+}
+
+maxibot.pro, www.maxibot.pro {
     reverse_proxy api:8000
 }

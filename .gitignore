@@ -1,5 +1,8 @@
 .env
 .env.staging
+.ads_codex_worker.env
+.ads_codex_worker.env.*
+.venv*/
 research/max_ws_reproduction/private/*
 research/max_ws_reproduction/private/.gitignore
 *.auth-state.json
@@ -10,3 +13,17 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 uploads/*
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.pem
+*.key
+*.p12
+*.cookie
+*.session
+.coverage
+htmlcov/
+dist/
+build/
