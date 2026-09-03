@@ -48,6 +48,7 @@ The latest developer handoffs added or changed the following covered areas:
 - system MAXIBOT owner-scoped promotion: `TC-BOT-011`;
 - Yandex offline target and Direct API error handling: `TC-YANDEX-003` and `TC-YANDEX-004`;
 - exact-count OAuth recovery: `TC-OAUTH-003`.
+- AI result external-link sanitization: `TC-ADS-001`.
 
 These cases are mapped to the current automated tests in the registry and are
 included by the full `tests`/`tests/regression` commands. Sanitized owner
@@ -60,3 +61,8 @@ separate and must not be inferred from local staging.
 Manual evidence, source-level assertions and local rollback are recorded
 separately; none is substituted for a different environment or live production
 verification.
+
+The current AI hotfix has automated coverage, but real MAX rendering of the
+result card was not performed because no isolated live MAX owner session was
+available. The live render remains a manual acceptance item and is not inferred
+from the stub-client tests.

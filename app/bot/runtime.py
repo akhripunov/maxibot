@@ -193,7 +193,14 @@ class MaxBotRuntime:
                 run.ui_admin_external_id, f"ads:{run.channel_id}", run.channel_id
             )
         try:
-            await self.client.edit_message(run.ui_admin_external_id, run.ui_message_id, text, keyboard, media)
+            await self.client.edit_message(
+                run.ui_admin_external_id,
+                run.ui_message_id,
+                text,
+                keyboard,
+                media,
+                disable_link_preview=True,
+            )
         except Exception:
             # The result remains committed and the dashboard will render it
             # on the next open. Never create a second notification here.
@@ -1114,9 +1121,17 @@ class MaxBotRuntime:
             await self._render(user_id, screen, channel_id)
     async def _render(self, admin_id: str, screen: str, channel_id: str | None = None, force_new: bool = False):
         text, keyboard, stored_message_id, media = await self.repo.render(admin_id, screen, channel_id)
+        # AI promotion results are the only dashboard messages whose text is
+        # explicitly treated as untrusted model output.  Keep preview
+        # suppression scoped to this screen; regular MAXIBOT screens may
+        # retain their existing preview behavior.
+        ai_result_screen = screen.startswith("ads:")
         if stored_message_id and not force_new:
             try:
-                await self.client.edit_message(admin_id, stored_message_id, text, keyboard, media)
+                edit_kwargs = {"disable_link_preview": True} if ai_result_screen else {}
+                await self.client.edit_message(
+                    admin_id, stored_message_id, text, keyboard, media, **edit_kwargs
+                )
                 logger.warning("ADMIN_UI_EDIT_OK screen=%s message_id=%s", screen, stored_message_id)
                 return stored_message_id
             except Exception as exc:
@@ -1135,7 +1150,8 @@ class MaxBotRuntime:
                 logger.warning("MAX service UI replaced old_message_id=%s", stored_message_id)
             except Exception:
                 logger.info("MAX old service UI delete failed; continuing with replacement")
-        new_id = await self.client.send_message(admin_id, text, keyboard, media)
+        await_kwargs = {"disable_link_preview": True} if ai_result_screen else {}
+        new_id = await self.client.send_message(admin_id, text, keyboard, media, **await_kwargs)
         await self.repo.save_service_message(admin_id, new_id)
         logger.warning("ADMIN_UI_FALLBACK_CREATE screen=%s new_message_id=%s", screen, new_id)
         return new_id

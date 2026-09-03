@@ -54,6 +54,7 @@ This registry is layered over the preserved pre-existing suite listed in `qa/EXI
 | TC-YANDEX-003 | Offline conversion target uses the configured goal identifier | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Offline target source contract | Build conversion upload payload | Configured target/goal identifier is used; numeric goal ID is not substituted | tests/regression/test_yandex_offline_target_contract.py | 2026-08-28 | ACTIVE |
 | TC-YANDEX-004 | Direct API errors are explicit and read-only | integrations/yandex-direct | HIGH | REGRESSION | AUTOMATED | Mock Direct API responses | Fetch campaign and handle HTTP/body errors | Read failures are surfaced and no error is treated as empty success | tests/test_yandex_direct.py | 2026-08-28 | ACTIVE |
 | TC-OAUTH-003 | OAuth recovery retry is exact and count-guarded | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Exact recovery batch fixtures | Attempt a bounded recovery retry | Only the approved exact row can retry; duplicate/bulk retry is blocked | tests/test_oauth_recovery_exact_batch.py | 2026-08-28 | ACTIVE |
+| TC-ADS-001 | AI user-facing result removes external URL previews | ads/ai-ui | HIGH | REGRESSION | AUTOMATED | AI result with Dzen/arbitrary URL text | Render the AI result card | External URL/Markdown preview syntax is absent from user-facing text while provenance and buttons remain intact | tests/test_ads_ai_external_link_preview.py | 2026-09-03 | ACTIVE |
 | TC-BOT-009 | Promotion menu keeps approved navigation contract | bot/menu | HIGH | REGRESSION | AUTOMATED | Menu source and channel | Open promotion channel menu | Expected short Yandex, landing, analytics, settings and back items are present; MAX target check is not exposed | tests/regression/test_promotion_menu_contract.py | — | ACTIVE |
 | TC-BOT-010 | Promotion summaries render safe channel and Yandex state | bot/menu | HIGH | REGRESSION | AUTOMATED | Promotion summary fixtures | Render connected and unconnected summaries | Missing values use safe placeholders and no secrets/internal flags leak | tests/test_promotion_channel_summary.py, tests/test_promotion_yandex_summary.py | — | ACTIVE |
 | TC-OAUTH-001 | Yandex OAuth state and token exchange are safe | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Mock OAuth transport | Create state and exchange code | State is validated; secret is not exposed | tests/test_yandex_oauth.py | — | ACTIVE |
@@ -120,6 +121,7 @@ Statuses below reflect the latest audit evidence, not the existence of implement
 | TC-YANDEX-003 | VERIFIED_WORKING | Automated offline target regression |
 | TC-YANDEX-004 | VERIFIED_WORKING | Automated Direct API error/read-only regressions |
 | TC-OAUTH-003 | VERIFIED_WORKING | Automated exact recovery guard regression |
+| TC-ADS-001 | VERIFIED_WORKING | Targeted AI external-link sanitizer and UI preservation tests |
 | TC-OAUTH-001 | VERIFIED_WORKING | Automated mocked OAuth regression |
 | TC-OAUTH-002 | VERIFIED_WORKING | Automated Yandex callback scoping regression |
 | TC-UI-001 | WORKING_UNTESTED | Static mini app route checked; signed MAX auth flow not run |

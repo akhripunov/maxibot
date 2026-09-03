@@ -44,7 +44,8 @@ class MaxUpdate:
 class MaxClient(ABC):
     @abstractmethod
     async def edit_message(self, conversation_id: str, message_id: str, text: str,
-                           buttons: list[list[dict]], attachments: list[dict[str, Any]] | None = None) -> str: ...
+                           buttons: list[list[dict]], attachments: list[dict[str, Any]] | None = None,
+                           *, disable_link_preview: bool | None = None) -> str: ...
 
     @abstractmethod
     async def send_message(self, conversation_id: str, text: str,
@@ -109,7 +110,8 @@ class StubMaxClient(MaxClient):
         self.deliveries: list[tuple[str, str]] = []
         self.receiving = True
 
-    async def edit_message(self, conversation_id, message_id, text, buttons, attachments=None):
+    async def edit_message(self, conversation_id, message_id, text, buttons, attachments=None,
+                           *, disable_link_preview=None):
         if self.fail_edits:
             raise RuntimeError("stub edit failure")
         self.messages[(conversation_id, message_id)] = (text, buttons)
@@ -314,7 +316,8 @@ class RealMaxClient(MaxClient):
             raise
         return True
 
-    async def edit_message(self, conversation_id, message_id, text, buttons, attachments=None):
+    async def edit_message(self, conversation_id, message_id, text, buttons, attachments=None,
+                           *, disable_link_preview=None):
         import logging
         data = {"text": text}
         if "**" in text or "[Предложка]" in text:
@@ -326,7 +329,9 @@ class RealMaxClient(MaxClient):
         # a previous HOME keyboard cannot remain attached to the feed header.
         merged_attachments = list(attachments or []) + self._attachments(buttons)
         data["attachments"] = merged_attachments
-        if "vkvideo.ru" in text:
+        if disable_link_preview is not None:
+            data["disable_link_preview"] = disable_link_preview
+        elif "vkvideo.ru" in text:
             data["disable_link_preview"] = True
         logging.getLogger(__name__).warning(
             "MAX PUT /messages payload=%s",

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import socket
 import secrets
 from zoneinfo import ZoneInfo
@@ -36,6 +37,26 @@ MAXIBOT_CHANNEL_URL = "https://max.ru/channel_maxibot"
 MOSCOW = ZoneInfo("Europe/Moscow")
 YANDEX_UTM_TEMPLATE = "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_name_lat}.{campaign_id}.{gbid}&utm_content={creative_id}.{ad_id}.{retargeting_id}&utm_term={keyword}"
 PROMOTION_VIDEO_URL = f"{settings.traffic_public_base_url.rstrip('/')}/video-instruction"
+
+# AI output is evidence-backed, but human-readable fields are still
+# untrusted text at the MAX message boundary.  Keep provenance in the stored
+# validated result while preventing arbitrary external URLs from becoming
+# rich previews in the user-facing AI card.
+EXTERNAL_LINKS_IN_AI_RESULT = "NOT_ALLOWED"
+_AI_MARKDOWN_EXTERNAL_LINK_RE = re.compile(r"\[([^\]]+)\]\(\s*(?:https?://|www\.)[^)]+\)", re.IGNORECASE)
+_AI_EXTERNAL_URL_RE = re.compile(r"(?<![\w@])(?:https?://|www\.)[^\s<>()\]]+", re.IGNORECASE)
+
+
+def sanitize_ai_user_text(value: object) -> str:
+    """Remove external URL syntax from AI prose without mutating provenance."""
+    text = str(value or "—")
+    text = _AI_MARKDOWN_EXTERNAL_LINK_RE.sub(r"\1", text)
+    text = _AI_EXTERNAL_URL_RE.sub("", text)
+    # Avoid leaving awkward whitespace after removing a URL, while retaining
+    # the original wording and all non-URL evidence references.
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip() or "—"
 
 
 def support_profile_url() -> str | None:
@@ -238,7 +259,7 @@ def format_trend_block(trends: dict | None) -> str:
     for finding in findings[:3]:
         state = states.get(finding.get("trend_state"), "мало истории")
         metric = metrics.get(finding.get("metric"), finding.get("metric", "метрика"))
-        entity = finding.get("entity") or "кампания"
+        entity = sanitize_ai_user_text(finding.get("entity") or "кампания")
         relative = finding.get("relative_delta")
         change = f" ({float(relative) * 100:+.1f}%)" if relative is not None else ""
         lines.append(f"• {metric} {entity}: {state}{change}")
@@ -268,7 +289,7 @@ def format_ads_result(*, headline: str, channel_title: str, direct_connected: bo
             f"Конверсии: {_metric('conversions_7d', fact_values.get('conversions_7d'))}\n"
             f"CPA: {_metric('actual_cpa_7d', fact_values.get('actual_cpa_7d'))}\n"
             f"{maxibot_metric}\nСопоставление с конкретной рекламной кампанией: {campaign_scope}\n\n"
-            f"🤖 Вывод AI\n{diagnosis}\n\n{format_trend_block(trends)}\nРекомендация:\n{recommendation}\n"
+            f"🤖 Вывод AI\n{sanitize_ai_user_text(diagnosis)}\n\n{format_trend_block(trends)}\nРекомендация:\n{sanitize_ai_user_text(recommendation)}\n"
             f"Уверенность: {confidence_label}\n"
             f"Уверенность в данных Яндекса: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая'}.get(performance_confidence, performance_confidence))}\n"
             f"Уверенность в сопоставлении MaxiBot: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая', 'INSUFFICIENT': 'недостаточно данных'}.get(attribution_confidence, attribution_confidence))}\n\n"

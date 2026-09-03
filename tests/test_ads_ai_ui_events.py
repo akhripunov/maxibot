@@ -22,7 +22,8 @@ def test_ai_result_flow_publishes_after_commit_and_updates_saved_origin():
     assert "await publish_ai_run_event(run.id, run.status)" in main
     assert "ui_message_id: str | None = None" in service
     assert "run.ui_message_id" in runtime
-    assert "self.client.edit_message(run.ui_admin_external_id, run.ui_message_id" in runtime
+    assert "run.ui_admin_external_id,\n                run.ui_message_id," in runtime
+    assert "disable_link_preview=True" in runtime
     assert "self.client.send_message(run.ui_admin_external_id" not in runtime
 
 
