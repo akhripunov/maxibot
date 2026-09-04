@@ -183,7 +183,55 @@ def build_recommendation_quality_layer(
         if len(selected) >= 3:
             break
     primary = selected[0] if selected else {"finding_id": None, "quality": {"action_ladder": "NO_ACTION", "signal_evolution": "INSUFFICIENT_NEW_DATA"}}
-    return {"primary": primary, "secondary": selected[1:3], "candidate_count": len(candidates), "dedup_policy": "one primary plus at most two distinct findings; trends are persistence evidence", "ladder": RECOMMENDATION_LADDER, "signal_evolution_values": SIGNAL_EVOLUTION}
+    outcome_rows = measured_outcomes or []
+    outcome_state = "COMPLETED" if any(str(row.get("status", "")).upper() == "COMPLETED" for row in outcome_rows) else "PENDING" if outcome_rows else "UNKNOWN"
+    history_state = "AVAILABLE" if previous_recommendations else "UNKNOWN"
+    return {"primary": primary, "secondary": selected[1:3], "candidate_count": len(candidates), "history_state": history_state, "outcome_state": outcome_state, "dedup_policy": "one primary plus at most two distinct findings; trends are persistence evidence", "ladder": RECOMMENDATION_LADDER, "signal_evolution_values": SIGNAL_EVOLUTION}
+
+
+def build_quality_decision_snapshot(
+    dataset: dict[str, Any],
+    *,
+    quality: dict[str, Any] | None = None,
+    history_state: str | None = None,
+    outcome_state: str | None = None,
+) -> dict[str, Any]:
+    """Persist one bounded forensic view of the deterministic primary decision."""
+    quality = quality or dataset.get("recommendation_quality") or {}
+    primary = quality.get("primary") or {}
+    finding_id = primary.get("finding_id")
+    findings = list((dataset.get("findings") or {}).get("positive", [])) + list((dataset.get("findings") or {}).get("watch", []))
+    finding = next((item for item in findings if item.get("finding_id") == finding_id), None) or {}
+    decision = primary.get("quality") or {}
+    metrics = finding.get("metrics") or {}
+    safe_label = str(finding.get("label") or finding.get("entity") or "")
+    if safe_label.count(".") >= 1:
+        safe_label = safe_label.replace(".", "[.]")
+    return {
+        "version": "quality_decision_snapshot_v1",
+        "primary_candidate": {
+            "dimension": finding.get("dimension") or primary.get("dimension"),
+            "safe_label": safe_label or None,
+            "safe_entity": safe_label or None,
+            "action_level": decision.get("action_ladder", "UNKNOWN"),
+            "confidence": decision.get("confidence", "UNKNOWN"),
+            "data_sufficiency": decision.get("sample_sufficiency", "UNKNOWN"),
+            "economic_impact": decision.get("economic_impact"),
+            "sample_metrics": {key: metrics.get(key) for key in ("impressions", "clicks", "cost", "conversions", "cpa", "cpc", "ctr")},
+            "spend_share": metrics.get("cost_share"),
+            "relative_deviation": finding.get("cpa_delta_pct") or metrics.get("cpa_delta_pct"),
+            "persistence": decision.get("persistence", "UNKNOWN"),
+            "signal_evolution": decision.get("signal_evolution", "UNKNOWN"),
+            "actionability": decision.get("actionability", "UNKNOWN"),
+            "action_risk": decision.get("risk", "UNKNOWN"),
+            "WHY_THIS": decision.get("why_this"),
+            "WHY_NOW": decision.get("why_now"),
+            "NEXT_STEP": decision.get("next_step"),
+            "WAIT_CONDITION": decision.get("wait_condition"),
+        },
+        "history_state": history_state or quality.get("history_state") or "UNKNOWN",
+        "outcome_state": outcome_state or quality.get("outcome_state") or "UNKNOWN",
+    }
 
 
 def build_deterministic_findings(dataset: dict[str, Any]) -> dict[str, Any]:
@@ -203,7 +251,7 @@ def build_deterministic_findings(dataset: dict[str, Any]) -> dict[str, Any]:
                 # Findings are a second view of selected rows, not a second
                 # copy of the complete observation payload.
                 "metrics": {key: row.get(key) for key in (
-                    "cost", "conversions", "cpa", "cost_share", "conversion_share",
+                    "impressions", "clicks", "cost", "conversions", "ctr", "cpc", "cpa", "cost_share", "conversion_share",
                     "confidence", "sample_sufficiency",
                 )},
                 "sample_sufficiency": row.get("sample_sufficiency"),
@@ -436,7 +484,15 @@ def _compact_trends(trends: dict[str, Any], *, max_findings: int = 8) -> dict[st
     }
 
 
-async def build_v2_analysis_dataset(db: AsyncSession, *, campaign: AdsCampaign, cutoff: date | None = None, top_n: int = 10) -> dict[str, Any]:
+async def build_v2_analysis_dataset(
+    db: AsyncSession,
+    *,
+    campaign: AdsCampaign,
+    cutoff: date | None = None,
+    top_n: int = 10,
+    previous_recommendations: list[dict[str, Any]] | None = None,
+    measured_outcomes: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     cutoff = cutoff or (datetime.now(timezone.utc).astimezone(__import__("zoneinfo").ZoneInfo("Europe/Moscow")).date() - timedelta(days=6))
     rows = list((await db.scalars(
         select(AdsV2Observation)
@@ -579,7 +635,10 @@ async def build_v2_analysis_dataset(db: AsyncSession, *, campaign: AdsCampaign, 
         dataset["findings"],
         campaign_metrics=campaign_metrics,
         trends=dataset.get("trends", {}).get("findings", []),
+        previous_recommendations=previous_recommendations,
+        measured_outcomes=measured_outcomes,
     )
+    dataset["QUALITY_DECISION_SNAPSHOT"] = build_quality_decision_snapshot(dataset)
     comparison = {}
     finding_items = dataset["findings"].get("positive", []) + dataset["findings"].get("watch", [])
     for dimension in DIMENSIONS:

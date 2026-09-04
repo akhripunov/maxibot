@@ -1,9 +1,11 @@
 from app.ads.analysis import (
     assess_recommendation_quality,
     build_recommendation_quality_layer,
+    build_quality_decision_snapshot,
     build_report_view,
     classify_signal_evolution,
 )
+from app.bot.menu import format_ads_result
 
 
 def finding(**overrides):
@@ -103,3 +105,76 @@ def test_14_production_like_fixture_is_sanitized_and_not_hardcoded():
     quality = build_report_view(fixture)["recommendation_quality"]
     assert quality["primary"]["entity"] == "production-placement"
     assert "yandex" not in str(quality).lower()
+
+
+def test_15_snapshot_is_bounded_and_has_primary_trace_fields():
+    dataset = {"findings": {"positive": [finding()], "watch": []}, "recommendation_quality": build_recommendation_quality_layer({"positive": [finding()], "watch": []})}
+    snapshot = build_quality_decision_snapshot(dataset)
+    candidate = snapshot["primary_candidate"]
+    assert snapshot["version"] == "quality_decision_snapshot_v1"
+    assert candidate["safe_entity"] == "fixture-placement"
+    assert candidate["WHY_THIS"] and candidate["NEXT_STEP"]
+    assert "sections" not in str(snapshot)
+
+
+def test_16_snapshot_uses_the_same_quality_profile_not_a_second_score():
+    quality = build_recommendation_quality_layer({"positive": [finding()], "watch": []}, previous_recommendations=[{"status": "OPEN"}])
+    snapshot = build_quality_decision_snapshot({"findings": {"positive": [finding()], "watch": []}}, quality=quality)
+    assert snapshot["primary_candidate"]["action_level"] == quality["primary"]["quality"]["action_ladder"]
+    assert snapshot["primary_candidate"]["signal_evolution"] == quality["primary"]["quality"]["signal_evolution"]
+
+
+def test_17_snapshot_preserves_unknown_without_coercing_to_zero():
+    item = finding(sample_sufficiency="INSUFFICIENT", impact=0, confidence="UNKNOWN")
+    quality = build_recommendation_quality_layer({"positive": [item], "watch": []})
+    snapshot = build_quality_decision_snapshot({"findings": {"positive": [item], "watch": []}}, quality=quality)
+    assert snapshot["primary_candidate"]["data_sufficiency"] == "INSUFFICIENT"
+    assert snapshot["primary_candidate"]["confidence"] == "UNKNOWN"
+
+
+def test_18_pending_outcome_is_not_rendered_as_completed():
+    quality = build_recommendation_quality_layer({"positive": [finding()], "watch": []}, measured_outcomes=[{"status": "PENDING"}])
+    snapshot = build_quality_decision_snapshot({"findings": {"positive": [finding()], "watch": []}}, quality=quality)
+    body = format_ads_result(headline="done", channel_title="Канал", direct_connected=True, campaign_name="campaign", ai_status="done", checked_at=None, fact_values={}, completed=True, v2_analysis={"QUALITY_DECISION_SNAPSHOT": snapshot})
+    assert "Измерение результата ещё ожидается" in body
+    assert "Измеренный результат доступен" not in body
+
+
+def test_19_history_state_is_only_shown_when_known():
+    unknown = build_quality_decision_snapshot({"findings": {"positive": [finding()], "watch": []}})
+    assert unknown["history_state"] == "UNKNOWN"
+    known = build_quality_decision_snapshot({"findings": {"positive": [finding()], "watch": []}}, history_state="AVAILABLE")
+    assert known["history_state"] == "AVAILABLE"
+
+
+def test_20_wait_condition_is_omitted_when_not_known():
+    quality = build_recommendation_quality_layer({"positive": [finding()], "watch": []})
+    snapshot = build_quality_decision_snapshot({"findings": {"positive": [finding()], "watch": []}}, quality=quality)
+    assert snapshot["primary_candidate"]["WAIT_CONDITION"] is None
+
+
+def test_21_renderer_humanizes_action_level_and_keeps_safe_label():
+    item = finding()
+    quality = build_recommendation_quality_layer({"positive": [item], "watch": []})
+    snapshot = build_quality_decision_snapshot({"findings": {"positive": [item], "watch": []}}, quality=quality)
+    body = format_ads_result(headline="done", channel_title="Канал", direct_connected=True, campaign_name="campaign", ai_status="done", checked_at=None, fact_values={}, completed=True, v2_analysis={"QUALITY_DECISION_SNAPSHOT": snapshot})
+    assert "Можно рассмотреть изменение" in body
+    assert "CONSIDER_CHANGE" not in body
+
+
+def test_22_legacy_renderer_without_snapshot_remains_safe():
+    body = format_ads_result(headline="done", channel_title="Канал", direct_connected=True, campaign_name="campaign", ai_status="done", checked_at=None, fact_values={}, completed=True, v2_analysis={})
+    assert "Решение:" not in body
+
+
+def test_23_snapshot_history_and_outcome_states_are_profile_metadata():
+    quality = build_recommendation_quality_layer({"positive": [finding()], "watch": []}, previous_recommendations=[{"status": "OPEN"}], measured_outcomes=[{"status": "PENDING"}])
+    snapshot = build_quality_decision_snapshot({"findings": {"positive": [finding()], "watch": []}}, quality=quality)
+    assert snapshot["history_state"] == "AVAILABLE"
+    assert snapshot["outcome_state"] == "PENDING"
+
+
+def test_24_snapshot_does_not_contain_raw_ai_or_ads_dataset():
+    snapshot = build_quality_decision_snapshot({"findings": {"positive": [finding()], "watch": []}})
+    assert "raw_structured_output_json" not in str(snapshot)
+    assert "daily_rows" not in str(snapshot)

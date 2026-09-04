@@ -104,7 +104,13 @@ async def _closed_loop_context(db: AsyncSession, channel_id: str, campaign_id: s
     return {"PREVIOUS_RECOMMENDATIONS": previous, "MEASURED_OUTCOMES": measured}
 
 async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Channel, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime) -> AdsAiRun:
-    dataset = await build_v2_analysis_dataset(db, campaign=campaign)
+    closed_loop = await _closed_loop_context(db, channel.id, campaign.id)
+    dataset = await build_v2_analysis_dataset(
+        db,
+        campaign=campaign,
+        previous_recommendations=closed_loop["PREVIOUS_RECOMMENDATIONS"],
+        measured_outcomes=closed_loop["MEASURED_OUTCOMES"],
+    )
     maxibot_metrics = await build_maxibot_metrics(db, channel_id=channel.id, end_date=report_date_to)
     aligned = {**traffic, "visits": maxibot_metrics["7d"]["visits"], "EXACT": 0, "HIGH": 0, "new_members": 0}
     aligned["EXACT"] = int(maxibot_metrics["7d"]["qualified_memberships"])
@@ -120,8 +126,8 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Cha
     # does not repeat the same trend object a second time.
     context_dataset = json.loads(json.dumps(dataset, ensure_ascii=False))
     context_dataset.pop("trends", None)
-    facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "TRENDS": dataset.get("trends", {}), "V2_ANALYSIS": context_dataset}
-    facts.update(await _closed_loop_context(db, channel.id, campaign.id))
+    facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "TRENDS": dataset.get("trends", {}), "V2_ANALYSIS": context_dataset, "QUALITY_DECISION_SNAPSHOT": dataset.get("QUALITY_DECISION_SNAPSHOT")}
+    facts.update(closed_loop)
     membership_rate = fact_set.maxibot_qualified_membership_rate
     facts["confidence_axes"] = {
         "performance_confidence": "HIGH" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 10 and dataset["campaign_summary"]["metrics"].get("clicks", 0) >= 100 else "MEDIUM" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 3 else "LOW",

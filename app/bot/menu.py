@@ -457,6 +457,70 @@ def _structured_recommendation(v2_analysis: dict | None, fallback: str) -> str:
     return f"В первую очередь проверить площадку {label}: {comparison}{share}.\nПока только наблюдать и анализировать — ничего автоматически не исключать и не менять."
 
 
+_QUALITY_ACTION_LABELS = {
+    "WATCH": "Наблюдать",
+    "INVESTIGATE": "Проверить",
+    "PLACEMENT_REVIEW": "Проверить",
+    "CONSIDER_CHANGE": "Можно рассмотреть изменение",
+    "STRONG_RECOMMENDATION": "Есть веские основания для изменения",
+    "NO_ACTION": "Ничего менять не нужно",
+}
+_QUALITY_HISTORY_LABELS = {"AVAILABLE": "история доступна", "UNKNOWN": "история не подтверждена"}
+_QUALITY_EVOLUTION_LABELS = {
+    "NEW": "новый сигнал",
+    "PERSISTENT": "сигнал сохраняется",
+    "STRENGTHENING": "сигнал усиливается",
+    "WEAKENING": "сигнал ослабевает",
+    "RESOLVED": "сигнал разрешился",
+}
+
+
+def _quality_decision_snapshot(v2_analysis: dict | None) -> dict | None:
+    snapshot = (v2_analysis or {}).get("QUALITY_DECISION_SNAPSHOT")
+    if isinstance(snapshot, dict) and isinstance(snapshot.get("primary_candidate"), dict):
+        return snapshot
+    return None
+
+
+def _format_quality_decision_snapshot(snapshot: dict | None) -> str:
+    if not snapshot:
+        return ""
+    candidate = snapshot.get("primary_candidate") or {}
+    action = _QUALITY_ACTION_LABELS.get(str(candidate.get("action_level") or ""))
+    if not action:
+        return ""
+    lines = [f"Решение: {action}"]
+    for key in ("WHY_THIS", "WHY_NOW"):
+        value = candidate.get(key) or candidate.get(key.lower())
+        if value:
+            lines.append(str(value))
+    sufficiency = candidate.get("data_sufficiency")
+    if sufficiency == "SUFFICIENT":
+        lines.append("Данных достаточно для такой проверки.")
+    elif sufficiency in {"WEAK_SIGNAL", "PARTIAL"}:
+        lines.append("Данные дают сигнал, но требуют дополнительной проверки.")
+    elif sufficiency not in {None, "UNKNOWN", "INSUFFICIENT"}:
+        lines.append("Достаточность данных не подтверждена.")
+    next_step = candidate.get("NEXT_STEP") or candidate.get("next_step")
+    if next_step:
+        lines.append(str(next_step))
+    wait = candidate.get("WAIT_CONDITION") or candidate.get("wait_condition")
+    if wait:
+        lines.append(f"Условие ожидания: {wait}")
+    evolution = _QUALITY_EVOLUTION_LABELS.get(str(candidate.get("signal_evolution") or ""))
+    if evolution:
+        lines.append(f"Динамика сигнала: {evolution}")
+    history = snapshot.get("history_state")
+    if history and history != "UNKNOWN":
+        lines.append(f"История: {_QUALITY_HISTORY_LABELS.get(history, 'подтверждена')}")
+    outcome = snapshot.get("outcome_state")
+    if outcome == "PENDING":
+        lines.append("Измерение результата ещё ожидается.")
+    elif outcome == "COMPLETED":
+        lines.append("Измеренный результат доступен.")
+    return "\n".join(lines)
+
+
 def format_ads_result(*, headline: str, channel_title: str, direct_connected: bool, campaign_name: str | None, ai_status: str, checked_at, fact_values: dict, diagnosis: str = "—", recommendation: str = "—", confidence: str = "—", performance_confidence: str = "—", attribution_confidence: str = "—", completed: bool = False, trends: dict | None = None, campaign_specific_matching: str | bool = "UNKNOWN", v2_analysis: dict | None = None) -> str:
     """Single user-facing renderer for every AI dashboard/result path."""
     checked = checked_at.astimezone(MOSCOW).strftime("%d.%m %H:%M") if checked_at else "—"
@@ -480,7 +544,7 @@ def format_ads_result(*, headline: str, channel_title: str, direct_connected: bo
             f"Конверсии: {_metric('conversions_7d', fact_values.get('conversions_7d'))}\n"
             f"CPA: {_metric('actual_cpa_7d', fact_values.get('actual_cpa_7d'))}\n"
             f"{maxibot_metric}\nСопоставление с конкретной рекламной кампанией: {campaign_scope}\n\n"
-            f"🤖 Вывод AI\n{_structured_summary(v2_analysis, fact_values, diagnosis)}\n\n{format_primary_findings(v2_analysis)}{format_dimension_coverage(v2_analysis)}{format_trend_block(trends, campaign_name)}\nРекомендация:\n{_structured_recommendation(v2_analysis, recommendation)}\n"
+            f"🤖 Вывод AI\n{_structured_summary(v2_analysis, fact_values, diagnosis)}\n\n{format_primary_findings(v2_analysis)}{format_dimension_coverage(v2_analysis)}{format_trend_block(trends, campaign_name)}\nРекомендация:\n{_structured_recommendation(v2_analysis, recommendation)}\n{_format_quality_decision_snapshot(_quality_decision_snapshot(v2_analysis))}\n"
             f"Уверенность: {confidence_label}\n"
             f"Уверенность в данных Яндекса: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая'}.get(performance_confidence, performance_confidence))}\n"
             f"Уверенность в сопоставлении MaxiBot: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая', 'INSUFFICIENT': 'недостаточно данных'}.get(attribution_confidence, attribution_confidence))}\n\n"
