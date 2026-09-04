@@ -5,7 +5,63 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AdsV2Outcome
+from app.db.models import AdsAiRun, AdsRecommendation, AdsV2Outcome
+
+OUTCOME_HORIZONS = (("24h", timedelta(hours=24)), ("72h", timedelta(hours=72)), ("7d", timedelta(days=7)))
+OUTCOME_METRICS = ("impressions_7d", "clicks_7d", "cost_7d", "conversions_7d")
+
+
+def outcome_metrics_sufficient(facts: dict | None) -> bool:
+    """Return true only when all campaign totals needed for a delta are known."""
+    values = (facts or {}).get("facts", facts or {})
+    return all(values.get(key) is not None for key in OUTCOME_METRICS)
+
+
+async def ensure_outcome_checkpoints(
+    db: AsyncSession,
+    recommendation: AdsRecommendation,
+    *,
+    baseline_snapshot_id: str | None = None,
+) -> int:
+    """Idempotently create the three advisory checkpoints from recommendation time."""
+    existing = {
+        row.horizon
+        for row in (await db.scalars(select(AdsV2Outcome).where(AdsV2Outcome.recommendation_id == recommendation.id))).all()
+    }
+    if baseline_snapshot_id is None and recommendation.ai_run_id:
+        ai = await db.get(AdsAiRun, recommendation.ai_run_id)
+        baseline_snapshot_id = ai.input_snapshot_id if ai else None
+    created = 0
+    created_at = recommendation.created_at
+    if created_at is None:
+        raise ValueError("RECOMMENDATION_CREATED_AT_REQUIRED")
+    for horizon, delta in OUTCOME_HORIZONS:
+        if horizon in existing:
+            continue
+        db.add(AdsV2Outcome(
+            recommendation_id=recommendation.id,
+            horizon=horizon,
+            due_at=created_at + delta,
+            execution_status="RECOMMENDATION_ONLY",
+            baseline_snapshot_id=baseline_snapshot_id,
+        ))
+        created += 1
+    if created:
+        await db.flush()
+    return created
+
+
+async def backfill_missing_outcome_checkpoints(db: AsyncSession, *, limit: int = 100) -> int:
+    """Repair only missing checkpoint rows; never invent measured outcomes."""
+    recommendations = list((await db.scalars(
+        select(AdsRecommendation).order_by(AdsRecommendation.created_at).limit(limit)
+    )).all())
+    created = 0
+    for recommendation in recommendations:
+        created += await ensure_outcome_checkpoints(db, recommendation)
+    if created:
+        await db.commit()
+    return created
 
 
 async def claim_due_outcomes(db: AsyncSession, *, now: datetime | None = None, limit: int = 20) -> list[AdsV2Outcome]:

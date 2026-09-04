@@ -33,6 +33,11 @@ def bound_ai_context(context: dict[str, Any], *, target_bytes: int, max_bytes: i
         if memories:
             memories.pop()
             return True
+        for key in ("MEASURED_OUTCOMES", "PREVIOUS_RECOMMENDATIONS"):
+            rows = facts.get(key) or []
+            if rows:
+                rows.pop()
+                return True
         for name in ("criteria", "demographics", "device", "region", "placement", "ad", "ad_group"):
             section = (v2.get("sections") or {}).get(name) or {}
             rows = section.get("notable") or []

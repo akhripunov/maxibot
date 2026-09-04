@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.facts import build_campaign_facts
-from app.ads.outcomes import claim_due_outcomes, mark_outcome_completed, mark_outcome_retryable
+from app.ads.outcomes import backfill_missing_outcome_checkpoints, claim_due_outcomes, mark_outcome_completed, mark_outcome_retryable, outcome_metrics_sufficient
 from app.ads.v2 import collect_yandex_v2
 from app.db.models import Admin, AdsAiRun, AdsCampaign, AdsRecommendation, AdsSnapshot, AdsV2Outcome, Channel
 from app.core.config import settings
@@ -19,6 +19,8 @@ MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 
 
 async def collect_one_outcome(db: AsyncSession, outcome: AdsV2Outcome) -> None:
+    if outcome.due_at > datetime.now(timezone.utc):
+        raise ValueError("OUTCOME_NOT_DUE")
     recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
     ai = await db.get(AdsAiRun, recommendation.ai_run_id) if recommendation and recommendation.ai_run_id else None
     channel = await db.get(Channel, recommendation.channel_id) if recommendation else None
@@ -41,6 +43,8 @@ async def collect_one_outcome(db: AsyncSession, outcome: AdsV2Outcome) -> None:
         baseline = await db.get(AdsSnapshot, outcome.baseline_snapshot_id) if outcome.baseline_snapshot_id else None
         before = json.loads(baseline.facts_json).get("facts", {}) if baseline else {}
         after = json.loads(periodic.facts_json).get("facts", {})
+        if not baseline or not outcome_metrics_sufficient(after):
+            raise ValueError("OUTCOME_AFTER_METRICS_INSUFFICIENT")
         delta = {key: {"before": before.get(key), "after": after.get(key)} for key in ("impressions_7d", "clicks_7d", "cost_7d", "conversions_7d", "actual_cpa_7d", "ctr_7d", "conversion_rate_7d")}
         delta.update({"causal_interpretation": "NOT_AVAILABLE", "interpretation": "OBSERVED_AFTER_RECOMMENDATION", "followup_source": "PERIODIC_COLLECTION", "observation_at": periodic.created_at.isoformat()})
         await mark_outcome_completed(db, outcome, followup_snapshot_id=periodic.id, delta=delta)
@@ -65,12 +69,16 @@ async def collect_one_outcome(db: AsyncSession, outcome: AdsV2Outcome) -> None:
     baseline = await db.get(AdsSnapshot, outcome.baseline_snapshot_id) if outcome.baseline_snapshot_id else None
     before = json.loads(baseline.facts_json).get("facts", {}) if baseline else {}
     after = facts.get("facts", {})
+    if not baseline or not outcome_metrics_sufficient(after):
+        raise ValueError("OUTCOME_AFTER_METRICS_INSUFFICIENT")
     delta = {key: {"before": before.get(key), "after": after.get(key)} for key in ("impressions_7d", "clicks_7d", "cost_7d", "conversions_7d", "actual_cpa_7d", "ctr_7d", "conversion_rate_7d")}
     delta.update({"causal_interpretation": "NOT_AVAILABLE", "interpretation": "OBSERVED_AFTER_RECOMMENDATION", "followup_source": "ON_DEMAND_FETCH"})
     await mark_outcome_completed(db, outcome, followup_snapshot_id=snapshot.id, delta=delta)
 
 
 async def process_due_outcomes(session_factory) -> int:
+    async with session_factory() as db:
+        await backfill_missing_outcome_checkpoints(db)
     async with session_factory() as db:
         due = await claim_due_outcomes(db)
         ids = [item.id for item in due]

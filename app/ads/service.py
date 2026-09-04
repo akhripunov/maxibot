@@ -12,6 +12,7 @@ from app.ads.health import data_health, sufficiency
 from app.ads.llm import PROMPT_VERSION, SCHEMA_VERSION, assert_safe_context, evidence_registry, policy, provider_from_settings, validate_output
 from app.ads.memory import create_candidates, retrieve
 from app.ads.codex_worker import WAITING
+from app.ads.outcomes import ensure_outcome_checkpoints
 from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v2
 from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_maxibot_metrics
@@ -57,6 +58,51 @@ async def _mapped(db: AsyncSession, channel_id: str) -> list[str]:
 def _context(campaign: AdsCampaign | None, facts: dict[str, Any], suff: str, missing: list[str], memories: list[AdsMemory]) -> dict[str, Any]:
     return {"context_version": 2, "CURRENT_CAMPAIGN": {"id": campaign.id, "name": campaign.name, "state": campaign.state} if campaign else None, "FACTS": facts, "DATA_SUFFICIENCY": suff, "RECENT_HISTORY": [], "RETRIEVED_PRIVATE_MEMORIES": [{"id": x.id, "status": x.status, "statement": x.content, "evidence_ids": json.loads(x.evidence_ids_json)} for x in memories], "MISSING_DATA": missing, "ALLOWED_RECOMMENDATION_TYPES": ["HOLD", "MONITOR", "INVESTIGATE", "TEST", "SCALE_CANDIDATE", "REDUCE_CANDIDATE", "PLACEMENT_REVIEW", "ATTRIBUTION_REVIEW", "CREATIVE_REVIEW", "TARGETING_REVIEW", "OBSERVE", "REVIEW_GOAL", "REVIEW_ATTRIBUTION", "REVIEW_CREATIVE", "REVIEW_TARGETING", "REVIEW_PLACEMENTS", "INSUFFICIENT_DATA"], "SYSTEM_CONSTRAINTS": {"direct_writes": False, "autopilot": False, "global_learning": False, "execution_allowed": False}}
 
+
+async def _closed_loop_context(db: AsyncSession, channel_id: str, campaign_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Return bounded recommendation/outcome history without attribution claims."""
+    recommendations = list((await db.scalars(
+        select(AdsRecommendation)
+        .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
+        .where(AdsRecommendation.channel_id == channel_id, AdsAiRun.campaign_id == campaign_id)
+        .order_by(AdsRecommendation.created_at.desc())
+        .limit(5)
+    )).all())
+    outcomes = list((await db.scalars(
+        select(AdsV2Outcome)
+        .join(AdsRecommendation, AdsRecommendation.id == AdsV2Outcome.recommendation_id)
+        .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
+        .where(AdsRecommendation.channel_id == channel_id, AdsAiRun.campaign_id == campaign_id)
+        .order_by(AdsV2Outcome.due_at.desc())
+        .limit(15)
+    )).all())
+    previous = [{
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "status": item.status,
+        "priority": item.priority,
+        "action_code": item.action_code,
+        "confidence": item.confidence,
+        "data_sufficiency": item.data_sufficiency,
+        "execution_status": "RECOMMENDATION_ONLY",
+    } for item in recommendations]
+    measured = []
+    for item in outcomes:
+        delta = None
+        if item.observed_delta_json:
+            try:
+                delta = json.loads(item.observed_delta_json)
+            except (TypeError, ValueError):
+                delta = None
+        measured.append({
+            "horizon": item.horizon,
+            "due_at": item.due_at.isoformat() if item.due_at else None,
+            "status": item.status,
+            "availability": "COMPLETED" if item.status == "COMPLETED" and delta is not None else "PENDING" if item.status in {"PENDING", "PROCESSING", "RETRYABLE_FAILED"} else "NOT_AVAILABLE",
+            "execution_status": item.execution_status,
+            "observed_delta": delta,
+        })
+    return {"PREVIOUS_RECOMMENDATIONS": previous, "MEASURED_OUTCOMES": measured}
+
 async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Channel, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime) -> AdsAiRun:
     dataset = await build_v2_analysis_dataset(db, campaign=campaign)
     maxibot_metrics = await build_maxibot_metrics(db, channel_id=channel.id, end_date=report_date_to)
@@ -75,6 +121,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Cha
     context_dataset = json.loads(json.dumps(dataset, ensure_ascii=False))
     context_dataset.pop("trends", None)
     facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "TRENDS": dataset.get("trends", {}), "V2_ANALYSIS": context_dataset}
+    facts.update(await _closed_loop_context(db, channel.id, campaign.id))
     membership_rate = fact_set.maxibot_qualified_membership_rate
     facts["confidence_axes"] = {
         "performance_confidence": "HIGH" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 10 and dataset["campaign_summary"]["metrics"].get("clicks", 0) >= 100 else "MEDIUM" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 3 else "LOW",
@@ -136,7 +183,8 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Cha
                 verdict = policy(valid, suff)
                 ai.status, ai.validated_output_json, ai.policy_result_json = "COMPLETED", json.dumps(valid, ensure_ascii=False), json.dumps(verdict)
                 rec = valid["recommendation"]
-                db.add(AdsRecommendation(channel_id=channel.id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict)))
+                recommendation = AdsRecommendation(channel_id=channel.id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict))
+                db.add(recommendation); await db.flush(); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
                 await create_candidates(db, channel_id=channel.id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids)
         except Exception as exc:
             ai.status, ai.validation_error = "FAILED", type(exc).__name__
@@ -267,8 +315,7 @@ async def persist_development_result(db: AsyncSession, *, channel_id: str, outpu
     recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict))
     db.add(recommendation)
     await db.flush()
-    for horizon, delta in (("24h", timedelta(hours=24)), ("72h", timedelta(hours=72)), ("7d", timedelta(days=7))):
-        db.add(AdsV2Outcome(recommendation_id=recommendation.id, horizon=horizon, due_at=ai.completed_at + delta, execution_status="RECOMMENDATION_ONLY", baseline_snapshot_id=ai.input_snapshot_id))
+    await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=ai.input_snapshot_id)
     campaign_id = (context.get("CURRENT_CAMPAIGN") or {}).get("id")
     await create_candidates(db, channel_id=channel_id, campaign_id=campaign_id, ai_run_id=ai.id, snapshot_id=ai.input_snapshot_id, candidates=valid["memory_candidates"], known_evidence=evidence_ids)
     await db.commit(); return ai

@@ -264,7 +264,9 @@ def format_trend_block(trends: dict | None, campaign_name: str | None = None) ->
         state = states.get(finding.get("trend_state"), "мало истории")
         metric = metrics.get(finding.get("metric"), finding.get("metric", "метрика"))
         labels = {"CAMPAIGN": campaign_name or "кампания", "AD": "объявление", "AD_GROUP": "группа объявлений", "PLACEMENT": "площадка", "REGION": "регион", "DEVICE": "устройство", "DEMOGRAPHICS": "демография", "CRITERIA": "критерий"}
-        entity = str(finding.get("entity") or "")
+        entity = humanize_entity_label(finding.get("dimension"), finding.get("entity"))
+        if finding.get("dimension") == "CAMPAIGN":
+            entity = "кампании"
         if not entity or entity.isdigit() or (len(entity) > 40 and entity.count("-") >= 2):
             entity = labels.get(finding.get("dimension"), "сущность")
         relative = finding.get("relative_delta")
@@ -277,13 +279,50 @@ def _format_finding_value(value, decimals: int = 2) -> str:
     return _ru_number(value, decimals)
 
 
+def humanize_entity_label(dimension: str | None, value: object) -> str:
+    """Convert provider identifiers to stable Russian labels at the UI edge."""
+    raw = str(value or "")
+    if str(dimension or "").upper() == "DEMOGRAPHICS":
+        age_match = re.search(r"AGE_([0-9]+)(?:_([0-9]+)|_PLUS|\+)?", raw)
+        gender = re.search(r"GENDER_([A-Z]+)", raw)
+        gender_label = {"FEMALE": "Женщины", "MALE": "Мужчины"}.get(gender.group(1), "Пользователи") if gender else "Пользователи"
+        if age_match:
+            low, high = age_match.group(1), age_match.group(2)
+            age = f"{low}–{high}" if high else f"{low}+"
+            return f"{gender_label} {age}"
+        return "Демографический сегмент"
+    mappings = {
+        "DEVICE": {"MOBILE": "Мобильные устройства", "DESKTOP": "Компьютеры", "TABLET": "Планшеты"},
+        "REGION": {"RU": "Россия"},
+    }
+    return mappings.get(str(dimension or "").upper(), {}).get(raw, raw)
+
+
+_DOMAIN_LABEL_RE = re.compile(r"(?<![\w])([a-z0-9-]+)\.([a-z]{2,63})(?![\w.-])", re.IGNORECASE)
+
+
+def safe_max_entity_label(label: object) -> str:
+    """Keep placement names recognizable while preventing MAX auto-linking."""
+    text = str(label or "")
+    if re.fullmatch(r"(?:[a-z0-9-]+\.)+[a-z]{2,63}", text, flags=re.IGNORECASE):
+        return text.replace(".", "[.]")
+    return _DOMAIN_LABEL_RE.sub(r"\1[.]\2", text)
+
+
+def _count_phrase(value: int, one: str, few: str, many: str) -> str:
+    value = int(value)
+    mod100 = value % 100
+    form = many if 11 <= mod100 <= 14 else one if value % 10 == 1 else few if value % 10 in {2, 3, 4} else many
+    return f"{value} {form}"
+
+
 def format_primary_findings(v2_analysis: dict | None) -> str:
     """Render material deterministic findings with grounded entity labels."""
     findings = build_report_view(v2_analysis or {}).get("primary_findings") or []
     lines = []
     for finding in findings[:3]:
         dimension = finding.get("dimension")
-        label = str(finding.get("label") or finding.get("entity") or "сущность")
+        label = safe_max_entity_label(humanize_entity_label(dimension, finding.get("label") or finding.get("entity") or "сущность"))
         metrics = finding.get("metrics") or {}
         cpa = metrics.get("cpa")
         campaign_cpa = finding.get("campaign_cpa")
@@ -303,15 +342,25 @@ def format_primary_findings(v2_analysis: dict | None) -> str:
 def format_dimension_coverage(v2_analysis: dict | None) -> str:
     """Show available/included dimension counts without raw JSON."""
     comparison = build_report_view(v2_analysis or {}).get("comparison") or {}
-    labels = {"ad_group": "группы", "ad": "объявления", "placement": "площадки", "region": "регионы", "device": "устройства", "demographics": "демография", "criteria": "критерии"}
+    labels = {"ad_group": "Группы", "ad": "Объявления", "placement": "Площадки", "region": "Регионы", "device": "Устройства", "demographics": "Демография", "criteria": "Критерии"}
     parts = []
     for key in ("ad_group", "ad", "placement", "region", "device", "demographics", "criteria"):
         item = comparison.get(key) or {}
         if item.get("available"):
-            state = item.get("state")
-            suffix = " (одно объявление — сравнение недоступно)" if key == "ad" and state == "SINGLE_ENTITY" else ""
-            parts.append(f"{labels[key]} {item.get('included', 0)}/{item.get('available', 0)}{suffix}")
-    return "🧭 Проверено: " + ", ".join(parts) + ".\n" if parts else ""
+            available = item.get("available")
+            selected = item.get("included")
+            material = item.get("material_findings")
+            detail = f"доступно {available}"
+            if selected not in (None, 0):
+                detail += f" · отобрано {selected}"
+            if material not in (None, 0):
+                detail += f" · {_count_phrase(material, 'значимый вывод', 'значимых вывода', 'значимых выводов')}"
+            elif material == 0:
+                detail += " · значимых выводов нет"
+            if key == "ad" and item.get("state") == "SINGLE_ENTITY":
+                detail += " · сравнивать креативы пока не с чем"
+            parts.append(f"• {labels[key]}: {detail}")
+    return "🧭 Что проверил ИИ-директолог\n" + "\n".join(parts) + "\n" if parts else ""
 
 
 def normalize_ai_text(text: str, fact_values: dict) -> str:
@@ -320,6 +369,10 @@ def normalize_ai_text(text: str, fact_values: dict) -> str:
         return text
     for technical, readable in (("performance_confidence", "уверенность в данных Яндекса"), ("WEAK_SIGNAL", "слабый сигнал"), ("VOLATILE", "нестабильно")):
         text = text.replace(technical, readable)
+    text = re.sub(r"attribution_confidence\s*[:=]?\s*(LOW|MEDIUM|HIGH|INSUFFICIENT)", lambda match: f"уверенность в сопоставлении MaxiBot: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая', 'INSUFFICIENT': 'недостаточно данных'}.get(match.group(1).upper(), match.group(1)))}", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bconfidence\b", "уверенность", text, flags=re.IGNORECASE)
+    text = re.sub(r"\breview\b", "проверка", text, flags=re.IGNORECASE)
+    text = text.replace("здоровый результат", "достаточные результаты")
     text = text.replace("при высокой уверенность", "при высокой уверенности")
     text = text.replace("при высокой уверенности в данных Яндекса", "при высокой уверенности в данных Яндекса")
     text = re.sub(r"\bread-only\b", "проверку", text, flags=re.IGNORECASE)
@@ -341,10 +394,54 @@ def normalize_ai_text(text: str, fact_values: dict) -> str:
     return re.sub(r"Атрибуция MaxiBot ограничена:.*?(?=\.\s|$)", canonical, text, count=1)
 
 
-def _user_facing_ai_text(text: str) -> str:
+def _user_facing_ai_text(text: str, v2_analysis: dict | None = None) -> str:
     """Финальный безопасный и локализованный проход для текста AI."""
     rendered = re.sub(r"\bread-only\b", "проверку", sanitize_ai_user_text(text or "—"), flags=re.IGNORECASE)
-    return re.sub(r"при высокой уверенность", "при высокой уверенности", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"при высокой уверенность", "при высокой уверенности", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"attribution_confidence\s*[:=]?\s*(LOW|MEDIUM|HIGH|INSUFFICIENT|низкая|средняя|высокая)", lambda match: f"уверенность в сопоставлении MaxiBot: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая', 'INSUFFICIENT': 'недостаточно данных'}.get(match.group(1).upper(), match.group(1)))}", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"\bconfidence\b", "уверенность", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"\breview\b", "проверка", rendered, flags=re.IGNORECASE)
+    rendered = rendered.replace("здоровый результат", "достаточные результаты")
+    primary = build_report_view(v2_analysis or {}).get("primary_findings") or []
+    placement = next((item for item in primary if item.get("dimension") == "PLACEMENT"), None)
+    if placement:
+        label = safe_max_entity_label(humanize_entity_label("PLACEMENT", placement.get("label") or placement.get("entity")))
+        rendered = re.sub(r"(?:размещение|площадка)\s+внешний источник", f"площадка {label}", rendered, flags=re.IGNORECASE)
+        rendered = rendered.replace("внешний источник", f"площадка {label}")
+    return re.sub(r"(CPA\s+\d+(?:[,.]\d+)?)\b(?!\s*₽)", r"\1 ₽", rendered, flags=re.IGNORECASE)
+
+
+def _structured_summary(v2_analysis: dict | None, fact_values: dict, fallback: str) -> str:
+    view = build_report_view(v2_analysis or {})
+    findings = view.get("primary_findings") or []
+    placement = next((item for item in findings if item.get("dimension") == "PLACEMENT"), None)
+    if not placement:
+        return _user_facing_ai_text(fallback, v2_analysis)
+    metrics = placement.get("metrics") or {}
+    label = safe_max_entity_label(humanize_entity_label("PLACEMENT", placement.get("label") or placement.get("entity")))
+    cpa = metrics.get("cpa")
+    baseline = placement.get("campaign_cpa")
+    conversions = fact_values.get("conversions_7d")
+    parts = []
+    if conversions is not None and fact_values.get("actual_cpa_7d") is not None:
+        parts.append(f"По данным Яндекса кампания показывает {_ru_number(conversions, 0)} конверсий за 7 дней при CPA {_ru_number(fact_values['actual_cpa_7d'])} ₽.")
+    if cpa is not None and baseline is not None:
+        share = f", доля расходов {_ru_number(float(metrics.get('cost_share')) * 100)}%" if metrics.get("cost_share") is not None else ""
+        parts.append(f"Главный сигнал для проверки — площадка {label}: CPA {_ru_number(cpa)} ₽ против {_ru_number(baseline)} ₽ по кампании{share}.")
+    return "\n\n".join(parts) or _user_facing_ai_text(fallback, v2_analysis)
+
+
+def _structured_recommendation(v2_analysis: dict | None, fallback: str) -> str:
+    view = build_report_view(v2_analysis or {})
+    placement = next((item for item in (view.get("primary_findings") or []) if item.get("dimension") == "PLACEMENT"), None)
+    if not placement:
+        return _user_facing_ai_text(fallback, v2_analysis)
+    metrics = placement.get("metrics") or {}
+    label = safe_max_entity_label(humanize_entity_label("PLACEMENT", placement.get("label") or placement.get("entity")))
+    cpa, baseline = metrics.get("cpa"), placement.get("campaign_cpa")
+    comparison = f"её CPA {_ru_number(cpa)} ₽ выше среднего по кампании" if cpa is not None and baseline is not None else "по ней есть значимый сигнал для проверки"
+    share = f", а доля расходов составляет {_ru_number(float(metrics.get('cost_share')) * 100)}%" if metrics.get("cost_share") is not None else ""
+    return f"В первую очередь проверить площадку {label}: {comparison}{share}.\nПока только наблюдать и анализировать — ничего автоматически не исключать и не менять."
 
 
 def format_ads_result(*, headline: str, channel_title: str, direct_connected: bool, campaign_name: str | None, ai_status: str, checked_at, fact_values: dict, diagnosis: str = "—", recommendation: str = "—", confidence: str = "—", performance_confidence: str = "—", attribution_confidence: str = "—", completed: bool = False, trends: dict | None = None, campaign_specific_matching: str | bool = "UNKNOWN", v2_analysis: dict | None = None) -> str:
@@ -370,7 +467,7 @@ def format_ads_result(*, headline: str, channel_title: str, direct_connected: bo
             f"Конверсии: {_metric('conversions_7d', fact_values.get('conversions_7d'))}\n"
             f"CPA: {_metric('actual_cpa_7d', fact_values.get('actual_cpa_7d'))}\n"
             f"{maxibot_metric}\nСопоставление с конкретной рекламной кампанией: {campaign_scope}\n\n"
-            f"🤖 Вывод AI\n{_user_facing_ai_text(diagnosis)}\n\n{format_primary_findings(v2_analysis)}{format_dimension_coverage(v2_analysis)}{format_trend_block(trends, campaign_name)}\nРекомендация:\n{_user_facing_ai_text(recommendation)}\n"
+            f"🤖 Вывод AI\n{_structured_summary(v2_analysis, fact_values, diagnosis)}\n\n{format_primary_findings(v2_analysis)}{format_dimension_coverage(v2_analysis)}{format_trend_block(trends, campaign_name)}\nРекомендация:\n{_structured_recommendation(v2_analysis, recommendation)}\n"
             f"Уверенность: {confidence_label}\n"
             f"Уверенность в данных Яндекса: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая'}.get(performance_confidence, performance_confidence))}\n"
             f"Уверенность в сопоставлении MaxiBot: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая', 'INSUFFICIENT': 'недостаточно данных'}.get(attribution_confidence, attribution_confidence))}\n\n"

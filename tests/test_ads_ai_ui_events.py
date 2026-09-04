@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.ads.events import parse_ai_run_event
-from app.bot.menu import format_ads_result
+from app.bot.menu import format_ads_result, safe_max_entity_label
 from datetime import datetime, timezone
 
 
@@ -86,9 +86,9 @@ def test_granular_report_uses_grounded_placement_and_single_ad_state():
                             "placement": {"available": 3, "included": 3, "state": "AVAILABLE"}},
         }},
     )
-    assert "Площадка yandex.ru" in body
-    assert "одно объявление — сравнение недоступно" in body
-    assert "при высокой уверенности" in body.lower()
+    assert "Площадка yandex[.]ru" in body
+    assert "сравнивать креативы пока не с чем" in body
+    assert "при высокой уверенность" not in body.lower()
     assert "read-only" not in body.lower()
 
 
@@ -102,5 +102,51 @@ def test_granular_report_does_not_claim_unavailable_dimensions():
             "device": {"available": 0, "included": 0, "state": "PROVIDER_UNAVAILABLE"},
         }}},
     )
-    assert "объявления 1/1" in body
+    assert "Объявления: доступно 1" in body
     assert "устройства" not in body
+
+
+def test_granular_report_polish_humanizes_entities_and_uses_explicit_coverage():
+    v2 = {"report_view": {
+        "primary_findings": [{"dimension": "PLACEMENT", "label": "yandex.ru", "finding_type": "HIGH_CPA",
+                              "metrics": {"cpa": 36.52, "cost_share": .3262}, "campaign_cpa": 19.91,
+                              "materiality": "HIGH", "sample_sufficiency": "SUFFICIENT"}],
+        "comparison": {
+            "ad": {"available": 1, "included": 1, "material_findings": 0, "state": "SINGLE_ENTITY"},
+            "placement": {"available": 381, "included": 25, "material_findings": 1, "state": "AVAILABLE"},
+            "region": {"available": 193, "included": 0, "material_findings": 0, "state": "NO_MATERIAL_DIFFERENCE"},
+            "demographics": {"available": 17, "included": 0, "material_findings": 0, "state": "NO_MATERIAL_DIFFERENCE"},
+        },
+    }}
+    body = format_ads_result(
+        headline="done", channel_title="Москва 365", direct_connected=True,
+        campaign_name="campaign", ai_status="done", checked_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        fact_values={}, diagnosis="Основной кандидат — размещение внешний источник с CPA 36,52.",
+        recommendation="Проверить размещение внешний источник. attribution_confidence низкая",
+        confidence="HIGH", completed=True, v2_analysis=v2,
+        trends={"findings": [{"dimension": "DEMOGRAPHICS", "entity": "AGE_45_54|GENDER_FEMALE", "metric": "cpa", "trend_state": "IMPROVING", "relative_delta": -.269}]},
+    )
+    assert "площадка yandex[.]ru" in body.lower()
+    assert "CPA 36,52 ₽" in body
+    assert "внешний источник" not in body
+    assert "attribution_confidence" not in body
+    assert "Женщины 45–54" in body
+    assert "🧭 Что проверил ИИ-директолог" in body
+    assert "Площадки: доступно 381 · отобрано 25 · 1 значимый вывод" in body
+    assert "Регионы: доступно 193 · значимых выводов нет" in body
+
+
+def test_safe_max_entity_label_breaks_bare_domain_autolinking_without_changing_identity():
+    assert safe_max_entity_label("yandex.ru") == "yandex[.]ru"
+    assert safe_max_entity_label("ru.yandex.weatherplugin") == "ru[.]yandex[.]weatherplugin"
+    assert safe_max_entity_label("Мобильные") == "Мобильные"
+
+
+def test_live_completion_payload_path_uses_canonical_renderer_contract():
+    from pathlib import Path
+    runtime = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    section = runtime[runtime.index("async def _handle_ads_ai_event"):runtime.index("    async def handle(")]
+    assert "self.repo.render" in section
+    assert "format_ads_result" in menu
+    assert "build_report_view" in menu
