@@ -118,7 +118,9 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Cha
     snapshot_at = datetime.now(timezone.utc)
     v2_cutoff = datetime.fromisoformat(dataset["data_cutoff"])
     fact_context = fact_set.context(report_date_from=report_date_from, report_date_to=report_date_to, report_fetched_at=v2_cutoff, snapshot_at=snapshot_at)
-    evidence_ids = evidence_registry({"FACTS": {**fact_context, "V2_ANALYSIS": dataset}})
+    # Register the stable semantic MaxiBot metric ID before the final facts
+    # envelope is assembled; the provider may cite this field directly.
+    evidence_ids = evidence_registry({"FACTS": {**fact_context, "MAXIBOT_QUALIFIED_MEMBERSHIP_RATE": True, "V2_ANALYSIS": dataset}})
     suff, missing = sufficiency(mapped_campaigns=1, report_days=int(dataset["data_quality"].get("history_days", 0)), conversions=fact_set.conversion_sample, attribution_available=bool(traffic.get("visits")), direct_available=bool(dataset["data_quality"].get("rows_loaded")))
     health = data_health(direct_available=bool(dataset["data_quality"].get("rows_loaded")), mapped_campaigns=1, attribution_available=bool(traffic.get("visits")), snapshot_fresh=bool(dataset["data_quality"].get("rows_loaded")), ai_available=bool(provider_from_settings()), memory_db_available=True, unmatched_attribution=int(traffic.get("UNATTRIBUTED", 0)))
     # Keep one canonical copy of trend features in FACTS.TRENDS.  V2_ANALYSIS

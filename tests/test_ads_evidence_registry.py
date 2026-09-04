@@ -24,3 +24,21 @@ def test_database_only_and_unknown_evidence_are_rejected():
 def test_duplicate_registry_ids_are_deterministic():
     context = {"FACTS": {"evidence": {"FACT-001": {}}, "V2_ANALYSIS": {"evidence": {"FACT-001": {}, "V2-001": {}}}}}
     assert evidence_registry(context) == {"FACT-001", "V2-001"}
+
+
+def test_runtime_trend_and_maxibot_semantic_ids_are_accepted_only_when_registered():
+    context = {
+        "FACTS": {
+            "MAXIBOT_QUALIFIED_MEMBERSHIP_RATE": {"value": 0.039},
+            "TRENDS": {"findings": [{"trend_finding_id": "TREND-039d20eaf677"}]},
+        }
+    }
+    allowed = evidence_registry(context)
+    assert validate_output(_result("TREND-039d20eaf677"), allowed)[0] is not None
+    assert validate_output(_result("MAXIBOT_QUALIFIED_MEMBERSHIP_RATE"), allowed)[0] is not None
+    assert validate_output(_result("TREND-deadbeef"), allowed)[1] == "EVIDENCE_NOT_IN_CONTEXT"
+
+
+def test_unsupported_evidence_prefix_remains_rejected():
+    allowed = {"TREND-039d20eaf677", "MAXIBOT_QUALIFIED_MEMBERSHIP_RATE"}
+    assert validate_output(_result("MAXIBOT_OTHER_METRIC"), allowed)[1] == "EVIDENCE_ID_INVALID_FORMAT"
