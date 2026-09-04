@@ -17,7 +17,7 @@ def test_home_banner_asset_is_scoped_to_home_screen():
     assert max(sum(pixel) for pixel in corners) < 120
     assert "def home_menu_banner_media" in source
     assert 'media = []' in source
-    assert "/static/images/maxibot_home_banner_compact.webp" in source
+    assert "maxibot_home_banner_fit.webp" in source
 
 
 def test_home_media_is_temporarily_disabled_for_all_screens():

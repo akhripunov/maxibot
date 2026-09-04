@@ -69,3 +69,38 @@ def test_result_renderer_shows_only_bounded_russian_trend_block():
     assert "CPA yandex.ru: ухудшается" in body
     assert body.count("• ") <= 3 + 8
     assert "DEGRADING" not in body
+    assert "713798021" not in body
+
+
+def test_granular_report_uses_grounded_placement_and_single_ad_state():
+    body = format_ads_result(
+        headline="done", channel_title="Москва 365", direct_connected=True,
+        campaign_name="campaign", ai_status="done", checked_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        fact_values={"cost_7d": 100, "conversions_7d": 5, "actual_cpa_7d": 20},
+        diagnosis="При высокой уверенность в данных Яндекса.",
+        recommendation="Выполнить read-only проверку.", confidence="HIGH", completed=True,
+        v2_analysis={"report_view": {
+            "primary_findings": [{"dimension": "PLACEMENT", "label": "yandex.ru", "finding_type": "HIGH_CPA",
+                                  "metrics": {"cpa": 35.06, "cost_share": .308}, "campaign_cpa": 20}],
+            "comparison": {"ad": {"available": 1, "included": 1, "state": "SINGLE_ENTITY"},
+                            "placement": {"available": 3, "included": 3, "state": "AVAILABLE"}},
+        }},
+    )
+    assert "Площадка yandex.ru" in body
+    assert "одно объявление — сравнение недоступно" in body
+    assert "при высокой уверенности" in body.lower()
+    assert "read-only" not in body.lower()
+
+
+def test_granular_report_does_not_claim_unavailable_dimensions():
+    body = format_ads_result(
+        headline="done", channel_title="Москва 365", direct_connected=True,
+        campaign_name="campaign", ai_status="done", checked_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        fact_values={}, diagnosis="ok", recommendation="наблюдать", confidence="HIGH", completed=True,
+        v2_analysis={"report_view": {"primary_findings": [], "comparison": {
+            "ad": {"available": 1, "included": 1, "state": "SINGLE_ENTITY"},
+            "device": {"available": 0, "included": 0, "state": "PROVIDER_UNAVAILABLE"},
+        }}},
+    )
+    assert "объявления 1/1" in body
+    assert "устройства" not in body

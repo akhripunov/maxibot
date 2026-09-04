@@ -42,6 +42,12 @@ def test_arbitrary_https_url_and_markdown_preview_are_removed():
     assert "исследование" in body
 
 
+def test_bare_external_domains_cannot_reach_user_facing_ai_result():
+    body = _body("Проверить dzen.ru/novosti и yandex.ru без перехода")
+    assert "dzen.ru" not in body
+    assert "yandex.ru" not in body
+
+
 def test_internal_provenance_is_not_mutated_by_user_facing_sanitizer():
     provenance = "V2-abc123"
     body = _body(f"Сигнал подтверждён доказательством {provenance}; источник скрыт")

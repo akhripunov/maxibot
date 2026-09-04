@@ -24,7 +24,7 @@ def test_admin_command_routes_through_database_admin_check_and_denies_non_admin(
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
     section = source[source.index("    async def _message("):source.index("    async def _deliver_inbox_message(")]
     assert "if self._is_admin_command(normalized_text):" in section
-    assert "await self.repo.is_admin(target_id)" in section
+    assert "await self.repo.is_platform_admin(target_id)" in section
     assert "Раздел администратора доступен только администраторам." in section
     assert 'await self._render(target_id, "owner_admin")' in section
     assert "OWNER_ADMIN_NOT_CONFIGURED" not in section
@@ -36,7 +36,7 @@ class _AdminCommandRepo:
         self.reset = []
         self.cleared = []
 
-    async def is_admin(self, external_id):
+    async def is_platform_admin(self, external_id):
         return self.admin
 
     async def reset_navigation(self, external_id):
@@ -147,7 +147,7 @@ def test_normal_start_replaces_old_service_panel_with_fresh_bottom_copy():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
-    assert 'message_id = await self._render(user_id, "home", force_new=True)' in source
+    assert 'message_id = await self._render(user_id, first_screen, force_new=True)' in source
 
 
 def test_normal_start_preserves_id_until_atomic_panel_replacement():
@@ -163,7 +163,8 @@ def test_stale_promotion_navigation_is_not_discarded():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
-    assert 'navigation_action = action in {"promotion", "connect_channel"} or action.startswith(("promotion_", "channels", "channel:", "settings:"))' in source
+    assert "navigation_action = action in {" in source
+    assert '"promotion_maxibot"' in source
     assert "and not navigation_action" in source
 
 
@@ -171,7 +172,8 @@ def test_message_settings_navigation_is_not_discarded_as_stale_callback():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
-    assert 'action.startswith(("promotion_", "channels", "channel:", "settings:"))' in source
+    assert 'action.startswith(("channel:", "settings:"' in source
+    assert '"promotion_channel:"' in source
     assert 'return ("⚙️ Настройка сообщений пользователя' in (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
 
 

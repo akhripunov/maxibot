@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Development-only bridge: internal API <-> local authenticated Codex CLI."""
-import argparse, json, os, signal, subprocess, tempfile, time, uuid, shutil
+import argparse, json, logging, os, signal, subprocess, tempfile, time, uuid, shutil
 from pathlib import Path
 import httpx
 
@@ -9,11 +9,12 @@ TOKEN=os.environ.get("ADS_CODEX_WORKER_TOKEN","")
 WORKER=os.environ.get("ADS_CODEX_WORKER_ID",f"mac-{uuid.uuid4().hex[:12]}")
 RELEASE_ID=os.environ.get("ADS_CODEX_WORKER_RELEASE_ID", os.environ.get("MAXIBOT_RELEASE_ID", "unknown"))
 POLL=int(os.environ.get("ADS_CODEX_WORKER_POLL_SECONDS","15")); TIMEOUT=int(os.environ.get("ADS_CODEX_EXECUTION_TIMEOUT_SECONDS","120")); STOP=False
+logger = logging.getLogger("ads_codex_worker")
 
 def halt(*_):
     global STOP; STOP=True
 def headers(): return {"Authorization":f"Bearer {TOKEN}"}
-print(f"ADS_CODEX_WORKER_START release_id={RELEASE_ID} worker_id={WORKER} python={os.sys.version.split()[0]}", flush=True)
+logger.warning("ADS_CODEX_WORKER_START release_id=%s worker_id=%s python=%s", RELEASE_ID, WORKER, os.sys.version.split()[0])
 def prompt(claim): return "Проанализируй ТОЛЬКО переданный контекст MaxiBot Ads и bounded V2_ANALYSIS dataset. UNKNOWN не равно ZERO. Campaign totals — единственный общий итог; не суммируй разные dimensions между собой. Используй deterministic findings как ranked candidates: strong wording только для SUFFICIENT, WEAK_SIGNAL означает только сигнал, INSUFFICIENT не даёт вывода. MAXIBOT_QUALIFIED_MEMBERSHIP_RATE означает только конверсию визит → подтверждённая подписка: qualified_memberships / tracked_landing_visits. Не называй её attribution coverage, attribution quality, подтверждением конверсий Яндекса или matching coverage. Campaign-specific matching обрабатывай отдельно и показывай UNKNOWN как недоступное сопоставление с конкретной кампанией. Разделяй performance_confidence по данным Яндекса и confidence campaign-specific matching. Учитывай confidence, sample size и freshness. Используй только переданные FACT/V2 IDs. Если history недостаточна, явно укажи это и не выдумывай trend. Верни только JSON по campaign_diagnosis_schema_v1, без markdown. Поля summary, evidence.statement, recommendation.reason, do_not_change и memory_candidates.statement заполни на русском языке. diagnosis_code и recommendation.action_code оставь стабильными английскими кодами. Никогда не предлагай выполнение изменений или записи в Direct.\nCONTEXT:\n"+json.dumps(claim["safe_context"],ensure_ascii=False)
 
 def findings_grounded(claim):

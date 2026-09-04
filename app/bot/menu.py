@@ -27,6 +27,7 @@ from app.integrations.max_connection import PRIMARY, BOT_CONNECTION
 from app.traffic.join_intent import consume_single_active_join_intent
 from app.traffic.analytics import traffic_stats_for_channels
 from app.ads.service import can_access_ads, campaigns_for_channel, latest_view
+from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
 from app.db.models import AdsAiRun, AdsMemory, AdsRecommendation, AdsV2Outcome
 from app.ads.storage_health import diagnostics as storage_diagnostics, human_size, ui_time
@@ -43,8 +44,9 @@ PROMOTION_VIDEO_URL = f"{settings.traffic_public_base_url.rstrip('/')}/video-ins
 # validated result while preventing arbitrary external URLs from becoming
 # rich previews in the user-facing AI card.
 EXTERNAL_LINKS_IN_AI_RESULT = "NOT_ALLOWED"
-_AI_MARKDOWN_EXTERNAL_LINK_RE = re.compile(r"\[([^\]]+)\]\(\s*(?:https?://|www\.)[^)]+\)", re.IGNORECASE)
+_AI_MARKDOWN_EXTERNAL_LINK_RE = re.compile(r"\[([^\]]+)\]\(\s*(?:(?:https?://|www\.)[^)]+|(?:[a-z0-9-]+\.)+[a-z]{2,63}[^)]*)\)", re.IGNORECASE)
 _AI_EXTERNAL_URL_RE = re.compile(r"(?<![\w@])(?:https?://|www\.)[^\s<>()\]]+", re.IGNORECASE)
+_AI_BARE_DOMAIN_RE = re.compile(r"(?<![\w@])(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:/[^\s<>()\]]*)?(?![\w.-])", re.IGNORECASE)
 
 
 def sanitize_ai_user_text(value: object) -> str:
@@ -52,6 +54,7 @@ def sanitize_ai_user_text(value: object) -> str:
     text = str(value or "—")
     text = _AI_MARKDOWN_EXTERNAL_LINK_RE.sub(r"\1", text)
     text = _AI_EXTERNAL_URL_RE.sub("", text)
+    text = _AI_BARE_DOMAIN_RE.sub("внешний источник", text)
     # Avoid leaving awkward whitespace after removing a URL, while retaining
     # the original wording and all non-URL evidence references.
     text = re.sub(r"[ \t]{2,}", " ", text)
@@ -248,25 +251,103 @@ def _metric(key: str, value) -> str:
     return _ru_number(value)
 
 
-def format_trend_block(trends: dict | None) -> str:
+def format_trend_block(trends: dict | None, campaign_name: str | None = None) -> str:
     """Render at most three deterministic, evidence-backed trend findings."""
     findings = (trends or {}).get("findings") or []
     if not findings:
         return ""
     states = {"IMPROVING": "улучшается", "STABLE": "стабильно", "DEGRADING": "ухудшается", "VOLATILE": "нестабильно", "RECOVERED": "восстановилось", "NEW_SIGNAL": "новый сигнал"}
     metrics = {"cpa": "CPA", "cvr": "CVR", "cpc": "CPC", "conversions": "конверсии"}
+    selected_findings = dedupe_trend_findings(findings)
     lines = []
-    for finding in findings[:3]:
+    for finding in selected_findings[:3]:
         state = states.get(finding.get("trend_state"), "мало истории")
         metric = metrics.get(finding.get("metric"), finding.get("metric", "метрика"))
-        entity = sanitize_ai_user_text(finding.get("entity") or "кампания")
+        labels = {"CAMPAIGN": campaign_name or "кампания", "AD": "объявление", "AD_GROUP": "группа объявлений", "PLACEMENT": "площадка", "REGION": "регион", "DEVICE": "устройство", "DEMOGRAPHICS": "демография", "CRITERIA": "критерий"}
+        entity = str(finding.get("entity") or "")
+        if not entity or entity.isdigit() or (len(entity) > 40 and entity.count("-") >= 2):
+            entity = labels.get(finding.get("dimension"), "сущность")
         relative = finding.get("relative_delta")
         change = f" ({float(relative) * 100:+.1f}%)" if relative is not None else ""
         lines.append(f"• {metric} {entity}: {state}{change}")
     return "📈 Динамика\n" + "\n".join(lines) + "\n"
 
 
-def format_ads_result(*, headline: str, channel_title: str, direct_connected: bool, campaign_name: str | None, ai_status: str, checked_at, fact_values: dict, diagnosis: str = "—", recommendation: str = "—", confidence: str = "—", performance_confidence: str = "—", attribution_confidence: str = "—", completed: bool = False, trends: dict | None = None, campaign_specific_matching: str | bool = "UNKNOWN") -> str:
+def _format_finding_value(value, decimals: int = 2) -> str:
+    return _ru_number(value, decimals)
+
+
+def format_primary_findings(v2_analysis: dict | None) -> str:
+    """Render material deterministic findings with grounded entity labels."""
+    findings = build_report_view(v2_analysis or {}).get("primary_findings") or []
+    lines = []
+    for finding in findings[:3]:
+        dimension = finding.get("dimension")
+        label = str(finding.get("label") or finding.get("entity") or "сущность")
+        metrics = finding.get("metrics") or {}
+        cpa = metrics.get("cpa")
+        campaign_cpa = finding.get("campaign_cpa")
+        prefix = {"PLACEMENT": "Площадка", "AD": "Объявление", "AD_GROUP": "Группа объявлений"}.get(dimension, dimension or "Сигнал")
+        if finding.get("finding_type") == "HIGH_CPA" and cpa is not None and campaign_cpa is not None:
+            detail = f"CPA {_format_finding_value(cpa)} ₽ против {_format_finding_value(campaign_cpa)} ₽ по кампании"
+            if metrics.get("cost_share") is not None:
+                detail += f", {_format_finding_value(float(metrics['cost_share']) * 100)}% расходов"
+            lines.append(f"• {prefix} {label} — под наблюдением: {detail}.")
+        elif finding.get("finding_type") == "STRONG_PERFORMANCE" and cpa is not None:
+            lines.append(f"• {prefix} {label} — положительный сигнал: CPA {_format_finding_value(cpa)} ₽.")
+        elif finding.get("sample_sufficiency") == "WEAK_SIGNAL":
+            lines.append(f"• {prefix} {label} — слабый сигнал, данных пока недостаточно.")
+    return "🔎 Что выделяется\n" + "\n".join(lines) + "\n" if lines else ""
+
+
+def format_dimension_coverage(v2_analysis: dict | None) -> str:
+    """Show available/included dimension counts without raw JSON."""
+    comparison = build_report_view(v2_analysis or {}).get("comparison") or {}
+    labels = {"ad_group": "группы", "ad": "объявления", "placement": "площадки", "region": "регионы", "device": "устройства", "demographics": "демография", "criteria": "критерии"}
+    parts = []
+    for key in ("ad_group", "ad", "placement", "region", "device", "demographics", "criteria"):
+        item = comparison.get(key) or {}
+        if item.get("available"):
+            state = item.get("state")
+            suffix = " (одно объявление — сравнение недоступно)" if key == "ad" and state == "SINGLE_ENTITY" else ""
+            parts.append(f"{labels[key]} {item.get('included', 0)}/{item.get('available', 0)}{suffix}")
+    return "🧭 Проверено: " + ", ".join(parts) + ".\n" if parts else ""
+
+
+def normalize_ai_text(text: str, fact_values: dict) -> str:
+    """Normalize legacy persisted summaries at display time only."""
+    if not text:
+        return text
+    for technical, readable in (("performance_confidence", "уверенность в данных Яндекса"), ("WEAK_SIGNAL", "слабый сигнал"), ("VOLATILE", "нестабильно")):
+        text = text.replace(technical, readable)
+    text = text.replace("при высокой уверенность", "при высокой уверенности")
+    text = text.replace("при высокой уверенности в данных Яндекса", "при высокой уверенности в данных Яндекса")
+    text = re.sub(r"\bread-only\b", "проверку", text, flags=re.IGNORECASE)
+    if "атрибуция maxibot ограничена" not in text.lower():
+        return text
+    qualified = fact_values.get("qualified_subscriptions")
+    visits = fact_values.get("landing_visits")
+    rate = fact_values.get("maxibot_qualified_membership_rate")
+    if rate is None and qualified is not None and visits:
+        rate = qualified / visits
+    if qualified is None or visits is None or rate is None:
+        return text.replace("Атрибуция MaxiBot ограничена", "Campaign-specific сопоставление MaxiBot ограничено")
+    canonical = (
+        f"Данные MaxiBot: {_ru_number(qualified, 0)} подтверждённых подписок из "
+        f"{_ru_number(visits, 0)} визитов; Конверсия визит → подписка: "
+        f"{_metric('maxibot_qualified_membership_rate', rate)}. "
+        "Сопоставление с конкретной рекламной кампанией недоступно"
+    )
+    return re.sub(r"Атрибуция MaxiBot ограничена:.*?(?=\.\s|$)", canonical, text, count=1)
+
+
+def _user_facing_ai_text(text: str) -> str:
+    """Финальный безопасный и локализованный проход для текста AI."""
+    rendered = re.sub(r"\bread-only\b", "проверку", sanitize_ai_user_text(text or "—"), flags=re.IGNORECASE)
+    return re.sub(r"при высокой уверенность", "при высокой уверенности", rendered, flags=re.IGNORECASE)
+
+
+def format_ads_result(*, headline: str, channel_title: str, direct_connected: bool, campaign_name: str | None, ai_status: str, checked_at, fact_values: dict, diagnosis: str = "—", recommendation: str = "—", confidence: str = "—", performance_confidence: str = "—", attribution_confidence: str = "—", completed: bool = False, trends: dict | None = None, campaign_specific_matching: str | bool = "UNKNOWN", v2_analysis: dict | None = None) -> str:
     """Single user-facing renderer for every AI dashboard/result path."""
     checked = checked_at.astimezone(MOSCOW).strftime("%d.%m %H:%M") if checked_at else "—"
     confidence_label = {"LOW": "низкая", "MEDIUM": "средняя", "HIGH": "высокая"}.get(confidence, confidence)
@@ -289,7 +370,7 @@ def format_ads_result(*, headline: str, channel_title: str, direct_connected: bo
             f"Конверсии: {_metric('conversions_7d', fact_values.get('conversions_7d'))}\n"
             f"CPA: {_metric('actual_cpa_7d', fact_values.get('actual_cpa_7d'))}\n"
             f"{maxibot_metric}\nСопоставление с конкретной рекламной кампанией: {campaign_scope}\n\n"
-            f"🤖 Вывод AI\n{sanitize_ai_user_text(diagnosis)}\n\n{format_trend_block(trends)}\nРекомендация:\n{sanitize_ai_user_text(recommendation)}\n"
+            f"🤖 Вывод AI\n{_user_facing_ai_text(diagnosis)}\n\n{format_primary_findings(v2_analysis)}{format_dimension_coverage(v2_analysis)}{format_trend_block(trends, campaign_name)}\nРекомендация:\n{_user_facing_ai_text(recommendation)}\n"
             f"Уверенность: {confidence_label}\n"
             f"Уверенность в данных Яндекса: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая'}.get(performance_confidence, performance_confidence))}\n"
             f"Уверенность в сопоставлении MaxiBot: {({'LOW': 'низкая', 'MEDIUM': 'средняя', 'HIGH': 'высокая', 'INSUFFICIENT': 'недостаточно данных'}.get(attribution_confidence, attribution_confidence))}\n\n"
@@ -730,7 +811,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         status_map = {"WAITING_FOR_CODEX": "⏳ Ожидает Codex Worker", "CODEX_PROCESSING": "⚙️ Codex анализирует рекламу", "CODEX_COMPLETED": "✅ Завершён", "CODEX_FAILED": "🔴 Не завершён"}
         ai_status = status_map.get(ai.status, "AI-анализ ещё не выполнялся.") if ai else "AI-анализ ещё не выполнялся."
         if ai and ai.status == "CODEX_COMPLETED" and ai.validated_output_json:
-            result = json.loads(ai.validated_output_json); diagnosis = result.get("summary") or "—"; recommendation = (result.get("recommendation") or {}).get("reason") or "—"; confidence = result.get("confidence") or "—"
+            result = json.loads(ai.validated_output_json); diagnosis = normalize_ai_text(result.get("summary") or "—", fact_values); recommendation = normalize_ai_text((result.get("recommendation") or {}).get("reason") or "—", fact_values); confidence = result.get("confidence") or "—"
             headline = "🟢 Анализ завершён"
         elif ai and ai.status == "CODEX_FAILED":
             result = {}; diagnosis = "Ответ AI не прошёл проверку или worker недоступен."; recommendation = "Попробуйте запустить проверку снова."; confidence = "—"; headline = "🔴 AI-анализ не завершён"
@@ -752,6 +833,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             completed=bool(ai and ai.status == "CODEX_COMPLETED"),
             trends=facts.get("TRENDS"),
             campaign_specific_matching=(facts.get("MAXIBOT_METRICS") or {}).get("campaign_specific", {}).get("value", "UNKNOWN"),
+            v2_analysis=facts.get("V2_ANALYSIS"),
         )
         return (body, buttons(
             (("🔄 Проверить снова" if ai and ai.status == "CODEX_COMPLETED" else "🔄 Проверить рекламу"), f"ads_check:{channel.id}"),
@@ -811,20 +893,20 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             findings = v2.get("findings") or {}
             trends = raw.get("FACTS", {}).get("TRENDS") or {}
             counts = trends.get("counts") or {}
-            detail = (f"Run: {ai.id if ai else '-'}\nМодель: {ai.model if ai else '-'}\nСтатус: {ai.status if ai else '-'}\n\n"
+            report_view = v2.get("report_view") or {}
+            comparison = report_view.get("comparison") or {}
+            coverage_labels = {"ad_group": "группы", "ad": "объявления", "placement": "площадки", "region": "регионы", "device": "устройства", "demographics": "демография", "criteria": "критерии"}
+            coverage = ", ".join(f"{coverage_labels[key]} {item.get('included', 0)}/{item.get('available', 0)}" for key, item in comparison.items() if item.get("available")) or "нет доступных измерений"
+            detail = (f"Статус: {ai.status if ai else '-'}\n\n"
                       f"Facts: {len(raw.get('FACTS', {}).get('evidence', {}))}\n"
                       f"Память использована: {len(raw.get('RETRIEVED_PRIVATE_MEMORIES', []))}\n"
                       f"Недостаёт: {', '.join(raw.get('MISSING_DATA', [])) or 'нет'}\n"
                       f"Достаточность: {raw.get('DATA_SUFFICIENCY', 'UNKNOWN')}\n"
                       f"\nAI получил:\n"
-                      f"• объявлений: {selection.get('ad', {}).get('rows_included', 0)} из {selection.get('ad', {}).get('rows_available', 0)}\n"
-                      f"• площадок: {selection.get('placement', {}).get('rows_included', 0)} из {selection.get('placement', {}).get('rows_available', 0)}\n"
-                      f"• регионов: {selection.get('region', {}).get('rows_included', 0)} из {selection.get('region', {}).get('rows_available', 0)}\n"
-                      f"• устройств: {selection.get('device', {}).get('rows_included', 0)} из {selection.get('device', {}).get('rows_available', 0)}\n"
-                      f"• аудиторий: {selection.get('demographics', {}).get('rows_included', 0)} из {selection.get('demographics', {}).get('rows_available', 0)}\n"
+                      f"• измерения: {coverage}\n"
                       f"\nТренды: история {trends.get('history_days_available', 0)} дн.; улучшение {counts.get('IMPROVING', 0)}, ухудшение {counts.get('DEGRADING', 0)}, нестабильно {counts.get('VOLATILE', 0)}, мало данных {0 if trends.get('history_sufficient') else 1}\n"
                       f"Значимые findings: +{len(findings.get('positive', []))}, watch {len(findings.get('watch', []))}, недостаточно данных {findings.get('insufficient_rows', 0)}\n"
-                      f"Бюджет контекста: {v2.get('context_budget', {})}")
+                      f"Размер контекста: {v2.get('context_budget', {}).get('bytes', 'н/д')} байт; evidence: {v2.get('context_budget', {}).get('evidence_entries', 'н/д')}")
             title = "🔎 Последний контекст AI"
         elif screen.startswith("ads_history:"):
             rows = list((await db.scalars(select(AdsAiRun).where(AdsAiRun.channel_id == channel.id).order_by(AdsAiRun.created_at.desc()).limit(10))).all())

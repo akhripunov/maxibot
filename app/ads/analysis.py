@@ -87,6 +87,8 @@ def build_deterministic_findings(dataset: dict[str, Any]) -> dict[str, Any]:
                 continue
             common = {
                 "dimension": dimension.upper(), "entity": row.get("value"),
+                "label": row.get("label") or row.get("value"),
+                "campaign_cpa": campaign.get("cpa"),
                 "evidence_ids": [row.get("evidence_id")],
                 # Findings are a second view of selected rows, not a second
                 # copy of the complete observation payload.
@@ -119,6 +121,68 @@ def build_deterministic_findings(dataset: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def dedupe_trend_findings(findings: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Collapse equivalent campaign/child trend rows without hiding distinct children."""
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for finding in findings or []:
+        key = (finding.get("metric"), finding.get("period"), finding.get("trend_state"), round(float(finding.get("relative_delta") or 0), 2))
+        grouped.setdefault(key, []).append(finding)
+    result: list[dict[str, Any]] = []
+    for group in grouped.values():
+        campaigns = [item for item in group if item.get("dimension") == "CAMPAIGN"]
+        children = [item for item in group if item.get("dimension") in {"AD_GROUP", "AD"}]
+        child_ids = {str(item.get("entity_id") or item.get("entity")) for item in children}
+        if campaigns and children and len(child_ids) <= 2:
+            result.append(campaigns[0])
+        else:
+            result.extend(group)
+    return result
+
+
+def build_report_view(dataset: dict[str, Any]) -> dict[str, Any]:
+    """Return one canonical report view, deriving legacy snapshots in memory only."""
+    stored = dataset.get("report_view")
+    if isinstance(stored, dict) and isinstance(stored.get("comparison"), dict):
+        return stored
+    findings = dataset.get("findings") or {}
+    candidates = list(findings.get("positive", [])) + list(findings.get("watch", []))
+    campaign_metrics = (dataset.get("campaign_summary") or {}).get("metrics") or {}
+    normalized: list[dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        copy = dict(item)
+        copy.setdefault("label", copy.get("entity"))
+        copy.setdefault("campaign_cpa", campaign_metrics.get("cpa"))
+        copy.setdefault("metrics", {})
+        normalized.append(copy)
+    primary = [item for item in normalized if item.get("materiality") == "HIGH" and item.get("sample_sufficiency") == "SUFFICIENT"]
+    selection = dataset.get("selection") or {}
+    sections = dataset.get("sections") or {}
+    comparison: dict[str, dict[str, Any]] = {}
+    for dimension in DIMENSIONS:
+        name = dimension.lower()
+        selected = selection.get(name) if isinstance(selection.get(name), dict) else None
+        section = sections.get(name) if isinstance(sections.get(name), dict) else None
+        available = selected.get("rows_available") if selected and "rows_available" in selected else None
+        included = selected.get("rows_included") if selected and "rows_included" in selected else None
+        if available is None and section is not None and "total_rows_analyzed" in section:
+            available = section.get("total_rows_analyzed")
+        if included is None and section is not None and "notable" in section:
+            included = len(section.get("notable") or [])
+        material = sum(1 for item in normalized if str(item.get("dimension", "")).upper() == dimension and item.get("materiality") == "HIGH")
+        state = "UNKNOWN" if available is None else ("PROVIDER_UNAVAILABLE" if not available else "SINGLE_ENTITY" if available == 1 else "AVAILABLE" if material else "NO_MATERIAL_DIFFERENCE")
+        comparison[name] = {"available": available, "included": included, "material_findings": material, "state": state}
+    trends = dataset.get("trends") or {}
+    return {
+        "primary_findings": sorted(primary, key=lambda item: (-float(item.get("impact", 0.0)), str(item.get("label") or item.get("entity") or "")))[:5],
+        "secondary_findings": [item for item in normalized if item not in primary][:5],
+        "trend_findings": dedupe_trend_findings(trends.get("findings")),
+        "comparison": comparison,
+        "creative_comparison": comparison.get("ad", {}).get("state", "UNKNOWN"),
+    }
+
+
 def _evidence_id(dimension: str, value: str) -> str:
     return "V2-" + hashlib.sha256(f"{dimension}:{value}".encode()).hexdigest()[:12]
 
@@ -141,6 +205,20 @@ def bound_v2_dataset(dataset: dict[str, Any], *, max_bytes: int, max_evidence: i
         for item in (data.get("trends") or {}).get("findings", []):
             referenced.update(item.get("evidence_ids") or [])
         data["evidence"] = {key: value for key, value in data.get("evidence", {}).items() if key in referenced}
+    def sync_report_view() -> None:
+        view = data.get("report_view")
+        if not view:
+            return
+        findings = data.get("findings") or {}
+        available_findings = findings.get("positive", []) + findings.get("watch", [])
+        view["primary_findings"] = [
+            item for item in view.get("primary_findings", [])
+            if item in available_findings and all(ref in data.get("evidence", {}) for ref in item.get("evidence_ids", []))
+        ]
+        for name, item in (view.get("comparison") or {}).items():
+            selection = data.get("selection", {}).get(name, {})
+            item["included"] = int(selection.get("rows_included", item.get("included", 0)))
+            item["material_findings"] = sum(1 for finding in available_findings if str(finding.get("dimension", "")).lower() == name)
     sync_evidence()
     def trim_one() -> bool:
         for name in order:
@@ -162,7 +240,9 @@ def bound_v2_dataset(dataset: dict[str, Any], *, max_bytes: int, max_evidence: i
         if not trim_one():
             break
         sync_evidence()
+        sync_report_view()
     data["context_budget"] = {"max_bytes": max_bytes, "max_evidence": max_evidence, "bytes": len(json.dumps(data, ensure_ascii=False).encode("utf-8")), "evidence": len(data.get("evidence", {})), "budget_exceeded": len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > max_bytes}
+    sync_report_view()
     return data
 
 
@@ -251,7 +331,7 @@ async def build_v2_analysis_dataset(db: AsyncSession, *, campaign: AdsCampaign, 
     for dimension in DIMENSIONS:
         calculated = []
         for value, values in grouped[dimension].items():
-            item = {"value": value, **_metrics(values, campaign=campaign_summary, history_days=7)}
+            item = {"value": value, "label": value, **_metrics(values, campaign=campaign_summary, history_days=7)}
             item["evidence_id"] = _evidence_id(dimension, value)
             evidence[item["evidence_id"]] = {
                 "source": "ADS_V2_OBSERVATION",
@@ -349,6 +429,17 @@ async def build_v2_analysis_dataset(db: AsyncSession, *, campaign: AdsCampaign, 
         "trends": trends,
     }
     dataset["findings"] = build_deterministic_findings(dataset)
+    comparison = {}
+    finding_items = dataset["findings"].get("positive", []) + dataset["findings"].get("watch", [])
+    for dimension in DIMENSIONS:
+        name = dimension.lower()
+        available = int(dataset["selection"].get(name, {}).get("rows_available", 0))
+        included = int(dataset["selection"].get(name, {}).get("rows_included", 0))
+        material = sum(1 for item in finding_items if item.get("dimension") == dimension)
+        state = ("PROVIDER_UNAVAILABLE" if not available else "SINGLE_ENTITY" if available == 1
+                 else "AVAILABLE" if material else "NO_MATERIAL_DIFFERENCE")
+        comparison[name] = {"available": available, "included": included, "material_findings": material, "state": state}
+    dataset["report_view"] = build_report_view({**dataset, "findings": dataset["findings"], "comparison": comparison})
     return bound_v2_dataset(dataset, max_bytes=max(12000, settings.ads_ai_context_max_bytes // 2), max_evidence=settings.ads_ai_evidence_max_entries)
 
 

@@ -11,7 +11,7 @@ METRICA = Path("app/integrations/yandex_metrica.py").read_text()
 def test_system_maxibot_is_an_owner_only_row_in_promotion_list():
     assert "def is_maxibot_owner(admin: Admin)" in MENU
     assert 'if not channels and not is_maxibot_owner(admin):' in MENU
-    assert 'rows.append([("🤖 МАКСИБОТ", "promotion_maxibot")])' in MENU
+    assert 'rows.append([("🤖 MAXIBOT", "promotion_maxibot")])' in MENU
     assert 'owner_id = (settings.maxibot_owner_user_id or "").strip()' in MENU
 
 
@@ -20,7 +20,7 @@ def test_system_maxibot_screen_is_owner_gated_without_public_channel_shortcut():
     end = MENU.index('if screen.startswith("promotion_channel:"):', start)
     screen = MENU[start:end]
     assert 'if not is_maxibot_owner(admin):' in screen
-    assert 'f"📣 Продвижение\\n\\nКанал: МАКСИБОТ\\n\\n"' in screen
+    assert 'f"📣 Продвижение\\n\\nКанал: MAXIBOT\\n\\n"' in screen
     assert 'system_yandex' in screen
     assert 'system_counter' in screen
     assert 'system_landing' in screen

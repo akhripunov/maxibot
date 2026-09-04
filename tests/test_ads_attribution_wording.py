@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.ads.llm import SYSTEM_PROMPT
-from app.bot.menu import format_ads_result
+from app.bot.menu import format_ads_result, normalize_ai_text
 
 
 def test_membership_rate_has_canonical_user_semantics_and_separate_scope():
@@ -35,3 +35,17 @@ def test_ai_prompt_declares_membership_rate_and_separates_yandex():
     assert "visit-to-qualified-membership" in SYSTEM_PROMPT
     assert "Never call it attribution coverage" in SYSTEM_PROMPT
     assert "Keep Yandex conversions and MaxiBot memberships as separate populations" in SYSTEM_PROMPT
+
+
+def test_legacy_persisted_summary_is_normalized_at_render_time():
+    legacy = (
+        "Атрибуция MaxiBot ограничена: подтверждено 50 qualified memberships из 1305 визитов, "
+        "покрытие 3,83%, при этом campaign-specific сопоставление недоступно."
+    )
+    rendered = normalize_ai_text(legacy, {
+        "qualified_subscriptions": 50,
+        "landing_visits": 1305,
+        "maxibot_qualified_membership_rate": 50 / 1305,
+    })
+    assert "Конверсия визит → подписка: 3,83%" in rendered
+    assert "покрытие 3,83%" not in rendered

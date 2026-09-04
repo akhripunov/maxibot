@@ -1,4 +1,4 @@
-from app.ads.analysis import bound_v2_dataset, build_deterministic_findings
+from app.ads.analysis import bound_v2_dataset, build_deterministic_findings, build_report_view, dedupe_trend_findings
 
 
 def _dataset(rows):
@@ -41,3 +41,37 @@ def test_bounded_dataset_keeps_findings_evidence_registry_consistent():
     allowed = set(bounded["evidence"])
     for group in ("positive", "watch"):
         assert all(ref in allowed for item in bounded["findings"][group] for ref in item["evidence_ids"])
+
+
+def test_legacy_report_view_fallback_preserves_grounded_placement_and_single_ad():
+    dataset = {
+        "campaign_summary": {"metrics": {"cpa": 20.0}},
+        "sections": {"ad": {"total_rows_analyzed": 1, "notable": [{"value": "713798021"}]},
+                     "ad_group": {"total_rows_analyzed": 1, "notable": [{"value": "g1"}]},
+                     "placement": {"total_rows_analyzed": 371, "notable": [{"value": "yandex.ru"}]}},
+        "selection": {"ad": {"rows_available": 1, "rows_included": 1}, "ad_group": {"rows_available": 1, "rows_included": 1},
+                      "placement": {"rows_available": 371, "rows_included": 26}},
+        "findings": {"positive": [], "watch": [{"dimension": "PLACEMENT", "entity": "yandex.ru", "metrics": {"cpa": 35.06, "cost_share": .3088, "sample_sufficiency": "SUFFICIENT"}, "materiality": "HIGH", "sample_sufficiency": "SUFFICIENT", "evidence_ids": ["V2-y"]}]},
+        "trends": {"findings": []}, "evidence": {"V2-y": {"source": "ADS_V2_OBSERVATION"}},
+    }
+    view = build_report_view(dataset)
+    assert view["primary_findings"][0]["label"] == "yandex.ru"
+    assert view["primary_findings"][0]["campaign_cpa"] == 20.0
+    assert view["creative_comparison"] == "SINGLE_ENTITY"
+    assert view["comparison"]["placement"]["available"] == 371
+
+
+def test_report_view_fallback_keeps_unknown_counts_unknown_and_native_view_unchanged():
+    legacy = build_report_view({"findings": {}, "sections": {"placement": {"notable": []}}})
+    assert legacy["comparison"]["placement"]["state"] == "UNKNOWN"
+    native = {"comparison": {"ad": {"state": "SINGLE_ENTITY"}}, "primary_findings": [{"label": "kept"}]}
+    assert build_report_view({"report_view": native}) is native
+
+
+def test_trend_dedup_collapses_equivalent_hierarchy_but_keeps_distinct_child():
+    base = [{"dimension": "CAMPAIGN", "entity": "c", "entity_id": "c", "metric": "cpa", "period": "3d", "trend_state": "VOLATILE", "relative_delta": .2},
+            {"dimension": "AD_GROUP", "entity": "g", "entity_id": "g", "metric": "cpa", "period": "3d", "trend_state": "VOLATILE", "relative_delta": .2},
+            {"dimension": "AD", "entity": "a", "entity_id": "a", "metric": "cpa", "period": "3d", "trend_state": "VOLATILE", "relative_delta": .2}]
+    assert len(dedupe_trend_findings(base)) == 1
+    distinct = base[:-1] + [{**base[-1], "relative_delta": .4}]
+    assert len(dedupe_trend_findings(distinct)) == 2

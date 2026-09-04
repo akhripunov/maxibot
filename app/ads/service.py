@@ -169,8 +169,14 @@ async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str
     return {"campaign_count": len(ai_runs), "ai_status": WAITING if settings.ads_llm_provider == "codex_worker" and settings.ads_codex_worker_enabled else "COMPLETED", "ai_run_ids": [item.id for item in ai_runs]}
 
 async def latest_view(db: AsyncSession, channel_id: str) -> dict[str, Any]:
-    snapshot = await db.scalar(select(AdsSnapshot).where(AdsSnapshot.channel_id == channel_id).order_by(AdsSnapshot.created_at.desc())); health = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.channel_id == channel_id).order_by(AdsDataHealth.checked_at.desc())); memories = list((await db.scalars(select(AdsMemory).where(AdsMemory.channel_id == channel_id).order_by(AdsMemory.updated_at.desc()).limit(20))).all())
     ai = await db.scalar(select(AdsAiRun).where(AdsAiRun.channel_id == channel_id).order_by(AdsAiRun.created_at.desc()))
+    # A periodic granular snapshot may be newer but intentionally contains
+    # only collection metadata. Prefer the snapshot that produced the current
+    # AI run so the dashboard keeps its campaign facts and provenance.
+    snapshot = await db.get(AdsSnapshot, ai.input_snapshot_id) if ai and ai.input_snapshot_id else None
+    if snapshot is None:
+        snapshot = await db.scalar(select(AdsSnapshot).where(AdsSnapshot.channel_id == channel_id, AdsSnapshot.source != "PERIODIC_GRANULAR").order_by(AdsSnapshot.created_at.desc()))
+    health = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.channel_id == channel_id).order_by(AdsDataHealth.checked_at.desc())); memories = list((await db.scalars(select(AdsMemory).where(AdsMemory.channel_id == channel_id).order_by(AdsMemory.updated_at.desc()).limit(20))).all())
     recommendation = await db.scalar(select(AdsRecommendation).where(AdsRecommendation.channel_id == channel_id, AdsRecommendation.status == "OPEN").order_by(AdsRecommendation.created_at.desc()))
     return {"facts": json.loads(snapshot.facts_json) if snapshot else None, "health": json.loads(health.reasons_json) if health else {"status": "UNKNOWN", "checks": {}}, "memories": memories, "checked_at": snapshot.created_at if snapshot else None, "ai": ai, "recommendation": recommendation}
 

@@ -30,6 +30,16 @@ MAX_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
 
 
+def _entity_config_rows(report) -> list[dict]:
+    """Extract the provider rows without treating ProviderReport as iterable."""
+    rows = getattr(report, "rows", None)
+    if not isinstance(rows, list):
+        raise TypeError("ENTITY_CONFIG_ROWS_NOT_LIST")
+    if any(not isinstance(row, dict) for row in rows):
+        raise TypeError("ENTITY_CONFIG_ROW_NOT_OBJECT")
+    return rows
+
+
 def _interval(collection_type: str) -> int:
     return {
         "CAMPAIGN": settings.ads_collection_campaign_interval_minutes,
@@ -158,12 +168,15 @@ async def collect_entity_configuration(db: AsyncSession, run: AdsV2CollectionRun
     provider = YandexAdsProvider(decrypt_token(encrypted))
     try:
         campaigns = await provider.campaigns([int(campaign.external_id)])
-        ads = await provider.ads([int(campaign.external_id)])
+        ads_report = await provider.ads([int(campaign.external_id)])
     finally:
         await provider.close()
     campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state})
-    for raw in ads:
-        await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(raw.get("Id")), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata=raw)
+    for raw in _entity_config_rows(ads_report):
+        provider_entity_id = raw.get("Id")
+        if provider_entity_id in (None, ""):
+            raise ValueError("ENTITY_CONFIG_AD_ID_MISSING")
+        await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(provider_entity_id), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata=raw)
     run.status, run.completed_at = "COMPLETED", datetime.now(timezone.utc)
     run.freshness_caveat = "metadata configuration refreshed"
 

@@ -4,18 +4,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_public_site_contains_robokassa_required_information():
+def test_public_site_contains_current_pricing_and_legal_links():
     page = (ROOT / "app/static/public_site.html").read_text(encoding="utf-8")
     for text in (
-        "Доступ к МАКСИБОТ — 30 дней",
-        "1 900 ₽",
+        "Тариф MaxiBot — 1 990 рублей в месяц",
         "Хрипунов Александр Сергеевич",
-        "505006274804",
-        "Щёлково",
-        "akhripunov@bk.ru",
-        "Отказ от услуги и возврат денежных средств",
-        "Политика обработки персональных данных",
-        "Комиссия Robokassa или банка из суммы возврата не удерживается.",
+        "ИНН 505006274804",
+        'href="/documents/oferta"',
+        'href="/documents/politika-konfidencialnosti"',
+        'href="/documents/politika-vozvrata"',
     ):
         assert text in page
 
