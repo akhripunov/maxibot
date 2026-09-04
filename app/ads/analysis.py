@@ -1,6 +1,7 @@
 """Deterministic, bounded analysis dataset built only from ADS V2 rows."""
 from __future__ import annotations
 
+import copy
 import hashlib
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -18,6 +19,8 @@ import json
 
 DIMENSIONS = ("AD_GROUP", "AD", "PLACEMENT", "REGION", "DEVICE", "DEMOGRAPHICS", "CRITERIA")
 METRICS = ("impressions", "clicks", "cost", "conversions")
+RECOMMENDATION_LADDER = ("NO_ACTION", "WATCH", "INVESTIGATE", "CONSIDER_CHANGE", "STRONG_RECOMMENDATION")
+SIGNAL_EVOLUTION = ("NEW", "PERSISTENT", "STRENGTHENING", "WEAKENING", "RESOLVED", "INSUFFICIENT_NEW_DATA")
 
 
 def _number(value: Any) -> float:
@@ -74,6 +77,113 @@ def _metrics_baseline_metric(metric: str, campaign: dict[str, float]) -> float |
 
 def _finding_rank(item: dict[str, Any]) -> tuple[float, int, float, str]:
     return (-float(item.get("impact", 0.0)), 0 if item.get("sample_sufficiency") == "SUFFICIENT" else 1, -float(item.get("cost", 0.0)), str(item.get("entity", "")))
+
+
+def classify_signal_evolution(
+    finding: dict[str, Any],
+    trends: list[dict[str, Any]] | None = None,
+    previous_recommendations: list[dict[str, Any]] | None = None,
+    measured_outcomes: list[dict[str, Any]] | None = None,
+) -> str:
+    """Classify one signal without counting trend/dimension rows as new signals."""
+    if finding.get("sample_sufficiency") in {"INSUFFICIENT", "UNKNOWN", None}:
+        return "INSUFFICIENT_NEW_DATA"
+    dimension = str(finding.get("dimension") or "").upper()
+    entity = str(finding.get("entity") or finding.get("label") or "")
+    matching = [item for item in trends or [] if str(item.get("dimension") or "").upper() == dimension and str(item.get("entity") or item.get("label") or "") == entity]
+    if matching:
+        state = str(matching[0].get("trend_state") or "")
+        if state in {"DEGRADING", "VOLATILE"}:
+            return "STRENGTHENING" if abs(float(matching[0].get("relative_delta") or 0)) >= abs(float(finding.get("cpa_delta_pct") or 0)) else "PERSISTENT"
+        if state in {"IMPROVING", "RECOVERED"}:
+            return "WEAKENING" if finding.get("severity") == "WATCH" else "RESOLVED"
+        if state == "STABLE":
+            return "PERSISTENT"
+    if any(str(item.get("status") or "").upper() == "COMPLETED" for item in measured_outcomes or []):
+        return "PERSISTENT"
+    if previous_recommendations:
+        return "PERSISTENT"
+    return "NEW"
+
+
+def assess_recommendation_quality(
+    finding: dict[str, Any],
+    *,
+    campaign_metrics: dict[str, Any] | None = None,
+    trends: list[dict[str, Any]] | None = None,
+    previous_recommendations: list[dict[str, Any]] | None = None,
+    measured_outcomes: list[dict[str, Any]] | None = None,
+    data_freshness_hours: float | None = None,
+) -> dict[str, Any]:
+    """Score a candidate for user value; this never executes an ad action."""
+    sample = finding.get("sample_sufficiency") or finding.get("metrics", {}).get("sample_sufficiency")
+    confidence = finding.get("confidence") or finding.get("metrics", {}).get("confidence")
+    if sample in {"INSUFFICIENT", "UNKNOWN", None}:
+        ladder = "NO_ACTION"
+    elif sample != "SUFFICIENT":
+        ladder = "INVESTIGATE"
+    else:
+        delta = abs(float(finding.get("cpa_delta_pct") or finding.get("metrics", {}).get("cpa_delta_pct") or 0))
+        impact = float(finding.get("impact") or 0)
+        evolution = classify_signal_evolution(finding, trends, previous_recommendations, measured_outcomes)
+        if finding.get("severity") != "WATCH" and finding.get("materiality") != "HIGH":
+            ladder = "WATCH"
+        elif evolution in {"STRENGTHENING", "PERSISTENT"} and delta >= 0.5 and impact > 0:
+            ladder = "STRONG_RECOMMENDATION"
+        elif delta >= 0.2 or impact > 0:
+            ladder = "CONSIDER_CHANGE"
+        else:
+            ladder = "WATCH"
+    evolution = classify_signal_evolution(finding, trends, previous_recommendations, measured_outcomes)
+    delta = abs(float(finding.get("cpa_delta_pct") or finding.get("metrics", {}).get("cpa_delta_pct") or 0))
+    economic_impact = float(finding.get("impact") or 0)
+    magnitude = min(1.0, delta)
+    return {
+        "action_ladder": ladder,
+        "signal_evolution": evolution,
+        "economic_impact": economic_impact,
+        "sample_sufficiency": sample or "INSUFFICIENT",
+        "magnitude": magnitude,
+        "persistence": evolution in {"PERSISTENT", "STRENGTHENING"},
+        "actionability": "HIGH" if sample == "SUFFICIENT" and finding.get("severity") == "WATCH" else "LOW",
+        "reversibility": "HIGH",
+        "risk": "LOW" if finding.get("severity") == "WATCH" else "UNKNOWN",
+        "confidence": confidence or "UNKNOWN",
+        "data_freshness_hours": data_freshness_hours,
+        "why_this": "Сигнал основан на сравнении с итогом кампании и отобранных данных." if sample == "SUFFICIENT" else "Недостаточно данных для вывода.",
+        "why_now": "Есть достаточная выборка для проверки." if sample == "SUFFICIENT" else "Нужно дождаться достаточных данных.",
+        "evidence": list(finding.get("evidence_ids") or []),
+        "risk_if_ignored": "Потенциально продолжатся неэффективные расходы." if ladder in {"CONSIDER_CHANGE", "STRONG_RECOMMENDATION"} else "Риск не подтверждён.",
+        "next_step": "Проверить сигнал вручную; автоматические изменения отключены." if ladder not in {"NO_ACTION", "WATCH"} else "Наблюдать.",
+        "wait_condition": "Нужны новые наблюдения при недостаточной выборке." if sample != "SUFFICIENT" else None,
+    }
+
+
+def build_recommendation_quality_layer(
+    findings: dict[str, Any],
+    *,
+    campaign_metrics: dict[str, Any] | None = None,
+    trends: list[dict[str, Any]] | None = None,
+    previous_recommendations: list[dict[str, Any]] | None = None,
+    measured_outcomes: list[dict[str, Any]] | None = None,
+    data_freshness_hours: float | None = None,
+) -> dict[str, Any]:
+    """Select one primary and at most two distinct secondary recommendations."""
+    candidates = list(findings.get("positive", [])) + list(findings.get("watch", []))
+    ranked = sorted(candidates, key=_finding_rank)
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for finding in ranked:
+        key = (finding.get("dimension"), finding.get("entity"), finding.get("finding_type"))
+        if key in seen:
+            continue
+        seen.add(key)
+        quality = assess_recommendation_quality(finding, campaign_metrics=campaign_metrics, trends=trends, previous_recommendations=previous_recommendations, measured_outcomes=measured_outcomes, data_freshness_hours=data_freshness_hours)
+        selected.append({"finding_id": finding.get("finding_id"), "dimension": finding.get("dimension"), "entity": finding.get("entity"), "quality": quality})
+        if len(selected) >= 3:
+            break
+    primary = selected[0] if selected else {"finding_id": None, "quality": {"action_ladder": "NO_ACTION", "signal_evolution": "INSUFFICIENT_NEW_DATA"}}
+    return {"primary": primary, "secondary": selected[1:3], "candidate_count": len(candidates), "dedup_policy": "one primary plus at most two distinct findings; trends are persistence evidence", "ladder": RECOMMENDATION_LADDER, "signal_evolution_values": SIGNAL_EVOLUTION}
 
 
 def build_deterministic_findings(dataset: dict[str, Any]) -> dict[str, Any]:
@@ -139,11 +249,38 @@ def dedupe_trend_findings(findings: list[dict[str, Any]] | None) -> list[dict[st
     return result
 
 
+def _with_semantic_coverage(view: dict[str, Any], *, findings: list[dict[str, Any]], trends: list[dict[str, Any]]) -> dict[str, Any]:
+    """Add explicit current-material, weak, and final-trend counts in memory."""
+    result = copy.deepcopy(view)
+    primary = result.get("primary_findings") or []
+    secondary = result.get("secondary_findings") or []
+    if not secondary:
+        secondary = [item for item in findings if item not in primary]
+    final_trends = dedupe_trend_findings(trends)
+    for name, item in (result.get("comparison") or {}).items():
+        dimension = str(name).upper()
+        material = sum(1 for finding in primary if str(finding.get("dimension", "")).upper() == dimension)
+        weak = sum(1 for finding in secondary if str(finding.get("dimension", "")).upper() == dimension and finding.get("sample_sufficiency") == "WEAK_SIGNAL")
+        trend = sum(1 for finding in final_trends if str(finding.get("dimension", "")).upper() == dimension)
+        item["material_findings"] = material
+        item["weak_signals"] = weak
+        item["trend_signals"] = trend
+        item["material_findings_count"] = material
+        item["weak_signals_count"] = weak
+        item["trend_signals_count"] = trend
+        item["available_count"] = item.get("available")
+        item["selected_count"] = item.get("included")
+    return result
+
+
 def build_report_view(dataset: dict[str, Any]) -> dict[str, Any]:
     """Return one canonical report view, deriving legacy snapshots in memory only."""
     stored = dataset.get("report_view")
     if isinstance(stored, dict) and isinstance(stored.get("comparison"), dict):
-        return stored
+        findings = list((dataset.get("findings") or {}).get("positive", [])) + list((dataset.get("findings") or {}).get("watch", []))
+        view = _with_semantic_coverage(stored, findings=findings, trends=(dataset.get("trends") or {}).get("findings") or stored.get("trend_findings") or [])
+        view.setdefault("recommendation_quality", dataset.get("recommendation_quality") or build_recommendation_quality_layer(dataset.get("findings") or {}, campaign_metrics=(dataset.get("campaign_summary") or {}).get("metrics"), trends=(dataset.get("trends") or {}).get("findings")))
+        return view
     findings = dataset.get("findings") or {}
     candidates = list(findings.get("positive", [])) + list(findings.get("watch", []))
     campaign_metrics = (dataset.get("campaign_summary") or {}).get("metrics") or {}
@@ -174,13 +311,15 @@ def build_report_view(dataset: dict[str, Any]) -> dict[str, Any]:
         state = "UNKNOWN" if available is None else ("PROVIDER_UNAVAILABLE" if not available else "SINGLE_ENTITY" if available == 1 else "AVAILABLE" if material else "NO_MATERIAL_DIFFERENCE")
         comparison[name] = {"available": available, "included": included, "material_findings": material, "state": state}
     trends = dataset.get("trends") or {}
-    return {
+    view = {
         "primary_findings": sorted(primary, key=lambda item: (-float(item.get("impact", 0.0)), str(item.get("label") or item.get("entity") or "")))[:5],
         "secondary_findings": [item for item in normalized if item not in primary][:5],
         "trend_findings": dedupe_trend_findings(trends.get("findings")),
         "comparison": comparison,
         "creative_comparison": comparison.get("ad", {}).get("state", "UNKNOWN"),
+        "recommendation_quality": dataset.get("recommendation_quality") or build_recommendation_quality_layer(findings, campaign_metrics=campaign_metrics, trends=trends.get("findings") or []),
     }
+    return _with_semantic_coverage(view, findings=normalized, trends=trends.get("findings") or [])
 
 
 def _evidence_id(dimension: str, value: str) -> str:
@@ -218,7 +357,14 @@ def bound_v2_dataset(dataset: dict[str, Any], *, max_bytes: int, max_evidence: i
         for name, item in (view.get("comparison") or {}).items():
             selection = data.get("selection", {}).get(name, {})
             item["included"] = int(selection.get("rows_included", item.get("included", 0)))
-            item["material_findings"] = sum(1 for finding in available_findings if str(finding.get("dimension", "")).lower() == name)
+            item["material_findings"] = sum(1 for finding in view.get("primary_findings", []) if str(finding.get("dimension", "")).lower() == name)
+            item["weak_signals"] = sum(1 for finding in view.get("secondary_findings", []) if str(finding.get("dimension", "")).lower() == name and finding.get("sample_sufficiency") == "WEAK_SIGNAL")
+            item["trend_signals"] = sum(1 for finding in view.get("trend_findings", []) if str(finding.get("dimension", "")).lower() == name)
+            item["material_findings_count"] = item["material_findings"]
+            item["weak_signals_count"] = item["weak_signals"]
+            item["trend_signals_count"] = item["trend_signals"]
+            item["available_count"] = item.get("available")
+            item["selected_count"] = item.get("included")
     sync_evidence()
     def trim_one() -> bool:
         for name in order:
@@ -429,6 +575,11 @@ async def build_v2_analysis_dataset(db: AsyncSession, *, campaign: AdsCampaign, 
         "trends": trends,
     }
     dataset["findings"] = build_deterministic_findings(dataset)
+    dataset["recommendation_quality"] = build_recommendation_quality_layer(
+        dataset["findings"],
+        campaign_metrics=campaign_metrics,
+        trends=dataset.get("trends", {}).get("findings", []),
+    )
     comparison = {}
     finding_items = dataset["findings"].get("positive", []) + dataset["findings"].get("watch", [])
     for dimension in DIMENSIONS:

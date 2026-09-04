@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.ads.events import parse_ai_run_event
-from app.bot.menu import format_ads_result, safe_max_entity_label
+from app.bot.menu import format_ads_result, safe_max_entity_label, format_dimension_coverage
 from datetime import datetime, timezone
 
 
@@ -66,7 +66,7 @@ def test_result_renderer_shows_only_bounded_russian_trend_block():
         ]},
     )
     assert "📈 Динамика" in body
-    assert "CPA yandex.ru: ухудшается" in body
+    assert "CPA yandex[.]ru: ухудшается" in body
     assert body.count("• ") <= 3 + 8
     assert "DEGRADING" not in body
     assert "713798021" not in body

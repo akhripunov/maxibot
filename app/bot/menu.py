@@ -264,13 +264,13 @@ def format_trend_block(trends: dict | None, campaign_name: str | None = None) ->
         state = states.get(finding.get("trend_state"), "мало истории")
         metric = metrics.get(finding.get("metric"), finding.get("metric", "метрика"))
         labels = {"CAMPAIGN": campaign_name or "кампания", "AD": "объявление", "AD_GROUP": "группа объявлений", "PLACEMENT": "площадка", "REGION": "регион", "DEVICE": "устройство", "DEMOGRAPHICS": "демография", "CRITERIA": "критерий"}
-        entity = humanize_entity_label(finding.get("dimension"), finding.get("entity"))
+        entity = safe_max_entity_label(humanize_entity_label(finding.get("dimension"), finding.get("entity")))
         if finding.get("dimension") == "CAMPAIGN":
             entity = "кампании"
         if not entity or entity.isdigit() or (len(entity) > 40 and entity.count("-") >= 2):
             entity = labels.get(finding.get("dimension"), "сущность")
         relative = finding.get("relative_delta")
-        change = f" ({float(relative) * 100:+.1f}%)" if relative is not None else ""
+        change = f" ({_signed_ru_percent(relative)})" if relative is not None else ""
         lines.append(f"• {metric} {entity}: {state}{change}")
     return "📈 Динамика\n" + "\n".join(lines) + "\n"
 
@@ -316,6 +316,13 @@ def _count_phrase(value: int, one: str, few: str, many: str) -> str:
     return f"{value} {form}"
 
 
+def _signed_ru_percent(value: object) -> str:
+    try:
+        return f"{float(value) * 100:+.1f}".replace(".", ",") + "%"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def format_primary_findings(v2_analysis: dict | None) -> str:
     """Render material deterministic findings with grounded entity labels."""
     findings = build_report_view(v2_analysis or {}).get("primary_findings") or []
@@ -349,14 +356,20 @@ def format_dimension_coverage(v2_analysis: dict | None) -> str:
         if item.get("available"):
             available = item.get("available")
             selected = item.get("included")
-            material = item.get("material_findings")
+            material = item.get("material_findings_count", item.get("material_findings"))
+            weak = item.get("weak_signals_count", item.get("weak_signals"))
+            trend = item.get("trend_signals_count", item.get("trend_signals"))
             detail = f"доступно {available}"
             if selected not in (None, 0):
                 detail += f" · отобрано {selected}"
             if material not in (None, 0):
                 detail += f" · {_count_phrase(material, 'значимый вывод', 'значимых вывода', 'значимых выводов')}"
             elif material == 0:
-                detail += " · значимых выводов нет"
+                detail += " · значимых текущих выводов нет" if trend not in (None, 0) else " · значимых выводов нет"
+            if weak not in (None, 0):
+                detail += f" · {_count_phrase(weak, 'слабый сигнал', 'слабых сигнала', 'слабых сигналов')}"
+            if trend not in (None, 0):
+                detail += f" · {_count_phrase(trend, 'тренд-сигнал', 'тренд-сигнала', 'тренд-сигналов')}"
             if key == "ad" and item.get("state") == "SINGLE_ENTITY":
                 detail += " · сравнивать креативы пока не с чем"
             parts.append(f"• {labels[key]}: {detail}")

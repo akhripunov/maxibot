@@ -1,4 +1,5 @@
 from app.ads.analysis import bound_v2_dataset, build_deterministic_findings, build_report_view, dedupe_trend_findings
+from app.bot.menu import _count_phrase, format_dimension_coverage, format_trend_block
 
 
 def _dataset(rows):
@@ -65,7 +66,10 @@ def test_report_view_fallback_keeps_unknown_counts_unknown_and_native_view_uncha
     legacy = build_report_view({"findings": {}, "sections": {"placement": {"notable": []}}})
     assert legacy["comparison"]["placement"]["state"] == "UNKNOWN"
     native = {"comparison": {"ad": {"state": "SINGLE_ENTITY"}}, "primary_findings": [{"label": "kept"}]}
-    assert build_report_view({"report_view": native}) is native
+    rendered = build_report_view({"report_view": native})
+    assert native["comparison"]["ad"] == {"state": "SINGLE_ENTITY"}
+    assert rendered["primary_findings"][0]["label"] == "kept"
+    assert rendered["comparison"]["ad"]["material_findings_count"] == 0
 
 
 def test_trend_dedup_collapses_equivalent_hierarchy_but_keeps_distinct_child():
@@ -75,3 +79,38 @@ def test_trend_dedup_collapses_equivalent_hierarchy_but_keeps_distinct_child():
     assert len(dedupe_trend_findings(base)) == 1
     distinct = base[:-1] + [{**base[-1], "relative_delta": .4}]
     assert len(dedupe_trend_findings(distinct)) == 2
+
+
+def test_coverage_separates_material_weak_and_trend_signals():
+    view = {"report_view": {
+        "primary_findings": [{"dimension": "PLACEMENT", "sample_sufficiency": "SUFFICIENT"}],
+        "secondary_findings": [
+            {"dimension": "PLACEMENT", "sample_sufficiency": "WEAK_SIGNAL"},
+            {"dimension": "PLACEMENT", "sample_sufficiency": "WEAK_SIGNAL"},
+        ],
+        "comparison": {
+            "placement": {"available": 381, "included": 25, "state": "AVAILABLE"},
+            "demographics": {"available": 17, "included": 0, "state": "NO_MATERIAL_DIFFERENCE"},
+        },
+    }, "trends": {"findings": [
+        {"dimension": "DEMOGRAPHICS", "entity": "AGE_45_54|GENDER_FEMALE", "metric": "cpa", "period": "3d", "trend_state": "IMPROVING", "relative_delta": -.269},
+        {"dimension": "DEMOGRAPHICS", "entity": "AGE_55|GENDER_FEMALE", "metric": "cpa", "period": "3d", "trend_state": "VOLATILE", "relative_delta": .25},
+    ]}}
+    body = format_dimension_coverage(view)
+    assert "Площадки: доступно 381 · отобрано 25 · 1 значимый вывод · 2 слабых сигнала" in body
+    assert "3 значимых вывода" not in body
+    assert "Демография: доступно 17 · значимых текущих выводов нет · 2 тренд-сигнала" in body
+
+
+def test_russian_count_morphology_and_percentage_formatting():
+    assert [_count_phrase(n, "значимый вывод", "значимых вывода", "значимых выводов") for n in (1, 2, 3, 4, 5, 11, 21)] == [
+        "1 значимый вывод", "2 значимых вывода", "3 значимых вывода", "4 значимых вывода", "5 значимых выводов", "11 значимых выводов", "21 значимый вывод"
+    ]
+    body = format_trend_block({"findings": [
+        {"dimension": "CAMPAIGN", "metric": "cpa", "trend_state": "VOLATILE", "relative_delta": .333},
+        {"dimension": "DEMOGRAPHICS", "entity": "AGE_45_54|GENDER_FEMALE", "metric": "cpa", "trend_state": "IMPROVING", "relative_delta": -.269},
+        {"dimension": "DEMOGRAPHICS", "entity": "AGE_55|GENDER_FEMALE", "metric": "cpa", "trend_state": "VOLATILE", "relative_delta": .25},
+    ]}, "campaign")
+    assert "+33,3%" in body
+    assert "-26,9%" in body
+    assert "+25,0%" in body
