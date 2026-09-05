@@ -73,6 +73,38 @@ def test_system_landing_uses_shared_bot_miniapp_handoff():
     assert "MAX_STARTAPP_HANDOFF" in system_landing
 
 
+def test_system_landing_has_channel_parity_card_and_bot_only_fallback():
+    start = MAIN.index('@app.get("/system/{public_id}"')
+    end = MAIN.index('@app.get("/health/live")', start)
+    system_landing = MAIN[start:end]
+    for fragment in (
+        "background:#f3f5f7",
+        "max-width:460px",
+        "background:#fff",
+        "border-radius:24px",
+        "box-shadow:0 12px 40px #0001",
+        "<h1>Переход в MAX</h1>",
+        "<p>Переходим в MAX…</p>",
+        "Открыть MaxiBot",
+        "window.location.replace",
+        "setTimeout(() => mainEl.classList.add('visible'), 1600)",
+        "setTimeout(() => mainEl.classList.add('visible', 'delayed'), 3200)",
+    ):
+        assert fragment in system_landing
+    ui = system_landing[system_landing.index("<main>"):system_landing.index("<script>")]
+    for forbidden in ("startapp", "resolve", "bot_started", "token"):
+        assert forbidden not in ui.lower()
+
+
+def test_channel_redirect_section_has_no_bot_landing_ui_changes():
+    start = MAIN.index("async def _traffic_redirect")
+    end = MAIN.index('@app.get("/go/{public_id}"', start)
+    channel_redirect = MAIN[start:end]
+    assert "Открыть MaxiBot" not in channel_redirect
+    assert "Переходим в MAX…" not in channel_redirect
+    assert "window.location.replace" in channel_redirect
+
+
 def test_system_landing_uses_its_own_metrika_counter_before_bot_handoff():
     start = MAIN.index('@app.get("/system/{public_id}"')
     end = MAIN.index('@app.get("/health/live")', start)

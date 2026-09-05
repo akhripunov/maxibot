@@ -759,20 +759,28 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
     await db.commit()
     metrica_counter = valid_counter_id(profile.yandex_counter_id)
     metrica_tag = metrica_tag_html(metrica_counter)
-    return HTMLResponse(f'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Переход в MAX</title>
+    handoff_url = html.escape(destination, quote=True)
+    return HTMLResponse(f'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Переход в MAX</title><meta name="description" content="Переход в MAX">
+<style>html,body{{margin:0;width:100%;min-height:100%;background:#f3f5f7;font-family:system-ui,-apple-system,sans-serif}}main{{box-sizing:border-box;max-width:460px;margin:18vh auto;padding:28px 24px;text-align:center;background:#fff;border-radius:24px;box-shadow:0 12px 40px #0001}}h1{{margin:0 0 12px;font-size:28px}}p{{margin:0 0 22px;color:#687386;line-height:1.45}}.hint{{font-size:14px}}.primary,.secondary{{display:block;padding:14px 22px;border-radius:14px;text-decoration:none;font-weight:700}}.primary{{background:#1677ff;color:#fff}}.secondary{{margin-top:12px;color:#1677ff;background:#eef4ff}}#fallbackCta{{display:none}}main.delayed #fallbackCta{{display:block}}</style>
 {metrica_tag}
+<main><h1>Переход в MAX</h1><p>Переходим в MAX…</p><a id="fallbackCta" class="primary" href="{handoff_url}">Открыть MaxiBot</a></main>
 <script>
 let maxibotHandoffStarted = false;
+const mainEl = document.querySelector('main');
 function systemSignal(eventType) {{
   try {{ navigator.sendBeacon('/system/traffic/events', new Blob([JSON.stringify({{visitor_token: {json.dumps(token)}, event_type: eventType}})], {{type:'application/json'}})); }} catch (_) {{}}
 }}
 systemSignal('SYSTEM_REDIRECT_ATTEMPTED');
 document.addEventListener('visibilitychange', () => systemSignal(document.visibilityState === 'hidden' ? 'SYSTEM_PAGE_HIDDEN' : 'SYSTEM_PAGE_VISIBLE_AGAIN'), {{passive:true}});
 window.addEventListener('pagehide', () => systemSignal('SYSTEM_PAGE_HIDDEN'), {{passive:true}});
+const slowTimer = setTimeout(() => mainEl.classList.add('visible'), 1600);
+const fallbackTimer = setTimeout(() => mainEl.classList.add('visible', 'delayed'), 3200);
 function continueToMax() {{
   if (maxibotHandoffStarted) return;
   maxibotHandoffStarted = true;
-  location.replace({json.dumps(destination)});
+  clearTimeout(slowTimer);
+  clearTimeout(fallbackTimer);
+  window.location.replace({json.dumps(destination)});
 }}
 if ({json.dumps(bool(metrica_counter))}) {{
   window.addEventListener('maxibot-metrica-error', continueToMax, {{once:true}});
@@ -783,11 +791,11 @@ if ({json.dumps(bool(metrica_counter))}) {{
       navigator.sendBeacon('/system/traffic/metrica/client-id', new Blob([JSON.stringify({{visitor_token: {json.dumps(token)}, client_id: clientId}})], {{type:'application/json'}}));
     }} catch (_) {{}}
   }}, {{once:true}});
-  ym({json.dumps(metrica_counter)}, 'hit', location.href, {{callback: continueToMax}});
+  ym({json.dumps(metrica_counter)}, 'hit', window.location.href, {{callback: continueToMax}});
 }} else {{
   continueToMax();
 }}
-</script><p>Переход в MAX…</p>''', headers={"Cache-Control": "no-store"})
+</script>''', headers={"Cache-Control": "no-store"})
 
 @app.get("/admin/system/telemetry-report")
 async def system_telemetry_report(
