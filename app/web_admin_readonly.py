@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.db.models import (
@@ -24,9 +25,11 @@ from app.db.models import (
     Conversation,
     SubscriptionOrder,
     TrafficProfile,
+    QaRun,
 )
 from app.db.session import get_session
-from app.web_admin_auth import require_web_admin
+from app.qa_observability import UNKNOWN, decode_json, parity_status, persist_qa_result
+from app.web_admin_auth import require_edge_token, require_web_admin
 
 router = APIRouter(prefix="/admin", tags=["web-admin"])
 
@@ -180,13 +183,129 @@ async def admin_system_health(
     }
 
 
+def _qa_parity(run: QaRun) -> dict[str, str]:
+    configured_sha = settings.maxibot_release_id if len(settings.maxibot_release_id or "") == 40 else UNKNOWN
+    current_main_sha = run.current_main_sha or configured_sha
+    main = parity_status(run.tested_sha, current_main_sha)
+    production = parity_status(run.tested_sha, run.production_sha)
+    overall = "MISMATCH" if "MISMATCH" in {main, production} else ("MATCH" if main == "MATCH" else "UNKNOWN")
+    return {"overall": overall, "tested_vs_current_main": main, "tested_vs_production": production}
+
+
+def _qa_freshness(run: QaRun) -> dict[str, object]:
+    if not run.finished_at:
+        return {"status": "UNKNOWN", "finished_at": None, "age_seconds": None}
+    age = max(int((_now() - run.finished_at).total_seconds()), 0)
+    return {"status": "FRESH" if age <= 86400 else "STALE", "finished_at": run.finished_at.isoformat(), "age_seconds": age}
+
+
+def _serialize_qa_run(run: QaRun, *, detail: bool = False) -> dict[str, object]:
+    parity = _qa_parity(run)
+    current_main_sha = run.current_main_sha or (settings.maxibot_release_id if len(settings.maxibot_release_id or "") == 40 else UNKNOWN)
+    payload: dict[str, object] = {
+        "run_id": run.id,
+        "release_id": run.release_id,
+        "TESTED_SHA": run.tested_sha,
+        "CURRENT_MAIN_SHA": current_main_sha,
+        "PRODUCTION_SHA": run.production_sha or "UNKNOWN",
+        "parity": parity,
+        "freshness": _qa_freshness(run),
+        "verdict": run.verdict,
+        "counts": {"total_tests": run.total_tests, "passed": run.passed, "failed": run.failed, "skipped": run.skipped},
+        "production": {"status": run.production_status, "smoke": run.production_smoke},
+        "production_smoke": run.production_smoke,
+        "artifact_sha256": run.artifact_sha256,
+        "read_only": True,
+    }
+    if detail:
+        payload["timing"] = {"started_at": run.started_at.isoformat() if run.started_at else None, "finished_at": run.finished_at.isoformat() if run.finished_at else None, "duration_ms": run.duration_ms}
+        payload["suite_matrix"] = [
+            {
+                "name": suite.suite_name,
+                "status": suite.status,
+                "total_tests": suite.total_tests,
+                "passed": suite.passed,
+                "failed": suite.failed,
+                "skipped": suite.skipped,
+                "duration_ms": suite.duration_ms,
+                "failures": decode_json(suite.failures_json, []),
+                "unverified": decode_json(suite.unverified_json, []),
+            }
+            for suite in sorted(run.suites, key=lambda item: item.suite_name)
+        ]
+        payload["failures_sanitized"] = decode_json(run.failures_json, [])
+        payload["unverified"] = decode_json(run.unverified_json, {"total": 0, "critical": 0, "statuses": ["WORKING_UNTESTED", "UNKNOWN"]})
+        payload["source_path"] = run.source_path
+    return payload
+
+
+@router.post("/qa-runs/ingest", dependencies=[Depends(require_edge_token)])
+async def admin_qa_ingest(payload: dict = Body(...), db: AsyncSession = Depends(get_session)):
+    try:
+        run = await persist_qa_result(db, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"run_id": run.id, "release_id": run.release_id, "stored": True, "read_only": False}
+
+
+@router.get("/qa/current")
+async def admin_qa_current(_: str = Depends(require_web_admin), db: AsyncSession = Depends(get_session)):
+    run = await db.scalar(select(QaRun).options(selectinload(QaRun.suites)).order_by(QaRun.created_at.desc()).limit(1))
+    if not run:
+        return {"status": "UNKNOWN", "reason": "no persisted QA run artifact", "read_only": True}
+    return _serialize_qa_run(run, detail=True)
+
+
+@router.get("/qa/runs")
+async def admin_qa_runs(
+    limit: int = Query(default=10, ge=1, le=10),
+    _: str = Depends(require_web_admin),
+    db: AsyncSession = Depends(get_session),
+):
+    runs = list((await db.scalars(select(QaRun).order_by(QaRun.created_at.desc()).limit(limit))).all())
+    return {"items": [_serialize_qa_run(run) for run in runs], "read_only": True}
+
+
+@router.get("/qa/runs/{run_id}")
+async def admin_qa_run(run_id: str, _: str = Depends(require_web_admin), db: AsyncSession = Depends(get_session)):
+    run = await db.scalar(select(QaRun).options(selectinload(QaRun.suites)).where(QaRun.id == run_id))
+    if not run:
+        raise HTTPException(status_code=404, detail="QA run not found")
+    return _serialize_qa_run(run, detail=True)
+
+
 @router.get("/qa-release")
-async def admin_qa_release(_: str = Depends(require_web_admin)):
+async def admin_qa_release(_: str = Depends(require_web_admin), db: AsyncSession = Depends(get_session)):
+    current = await admin_qa_current(_, db)
+    if current.get("status") == "UNKNOWN":
+        return current
+    runs = list((await db.scalars(select(QaRun).order_by(QaRun.created_at.desc()).limit(10))).all())
+    verdict = "PASS" if current["verdict"] == "GO" else current["verdict"]
+    unverified = current.get("unverified", {})
+    if isinstance(unverified, dict):
+        unverified = [
+            {"name": "UNKNOWN cases", "status": str(unverified.get("total", 0))},
+            {"name": "UNKNOWN critical cases", "status": str(unverified.get("critical", 0))},
+        ]
     return {
-        "release_id": settings.maxibot_release_id,
-        "qa_status": "UNKNOWN",
-        "production_deploy": "NOT_CHECKED",
-        "reason": "release evidence is maintained outside the read-only business API",
+        "release_id": current["release_id"],
+        "qa_status": verdict,
+        "production_deploy": current["production"]["status"],
+        "current_summary": {
+            "verdict": verdict,
+            "title": "Проверка пройдена" if verdict == "PASS" else "Проверка не пройдена",
+            "reason": "Структурированный QA-артефакт сохранён" if verdict == "PASS" else "QA verdict не подтверждён",
+            "tested_sha": current["TESTED_SHA"],
+            "current_main_sha": current["CURRENT_MAIN_SHA"],
+            "production_sha": current["PRODUCTION_SHA"],
+            "checked_at": current["freshness"]["finished_at"],
+            "parity": current["parity"]["overall"],
+        },
+        "headline_counts": current["counts"],
+        "suite_matrix": current.get("suite_matrix", []),
+        "failures": current.get("failures_sanitized", []),
+        "unverified": unverified,
+        "recent_runs": [_serialize_qa_run(run) for run in runs],
         "read_only": True,
     }
 

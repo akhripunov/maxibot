@@ -7,6 +7,7 @@ cd "$ROOT_DIR" || exit 1
 
 RELEASE_ID="$(date -u +%Y-%m-%dT%H%M%SZ)"
 RELEASE_DATE="$(date -u +%Y-%m-%d)"
+RUN_STARTED_EPOCH="$(date -u +%s)"
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   CANDIDATE_SHA="$(git rev-parse HEAD)"
   PREVIOUS_GOOD_SHA="$(git log -2 --format=%H 2>/dev/null | sed -n '2p')"
@@ -28,6 +29,9 @@ mkdir -p "$HISTORY_DIR" "$LOG_DIR"
 STATIC="NOT_RUN"; UNIT="NOT_RUN"; INTEGRATION="NOT_RUN"; REGRESSION="NOT_RUN"
 BUILD="NOT_RUN"; STAGING="NOT_RUN"; E2E="NOT_RUN"
 TOTAL_TESTS=0; PASSED=0; FAILED=0; SKIPPED=0
+UNIT_TESTS=0; UNIT_PASSED=0; UNIT_FAILED=0; UNIT_SKIPPED=0; UNIT_DURATION_MS=0
+INTEGRATION_TESTS=0; INTEGRATION_PASSED=0; INTEGRATION_FAILED=0; INTEGRATION_SKIPPED=0; INTEGRATION_DURATION_MS=0
+REGRESSION_TESTS=0; REGRESSION_PASSED=0; REGRESSION_FAILED=0; REGRESSION_SKIPPED=0; REGRESSION_DURATION_MS=0
 TOTAL_CASES=0; AUTOMATED_CASES=0; MANUAL_CASES=0; SEMI_AUTOMATED_CASES=0; CRITICAL_CASES=0; REGRESSION_CASES=0
 VERIFIED_WORKING=0; WORKING_UNTESTED=0; BROKEN=0; UNKNOWN=0; BROKEN_CRITICAL=0; UNKNOWN_CRITICAL=0
 EXECUTED_CASES=0; PASSED_CASES=0; FAILED_CASES=0; BLOCKED_CASES=0
@@ -174,6 +178,87 @@ NEW_REGRESSION_CASES = $NEW_REGRESSION_CASES
 EOF
 }
 
+write_machine_result() {
+  local finished_epoch duration_ms
+  finished_epoch="$(date -u +%s)"
+  duration_ms=$(( (finished_epoch - RUN_STARTED_EPOCH) * 1000 ))
+  export RELEASE_ID CANDIDATE_SHA VERDICT CURRENT_PROD_SHA PRODUCTION PRODUCTION_SMOKE PRODUCTION_CHANGED
+  export STATIC UNIT INTEGRATION REGRESSION BUILD STAGING E2E TOTAL_TESTS PASSED FAILED SKIPPED
+  export UNKNOWN UNKNOWN_CRITICAL
+  export UNIT_TESTS UNIT_PASSED UNIT_FAILED UNIT_SKIPPED UNIT_DURATION_MS
+  export INTEGRATION_TESTS INTEGRATION_PASSED INTEGRATION_FAILED INTEGRATION_SKIPPED INTEGRATION_DURATION_MS
+  export REGRESSION_TESTS REGRESSION_PASSED REGRESSION_FAILED REGRESSION_SKIPPED REGRESSION_DURATION_MS
+  FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" DURATION_MS="$duration_ms" \
+    "${QA_PYTHON:-python3}" - "$LOG_DIR/qa-result.json" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+path = sys.argv[1]
+
+def integer(name):
+    try:
+        return max(int(os.environ.get(name, "0")), 0)
+    except ValueError:
+        return 0
+
+def suite(name, status, total=None, passed=None, failed=None, skipped=None, duration=None):
+    return {
+        "name": name,
+        "status": status,
+        "total_tests": total,
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "duration_ms": duration,
+        "failures": [],
+        "unverified": [],
+    }
+
+payload = {
+    "schema_version": "qa_observability.v1",
+    "release_id": os.environ["RELEASE_ID"],
+    "tested_sha": os.environ["CANDIDATE_SHA"],
+    "current_main_sha": os.environ["CANDIDATE_SHA"],
+    "production_sha": os.environ.get("CURRENT_PROD_SHA") or "UNKNOWN",
+    "verdict": os.environ["VERDICT"],
+    "timing": {
+        "started_at": os.environ["RELEASE_ID"],
+        "finished_at": os.environ["FINISHED_AT"],
+        "duration_ms": integer("DURATION_MS"),
+    },
+    "counts": {key: integer(key.upper()) for key in ("total_tests", "passed", "failed", "skipped")},
+    "production": {
+        "status": os.environ["PRODUCTION"],
+        "smoke": os.environ["PRODUCTION_SMOKE"],
+        "changed": os.environ["PRODUCTION_CHANGED"] == "YES",
+    },
+    "source_path": "scripts/qa_check.sh",
+    "suites": [
+        suite("static", os.environ["STATIC"]),
+        suite("unit", os.environ["UNIT"], integer("UNIT_TESTS"), integer("UNIT_PASSED"), integer("UNIT_FAILED"), integer("UNIT_SKIPPED"), integer("UNIT_DURATION_MS")),
+        suite("integration", os.environ["INTEGRATION"], integer("INTEGRATION_TESTS"), integer("INTEGRATION_PASSED"), integer("INTEGRATION_FAILED"), integer("INTEGRATION_SKIPPED"), integer("INTEGRATION_DURATION_MS")),
+        suite("regression", os.environ["REGRESSION"], integer("REGRESSION_TESTS"), integer("REGRESSION_PASSED"), integer("REGRESSION_FAILED"), integer("REGRESSION_SKIPPED"), integer("REGRESSION_DURATION_MS")),
+        suite("build", os.environ["BUILD"]),
+        suite("staging", os.environ["STAGING"]),
+        suite("e2e", os.environ["E2E"]),
+    ],
+    "failures": [
+        {"name": name, "status": "FAIL"}
+        for name, status in (("static", os.environ["STATIC"]), ("unit", os.environ["UNIT"]), ("integration", os.environ["INTEGRATION"]), ("regression", os.environ["REGRESSION"]), ("build", os.environ["BUILD"]), ("staging", os.environ["STAGING"]), ("e2e", os.environ["E2E"]))
+        if status == "FAIL"
+    ],
+    "case_registry": {"unknown": integer("UNKNOWN"), "unknown_critical": integer("UNKNOWN_CRITICAL")},
+}
+canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+payload["artifact_sha256"] = hashlib.sha256(canonical).hexdigest()
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
 finalize() {
   write_status
   local history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}.md"
@@ -181,6 +266,20 @@ finalize() {
     history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}_${RELEASE_ID}.md"
   fi
   cp "$STATUS_FILE" "$history_path"
+  write_machine_result
+  local artifact_history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}.json"
+  if [ -e "$artifact_history_path" ]; then
+    artifact_history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}_${RELEASE_ID}.json"
+  fi
+  cp "$LOG_DIR/qa-result.json" "$artifact_history_path"
+  if [ -n "${QA_RESULT_INGEST_URL:-}" ]; then
+    if [ -z "${QA_RESULT_INGEST_TOKEN:-}" ] || ! curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" \
+      -X POST -H "X-MAXIBOT-Admin-Token: $QA_RESULT_INGEST_TOKEN" -H "Content-Type: application/json" \
+      --data-binary "@$LOG_DIR/qa-result.json" "$QA_RESULT_INGEST_URL" >"$LOG_DIR/qa-ingest.json" 2>"$LOG_DIR/qa-ingest.log"; then
+      echo "QA artifact ingestion failed" >&2
+      return 1
+    fi
+  fi
   printf 'RELEASE = %s\nNEW_FEATURE = %s\nREGRESSION = %s\nTESTS = %s/%s\nSTAGING = %s\nE2E = %s\nCRITICAL_BUGS = %s\nQA_VERDICT = %s\nPRODUCTION = %s\n' \
     "$CANDIDATE_SHA" "${NEW_FEATURE:-❌}" "${REGRESSION:-NOT_RUN}" "$PASSED" "$TOTAL_TESTS" "$STAGING" "$E2E" "$CRITICAL_BUGS" "$VERDICT" "$PRODUCTION"
 }
@@ -217,6 +316,8 @@ PY
 run_tests() {
   local name="$1"; shift
   local xml="$LOG_DIR/${name}.xml" log="$LOG_DIR/${name}.log"
+  local suite_started suite_finished suite_duration
+  suite_started="$(date -u +%s)"
   if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
     docker run --rm --entrypoint python -w /app -v "$ROOT_DIR:/app:ro" -v "$LOG_DIR:/qa-logs" "$IMAGE" -m pytest -q --junitxml="/qa-logs/${name}.xml" "$@" >"$log" 2>&1
   else
@@ -237,6 +338,13 @@ PY
 $counts
 EOF
     TOTAL_TESTS=$((TOTAL_TESTS+t)); FAILED=$((FAILED+f)); SKIPPED=$((SKIPPED+s)); PASSED=$((PASSED+t-f-s))
+    suite_finished="$(date -u +%s)"
+    suite_duration=$(( (suite_finished - suite_started) * 1000 ))
+    case "$name" in
+      unit) UNIT_TESTS="$t"; UNIT_FAILED="$f"; UNIT_SKIPPED="$s"; UNIT_PASSED=$((t-f-s)); UNIT_DURATION_MS="$suite_duration" ;;
+      integration) INTEGRATION_TESTS="$t"; INTEGRATION_FAILED="$f"; INTEGRATION_SKIPPED="$s"; INTEGRATION_PASSED=$((t-f-s)); INTEGRATION_DURATION_MS="$suite_duration" ;;
+      regression) REGRESSION_TESTS="$t"; REGRESSION_FAILED="$f"; REGRESSION_SKIPPED="$s"; REGRESSION_PASSED=$((t-f-s)); REGRESSION_DURATION_MS="$suite_duration" ;;
+    esac
   fi
   return "$rc"
 }
@@ -316,5 +424,5 @@ if [ "${1:-}" = "DEPLOY" ]; then
   fi
   PRODUCTION_SMOKE="PASS"
 fi
-finalize
+finalize || exit 1
 exit 0

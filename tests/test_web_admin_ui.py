@@ -25,6 +25,20 @@ def test_admin_shell_has_no_fake_business_values_and_distinguishes_unknown():
     assert "fake" not in text.lower()
 
 
+def test_qa_dashboard_is_structured_read_only_and_has_honest_zero_states():
+    text = (ROOT / "app/static/admin/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/admin/admin.js").read_text(encoding="utf-8")
+    for marker in ("qa-summary-title", "qa-count-passed", "qa-suite-matrix", "qa-failures", "qa-unverified", "qa-recent-runs", "qa-parity"):
+        assert marker in text
+    assert "NOT RUN" in text
+    assert "UNVERIFIED" in text
+    assert "renderQA" in script
+    assert "getJson('/qa-release')" in script
+    qa_section = text.split('<section id="qa"', 1)[1].split('</section>', 1)[0]
+    assert '<button' not in qa_section
+    assert '<input' not in qa_section
+
+
 def test_admin_route_serves_shell_without_changing_api_namespace():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
     routes = (ROOT / "app/api/routes.py").read_text(encoding="utf-8")

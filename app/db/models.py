@@ -62,6 +62,46 @@ class WebAdminSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
+class QaRun(Base):
+    __tablename__ = "qa_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    release_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    tested_sha: Mapped[str] = mapped_column(String(64), index=True)
+    current_main_sha: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    production_sha: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    total_tests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    passed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    production_status: Mapped[str] = mapped_column(String(24), default="NOT_DEPLOYED", nullable=False)
+    production_smoke: Mapped[str] = mapped_column(String(24), default="NOT_RUN", nullable=False)
+    artifact_sha256: Mapped[Optional[str]] = mapped_column(String(64))
+    source_path: Mapped[Optional[str]] = mapped_column(String(255))
+    failures_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    unverified_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    suites = relationship("QaSuiteResult", back_populates="run", cascade="all, delete-orphan")
+
+class QaSuiteResult(Base):
+    __tablename__ = "qa_suite_results"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    run_id: Mapped[str] = mapped_column(ForeignKey("qa_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    suite_name: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    total_tests: Mapped[Optional[int]] = mapped_column(Integer)
+    passed: Mapped[Optional[int]] = mapped_column(Integer)
+    failed: Mapped[Optional[int]] = mapped_column(Integer)
+    skipped: Mapped[Optional[int]] = mapped_column(Integer)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    failures_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    unverified_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    run = relationship("QaRun", back_populates="suites")
+    __table_args__ = (UniqueConstraint("run_id", "suite_name", name="uq_qa_suite_result_run_name"),)
+
 class ChannelSlugRegistry(Base):
     __tablename__="channel_slug_registry"
     id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid)

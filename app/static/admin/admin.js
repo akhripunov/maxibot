@@ -130,6 +130,7 @@
       renderAuthState({enrolled: true, authenticated: true});
       await loadOverview(epoch);
       if (!isCurrentAuthTransition(epoch)) return;
+      await loadQA(epoch).catch(() => {});
       renderAuthState({enrolled: true, authenticated: true});
       return;
     }
@@ -150,6 +151,58 @@
 
   function setMetric(name, value) {
     document.querySelectorAll(`[data-metric="${name}"]`).forEach(node => { node.textContent = valueOrUnknown(value); });
+  }
+
+  const qaValue = value => value === null || value === undefined || value === '' ? 'UNKNOWN' : esc(value);
+  const qaNode = id => document.querySelector(`#${id}`);
+  function renderQA(data = {}) {
+    const summary = data.current_summary || data.summary || {};
+    const counts = data.headline_counts || data.counts || {};
+    const verdict = String(summary.verdict || data.verdict || data.qa_status || 'UNKNOWN').toUpperCase();
+    qaNode('qa-verdict').textContent = verdict;
+    qaNode('qa-verdict').className = `state-pill ${verdict === 'PASS' ? 'ready' : 'unknown'}`;
+    qaNode('qa-summary-title').textContent = qaValue(summary.title || summary.label || (verdict === 'PASS' ? 'Проверка пройдена' : 'Проверка не подтверждена'));
+    qaNode('qa-summary-reason').textContent = qaValue(summary.reason || data.reason);
+    qaNode('qa-tested-sha').textContent = qaValue(summary.tested_sha || data.tested_sha);
+    qaNode('qa-main-sha').textContent = qaValue(summary.current_main_sha || summary.main_sha || data.current_main_sha);
+    qaNode('qa-production-sha').textContent = qaValue(summary.production_sha || data.production_sha);
+    qaNode('qa-checked-at').textContent = qaValue(summary.checked_at || data.checked_at);
+    const parity = String(summary.parity || data.parity || 'UNKNOWN').toUpperCase();
+    qaNode('qa-parity').textContent = `СОВПАДЕНИЕ: ${parity}`;
+    qaNode('qa-parity').className = `qa-parity state-pill ${parity === 'MATCH' ? 'ready' : 'unknown'}`;
+    ['total', 'passed', 'failed', 'skipped'].forEach(key => { qaNode(`qa-count-${key}`).textContent = qaValue(counts[key]); });
+    const renderList = (id, values, empty) => {
+      const node = qaNode(id); node.textContent = '';
+      if (!Array.isArray(values) || !values.length) {
+        const row = document.createElement('div'); row.className = 'qa-empty'; row.textContent = empty; node.appendChild(row); return;
+      }
+      values.forEach(item => {
+        const row = document.createElement('div');
+        if (typeof item === 'string') row.textContent = item;
+        else {
+          const title = document.createElement('strong'); title.textContent = qaValue(item.name || item.title || item.test || item.run_id);
+          const detail = document.createElement('small'); detail.textContent = qaValue(item.status || item.reason || item.sha || item.finished_at);
+          row.append(title, detail);
+        }
+        node.appendChild(row);
+      });
+    };
+    renderList('qa-suite-matrix', data.suite_matrix || data.suites, 'UNVERIFIED');
+    renderList('qa-failures', data.failures || data.blockers, 'UNVERIFIED');
+    renderList('qa-unverified', data.unverified || data.not_run, 'UNVERIFIED');
+    renderList('qa-recent-runs', data.recent_runs || data.runs, 'NOT RUN');
+    qaNode('qa-trend').textContent = Array.isArray(data.trend) && data.trend.length ? `Тренд: ${data.trend.map(qaValue).join(' → ')}` : 'Тренд недоступен без истории запусков.';
+  }
+
+  async function loadQA(epoch = null) {
+    try {
+      const data = await getJson('/qa-release');
+      if (epoch !== null && !isCurrentAuthTransition(epoch)) return;
+      renderQA(data);
+    } catch (error) {
+      if (epoch === null || isCurrentAuthTransition(epoch)) renderQA();
+      throw error;
+    }
   }
 
   async function loadOverview(epoch = null) {
@@ -197,7 +250,7 @@
     try { await loadOverview(); } catch (error) { if (!String(error.message).startsWith('AUTH_')) { resetLockedView(); renderAuthState(lastAuthState); authMessage.textContent = 'Данные временно недоступны. Попробуйте обновить страницу.'; } } finally { refreshButton.disabled = false; refreshButton.textContent = 'Обновить'; }
   }
 
-  if (globalThis.__MAXIBOT_ADMIN_TEST__) Object.assign(globalThis.__MAXIBOT_ADMIN_TEST__, {resetLockedView, renderAuthState, checkAuth, loadOverview, logout, passkeyLogin});
+  if (globalThis.__MAXIBOT_ADMIN_TEST__) Object.assign(globalThis.__MAXIBOT_ADMIN_TEST__, {resetLockedView, renderAuthState, renderQA, loadQA, checkAuth, loadOverview, logout, passkeyLogin});
 
   document.querySelectorAll('.side-link').forEach(link => link.addEventListener('click', () => {
     document.querySelectorAll('.side-link').forEach(item => item.classList.toggle('active', item === link));
