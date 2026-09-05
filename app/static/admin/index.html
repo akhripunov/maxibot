@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>MaxiBot — панель владельца</title>
+  <link rel="stylesheet" href="/static/admin/admin.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Разделы панели">
+      <a class="brand" href="/admin" aria-label="MaxiBot — панель владельца">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <span><strong>MaxiBot</strong><small>OWNER CONSOLE</small></span>
+      </a>
+      <nav class="side-nav">
+        <a class="side-link active" href="#overview" data-section="overview"><span>⌂</span>Обзор</a>
+        <a class="side-link" href="#clients" data-section="clients"><span>◌</span>Клиенты</a>
+        <a class="side-link" href="#subscriptions" data-section="subscriptions"><span>₽</span>Подписки и оплаты</a>
+        <a class="side-link" href="#channels" data-section="channels"><span>◫</span>Каналы</a>
+        <a class="side-link" href="#direct" data-section="direct"><span>✦</span>AI Директолог</a>
+        <a class="side-link" href="#ads" data-section="ads"><span>↗</span>ADS</a>
+        <a class="side-link" href="#qa" data-section="qa"><span>✓</span>QA</a>
+        <a class="side-link" href="#releases" data-section="releases"><span>◷</span>Релизы</a>
+        <a class="side-link" href="#system" data-section="system"><span>⌁</span>Система</a>
+        <a class="side-link" href="#storage" data-section="storage"><span>▣</span>Хранилище</a>
+      </nav>
+      <div class="sidebar-note"><span class="status-dot"></span><span>Только чтение<br><small>Данные защищены сервером</small></span></div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div><p class="eyebrow">ПАНЕЛЬ ВЛАДЕЛЬЦА</p><h1>Добрый день, Александр</h1></div>
+        <div class="topbar-meta"><span id="last-updated">Обновляем данные…</span><button id="refresh" class="refresh-button" type="button">Обновить</button><button id="logout" class="refresh-button" type="button" hidden>Выйти</button><span class="avatar">АС</span></div>
+      </header>
+
+      <div id="auth-banner" class="banner banner-locked" hidden>
+        <strong>Панель закрыта</strong><span id="auth-message">Доступ подтверждается сервером.</span>
+        <div id="auth-actions" class="auth-actions" hidden>
+          <input id="bootstrap-token" type="text" autocomplete="one-time-code" placeholder="Одноразовый код регистрации">
+          <button id="register-passkey" class="refresh-button" type="button">Зарегистрировать Passkey</button>
+          <button id="login-passkey" class="refresh-button" type="button">Войти с Passkey</button>
+        </div>
+      </div>
+
+      <section id="overview" class="page-section active-section" data-page="overview">
+        <div class="section-heading"><div><p class="eyebrow">ОСНОВНЫЕ ПОКАЗАТЕЛИ</p><h2>Обзор бизнеса</h2></div><span class="read-only-badge">READ-ONLY</span></div>
+        <div class="metric-grid">
+          <article class="metric-card accent"><span>Всего клиентов</span><strong data-metric="total_clients">—</strong><small>в системе</small></article>
+          <article class="metric-card"><span>Платящие клиенты</span><strong data-metric="paying_clients">—</strong><small>есть оплаченный заказ</small></article>
+          <article class="metric-card"><span>Активные подписки</span><strong data-metric="active_subscriptions">—</strong><small>на текущий момент</small></article>
+          <article class="metric-card"><span>MRR</span><strong data-metric="mrr">N/A</strong><small>автопродление не реализовано</small></article>
+        </div>
+
+        <div class="content-grid">
+          <article class="panel growth-panel"><div class="panel-heading"><div><p class="eyebrow">ДИНАМИКА</p><h3>Новые клиенты</h3></div><span class="panel-caption">UTC</span></div><div class="period-grid"><div><span>Сегодня</span><strong data-window="1" data-field="new_clients">—</strong></div><div><span>За 7 дней</span><strong data-window="7" data-field="new_clients">—</strong></div><div><span>За 30 дней</span><strong data-window="30" data-field="new_clients">—</strong></div></div><div class="empty-chart"><span class="chart-line"></span><p>График появится после накопления данных</p></div></article>
+          <article class="panel health-panel"><div class="panel-heading"><div><p class="eyebrow">СОСТОЯНИЕ</p><h3>Система</h3></div><span id="health-pill" class="state-pill unknown">UNKNOWN</span></div><div id="health-list" class="health-list"><div><span>API</span><strong>Проверяем…</strong></div><div><span>База данных</span><strong>Проверяем…</strong></div><div><span>MAX</span><strong>Проверяем…</strong></div></div><p class="panel-footnote">Только агрегированный статус, без секретов и идентификаторов.</p></article>
+        </div>
+
+        <div class="content-grid lower-grid">
+          <article class="panel usage-panel"><div class="panel-heading"><div><p class="eyebrow">ПРОДУКТ</p><h3>Использование</h3></div><span class="panel-caption">Всего</span></div><div id="usage-list" class="usage-list"><div><span>Каналы</span><strong>—</strong></div><div><span>Боты</span><strong>—</strong></div><div><span>Диалоги</span><strong>—</strong></div><div><span>AI-запуски</span><strong>—</strong></div></div></article>
+          <article class="panel definitions-panel"><div class="panel-heading"><div><p class="eyebrow">ДОВЕРИЕ К ДАННЫМ</p><h3>Что мы считаем</h3></div></div><p>Показатели строятся по реальным записям клиентов, заказов и подписок. Если в системе нет подтверждённого источника, значение остаётся <span class="inline-unknown">UNKNOWN</span>, а не превращается в ноль.</p><div class="definition-row"><span class="mini-icon">✓</span><span>Без выдуманных цифр и графиков</span></div><div class="definition-row"><span class="mini-icon">◉</span><span>Без действий изменения данных</span></div></article>
+        </div>
+      </section>
+
+      <section id="clients" class="page-section" data-page="clients"><div class="section-heading"><div><p class="eyebrow">BUSINESS DATA</p><h2>Клиенты</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">◌</span><h3>Раздел готовится</h3><p>Список клиентов будет подключён после утверждения browser-auth контракта. Здесь не показываются сырые идентификаторы или персональные данные.</p></div></section>
+      <section id="subscriptions" class="page-section" data-page="subscriptions"><div class="section-heading"><div><p class="eyebrow">REVENUE</p><h2>Подписки и оплаты</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">₽</span><h3>Только чтение</h3><p>Сводка заказов уже доступна серверному API. Детализация появится после согласования доступа к панели.</p></div></section>
+      <section id="channels" class="page-section" data-page="channels"><div class="section-heading"><div><p class="eyebrow">PRODUCT</p><h2>Каналы</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">◫</span><h3>Раздел готовится</h3><p>Подключение каналов и управление ими остаются в существующем MAX-интерфейсе.</p></div></section>
+      <section id="direct" class="page-section" data-page="direct"><div class="section-heading"><div><p class="eyebrow">INTELLIGENCE</p><h2>AI Директолог</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">✦</span><h3>Нет данных для отображения</h3><p>Рекомендации появятся только при наличии подтверждённых AI-запусков.</p></div></section>
+      <section id="ads" class="page-section" data-page="ads"><div class="section-heading"><div><p class="eyebrow">ACQUISITION</p><h2>ADS</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">↗</span><h3>Нет данных для отображения</h3><p>Рекламные метрики не подменяются нулевыми значениями.</p></div></section>
+      <section id="qa" class="page-section" data-page="qa"><div class="section-heading"><div><p class="eyebrow">RELIABILITY</p><h2>QA</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">✓</span><h3>Статус не подтверждён</h3><p>Последний QA verdict не передаётся в бизнес-обзор автоматически.</p><span class="state-pill unknown">UNVERIFIED</span></div></section>
+      <section id="releases" class="page-section" data-page="releases"><div class="section-heading"><div><p class="eyebrow">DELIVERY</p><h2>Релизы</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">◷</span><h3>Статус не подтверждён</h3><p>Данные релиза доступны только после независимой проверки.</p><span class="state-pill unknown">NOT RUN</span></div></section>
+      <section id="system" class="page-section" data-page="system"><div class="section-heading"><div><p class="eyebrow">INFRASTRUCTURE</p><h2>Система</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">⌁</span><h3>Система под контролем</h3><p>На обзоре показан компактный агрегированный health-check без технических секретов.</p></div></section>
+      <section id="storage" class="page-section" data-page="storage"><div class="section-heading"><div><p class="eyebrow">GOVERNANCE</p><h2>Хранилище</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">▣</span><h3>Раздел готовится</h3><p>Будут показаны только безопасные агрегаты хранения. Секреты и сырые рекламные данные не выводятся.</p></div></section>
+    </main>
+  </div>
+  <script src="/static/admin/admin.js" defer></script>
+</body>
+</html>

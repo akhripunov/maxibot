@@ -33,6 +33,35 @@ class Admin(Base):
     pending_custom_bot_id: Mapped[Optional[str]]=mapped_column(String(36))
     channels=relationship("Channel", back_populates="admin", cascade="all, delete-orphan")
 
+class WebAuthnCredential(Base):
+    __tablename__ = "web_admin_webauthn_credentials"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    admin_id: Mapped[str] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
+    credential_id: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    credential_public_key: Mapped[str] = mapped_column(Text, nullable=False)
+    sign_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+class WebAdminAuthChallenge(Base):
+    __tablename__ = "web_admin_auth_challenges"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    admin_id: Mapped[Optional[str]] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
+    purpose: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    challenge: Mapped[str] = mapped_column(String(512), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class WebAdminSession(Base):
+    __tablename__ = "web_admin_sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    admin_id: Mapped[str] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
 class ChannelSlugRegistry(Base):
     __tablename__="channel_slug_registry"
     id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid)

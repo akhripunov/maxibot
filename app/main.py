@@ -281,14 +281,24 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 public_site_file = static_dir / "public_site.html"
 legal_dir = static_dir / "legal"
 yandex_verification_file = static_dir / "yandex_b08d068dab89b456.html"
+admin_shell_file = static_dir / "admin" / "index.html"
 sitemap_file = static_dir / "sitemap.xml"
 robots_file = static_dir / "robots.txt"
 
 
 @app.get("/", response_class=FileResponse)
-async def public_site():
+async def public_site(request: Request):
     """Public service and payment information for Robokassa review."""
+    if request.url.hostname == "admin.maxibot.pro":
+        return FileResponse(admin_shell_file, media_type="text/html", headers={"Cache-Control": "no-store"})
     return FileResponse(public_site_file, media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/admin", response_class=FileResponse)
+async def admin_shell(request: Request):
+    if request.url.hostname == "admin.maxibot.pro":
+        return RedirectResponse("/", status_code=308)
+    return FileResponse(admin_shell_file, media_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/yandex_b08d068dab89b456.html", response_class=FileResponse)

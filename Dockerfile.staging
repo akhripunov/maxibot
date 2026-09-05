@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir \
     "asyncpg>=0.30" "alembic>=1.14" "psycopg2-binary>=2.9" \
     "redis>=5.2" "pydantic-settings>=2.7" "jinja2>=3.1" \
     "httpx>=0.28" "cryptography>=43" "pytest>=8.3" \
-    "pytest-asyncio>=0.25" "aiosqlite>=0.20" "Pillow>=10"
+    "pytest-asyncio>=0.25" "aiosqlite>=0.20" "Pillow>=10" \
+    "webauthn>=2.8,<3"
 
 COPY . .

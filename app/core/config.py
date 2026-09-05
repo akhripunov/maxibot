@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     max_support_chat_id: str | None = Field(default=None, validation_alias="MAXIBOT_SUPPORT_CHAT_ID")
     maxibot_owner_user_id: str | None = Field(default=None, validation_alias="MAXIBOT_OWNER_USER_ID")
     maxibot_support_url: str | None = Field(default=None, validation_alias="MAXIBOT_SUPPORT_URL")
+    web_admin_internal_token: str | None = Field(default=None, validation_alias="WEB_ADMIN_INTERNAL_TOKEN")
+    web_admin_rp_id: str = Field(default="admin.maxibot.pro", validation_alias="WEB_ADMIN_RP_ID")
+    web_admin_origin: str = Field(default="https://admin.maxibot.pro", validation_alias="WEB_ADMIN_ORIGIN")
+    web_admin_rp_name: str = Field(default="MAXIBOT Owner Console", validation_alias="WEB_ADMIN_RP_NAME")
+    web_admin_session_ttl_seconds: int = Field(default=28800, validation_alias="WEB_ADMIN_SESSION_TTL_SECONDS")
+    web_admin_cookie_secure: bool = Field(default=True, validation_alias="WEB_ADMIN_COOKIE_SECURE")
+    web_admin_passkey_bootstrap_token_hash: str | None = Field(default=None, validation_alias="WEB_ADMIN_PASSKEY_BOOTSTRAP_TOKEN_HASH")
     # AI promotion is deliberately opt-in and read-only in V1.  These flags
     # are checked on the server for every callback; a hidden button alone is
     # never treated as an access-control boundary.
