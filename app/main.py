@@ -765,9 +765,9 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
     metrica_tag = metrica_tag_html(metrica_counter)
     handoff_url = html.escape(destination, quote=True)
     return HTMLResponse(f'''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Переход в MAX</title><meta name="description" content="Переход в MAX">
-<style>html,body{{margin:0;width:100%;min-height:100%;background:#f3f5f7;font-family:system-ui,-apple-system,sans-serif}}main{{box-sizing:border-box;max-width:460px;margin:18vh auto;padding:28px 24px;text-align:center;background:#fff;border-radius:24px;box-shadow:0 12px 40px #0001}}h1{{margin:0 0 12px;font-size:28px}}p{{margin:0 0 22px;color:#687386;line-height:1.45}}.hint{{font-size:14px}}.primary,.secondary{{display:block;padding:14px 22px;border-radius:14px;text-decoration:none;font-weight:700}}.primary{{background:#1677ff;color:#fff}}.secondary{{margin-top:12px;color:#1677ff;background:#eef4ff}}#fallbackCta{{display:none}}main.delayed #fallbackCta{{display:block}}</style>
+<style>html,body{{margin:0;width:100%;min-height:100%;background:#f3f5f7;font-family:system-ui,-apple-system,sans-serif}}main{{box-sizing:border-box;max-width:460px;margin:18vh auto;padding:28px 24px;text-align:center;background:#fff;border-radius:24px;box-shadow:0 12px 40px #0001}}h1{{margin:0 0 12px;font-size:28px}}p{{margin:0 0 22px;color:#687386;line-height:1.45}}.hint{{font-size:14px}}.primary,.secondary{{display:block;padding:14px 22px;border-radius:14px;text-decoration:none;font-weight:700}}.primary{{background:#1677ff;color:#fff}}.secondary{{margin-top:12px;color:#1677ff;background:#eef4ff}}#fallbackCta{{display:block}}</style>
 {metrica_tag}
-<main><h1>Переход в MAX</h1><p>Переходим в MAX…</p><a id="fallbackCta" class="primary" href="{handoff_url}">Открыть MaxiBot</a></main>
+<main><h1>Переход в MAX</h1><p>Переходим в MAX…</p><a id="fallbackCta" class="primary" href="{handoff_url}">Перейти в MAX</a></main>
 <script>
 let maxibotHandoffStarted = false;
 const mainEl = document.querySelector('main');
