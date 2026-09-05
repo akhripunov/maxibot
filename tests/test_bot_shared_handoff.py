@@ -45,10 +45,22 @@ def test_raw_bot_start_is_legacy_only_and_not_an_ads_conversion():
 def test_mini_app_resolves_bot_without_touching_channel_open_branch():
     resolve = MINI[MINI.index("async function resolveChannel"):MINI.index("resolveChannel().catch")]
     assert "data.destination_type === 'BOT'" in resolve
-    assert "webApp.close()" in resolve
+    assert "openBot(data.target_url)" in resolve
     channel = MINI[MINI.index("function openChannel"):MINI.index("async function resolveChannel")]
     assert "window.location.replace(targetUrl)" in channel
     assert "webApp.openMaxLink(targetUrl)" in channel
+
+
+def test_bot_post_resolve_copies_platform_open_without_closing_miniapp():
+    bot = MINI[MINI.index("function openBot"):MINI.index("function reportMaxOpened")]
+    assert "miniTelemetry('BOT_HANDOFF_STARTED')" in bot
+    assert "platform === 'android'" in bot
+    assert "window.location.replace(targetUrl)" in bot
+    assert "!isAppleMobile && typeof webApp?.openMaxLink === 'function'" in bot
+    assert "webApp.openMaxLink(targetUrl)" in bot
+    assert "openViaAnchor(targetUrl)" in bot
+    assert "webApp.close()" not in bot
+    assert "MINIAPP_CHANNEL_HANDOFF_STARTED" not in bot
 
 
 def test_required_safe_handoff_event_names_are_present_without_raw_identity_logging():
@@ -65,9 +77,8 @@ def test_bot_landing_uses_official_https_max_startapp_contract_only():
     start = MAIN.index('@app.get("/system/{public_id}"')
     end = MAIN.index('@app.get("/health/live")', start)
     section = MAIN[start:end]
-    assert "build_miniapp_deep_link(settings.max_bot_username, token)" in section
-    assert "build_native_miniapp_deep_link" not in section
-    assert "build_web_miniapp_deep_link" not in section
+    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in section
+    assert "build_miniapp_deep_link" not in section
     assert "build_bot_deep_link" not in section
 
 

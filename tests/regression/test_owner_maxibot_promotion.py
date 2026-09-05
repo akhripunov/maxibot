@@ -68,9 +68,8 @@ def test_system_landing_uses_shared_bot_miniapp_handoff():
     start = MAIN.index('@app.get("/system/{public_id}"')
     end = MAIN.index('@app.get("/health/live")', start)
     system_landing = MAIN[start:end]
-    assert "build_miniapp_deep_link" in system_landing
-    assert "build_native_miniapp_deep_link" not in system_landing
-    assert "build_web_miniapp_deep_link" not in system_landing
+    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in system_landing
+    assert "build_miniapp_deep_link" not in system_landing
     assert "settings.max_bot_username" in system_landing
     ui = system_landing[system_landing.index("<main>"):system_landing.index("<script>")]
     assert "startapp" not in ui.lower()
@@ -116,7 +115,7 @@ def test_system_landing_uses_its_own_metrika_counter_before_bot_handoff():
     assert "valid_counter_id(profile.yandex_counter_id)" in system_landing
     assert "metrica_tag_html(metrica_counter)" in system_landing
     assert "ym(" in system_landing
-    assert "build_miniapp_deep_link" in system_landing
+    assert "build_native_miniapp_deep_link" in system_landing
 
 
 def test_system_landing_captures_attribution_metadata_and_client_id_safely():
@@ -127,9 +126,8 @@ def test_system_landing_captures_attribution_metadata_and_client_id_safely():
         assert f"{field}=request." in system_landing
     assert "maxibot-metrica-client-id" in system_landing
     assert "system/traffic/metrica/client-id" in system_landing
-    assert "build_miniapp_deep_link" in system_landing
-    assert "build_web_miniapp_deep_link" not in system_landing
-    assert "build_native_miniapp_deep_link" not in system_landing
+    assert "build_web_miniapp_deep_link" in system_landing
+    assert "build_native_miniapp_deep_link" in system_landing
 
 
 def test_system_client_id_endpoint_is_separate_from_channel_traffic_endpoint():

@@ -129,6 +129,26 @@ function openChannel(targetUrl) {
   openViaAnchor(targetUrl);
 }
 
+function openBot(targetUrl) {
+  miniTelemetry('BOT_HANDOFF_STARTED');
+  const platform = webApp?.platform || '';
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  if (platform === 'android') {
+    window.location.replace(targetUrl);
+    return;
+  }
+
+  if (!isAppleMobile && typeof webApp?.openMaxLink === 'function') {
+    webApp.openMaxLink(targetUrl);
+    return;
+  }
+
+  // BOT keeps the Mini App open while iOS opens the verified target through
+  // the same top-level anchor mechanism as the frozen CHANNEL handoff.
+  openViaAnchor(targetUrl);
+}
+
 function reportMaxOpened(counterId) {
   // This is a diagnostic Metrika goal, not the subscription conversion.
   // The server has already verified MAX initData and the tracking token
@@ -167,7 +187,7 @@ async function resolveChannel() {
   if (data.destination_type === 'BOT') {
     clearTimeout(slowTimer);
     clearTimeout(fallbackTimer);
-    if (typeof webApp?.close === 'function') webApp.close();
+    openBot(data.target_url);
     return;
   }
   openChannel(data.target_url);

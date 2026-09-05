@@ -747,10 +747,9 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
     })
     # BOT is an additive destination in the shared Mini App handoff. The
     # existing CHANNEL landing path remains unchanged.
-    # BOT uses the official HTTPS Mini App contract on every device.  The
-    # frozen CHANNEL route below retains its existing platform-specific
-    # launch transport unchanged.
-    destination = build_miniapp_deep_link(settings.max_bot_username, token)
+    # BOT reproduces the frozen CHANNEL launch contract without calling the
+    # channel route: native MAX scheme on mobile, MAX Web HTTPS on desktop.
+    destination = (build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link)(settings.max_bot_username, token)
     await _system_telemetry_event(db, visit, "SYSTEM_REDIRECT_SENT", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
