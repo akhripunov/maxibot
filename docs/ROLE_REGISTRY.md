@@ -44,6 +44,16 @@ above; task selection is a coordination detail owned by ARCHITECT CODEX.
 
 ## Dynamic chat routing registry
 
+## Frozen paid-traffic paths
+
+`BOT` and `CHANNEL` are separate `PAID_TRAFFIC_CRITICAL`
+`FROZEN_PRODUCTION_PATHS`. The freeze is behavioral, not only file-based;
+`NO_REFACTOR_FOR_CLEANUP = YES`, and any frozen-path or shared-dependency
+change requires `OWNER_APPROVAL_REQUIRED_FOR_FROZEN_CHANGE = YES` plus
+`FROZEN_PATH_REGRESSION` evidence. Use `docs/frozen_paths.yaml` and
+`scripts/frozen_path_guard.sh`; `BOT_AND_CHANNEL_SEPARATE = YES` and
+`FAST_PATH_WHEN_UNCHANGED = YES`.
+
 Chat IDs are cache values, not permanent role identity. Before each delegation,
 resolve the current existing project chat using the project metadata and the
 selection rule in `docs/ORCHESTRATION_PROTOCOL.md`.

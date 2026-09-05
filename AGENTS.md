@@ -252,3 +252,29 @@ behavior, core architecture, attribution semantics или security policy. Пр�
   [`docs/ORCHESTRATION_PROTOCOL.md`](docs/ORCHESTRATION_PROTOCOL.md).
 - Перед существенной задачей обязателен repository preflight; `UNKNOWN` и
   `UNVERIFIED` нельзя выдавать за `PASS`.
+
+## Frozen paid-traffic production paths
+
+`BOT` и `CHANNEL` являются отдельными `PAID_TRAFFIC_CRITICAL`
+`FROZEN_PRODUCTION_PATHS`. Freeze is behavioral, not only file-based:
+refactoring, cleanup, or unification affecting either paid path or a shared
+dependency requires explicit OWNER approval. The canonical stable baseline,
+protected areas, and regression contracts are in
+[`docs/frozen_paths.yaml`](docs/frozen_paths.yaml); the executable gate is
+`scripts/frozen_path_guard.sh` and its result is `FROZEN_PATH_GUARD`.
+
+`OWNER_APPROVAL_REQUIRED_FOR_FROZEN_CHANGE = YES`.
+`BOT_AND_CHANNEL_SEPARATE = YES`.
+`NO_REFACTOR_FOR_CLEANUP = YES`.
+`FAST_PATH_WHEN_UNCHANGED = YES`.
+An unchanged frozen path does not require duplicate role work. A changed path
+requires `FROZEN_PATH_REGRESSION` evidence. These rules are authoritative and
+lower-level documents may not weaken them.
+
+`ARCHITECT CODEX` remains the single technical/orchestration window.
+`MINIMUM_REQUIRED_ROLES / FAST_PATH` applies; SYSADMIN is an optional
+read-only infrastructure validator unless a real infrastructure, secret,
+runtime, or deployment blocker requires escalation. QA uses the risk-based
+policy; QA artifact ingest is non-blocking for otherwise-green product QA,
+while product and frozen-path failures remain fail-closed. Advertising
+campaign control is `OWNER_ONLY`.

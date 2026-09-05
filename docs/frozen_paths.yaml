@@ -1,0 +1,38 @@
+schema_version: 1
+policy: FROZEN_PRODUCTION_PATHS
+classification: PAID_TRAFFIC_CRITICAL
+OWNER_APPROVAL_REQUIRED_FOR_FROZEN_CHANGE: YES
+BEHAVIORAL_NOT_ONLY_FILE_BASED_FREEZE: YES
+BOT_AND_CHANNEL_SEPARATE: YES
+FAST_PATH_WHEN_UNCHANGED: YES
+
+stable_baseline:
+  immutable_commit: 9bfc4e04232bfa33bd61139e8ac82f400cd1971f
+  immutable_tag: maxibot-bot-handoff-stable-2026-09-05
+  production_alembic_head: 0068_generic_bot_traffic
+
+protected_runtime_areas:
+  bot_direct:
+    - app/main.py
+    - app/bot/runtime.py
+    - app/traffic/system_conversion.py
+    - app/traffic/system_conversion_processor.py
+    - miniapp/traffic.html
+  channel_direct:
+    - app/main.py
+    - app/bot/runtime.py
+    - app/bot/menu.py
+    - app/traffic/deep_link.py
+    - miniapp/traffic.html
+  shared_dependencies:
+    - app/db/models.py
+    - app/core/config.py
+    - app/integrations/max*
+    - alembic/
+    - docker-compose*.yml
+
+regression_contracts:
+  - tests/regression/test_mobile_max_handoff_contract.py
+  - tests/test_traffic_deep_link.py
+  - tests/test_landing_ui_contract.py
+  - tests/test_update_payload.py

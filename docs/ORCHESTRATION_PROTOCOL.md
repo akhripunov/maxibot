@@ -117,6 +117,18 @@ recreated.
 Do not invoke every role automatically. Specialist roles submit proposals and
 structured handoffs; ARCHITECT CODEX accepts, modifies, or rejects them.
 
+## Frozen production path governance
+
+`BOT` and `CHANNEL` are separate `PAID_TRAFFIC_CRITICAL`
+`FROZEN_PRODUCTION_PATHS`. `AGENTS.md` is authoritative: the freeze is
+behavioral, not only file-based, and `NO_REFACTOR_FOR_CLEANUP = YES`.
+`OWNER_APPROVAL_REQUIRED_FOR_FROZEN_CHANGE = YES`; any direct or shared
+dependency impact requires task-scoped approval and `FROZEN_PATH_REGRESSION`.
+The machine-readable source is `docs/frozen_paths.yaml`, enforced by
+`scripts/frozen_path_guard.sh` as `FROZEN_PATH_GUARD`. If the paths are
+unchanged, `FAST_PATH_WHEN_UNCHANGED = YES` applies and no ceremonial role
+work is added.
+
 ## Dynamic role-chat resolution
 
 Role identity is logical; a Codex task/thread ID is replaceable routing state.
