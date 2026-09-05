@@ -189,8 +189,9 @@ def test_quality_renderer_maps_watch_and_no_action():
 def test_quality_renderer_maps_change_levels_and_has_one_sufficiency_sentence():
     body = _render_quality(_quality_render_snapshot("CONSIDER_CHANGE"))
     assert "Можно рассмотреть изменение" in body
-    assert body.count("Данных достаточно для такой проверки") == 1
+    assert body.count("Выборки достаточно для проверки сигнала") == 1
     assert "CONSIDER_CHANGE" not in body
+    assert body.count("Автоматические изменения отключены") == 1
 
 
 def test_quality_renderer_maps_investigate_and_strong_recommendation():
@@ -199,8 +200,8 @@ def test_quality_renderer_maps_investigate_and_strong_recommendation():
 
 
 def test_quality_renderer_shows_history_only_for_proven_evolution():
-    body = _render_quality(_quality_render_snapshot("WATCH", evolution="PERSISTENT"))
-    assert "Динамика сигнала: сигнал сохраняется" in body
+    body = _render_quality(_quality_render_snapshot("WATCH", evolution="STRENGTHENING"))
+    assert "Сигнал усиливается по сравнению с прошлой проверкой." in body
     assert "История: история доступна" not in body
     unknown = _render_quality(_quality_render_snapshot("WATCH", evolution="UNKNOWN"))
     assert "Динамика сигнала:" not in unknown
@@ -218,3 +219,18 @@ def test_quality_renderer_does_not_repeat_primary_label_in_summary_and_recommend
     assert body.count("yandex[.]ru") == 1
     assert "WHY_THIS" not in body
     assert "WHY_NOW" not in body
+
+
+def test_exact_live_consider_change_copy_contract():
+    body = _render_quality(_quality_render_snapshot("CONSIDER_CHANGE", evolution="STRENGTHENING", outcome="PENDING"))
+    assert "Можно рассмотреть изменение." in body
+    assert "Почему это важно: CPA отклоняется от среднего по кампании на 82,00%" in body
+    assert "Почему сейчас: текущие метрики дают проверяемый сигнал." in body
+    assert "Выборки достаточно для проверки сигнала." in body
+    assert "Сигнал усиливается по сравнению с прошлой проверкой." in body
+    assert "Измерение результата ещё ожидается." in body
+    assert "CONSIDER_CHANGE" not in body
+    assert "SUFFICIENT" not in body
+    assert "PENDING" not in body
+    assert body.count("Автоматические изменения отключены") == 1
+    assert body.count("yandex[.]ru") == 1

@@ -459,7 +459,7 @@ def _structured_recommendation(v2_analysis: dict | None, fallback: str) -> str:
         if action:
             if action == "Проверить":
                 action = "Проверить вручную"
-            return f"{action}. Автоматические изменения отключены."
+            return f"{action}."
     view = build_report_view(v2_analysis or {})
     placement = next((item for item in (view.get("primary_findings") or []) if item.get("dimension") == "PLACEMENT"), None)
     if not placement:
@@ -507,35 +507,44 @@ def _format_quality_decision_snapshot(snapshot: dict | None) -> str:
     deviation = candidate.get("relative_deviation")
     spend_share = candidate.get("spend_share")
     if deviation is not None:
-        lines.append(f"CPA отклоняется от среднего по кампании на {_ru_number(abs(float(deviation)) * 100)}%.")
+        deviation_text = f"{_ru_number(abs(float(deviation)) * 100)}%"
+        lines.append(f"Почему это важно: CPA отклоняется от среднего по кампании на {deviation_text}.")
     if spend_share is not None:
         lines.append(f"Доля расходов по сигналу: {_ru_number(float(spend_share) * 100)}%.")
     for key in ("WHY_THIS", "WHY_NOW"):
         value = candidate.get(key) or candidate.get(key.lower())
         if value and not str(value).startswith(("Сигнал основан на сравнении", "Есть достаточная выборка")):
             lines.append(str(value))
+    if deviation is not None or spend_share is not None:
+        lines.append("Почему сейчас: текущие метрики дают проверяемый сигнал.")
     sufficiency = candidate.get("data_sufficiency")
     if sufficiency == "SUFFICIENT":
-        lines.append("Данных достаточно для такой проверки.")
+        lines.append("Выборки достаточно для проверки сигнала.")
     elif sufficiency in {"WEAK_SIGNAL", "PARTIAL"}:
         lines.append("Данные дают сигнал, но требуют дополнительной проверки.")
     elif sufficiency not in {None, "UNKNOWN", "INSUFFICIENT"}:
         lines.append("Достаточность данных не подтверждена.")
     next_step = candidate.get("NEXT_STEP") or candidate.get("next_step")
     if next_step:
-        lines.append(str(next_step))
+        cleaned_next_step = re.sub(r"[.;]?\s*автоматические изменения отключены\.?", "", str(next_step), flags=re.IGNORECASE).strip()
+        if cleaned_next_step:
+            lines.append(cleaned_next_step)
     wait = candidate.get("WAIT_CONDITION") or candidate.get("wait_condition")
     if wait:
         lines.append(f"Условие ожидания: {wait}")
     evolution_code = str(candidate.get("signal_evolution") or "")
     evolution = _QUALITY_EVOLUTION_LABELS.get(evolution_code) if evolution_code in {"PERSISTENT", "STRENGTHENING", "WEAKENING", "RESOLVED"} else None
     if evolution and snapshot.get("history_state") != "UNKNOWN":
-        lines.append(f"Динамика сигнала: {evolution}")
+        if evolution_code == "STRENGTHENING":
+            lines.append("Сигнал усиливается по сравнению с прошлой проверкой.")
+        else:
+            lines.append(f"Динамика сигнала: {evolution}")
     outcome = snapshot.get("outcome_state")
     if outcome == "PENDING":
         lines.append("Измерение результата ещё ожидается.")
     elif outcome == "COMPLETED":
         lines.append("Измеренный результат доступен.")
+    lines.append("Автоматические изменения отключены.")
     return "\n".join(lines)
 
 
