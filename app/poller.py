@@ -18,6 +18,7 @@ from app.ads.outcome_collector import process_due_outcomes
 from app.ads.periodic import process_periodic_collection
 from app.traffic.membership_reconciliation import reconcile_active_memberships
 from app.traffic.metrica_upload_tracker import refresh_metrica_upload_statuses
+from app.traffic.system_conversion_processor import process_system_conversions
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,9 @@ async def main() -> None:
                 processed = await process_due_outcomes(SessionLocal)
                 if processed:
                     logger.info("ADS_V2_OUTCOMES_PROCESSED count=%s", processed)
+                system_processed = await process_system_conversions(SessionLocal)
+                if system_processed:
+                    logger.info("SYSTEM_CONVERSIONS_PROCESSED count=%s", system_processed)
             except asyncio.CancelledError:
                 raise
             except Exception:

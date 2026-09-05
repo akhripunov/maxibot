@@ -14,7 +14,7 @@ from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, SystemTrafficVisit, SystemTrafficEvent, SystemConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent
+from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, SystemTrafficVisit, SystemTrafficEvent, SystemConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder
 from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion, resolve_exact_identity_visit
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
@@ -31,6 +31,8 @@ from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
 from app.db.models import AdsAiRun, AdsMemory, AdsRecommendation, AdsV2Outcome
 from app.ads.storage_health import diagnostics as storage_diagnostics, human_size, ui_time
+from app.integrations.robokassa import payment_url
+from app.integrations.subscriptions import subscription_status
 
 logger = logging.getLogger(__name__)
 
@@ -637,13 +639,39 @@ def new_landing_public_id() -> str:
 
 
 def promotion_channel_summary(channel_title: str, yandex_value: str | None,
-                              counter_id: str | None, landing_url: str | None) -> str:
+                              counter_id: str | None, landing_url: str | None,
+                              daily_reports_enabled: bool = True,
+                              subscription_expires_at: datetime | None = None) -> str:
     """Render only channel-scoped, non-secret promotion readiness fields."""
+    daily_reports_status = "✅ Включены" if daily_reports_enabled else "🔴 Отключены"
+    subscription_line = "Тариф: не активирован"
+    if subscription_expires_at:
+        subscription_line = (
+            f"Тариф: {'✅ Активен' if subscription_status(subscription_expires_at) == 'активен' else '🔴 Истёк'} "
+            f"до {subscription_expires_at.astimezone(MOSCOW):%d.%m.%Y}"
+        )
     return (
-        f"📣 Продвижение\n\nКанал: {channel_title}\n\n"
+        f"📣 Продвижение\n\nКанал: {channel_title}\n"
+        f"{subscription_line}\n"
+        f"Ежедневные отчёты: {daily_reports_status}\n\n"
         f"Яндекс: {yandex_value or '-'}\n"
         f"Метрика: {counter_id or '-'}\n"
         f"Лендинг: {landing_url or '-'}"
+    )
+
+
+SUBSCRIPTION_PLANS = (
+    ("1 месяц — 1 900 ₽", 1),
+    ("3 месяца — 5 130 ₽ (−10%)", 3),
+    ("6 месяцев — 7 980 ₽ (−30%)", 6),
+)
+
+
+def subscription_text(channel_title: str) -> str:
+    return (
+        f"💳 Оплата тарифа\n\n"
+        f"📣 Канал: {channel_title}\n\n"
+        "Выберите период подписки:"
     )
 
 
@@ -835,14 +863,16 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return await render_screen(db, admin, "promotion")
         profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
         system_yandex = (profile.yandex_owner_login if profile and profile.yandex_owner_login else ("Подключён" if profile and profile.yandex_oauth_token_encrypted else "-"))
+        system_yandex_connected = await system_connection_status(db=db)
         system_counter = profile.yandex_counter_id if profile and profile.yandex_counter_id else "-"
         system_landing = profile.landing_url if profile and profile.landing_url else "-"
-        keyboard = buttons(("⚡ Яндекс", "promotion_maxibot_yandex"),
+        system_yandex_button = "🔗 Яндекс.Директ ✅" if system_yandex_connected else "🔗 Яндекс.Директ ❌"
+        keyboard = buttons((system_yandex_button, "promotion_maxibot_yandex"),
                            ("📊 Аналитика", "promotion_maxibot_analytics"),
                            ("⬅️ Назад", "promotion"))
         return (
             f"📣 Продвижение\n\nКанал: MAXIBOT\n\n"
-            f"Яндекс: {system_yandex}\n"
+            f"Яндекс.Директ: {system_yandex}\n"
             f"Метрика: {system_counter}\n"
             f"Лендинг: {system_landing}",
             keyboard,
@@ -858,7 +888,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             counter = profile.yandex_counter_id if profile and profile.yandex_counter_id else "не настроен"
             goal = profile.yandex_goal_name if profile and profile.yandex_goal_name else "не настроена"
             status = await system_connection_status(db=db)
-            body = f"⚡ Яндекс\n\n🤖 MAXIBOT\n\nСтатус: {'подключено' if status else 'не подключено'}\nСистемный счётчик: {counter}\nЦель: {goal}\n\nИспользуется только отдельная system-scoped конфигурация."
+            body = f"🔗 Яндекс.Директ\n\n🤖 MAXIBOT\n\nСтатус: {'подключено' if status else 'не подключено'}\nСистемный счётчик: {counter}\nЦель: {goal}\n\nИспользуется только отдельная system-scoped конфигурация."
             if configured():
                 system_oauth_url = f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/system/start?admin_id={quote(str(admin.external_id), safe='')}"
                 oauth_label = "🔄 Переподключить Яндекс" if status else "🔐 Подключить Яндекс"
@@ -883,10 +913,11 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             Channel.admin_id == admin.id,
             Channel.bot_connection_id == bot.id,
         ))).all())
-        bot_yandex_connected = any(
-            await connection_status(admin.external_id, channel.id, db=db)
-            for channel in bot_channels
-        )
+        bot_yandex_connected = False
+        for channel in bot_channels:
+            if await connection_status(admin.external_id, channel.id, db=db):
+                bot_yandex_connected = True
+                break
         yandex_button = "🔗 Яндекс.Директ ✅" if bot_yandex_connected else "🔗 Яндекс.Директ ❌"
         status = {
             "ACTIVE": "работает",
@@ -969,7 +1000,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             controls.append(("🤖 AI Продвижение", f"ads:{channel.id}"))
         controls.extend([
             ("📊 Аналитика", f"promotion_analytics:{channel.id}"),
+            (("⛔ Отключить ежедневные отчёты" if channel.daily_reports_enabled else "✅ Включить ежедневные отчёты"),
+             f"daily_reports:{channel.id}:{'off' if channel.daily_reports_enabled else 'on'}"),
             ("📩 Обращения / Предложка", f"channel:{channel.id}"),
+            ("💳 Оформить подписку", f"subscription:{channel.id}"),
             ("🗑 Удалить канал", f"delete:{channel.id}"),
             ("⬅️ Назад", "promotion"),
         ])
@@ -991,8 +1025,47 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 yandex_value,
                 counter_id,
                 public_landing_url(landing.public_id) if landing else None,
+                channel.daily_reports_enabled,
+                admin.subscription_expires_at,
             ),
             buttons(*controls),
+        )
+    if screen.startswith("subscription:"):
+        selected_id = screen.split(":", 1)[1]
+        channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
+        if not channel:
+            return await render_screen(db, admin, "promotion")
+        plan_buttons = [
+            (label, f"subscription_plan:{channel.id}:{months}")
+            for label, months in SUBSCRIPTION_PLANS
+        ]
+        return (
+            subscription_text(channel.title),
+            buttons(*plan_buttons, ("⬅️ Назад", f"promotion_channel:{channel.id}")),
+        )
+    if screen.startswith("subscription_payment:"):
+        order_id = screen.split(":", 1)[1]
+        order = await db.scalar(select(SubscriptionOrder).where(
+            SubscriptionOrder.id == order_id,
+            SubscriptionOrder.admin_id == admin.id,
+            SubscriptionOrder.status == "pending",
+        ))
+        if not order:
+            return await render_screen(db, admin, "promotion")
+        channel = await db.get(Channel, order.channel_id)
+        if not channel:
+            return await render_screen(db, admin, "promotion")
+        url = payment_url(
+            invoice_id=order.invoice_id,
+            amount=order.amount,
+            description=f"MAXIBOT — подписка на канал «{channel.title}», {order.months} мес.",
+        )
+        return (
+            f"💳 Оплата тарифа\n\n📣 Канал: {channel.title}\n"
+            f"Период: {order.months} мес.\nСумма: {order.amount:.0f} ₽\n\n"
+            "Нажмите кнопку для перехода к оплате.",
+            [[{"text": "💳 Перейти к оплате", "type": "link", "url": url}],
+             [{"text": "⬅️ Назад", "callback_data": f"subscription:{channel.id}"}]],
         )
     if screen.startswith("ads:"):
         selected_id = screen.split(":", 1)[1]
@@ -1238,7 +1311,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             [
                 [{"text": "📣 Наш MAX-канал", "type": "link", "url": MAXIBOT_CHANNEL_URL}],
                 [support_button()],
-                [{"text": "⬅️ Назад", "callback_data": "home"}],
+                [{"text": "⬅️ Главное меню", "callback_data": "home"}],
             ],
         )
     if screen == "owner_admin":
@@ -1410,7 +1483,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             (inbox_action[0], inbox_action[1]),
             *((toggle,) if channel.inbox_chat_id else ()),
             ("⚙️ Настройка сообщений пользователя", f"settings:{channel.id}"),
-            ("⬅️ Назад", f"channel:{channel.id}"),
+            ("⬅️ Назад", f"promotion_channel:{channel.id}"),
         )
     if screen.startswith("inbox_connect:") or screen.startswith("inbox_change:"):
         selected_id = screen.split(":", 1)[1] if ":" in screen else None
@@ -3178,6 +3251,13 @@ class MenuRepository:
             channel = await db.get(Channel, channel_id)
             if channel:
                 channel.accepting = accepting
+                await db.commit()
+
+    async def set_daily_reports(self, channel_id: str, enabled: bool):
+        async with self.session_factory() as db:
+            channel = await db.get(Channel, channel_id)
+            if channel:
+                channel.daily_reports_enabled = enabled
                 await db.commit()
 
     async def begin_inbox_connect(self, admin_external_id: str, channel_id: str) -> bool:

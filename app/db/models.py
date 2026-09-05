@@ -28,6 +28,7 @@ class Admin(Base):
     pending_traffic_channel_id: Mapped[Optional[str]]=mapped_column(String(36))
     support_input_mode: Mapped[bool]=mapped_column(Boolean, default=False, nullable=False)
     support_input_ticket_id: Mapped[Optional[str]]=mapped_column(String(36))
+    subscription_expires_at: Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True), index=True)
     custom_bot_state: Mapped[Optional[str]]=mapped_column(String(32))
     pending_custom_bot_id: Mapped[Optional[str]]=mapped_column(String(36))
     channels=relationship("Channel", back_populates="admin", cascade="all, delete-orphan")
@@ -51,6 +52,7 @@ class Channel(Base):
     title: Mapped[str]=mapped_column(String(255))
     avatar_url: Mapped[Optional[str]]=mapped_column(String(2048))
     accepting: Mapped[bool]=mapped_column(Boolean, default=True, nullable=False)
+    daily_reports_enabled: Mapped[bool]=mapped_column(Boolean, default=True, server_default="true", nullable=False)
     auto_approve_enabled: Mapped[bool]=mapped_column(Boolean, default=False, nullable=False)
     public_slug: Mapped[str]=mapped_column(String(64), unique=True, index=True)
     inbox_chat_id: Mapped[Optional[str]]=mapped_column(String(128), index=True)
@@ -67,6 +69,18 @@ class Channel(Base):
     blocked_users=relationship("BlockedUser", back_populates="channel", cascade="all, delete-orphan")
     admin=relationship("Admin", back_populates="channels")
     conversations=relationship("Conversation", back_populates="channel", cascade="all, delete-orphan")
+
+class SubscriptionOrder(Base):
+    __tablename__ = "subscription_orders"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    invoice_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    admin_id: Mapped[str] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    months: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount: Mapped[Numeric] = mapped_column(Numeric(10, 2), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 class LandingPage(Base):
     __tablename__ = "landing_pages"

@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 
 from app.db.models import Admin, Channel, DailyChannelReport, TrafficEvent, TrafficMembership
+from app.db.models import TrafficVisit
+from app.traffic.attribution import EXACT
 
 
 logger = logging.getLogger(__name__)
@@ -66,50 +68,70 @@ def render_daily_report(title: str, subscriber_count: int | None, subscriber_del
         f"   └─ источник не подтверждён: +{source_unconfirmed}\n\n"
         f"⛔️ Отписалось: -{unsubscribed}\n"
         f"   ├─ подтверждено из рекламы: -{confirmed_unsubscribed}\n"
-        f"   └─ источник не подтверждён: -{undetermined_unsubscribed}\n"
-        f"Пригласительные ссылки: -{invite_link_unsubscribed}\n"
-        f"Не определено: -{undetermined_unsubscribed}"
+        f"   └─ источник не подтверждён: -{undetermined_unsubscribed}"
     )
 
 
 async def _day_counts(db, channel_id: str, report_day: date) -> tuple[int, int, int, int, int]:
     start = datetime.combine(report_day, time.min, tzinfo=MOSCOW).astimezone(timezone.utc)
     end = start + timedelta(days=1)
-    subscribed = int(await db.scalar(select(func.count(TrafficEvent.id)).where(
+    subscribed = int(await db.scalar(select(func.count(func.distinct(TrafficEvent.max_user_id))).where(
         TrafficEvent.channel_id == channel_id,
         TrafficEvent.event_type == "user_added",
+        TrafficEvent.max_user_id.is_not(None),
         TrafficEvent.event_time >= start,
         TrafficEvent.event_time < end,
     )) or 0)
-    exact = int(await db.scalar(select(func.count(TrafficMembership.id)).join(
-        TrafficEvent, TrafficMembership.source_event_id == TrafficEvent.id,
-    ).where(
-        TrafficMembership.channel_id == channel_id,
-        TrafficMembership.attribution_status == "EXACT",
-        TrafficEvent.event_type == "user_added",
-        TrafficEvent.event_time >= start,
-        TrafficEvent.event_time < end,
-    )) or 0)
-    # All non-EXACT memberships remain explicitly unconfirmed.  They must not
-    # be presented as organic because MAX does not prove an organic source.
+    exact = int(await db.scalar(
+        select(func.count(func.distinct(TrafficEvent.max_user_id)))
+        .select_from(TrafficEvent)
+        .join(
+            TrafficMembership,
+            (TrafficMembership.channel_id == TrafficEvent.channel_id)
+            & (TrafficMembership.max_user_id == TrafficEvent.max_user_id),
+        )
+        .join(TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id)
+        .where(
+            TrafficEvent.channel_id == channel_id,
+            TrafficEvent.event_type == "user_added",
+            TrafficEvent.max_user_id.is_not(None),
+            TrafficEvent.event_time >= start,
+            TrafficEvent.event_time < end,
+            TrafficMembership.attribution_status == EXACT,
+            TrafficVisit.yclid.is_not(None),
+            TrafficVisit.yclid != "",
+        )
+    ) or 0)
+    # A confirmed MAX subscription without exact Yandex identity evidence is
+    # still a real subscription, but its source remains unconfirmed.
     source_unconfirmed = max(0, subscribed - exact)
-    unsubscribed = int(await db.scalar(select(func.count(TrafficEvent.id)).where(
+    unsubscribed = int(await db.scalar(select(func.count(func.distinct(TrafficEvent.max_user_id))).where(
         TrafficEvent.channel_id == channel_id,
         TrafficEvent.event_type.in_(REMOVAL_EVENTS),
+        TrafficEvent.max_user_id.is_not(None),
         TrafficEvent.event_time >= start,
         TrafficEvent.event_time < end,
     )) or 0)
-    confirmed_unsubscribed = int(await db.scalar(select(func.count(TrafficEvent.id)).join(
-        TrafficMembership,
-        (TrafficMembership.channel_id == TrafficEvent.channel_id)
-        & (TrafficMembership.max_user_id == TrafficEvent.max_user_id),
-    ).where(
-        TrafficEvent.channel_id == channel_id,
-        TrafficEvent.event_type.in_(REMOVAL_EVENTS),
-        TrafficEvent.event_time >= start,
-        TrafficEvent.event_time < end,
-        TrafficMembership.attribution_status == "EXACT",
-    )) or 0)
+    confirmed_unsubscribed = int(await db.scalar(
+        select(func.count(func.distinct(TrafficEvent.max_user_id)))
+        .select_from(TrafficEvent)
+        .join(
+            TrafficMembership,
+            (TrafficMembership.channel_id == TrafficEvent.channel_id)
+            & (TrafficMembership.max_user_id == TrafficEvent.max_user_id),
+        )
+        .join(TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id)
+        .where(
+            TrafficEvent.channel_id == channel_id,
+            TrafficEvent.event_type.in_(REMOVAL_EVENTS),
+            TrafficEvent.max_user_id.is_not(None),
+            TrafficEvent.event_time >= start,
+            TrafficEvent.event_time < end,
+            TrafficMembership.attribution_status == EXACT,
+            TrafficVisit.yclid.is_not(None),
+            TrafficVisit.yclid != "",
+        )
+    ) or 0)
     return subscribed, exact, source_unconfirmed, unsubscribed, confirmed_unsubscribed
 
 
@@ -122,6 +144,8 @@ async def send_due_daily_reports(client, session_factory, now: datetime | None =
     async with session_factory() as db:
         rows = (await db.execute(select(Channel, Admin).join(Admin).order_by(Channel.title))).all()
     for channel, admin in rows:
+        if not channel.daily_reports_enabled:
+            continue
         # A channel connected today must first appear in tomorrow's report;
         # never backfill yesterday's report at the moment of connection.
         if not channel_existed_on_report_day(channel.connected_at, report_day):

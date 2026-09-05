@@ -177,24 +177,22 @@ def test_message_settings_navigation_is_not_discarded_as_stale_callback():
     assert 'return ("⚙️ Настройка сообщений пользователя' in (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
 
 
-def test_channel_messages_back_returns_to_same_parent_channel():
+def test_channel_overview_back_returns_to_current_promotion_channel():
     from pathlib import Path
 
     menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
     section = menu[menu.index('if screen.startswith("channel:") or screen == "channel"'):menu.index('if screen.startswith("inbox_connect:")')]
     assert '("⚙️ Настройка сообщений пользователя", f"settings:{channel.id}")' in section
-    assert '("⬅️ Назад", f"channel:{channel.id}")' in section
+    assert '("⬅️ Назад", f"promotion_channel:{channel.id}")' in section
     assert '("⬅️ Назад", "channels")' not in section
 
 
-def test_channel_messages_back_callback_cannot_reuse_previous_channel_context():
+def test_channel_messages_back_returns_to_same_parent_channel():
     from pathlib import Path
 
     menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
-    section = menu[menu.index('if screen.startswith("channel:") or screen == "channel"'):menu.index('if screen.startswith("inbox_connect:")')]
-    back_line = next(line.strip() for line in section.splitlines() if '"⬅️ Назад"' in line)
-    assert "channel:{channel.id}" in back_line
-    assert "channels" not in back_line
+    section = menu[menu.index('if screen.startswith("messages:")'):menu.index('if screen.startswith("conversation:")')]
+    assert '("⬅️ Назад", f"channel:{channel.id}")' in section
 
 
 def test_stale_channel_guard_remains_required_for_channel_navigation():
@@ -203,6 +201,44 @@ def test_stale_channel_guard_remains_required_for_channel_navigation():
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
     assert 'if action.startswith("channel:")' in source
     assert 'if not await self.repo.channel_owned(user_id, stale_channel_id):' in source
+
+
+def test_delete_cancel_returns_to_current_promotion_channel():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    section = source[source.index('elif action.startswith("delete:")'):source.index('elif action == "read_all"')]
+    assert 'await self._render(user_id, f"promotion_channel:{channel_id}", channel_id)' in section
+    assert 'await self._render(user_id, f"channel:{channel_id}", channel_id)' not in section
+
+
+def test_daily_reports_toggle_is_rendered_between_analytics_and_inbox():
+    from pathlib import Path
+
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    start = menu.index('if screen.startswith("promotion_channel:")')
+    end = menu.index('if screen.startswith("promotion_landing:")', start)
+    section = menu[start:end]
+    assert 'Ежедневные отчёты:' in menu
+    assert 'daily_reports:{channel.id}' in section
+    assert section.index('("📊 Аналитика"') < section.index('daily_reports:{channel.id}') < section.index('("📩 Обращения / Предложка"')
+
+
+def test_daily_reports_callback_updates_channel_and_returns_to_promotion_channel():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    section = source[source.index('elif action.startswith("daily_reports:")'):source.index('elif action == "messages:global"')]
+    assert 'await self.repo.set_daily_reports(channel_id, enabled)' in section
+    assert 'await self._render(user_id, f"promotion_channel:{channel_id}", channel_id)' in section
+
+
+def test_about_screen_labels_home_navigation_explicitly():
+    from pathlib import Path
+
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    section = menu[menu.index('if screen == "about":'):menu.index('if screen == "owner_admin":')]
+    assert '{"text": "⬅️ Главное меню", "callback_data": "home"}' in section
 
 
 def test_navigation_callback_returns_the_rendered_screen_to_active_max_client():

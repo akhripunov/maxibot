@@ -33,9 +33,8 @@ def test_daily_report_keeps_unknown_unsubscribe_source_fail_closed():
         "   └─ источник не подтверждён: +0\n\n"
         "⛔️ Отписалось: -1\n"
         "   ├─ подтверждено из рекламы: -0\n"
-        "   └─ источник не подтверждён: -1\n"
-        "Пригласительные ссылки: -0\n"
-        "Не определено: -1"
+        "   └─ источник не подтверждён: -1"
+        ""
     )
 
 
@@ -51,3 +50,19 @@ def test_daily_report_classifies_confirmed_ad_unsubscribes_separately():
     assert "Отписалось: -2" in text
     assert "подтверждено из рекламы: -1" in text
     assert "источник не подтверждён: -1" in text
+
+
+def test_daily_report_delivery_has_per_channel_disable_gate():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "daily_reports.py").read_text()
+    assert "if not channel.daily_reports_enabled:" in source
+
+
+def test_daily_report_counts_unique_members_and_exact_yclid_attribution():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "daily_reports.py").read_text()
+    assert "func.count(func.distinct(TrafficEvent.max_user_id))" in source
+    assert "TrafficMembership.source_event_id == TrafficEvent.id" not in source
+    assert "TrafficVisit.yclid.is_not(None)" in source

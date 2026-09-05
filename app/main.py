@@ -10,7 +10,7 @@ import httpx
 from datetime import datetime, timedelta, timezone, date as date_type, time as time_type
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Header
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.db.base import Base
 from app.db.session import engine, get_session
-from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, SystemTrafficVisit, SystemTrafficEvent, SystemConversion, BotConnection, AdsAiRun
+from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, SystemTrafficVisit, SystemTrafficEvent, SystemConversion, BotConnection, AdsAiRun, SubscriptionOrder
 from app.domain.services import WELCOME, SENT, editable_welcome, render_channel_welcome_message, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
@@ -38,6 +38,8 @@ from app.traffic.funnel_reporting import campaign_matches
 from app.traffic.analytics import traffic_stats_for_channels
 from app.traffic.join_intent import activate_join_intent
 from app.security_tokens import decrypt_token
+from app.integrations.robokassa import valid_result_signature
+from app.integrations.subscriptions import add_subscription_months
 import html
 import secrets
 from app.ads.codex_worker import claim_next_codex_run, fail_claimed_run, lease_active, worker_enabled, COMPLETED, FAILED, PROCESSING
@@ -315,6 +317,58 @@ async def privacy_page():
 @app.get("/payment-and-refund", response_class=FileResponse)
 async def payment_and_refund_page():
     return FileResponse(legal_dir / "payment-and-refund.html", media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def _robokassa_payload(request: Request) -> dict[str, str]:
+    values = dict(request.query_params)
+    if request.method == "POST":
+        body = (await request.body()).decode("utf-8", errors="replace")
+        for key, items in parse_qs(body, keep_blank_values=True).items():
+            if items:
+                values[key] = items[-1]
+    return values
+
+
+@app.api_route("/payments/robokassa/result", methods=["GET", "POST"])
+async def robokassa_result(request: Request, db: AsyncSession = Depends(get_session)):
+    payload = await _robokassa_payload(request)
+    invoice_id = payload.get("InvId", "")
+    amount = payload.get("OutSum", "")
+    signature = payload.get("SignatureValue", "")
+    if not invoice_id or not amount or not valid_result_signature(
+        amount=amount, invoice_id=invoice_id, signature=signature
+    ):
+        raise HTTPException(status_code=400, detail="invalid Robokassa signature")
+    try:
+        invoice_number = int(invoice_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid invoice") from exc
+    order = await db.scalar(select(SubscriptionOrder).where(SubscriptionOrder.invoice_id == invoice_number))
+    if not order:
+        raise HTTPException(status_code=404, detail="order not found")
+    if order.status == "pending":
+        order.status = "paid"
+        order.paid_at = model_now()
+        admin = await db.get(Admin, order.admin_id)
+        if admin is None:
+            raise HTTPException(status_code=404, detail="admin not found")
+        admin.subscription_expires_at = add_subscription_months(
+            admin.subscription_expires_at,
+            order.months,
+            now=order.paid_at,
+        )
+        await db.commit()
+    return Response(content=f"OK{invoice_id}", media_type="text/plain")
+
+
+@app.get("/payments/robokassa/success", response_class=HTMLResponse)
+async def robokassa_success():
+    return HTMLResponse("<h1>Оплата принята</h1><p>Платёж передан в MAXIBOT на подтверждение.</p>")
+
+
+@app.get("/payments/robokassa/fail", response_class=HTMLResponse)
+async def robokassa_fail():
+    return HTMLResponse("<h1>Оплата не завершена</h1><p>Попробуйте ещё раз из MAXIBOT.</p>")
 
 @app.get("/documents/oferta", response_class=FileResponse)
 async def documents_offer_page():

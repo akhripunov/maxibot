@@ -87,7 +87,8 @@ def test_system_promotion_menu_keeps_only_yandex_analytics_and_back():
     start = MENU.index('if screen == "promotion_maxibot":')
     end = MENU.index('if screen in {"promotion_maxibot_landing",', start)
     block = MENU[start:end]
-    assert '"⚡ Яндекс"' in block
+    assert 'system_yandex_button' in block
+    assert '"🔗 Яндекс.Директ ✅" if system_yandex_connected else "🔗 Яндекс.Директ ❌"' in block
     assert '"📊 Аналитика"' in block
     assert '"⬅️ Назад"' in block
     assert '"📄 Лендинг"' not in block

@@ -1,5 +1,6 @@
 .env
 .env.*
+ROBOKASSA_PRODUCTION.env
 .git
 .gitignore
 __pycache__

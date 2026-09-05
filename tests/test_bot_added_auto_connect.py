@@ -169,7 +169,7 @@ def test_about_screen_has_compact_maxibot_copy_and_site_link():
     assert '"🌐 **Наш сайт:** [maxibot.pro](https://maxibot.jobjin.ru)"' in about
     assert '"text": "📣 Наш MAX-канал", "type": "link", "url": MAXIBOT_CHANNEL_URL' in about
     assert '"text": "💬 Написать в поддержку", "type": "link", "url": url' in about or 'support_button()' in about
-    assert '"text": "⬅️ Назад", "callback_data": "home"' in about
+    assert '"text": "⬅️ Главное меню", "callback_data": "home"' in about
 
 
 def test_connect_channel_screen_has_exact_approved_text():

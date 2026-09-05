@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.bot.menu import MenuRepository, official_bot_added_diagnostics
-from app.db.models import Admin, AdsAiRun, Channel, Conversation, MaxPollingCheckpoint, Message
+from app.db.models import Admin, AdsAiRun, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
 from app.daily_reports import send_due_daily_reports
@@ -21,6 +21,7 @@ from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMa
 from app.security_tokens import decrypt_token, encrypt_token
 from app.ads.service import can_access_ads, run_check, toggle_campaign_link
 from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
+from app.integrations.robokassa import amount_for_months, configured as robokassa_configured
 
 logger = logging.getLogger(__name__)
 
@@ -751,7 +752,7 @@ class MaxBotRuntime:
         # was pressed.  Prefer this for navigation; editing a separately
         # stored message id leaves an old keyboard visible in some clients.
         navigation = action in {"home", "channels", "promotion", "promotion_maxibot", "promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}
-        navigation = navigation or action.startswith(("channel:", "settings:", "promotion_channel:", "promotion_landing:", "ads:"))
+        navigation = navigation or action.startswith(("channel:", "settings:", "promotion_channel:", "promotion_landing:", "subscription:", "ads:"))
         if navigation and update.callback_id:
             await self._navigation_callback(update, str(user_id), action)
             return
@@ -801,11 +802,25 @@ class MaxBotRuntime:
         callback_message_id = update.message.external_message_id if update.message else ""
         current_message_id = await self.repo.service_message_id(user_id)
         action = update.button_payload or "home"
-        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "ads_storage"} or action.startswith(("promotion_", "channels", "channel:", "settings:", "channel_admin_", "ads"))
+        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "ads_storage"} or action.startswith(("promotion_", "subscription", "channels", "channel:", "settings:", "channel_admin_", "ads"))
         if callback_message_id and current_message_id and callback_message_id != current_message_id and not navigation_action:
             logger.info("MAX stale callback ignored")
             return
         screen, channel_id = self._action_parts(action)
+        if action == "subscription":
+            current_text = update.message.text if update.message else ""
+            match = re.search(r"(?:Канал:|📣)\s*(.+?)(?:\n|$)", current_text)
+            if match:
+                async with self.session_factory() as db:
+                    recovered = await db.scalar(select(Channel).join(Admin).where(
+                        Channel.title == match.group(1).strip(),
+                        Admin.external_id == str(user_id),
+                    ))
+                if recovered:
+                    await self._render(user_id, f"subscription:{recovered.id}", recovered.id)
+                    return
+            await self._render(user_id, "promotion")
+            return
         if screen == "ads_campaigns" and not channel_id:
             # Some MAX clients emit the callback label without the channel
             # id. Recover the channel from the current dashboard/list text.
@@ -835,6 +850,42 @@ class MaxBotRuntime:
             selected_id = action.split(":", 1)[1].split(":", 1)[0]
             if await self.repo.channel_owned(user_id, selected_id):
                 await self._render(user_id, action, selected_id)
+        elif action.startswith("subscription:"):
+            selected_id = action.split(":", 1)[1]
+            if await self.repo.channel_owned(user_id, selected_id):
+                await self._render(user_id, action, selected_id)
+        elif action.startswith("subscription_plan:"):
+            selected_id, months_text = action.split(":", 2)[1:]
+            if await self.repo.channel_owned(user_id, selected_id):
+                try:
+                    months = int(months_text)
+                    amount = amount_for_months(months)
+                except (TypeError, ValueError):
+                    return
+                if not robokassa_configured():
+                    await self._render(user_id, f"subscription:{selected_id}", selected_id)
+                    return
+                async with self.session_factory() as db:
+                    admin = await db.scalar(select(Admin).where(Admin.external_id == str(user_id)))
+                    channel = await db.scalar(select(Channel).where(
+                        Channel.id == selected_id,
+                        Channel.admin_id == admin.id if admin else False,
+                    ))
+                    if not channel or not admin:
+                        return
+                    order = SubscriptionOrder(
+                        invoice_id=int(time.time() * 1000),
+                        admin_id=admin.id,
+                        channel_id=channel.id,
+                        months=months,
+                        amount=amount,
+                        status="pending",
+                    )
+                    db.add(order)
+                    await db.commit()
+                    order_id = order.id
+                await self._render(user_id, f"subscription_payment:{order_id}", selected_id)
+                return
         elif action.startswith("ads_check:"):
             selected_id = action.split(":", 1)[1]
             if can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, selected_id):
@@ -1031,6 +1082,13 @@ class MaxBotRuntime:
             await self.repo.set_receiving(channel_id, accepting)
             await self._render(user_id, f"channel:{channel_id}", channel_id)
             screen = f"channel:{channel_id}"
+        elif action.startswith("daily_reports:"):
+            bits = action.split(":", 2)
+            channel_id = bits[1] if len(bits) > 1 else None
+            enabled = len(bits) > 2 and bits[2] == "on"
+            if channel_id and await self.repo.channel_owned(user_id, channel_id):
+                await self.repo.set_daily_reports(channel_id, enabled)
+                await self._render(user_id, f"promotion_channel:{channel_id}", channel_id)
         elif action == "messages:global":
             logger.warning("MESSAGES_SCREEN_OPEN callback_id=%s admin_id=%s", update.callback_id, user_id)
             await self._open_global_feed(user_id)
@@ -1052,7 +1110,7 @@ class MaxBotRuntime:
         elif action.startswith("delete_cancel:"):
             channel_id = action.split(":", 1)[1] if ":" in action else None
             if channel_id:
-                await self._render(user_id, f"channel:{channel_id}", channel_id)
+                await self._render(user_id, f"promotion_channel:{channel_id}", channel_id)
         elif action.startswith("delete_channel_confirm:"):
             channel_id = action.split(":", 1)[1] if ":" in action else None
             if channel_id:

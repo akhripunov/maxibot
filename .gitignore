@@ -1,5 +1,6 @@
 .env
 .env.staging
+ROBOKASSA_PRODUCTION.env
 .ads_codex_worker.env
 .ads_codex_worker.env.*
 .venv*/

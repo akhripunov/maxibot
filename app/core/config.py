@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     max_public_url: str = "https://go.maxibot.pro"
     traffic_public_base_url: str = "https://go.maxibot.pro"
     max_landing_base_url: str = "https://go.maxibot.pro"
+    robokassa_merchant_login: str | None = Field(default=None, validation_alias="ROBOKASSA_MERCHANT_LOGIN")
+    robokassa_password1: str | None = Field(default=None, validation_alias="ROBOKASSA_PASSWORD1")
+    robokassa_password2: str | None = Field(default=None, validation_alias="ROBOKASSA_PASSWORD2")
+    robokassa_test_password1: str | None = Field(default=None, validation_alias="ROBOKASSA_TEST_PASSWORD1")
+    robokassa_test_password2: str | None = Field(default=None, validation_alias="ROBOKASSA_TEST_PASSWORD2")
+    robokassa_test_mode: bool = Field(default=True, validation_alias="ROBOKASSA_TEST_MODE")
+    robokassa_payment_url: str = "https://auth.robokassa.ru/Merchant/Index.aspx"
     traffic_attribution_window_hours: int = 72
     traffic_conversion_policy: str = "CONSERVATIVE"
     traffic_bot_attribution_enabled: bool = False
