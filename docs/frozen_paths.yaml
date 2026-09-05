@@ -7,9 +7,18 @@ BOT_AND_CHANNEL_SEPARATE: YES
 FAST_PATH_WHEN_UNCHANGED: YES
 
 stable_baseline:
-  immutable_commit: 9bfc4e04232bfa33bd61139e8ac82f400cd1971f
-  immutable_tag: maxibot-bot-handoff-stable-2026-09-05
+  immutable_commit: e9bf968347356c871dc6a59ac0a86ee872fdd3be
+  immutable_tag: maxibot-bot-handoff-fallback-stable-2026-09-05
+  previous_bot_immutable_commit: 9bfc4e04232bfa33bd61139e8ac82f400cd1971f
+  previous_bot_immutable_tag: maxibot-bot-handoff-stable-2026-09-05
   production_alembic_head: 0068_generic_bot_traffic
+  ios_postdeploy_real_device: PASS
+  android_previous_stable_baseline: PASS
+  android_postdeploy_real_device: WAIVED_BY_OWNER
+  auto_redirect: PASS
+  fallback_button: PASS
+  real_start: PASS
+  bot_started: PASS
 
 protected_runtime_areas:
   bot_direct:

@@ -1,9 +1,18 @@
 # Frozen production paths
 
 `BOT` and `CHANNEL` are separate `PAID_TRAFFIC_CRITICAL` production paths.
-Their current stable baseline is commit
-`9bfc4e04232bfa33bd61139e8ac82f400cd1971f`, tagged as
-`maxibot-bot-handoff-stable-2026-09-05`.
+The current BOT stable baseline is commit
+`e9bf968347356c871dc6a59ac0a86ee872fdd3be`, tagged as
+`maxibot-bot-handoff-fallback-stable-2026-09-05`.
+The previous BOT baseline remains immutable as the rollback/reference tag
+`maxibot-bot-handoff-stable-2026-09-05` at
+`9bfc4e04232bfa33bd61139e8ac82f400cd1971f`.
+
+BOT closeout evidence: `IOS_POSTDEPLOY_REAL_DEVICE = PASS`,
+`ANDROID_PREVIOUS_STABLE_BASELINE = PASS`,
+`ANDROID_POSTDEPLOY_REAL_DEVICE = WAIVED_BY_OWNER`,
+`AUTO_REDIRECT = PASS`, `FALLBACK_BUTTON = PASS`,
+`REAL_START = PASS`, `BOT_STARTED = PASS`.
 
 This is a behavioral freeze, not a file-only freeze. Refactoring, cleanup,
 unification, or changing a shared dependency can alter the paid-traffic
