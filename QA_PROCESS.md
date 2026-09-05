@@ -26,6 +26,19 @@ The deploy command must be supplied through `PRODUCTION_DEPLOY_CMD`; smoke uses 
 
 The runner stores logs under `.qa-logs/` (override with `QA_LOG_DIR`) and keeps immutable release records under `releases/`. Secrets must be passed through the environment and are not printed by the runner.
 
+QA persistence is mandatory for the canonical gate. Before running it, provide
+`QA_RESULT_INGEST_URL` and the secret `QA_RESULT_INGEST_TOKEN` through the
+operator/CI secret environment. The URL must be HTTPS; local Docker QA may use
+the runner's default localhost ingest URL. The token is sent only as the
+`X-MAXIBOT-Admin-Token` header and never enters QA artifacts. A missing or
+unreachable ingest target is a failed gate, not a successful unpersisted run.
+
+Production SHA parity is read only from `QA_PRODUCTION_SHA` (an exact commit
+SHA supplied by deployment metadata) or `QA_PRODUCTION_URL/health/ready` field
+`commit_sha`. The application exposes that field from `MAXIBOT_COMMIT_SHA`.
+Release markers and human-readable release IDs are not treated as commit SHAs;
+when the field is unavailable the dashboard reports `UNKNOWN`.
+
 `RELEASE_STATUS.md` separates executed pytest counts (`TOTAL_TESTS`, `PASSED`, `FAILED`, `SKIPPED`) from registry counts (`TOTAL_TEST_CASES`, `AUTOMATED_CASES`, `MANUAL_CASES`, `SEMI_AUTOMATED_CASES`). `NEW_*_CASES` fields are calculated against the previous release report; they are not aliases for the total registry size.
 
 Functional verification uses only four statuses: `VERIFIED_WORKING`, `WORKING_UNTESTED`, `BROKEN`, and `UNKNOWN`. Any `BROKEN_CRITICAL` or `UNKNOWN_CRITICAL` case forces `QA_VERDICT = NO_GO`, even when automated tests and staging smoke are green.

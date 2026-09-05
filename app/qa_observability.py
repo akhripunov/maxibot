@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -73,6 +75,14 @@ def normalize_qa_result(payload: dict[str, Any]) -> dict[str, Any]:
     """Validate the machine artifact and return only the safe canonical shape."""
     if not isinstance(payload, dict):
         raise ValueError("QA artifact must be an object")
+    artifact_sha256 = _text(payload.get("artifact_sha256"), limit=64).lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256):
+        raise ValueError("QA artifact must contain artifact_sha256")
+    unsigned = dict(payload)
+    unsigned.pop("artifact_sha256", None)
+    expected_sha256 = hashlib.sha256(json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if not hmac.compare_digest(artifact_sha256, expected_sha256):
+        raise ValueError("QA artifact hash mismatch")
     tested_sha = _sha(payload.get("tested_sha"))
     if tested_sha == UNKNOWN:
         raise ValueError("QA artifact must contain an exact 40-character tested_sha")
@@ -114,7 +124,7 @@ def normalize_qa_result(payload: dict[str, Any]) -> dict[str, Any]:
             "smoke": _text(production.get("smoke"), limit=24) or UNVERIFIED,
             "changed": bool(production.get("changed", False)),
         },
-        "artifact_sha256": _text(payload.get("artifact_sha256"), limit=64) or None,
+        "artifact_sha256": artifact_sha256,
         "source_path": _text(payload.get("source_path"), limit=255) or None,
         "suites": suites,
         "failures": _safe_failures(payload.get("failures")),

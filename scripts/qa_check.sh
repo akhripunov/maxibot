@@ -25,6 +25,44 @@ STATUS_FILE="$ROOT_DIR/RELEASE_STATUS.md"
 HISTORY_DIR="$ROOT_DIR/releases"
 LOG_DIR="${QA_LOG_DIR:-$ROOT_DIR/.qa-logs/$RELEASE_ID}"
 mkdir -p "$HISTORY_DIR" "$LOG_DIR"
+if [ "${QA_LOCAL_DOCKER:-0}" = "1" ] && [ -z "${QA_RESULT_INGEST_URL:-}" ]; then
+  QA_RESULT_INGEST_URL="http://127.0.0.1:${QA_STAGING_PORT}/api/admin/qa-runs/ingest"
+fi
+
+require_ingest_config() {
+  if [ -z "${QA_RESULT_INGEST_URL:-}" ] || [ -z "${QA_RESULT_INGEST_TOKEN:-}" ]; then
+    echo "QA persistence is mandatory: set QA_RESULT_INGEST_URL and QA_RESULT_INGEST_TOKEN" >&2
+    return 1
+  fi
+  case "$QA_RESULT_INGEST_URL" in
+    https://*|http://127.0.0.1:*|http://localhost:*) return 0 ;;
+    *) echo "QA_RESULT_INGEST_URL must use HTTPS (HTTP is allowed only for localhost QA)" >&2; return 1 ;;
+  esac
+}
+
+resolve_production_sha() {
+  case "${CURRENT_PROD_SHA:-UNKNOWN}" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
+  esac
+  if [ -n "${QA_PRODUCTION_SHA:-}" ]; then
+    if printf '%s\n' "$QA_PRODUCTION_SHA" | grep -Eq '^[0-9a-fA-F]{40}$'; then CURRENT_PROD_SHA="$QA_PRODUCTION_SHA"; return 0; fi
+    CURRENT_PROD_SHA="UNKNOWN"; return 0
+  fi
+  local production_url="${QA_PRODUCTION_URL:-${PRODUCTION_URL:-}}" response
+  if [ -z "$production_url" ] || ! response=$(curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" "$production_url/health/ready" 2>"$LOG_DIR/production-sha.log"); then
+    CURRENT_PROD_SHA="UNKNOWN"; return 0
+  fi
+  printf '%s' "$response" >"$LOG_DIR/production-sha.json"
+  CURRENT_PROD_SHA="$(${QA_PYTHON:-python3} - <<'PY' "$response"
+import json, re, sys
+try:
+    value = json.loads(sys.argv[1]).get("commit_sha", "")
+except (TypeError, ValueError):
+    value = ""
+print(value if re.fullmatch(r"[0-9a-fA-F]{40}", str(value)) else "UNKNOWN")
+PY
+  )"
+}
 
 STATIC="NOT_RUN"; UNIT="NOT_RUN"; INTEGRATION="NOT_RUN"; REGRESSION="NOT_RUN"
 BUILD="NOT_RUN"; STAGING="NOT_RUN"; E2E="NOT_RUN"
@@ -39,7 +77,7 @@ NEW_TEST_CASES=0; NEW_AUTOMATED_CASES=0; NEW_MANUAL_CASES=0; NEW_SEMI_AUTOMATED_
 PREVIOUS_TOTAL_CASES=0; PREVIOUS_AUTOMATED_CASES=0; PREVIOUS_MANUAL_CASES=0; PREVIOUS_SEMI_AUTOMATED_CASES=0; PREVIOUS_REGRESSION_CASES=0
 CRITICAL_BUGS=0; NON_CRITICAL_BUGS=0
 PRODUCTION="NOT_DEPLOYED"; PRODUCTION_SMOKE="NOT_RUN"; PRODUCTION_CHANGED="NO"
-CURRENT_PROD_SHA="UNAVAILABLE"; ROLLBACK_SHA="UNAVAILABLE"; ROLLBACK="NOT_RUN"
+CURRENT_PROD_SHA="UNKNOWN"; ROLLBACK_SHA="UNKNOWN"; ROLLBACK="NOT_RUN"
 VERDICT="NO_GO"
 IMAGE_BUILT=0
 QA_DOCKER_BUILD_NETWORK="${QA_DOCKER_BUILD_NETWORK:-}"
@@ -260,6 +298,7 @@ PY
 }
 
 finalize() {
+  resolve_production_sha
   write_status
   local history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}.md"
   if [ -e "$history_path" ]; then
@@ -285,6 +324,7 @@ finalize() {
 }
 
 fail_gate() { VERDICT="NO_GO"; finalize; exit 1; }
+require_ingest_config || exit 2
 read_case_registry || { echo "test-case registry cannot be read" >&2; fail_gate; }
 read_previous_case_counts || { echo "previous test-case counts cannot be read" >&2; fail_gate; }
 NEW_TEST_CASES=$((TOTAL_CASES - PREVIOUS_TOTAL_CASES)); [ "$NEW_TEST_CASES" -lt 0 ] && NEW_TEST_CASES=0

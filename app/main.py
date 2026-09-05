@@ -857,7 +857,7 @@ async def readiness(db: AsyncSession = Depends(get_session)):
         await db.execute(select(1))
     except Exception:
         raise HTTPException(503, "database is not ready")
-    return {"status": "ready", "service": "maxibot", "max_mode": settings.max_client_mode, "release_id": settings.maxibot_release_id, "release": os.getenv("MAXIBOT_RELEASE_MARKER", settings.maxibot_release_id)}
+    return {"status": "ready", "service": "maxibot", "max_mode": settings.max_client_mode, "release_id": settings.maxibot_release_id, "release": os.getenv("MAXIBOT_RELEASE_MARKER", settings.maxibot_release_id), "commit_sha": settings.maxibot_commit_sha}
 
 
 @app.get("/health/traffic-ready")

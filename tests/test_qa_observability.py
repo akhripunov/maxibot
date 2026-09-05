@@ -1,4 +1,7 @@
 import json
+import hashlib
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -29,6 +32,7 @@ def artifact(**overrides):
         "case_registry": {"unknown": 2, "unknown_critical": 1},
     }
     value.update(overrides)
+    value["artifact_sha256"] = hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return value
 
 
@@ -72,6 +76,28 @@ def test_qa_runner_emits_machine_artifact_and_no_raw_failure_messages():
     assert '"artifact_sha256"' in script
     assert '"failures": []' in script
     assert "qa-result.json" in script
+    assert "require_ingest_config" in script
+    assert "QA_RESULT_INGEST_TOKEN" in script
+    assert "QA_PRODUCTION_URL/health/ready" in (ROOT / "QA_PROCESS.md").read_text(encoding="utf-8")
+
+
+def test_production_sha_has_explicit_runtime_source_and_never_uses_release_marker():
+    config = (ROOT / "app/core/config.py").read_text(encoding="utf-8")
+    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    compose = (ROOT / "docker-compose.vps.yml").read_text(encoding="utf-8")
+    assert "MAXIBOT_COMMIT_SHA" in config
+    assert '"commit_sha": settings.maxibot_commit_sha' in main
+    assert "MAXIBOT_COMMIT_SHA:" in compose
+    assert "release marker" not in main.lower()
+
+
+def test_canonical_runner_fails_closed_before_tests_without_secure_ingest_url():
+    env = os.environ.copy()
+    env.update({"QA_RESULT_INGEST_URL": "http://example.invalid", "QA_RESULT_INGEST_TOKEN": "do-not-print"})
+    result = subprocess.run(["bash", "scripts/qa_check.sh"], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "HTTPS" in result.stderr
+    assert "do-not-print" not in result.stdout + result.stderr
 
 
 def test_web_admin_qa_routes_are_owner_read_only_and_ingest_is_edge_only():

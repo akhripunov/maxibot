@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     maxibot_release_id: str = Field(default="dev-local", validation_alias="MAXIBOT_RELEASE_ID")
+    maxibot_commit_sha: str = Field(default="UNKNOWN", validation_alias="MAXIBOT_COMMIT_SHA")
     database_url: str = "postgresql+asyncpg://maxibot:maxibot@db:5432/maxibot"
     redis_url: str = "redis://redis:6379/0"
     app_secret: str = "dev-secret"
