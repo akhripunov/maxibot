@@ -31,7 +31,7 @@ from app.integrations.yandex_oauth import authorize_url, combined_scope, configu
 from app.integrations.yandex_metrica import ensure_channel_setup, ensure_system_setup
 from app.integrations.yandex_direct import YandexDirectAPIError, YandexDirectClient
 from app.db.models import now as model_now
-from app.traffic.deep_link import build_bot_deep_link, build_native_miniapp_deep_link, build_web_bot_deep_link, build_web_miniapp_deep_link, new_attribution_token, valid_max_target
+from app.traffic.deep_link import build_bot_deep_link, build_miniapp_deep_link, build_native_miniapp_deep_link, build_web_bot_deep_link, build_web_miniapp_deep_link, new_attribution_token, valid_max_target
 from app.traffic.metrica_tag import metrica_tag_html, valid_counter_id
 from app.traffic.funnel_reporting import FunnelObservation, canonical_paid_click_report
 from app.traffic.funnel_reporting import campaign_matches
@@ -747,7 +747,10 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
     })
     # BOT is an additive destination in the shared Mini App handoff. The
     # existing CHANNEL landing path remains unchanged.
-    destination = (build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link)(settings.max_bot_username, token)
+    # BOT uses the official HTTPS Mini App contract on every device.  The
+    # frozen CHANNEL route below retains its existing platform-specific
+    # launch transport unchanged.
+    destination = build_miniapp_deep_link(settings.max_bot_username, token)
     await _system_telemetry_event(db, visit, "SYSTEM_REDIRECT_SENT", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),

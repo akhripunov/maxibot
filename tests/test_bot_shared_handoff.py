@@ -59,3 +59,25 @@ def test_required_safe_handoff_event_names_are_present_without_raw_identity_logg
     ):
         assert event in MAIN
     assert "raw initData" not in MAIN.lower()
+
+
+def test_bot_landing_uses_official_https_max_startapp_contract_only():
+    start = MAIN.index('@app.get("/system/{public_id}"')
+    end = MAIN.index('@app.get("/health/live")', start)
+    section = MAIN[start:end]
+    assert "build_miniapp_deep_link(settings.max_bot_username, token)" in section
+    assert "build_native_miniapp_deep_link" not in section
+    assert "build_web_miniapp_deep_link" not in section
+    assert "build_bot_deep_link" not in section
+
+
+def test_bot_landing_is_operationally_separate_from_channel_redirect():
+    start = MAIN.index('@app.get("/system/{public_id}"')
+    end = MAIN.index('@app.get("/health/live")', start)
+    section = MAIN[start:end]
+    assert "_traffic_redirect" not in section
+    assert "SystemTrafficVisit" in section
+    assert "select(TrafficVisit)" not in section
+    assert "channel_id" not in section
+    assert "user_added" not in section
+    assert "JOIN_REQUEST" not in section
