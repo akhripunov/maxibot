@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     max_public_url: str = "https://go.maxibot.pro"
     traffic_public_base_url: str = "https://go.maxibot.pro"
     max_landing_base_url: str = "https://go.maxibot.pro"
+    uploads_dir: str = Field(default="/app/uploads", validation_alias="UPLOADS_DIR")
     robokassa_merchant_login: str | None = Field(default=None, validation_alias="ROBOKASSA_MERCHANT_LOGIN")
     robokassa_password1: str | None = Field(default=None, validation_alias="ROBOKASSA_PASSWORD1")
     robokassa_password2: str | None = Field(default=None, validation_alias="ROBOKASSA_PASSWORD2")

@@ -1,17 +1,25 @@
-from pathlib import Path
-
 import pytest
 
 from app.integrations.max_binary_codec import MaxBinaryCodec, MaxBinaryCodecError
 
 
-PRIVATE = Path("research/max_ws_reproduction/private")
+
+
+def _synthetic_pending_response() -> bytes:
+    """Build a sanitized response shape without retaining a private capture."""
+    name = b"QA synthetic member".ljust(31, b" ")
+    body = (
+        b"\x81\xa7members\x91\x81\xa7contact\x83"
+        b"\xa2id\xc7\x05\x01\xd2" + (987).to_bytes(4, "big", signed=True)
+        + b"\xa5names\xbf" + name
+    )
+    return b"\x0a\x00\x00\x1e\x00;\x01\x00\x00\x00\x00\x01" + body
 
 
 def test_decode_known_pending_and_approve_fixtures():
     codec = MaxBinaryCodec()
-    pending = codec.decode_message((PRIVATE / "pending_request.bin").read_bytes())
-    approve = codec.decode_message((PRIVATE / "approve_frame_template.bin").read_bytes())
+    pending = codec.decode_message(codec.encode_pending_request(request_value=7, chat_id=-123))
+    approve = codec.decode_message(codec.encode_approve_request(request_value=8, chat_id=-123, user_id=987))
     assert pending.opcode == 59
     assert pending.payload["chatId"] == approve.payload["chatId"]
     assert approve.opcode == 77
@@ -19,7 +27,7 @@ def test_decode_known_pending_and_approve_fixtures():
 
 
 def test_decode_known_pending_response_identity():
-    message = MaxBinaryCodec().decode_message((PRIVATE / "pending_response_latest.bin").read_bytes())
+    message = MaxBinaryCodec().decode_message(_synthetic_pending_response())
     member = message.payload["members"][0]
     assert message.opcode == 59
     assert member["contact"]["id"] > 0
@@ -33,7 +41,7 @@ def test_dynamic_encode_replaces_runtime_ids_and_request_value():
     assert decoded.request_value == 0x123456
     assert decoded.payload["chatId"] == -123
     assert decoded.payload["userIds"] == [987]
-    assert frame != (PRIVATE / "approve_frame_template.bin").read_bytes()
+    assert frame != codec.encode_approve_request(request_value=0x123455, chat_id=-123, user_id=987)
 
 
 def test_dynamic_pending_encode_and_single_user_guard_shape():

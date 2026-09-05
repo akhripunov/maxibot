@@ -272,7 +272,7 @@ async def lifespan(app):
 
 app = FastAPI(title="MAXIBOT MVP", lifespan=lifespan)
 mini_dir = Path(__file__).parent.parent / "miniapp"
-uploads_dir = Path("/app/uploads")
+uploads_dir = Path(settings.uploads_dir)
 uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/miniapp", StaticFiles(directory=mini_dir), name="miniapp")
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")

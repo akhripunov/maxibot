@@ -379,12 +379,13 @@ run_tests() {
   local name="$1"; shift
   local xml="$LOG_DIR/${name}.xml" log="$LOG_DIR/${name}.log"
   local suite_started suite_finished suite_duration
+  local qa_uploads_dir="${QA_UPLOADS_DIR:-/tmp/maxibot-qa-uploads}"
   suite_started="$(date -u +%s)"
   if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
-    docker run --rm --entrypoint python -w /app -v "$ROOT_DIR:/app:ro" -v "$LOG_DIR:/qa-logs" "$IMAGE" -m pytest -q --junitxml="/qa-logs/${name}.xml" "$@" >"$log" 2>&1
+    docker run --rm --entrypoint python -w /app -e "UPLOADS_DIR=${qa_uploads_dir}" -v "$ROOT_DIR:/app:ro" -v "$LOG_DIR:/qa-logs" "$IMAGE" -m pytest -q --junitxml="/qa-logs/${name}.xml" "$@" >"$log" 2>&1
   else
     command -v "${QA_PYTHON:-python3}" >/dev/null 2>&1 || return 1
-    "${QA_PYTHON:-python3}" -m pytest -q --junitxml="$xml" "$@" >"$log" 2>&1
+    UPLOADS_DIR="$qa_uploads_dir" "${QA_PYTHON:-python3}" -m pytest -q --junitxml="$xml" "$@" >"$log" 2>&1
   fi
   local rc=$?
   if [ -f "$xml" ]; then

@@ -37,11 +37,8 @@ def test_callback_credits_only_pending_order_and_is_idempotent():
 
 @pytest.mark.asyncio
 async def test_real_result_endpoint_credits_once_and_does_not_extend_twice(monkeypatch):
-    try:
-        from app import main
-    except PermissionError:
-        pytest.skip("host runtime cannot create /app/uploads; covered in Docker QA")
-
+    monkeypatch.setattr(settings, "uploads_dir", "/tmp/maxibot-test-uploads")
+    from app import main
     monkeypatch.setattr(settings, "robokassa_test_mode", True)
     monkeypatch.setattr(settings, "robokassa_test_password2", "isolated-test-password")
     invoice_id = "54321"
