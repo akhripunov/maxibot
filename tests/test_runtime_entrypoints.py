@@ -177,6 +177,34 @@ def test_message_settings_navigation_is_not_discarded_as_stale_callback():
     assert 'return ("⚙️ Настройка сообщений пользователя' in (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
 
 
+def test_channel_messages_back_returns_to_same_parent_channel():
+    from pathlib import Path
+
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    section = menu[menu.index('if screen.startswith("channel:") or screen == "channel"'):menu.index('if screen.startswith("inbox_connect:")')]
+    assert '("⚙️ Настройка сообщений пользователя", f"settings:{channel.id}")' in section
+    assert '("⬅️ Назад", f"channel:{channel.id}")' in section
+    assert '("⬅️ Назад", "channels")' not in section
+
+
+def test_channel_messages_back_callback_cannot_reuse_previous_channel_context():
+    from pathlib import Path
+
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    section = menu[menu.index('if screen.startswith("channel:") or screen == "channel"'):menu.index('if screen.startswith("inbox_connect:")')]
+    back_line = next(line.strip() for line in section.splitlines() if '"⬅️ Назад"' in line)
+    assert "channel:{channel.id}" in back_line
+    assert "channels" not in back_line
+
+
+def test_stale_channel_guard_remains_required_for_channel_navigation():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    assert 'if action.startswith("channel:")' in source
+    assert 'if not await self.repo.channel_owned(user_id, stale_channel_id):' in source
+
+
 def test_navigation_callback_returns_the_rendered_screen_to_active_max_client():
     from pathlib import Path
 

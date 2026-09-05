@@ -1410,7 +1410,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             (inbox_action[0], inbox_action[1]),
             *((toggle,) if channel.inbox_chat_id else ()),
             ("⚙️ Настройка сообщений пользователя", f"settings:{channel.id}"),
-            ("⬅️ Назад", "channels"),
+            ("⬅️ Назад", f"channel:{channel.id}"),
         )
     if screen.startswith("inbox_connect:") or screen.startswith("inbox_change:"):
         selected_id = screen.split(":", 1)[1] if ":" in screen else None
