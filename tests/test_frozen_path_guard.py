@@ -31,7 +31,10 @@ def _repo(tmp_path: Path, changed_path: str) -> tuple[Path, str, str]:
     base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     target = repo / changed_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("changed\n", encoding="utf-8")
+    content = "changed\n"
+    if changed_path == "app/main.py":
+        content = "#fallbackCta Перейти в MAX\n"
+    target.write_text(content, encoding="utf-8")
     subprocess.run(["git", "add", changed_path], cwd=repo, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "change"], cwd=repo, check=True, env=env)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()

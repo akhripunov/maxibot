@@ -19,17 +19,21 @@ protected_runtime_areas:
     - app/traffic/system_conversion_processor.py
     - miniapp/traffic.html
   channel_direct:
-    - app/main.py
     - app/bot/runtime.py
     - app/bot/menu.py
     - app/traffic/deep_link.py
     - miniapp/traffic.html
   shared_dependencies:
+    - app/main.py
     - app/db/models.py
     - app/core/config.py
     - app/integrations/max*
     - alembic/
     - docker-compose*.yml
+
+scoped_bot_only:
+  - app/main.py|#fallbackCta
+  - app/main.py|Перейти в MAX
 
 regression_contracts:
   - tests/regression/test_mobile_max_handoff_contract.py

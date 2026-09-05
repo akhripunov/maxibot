@@ -54,9 +54,23 @@ if not manifest_path.is_absolute():
     manifest_path = Path(repo) / manifest_path
 text = manifest_path.read_text(encoding="utf-8")
 lists: dict[str, list[str]] = {}
+scoped_bot_only: list[tuple[str, str]] = []
 in_paths = False
 current = None
+in_scoped = False
 for line in text.splitlines():
+    if line == "scoped_bot_only:":
+        in_scoped = True
+        in_paths = False
+        current = None
+        continue
+    if in_scoped and line and not line.startswith(" "):
+        in_scoped = False
+    if in_scoped:
+        match = re.match(r"^  - ([^|]+)\|(.+)$", line)
+        if match:
+            scoped_bot_only.append((match.group(1).strip(), match.group(2)))
+        continue
     if line == "protected_runtime_areas:":
         in_paths = True
         continue
@@ -84,9 +98,19 @@ def matches(pattern: str, path: str) -> bool:
 changed = subprocess.check_output(
     ["git", "-C", repo, "diff", "--name-only", f"{base}..{head}"], text=True
 ).splitlines()
+def diff_for(path: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", repo, "diff", "--unified=0", f"{base}..{head}", "--", path], text=True
+    )
+
+bot_scoped = {
+    path for path in changed
+    if any(path == scoped_path and marker in diff_for(path) for scoped_path, marker in scoped_bot_only)
+}
 bot_direct = [p for p in changed if any(matches(x, p) for x in lists.get("bot_direct", []))]
 channel_direct = [p for p in changed if any(matches(x, p) for x in lists.get("channel_direct", []))]
 shared = [p for p in changed if any(matches(x, p) for x in lists.get("shared_dependencies", []))]
+shared_for_impact = [p for p in shared if p not in bot_scoped]
 protected = sorted(set(bot_direct + channel_direct + shared))
 approval_paths = [p for p in protected if owner_task and any(matches(a, p) for a in approved)]
 approval_complete = bool(protected) and len(approval_paths) == len(protected)
@@ -99,7 +123,7 @@ def state(direct: list[str], shared_hit: bool) -> str:
     return "NO"
 
 print(f"BOT_FROZEN_PATH_CHANGED={state(bot_direct, bool(shared))}")
-print(f"CHANNEL_FROZEN_PATH_CHANGED={state(channel_direct, bool(shared))}")
+print(f"CHANNEL_FROZEN_PATH_CHANGED={state(channel_direct, bool(shared_for_impact))}")
 print(f"OWNER_FROZEN_CHANGE_APPROVAL={'YES' if approval_complete else 'NO'}")
 if not protected or approval_complete:
     print("FROZEN_PATH_GUARD=PASS")
