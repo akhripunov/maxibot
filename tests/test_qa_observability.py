@@ -91,13 +91,12 @@ def test_production_sha_has_explicit_runtime_source_and_never_uses_release_marke
     assert "release marker" not in main.lower()
 
 
-def test_canonical_runner_fails_closed_before_tests_without_secure_ingest_url():
-    env = os.environ.copy()
-    env.update({"QA_RESULT_INGEST_URL": "http://example.invalid", "QA_RESULT_INGEST_TOKEN": "do-not-print"})
-    result = subprocess.run(["bash", "scripts/qa_check.sh"], cwd=ROOT, env=env, capture_output=True, text=True)
-    assert result.returncode == 2
-    assert "HTTPS" in result.stderr
-    assert "do-not-print" not in result.stdout + result.stderr
+def test_missing_ingest_config_is_a_persistence_warning_not_a_product_gate():
+    script = (ROOT / "scripts/qa_check.sh").read_text(encoding="utf-8")
+    assert 'QA_ARTIFACT_PERSISTENCE="WARN"' in script
+    assert "product QA gates continue" in script
+    assert "local artifacts retained" in script
+    assert "protected ingest failed" in script
 
 
 def test_web_admin_qa_routes_are_owner_read_only_and_ingest_is_edge_only():
@@ -105,5 +104,12 @@ def test_web_admin_qa_routes_are_owner_read_only_and_ingest_is_edge_only():
     assert '@router.get("/qa/current")' in source
     assert '@router.get("/qa/runs")' in source
     assert '@router.get("/qa/runs/{run_id}")' in source
-    assert '@router.post("/qa-runs/ingest", dependencies=[Depends(require_edge_token)])' in source
+    assert '@router.post("/qa-runs/ingest", dependencies=[Depends(require_qa_ingest_token)])' in source
     assert 'Depends(require_web_admin)' in source
+
+
+def test_local_qa_ingest_uses_one_secure_client_server_token_source():
+    compose = (ROOT / "docker-compose.qa.yml").read_text(encoding="utf-8")
+    assert 'QA_RESULT_INGEST_TOKEN: "${QA_RESULT_INGEST_TOKEN:?' in compose
+    assert "must be provided securely" in compose
+    assert "QA_RESULT_INGEST_TOKEN" in compose

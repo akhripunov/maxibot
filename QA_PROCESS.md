@@ -26,12 +26,16 @@ The deploy command must be supplied through `PRODUCTION_DEPLOY_CMD`; smoke uses 
 
 The runner stores logs under `.qa-logs/` (override with `QA_LOG_DIR`) and keeps immutable release records under `releases/`. Secrets must be passed through the environment and are not printed by the runner.
 
-QA persistence is mandatory for the canonical gate. Before running it, provide
-`QA_RESULT_INGEST_URL` and the secret `QA_RESULT_INGEST_TOKEN` through the
-operator/CI secret environment. The URL must be HTTPS; local Docker QA may use
-the runner's default localhost ingest URL. The token is sent only as the
-`X-MAXIBOT-Admin-Token` header and never enters QA artifacts. A missing or
-unreachable ingest target is a failed gate, not a successful unpersisted run.
+QA artifact persistence is monitored separately from product QA. Before running
+it, provide `QA_RESULT_INGEST_URL` and the secret `QA_RESULT_INGEST_TOKEN`
+through the operator/CI secret environment. The URL must be HTTPS; local Docker
+QA may use the runner's default localhost ingest URL. The token is sent only as
+the `X-MAXIBOT-Admin-Token` header and never enters QA artifacts. Missing,
+unreachable, or unauthorized ingest records
+`QA_ARTIFACT_PERSISTENCE = WARN` while retaining local artifacts. It does not
+turn an otherwise fully green product execution into NO_GO. Product failures,
+unknown critical cases, mandatory skips, staging failures, and E2E failures
+remain fail-closed and produce `QA_VERDICT = NO_GO`.
 
 Production SHA parity is read only from `QA_PRODUCTION_SHA` (an exact commit
 SHA supplied by deployment metadata) or `QA_PRODUCTION_URL/health/ready` field

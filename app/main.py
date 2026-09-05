@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.db.base import Base
 from app.db.session import engine, get_session
-from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, SystemTrafficVisit, SystemTrafficEvent, SystemConversion, BotConnection, AdsAiRun, SubscriptionOrder
+from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, BotConnection, AdsAiRun, SubscriptionOrder
 from app.domain.services import WELCOME, SENT, editable_welcome, render_channel_welcome_message, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
@@ -620,15 +620,16 @@ SYSTEM_TELEMETRY_EVENTS = {
     "MAX_STARTAPP_HANDOFF",
 }
 
-async def _system_telemetry_event(db: AsyncSession, visit: SystemTrafficVisit, event_type: str, metadata: dict | None = None) -> bool:
+async def _bot_telemetry_event(db: AsyncSession, visit: BotTrafficVisit, event_type: str, metadata: dict | None = None) -> bool:
     if event_type not in SYSTEM_TELEMETRY_EVENTS and event_type not in SYSTEM_HANDOFF_EVENTS:
         return False
-    dedupe = f"system-telemetry:{visit.id}:{event_type}"
-    if await db.scalar(select(SystemTrafficEvent.id).where(SystemTrafficEvent.dedupe_key == dedupe)):
+    dedupe = f"bot-telemetry:{visit.id}:{event_type}"
+    if await db.scalar(select(BotTrafficEvent.id).where(BotTrafficEvent.dedupe_key == dedupe)):
         return False
     safe = {k: v for k, v in (metadata or {}).items() if k in {"device_family", "browser_family", "error_class"} and isinstance(v, (str, int, float, bool))}
-    db.add(SystemTrafficEvent(visit_id=visit.id, event_type=event_type, event_time=model_now(),
-                              metadata_json=json.dumps(safe, ensure_ascii=False), dedupe_key=dedupe))
+    db.add(BotTrafficEvent(bot_visit_id=visit.id, bot_id=visit.bot_id, destination_id=visit.destination_id,
+                           event_type=event_type, event_time=model_now(),
+                           metadata_json=json.dumps(safe, ensure_ascii=False), dedupe_key=dedupe))
     return True
 
 
@@ -731,7 +732,8 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
     if not profile:
         raise HTTPException(404, "system landing not found")
     token = secrets.token_urlsafe(24)
-    visit = SystemTrafficVisit(token=token, yclid=request.query_params.get("yclid"),
+    visit = BotTrafficVisit(token=token, bot_id=settings.max_bot_id, destination_id=settings.max_bot_id,
+                            yclid=request.query_params.get("yclid"),
                                utm_source=request.query_params.get("utm_source"),
                                utm_medium=request.query_params.get("utm_medium"),
                                utm_campaign=request.query_params.get("utm_campaign"),
@@ -741,7 +743,7 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
                                user_agent=request.headers.get("user-agent"))
     db.add(visit)
     await db.commit()
-    await _system_telemetry_event(db, visit, "SYSTEM_LANDING_RENDERED", {
+    await _bot_telemetry_event(db, visit, "SYSTEM_LANDING_RENDERED", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
     })
@@ -750,11 +752,11 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
     # BOT reproduces the frozen CHANNEL launch contract without calling the
     # channel route: native MAX scheme on mobile, MAX Web HTTPS on desktop.
     destination = (build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link)(settings.max_bot_username, token)
-    await _system_telemetry_event(db, visit, "SYSTEM_REDIRECT_SENT", {
+    await _bot_telemetry_event(db, visit, "SYSTEM_REDIRECT_SENT", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
     })
-    await _system_telemetry_event(db, visit, "MAX_STARTAPP_HANDOFF", {
+    await _bot_telemetry_event(db, visit, "MAX_STARTAPP_HANDOFF", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
     })
@@ -809,12 +811,12 @@ async def system_telemetry_report(
     if not settings.maxibot_owner_user_id or str(admin.external_id) != settings.maxibot_owner_user_id:
         raise HTTPException(403, "system telemetry is owner-only")
     start = datetime.now(timezone.utc) - timedelta(hours=hours)
-    visits = list((await db.scalars(select(SystemTrafficVisit).where(SystemTrafficVisit.created_at >= start))).all())
+    visits = list((await db.scalars(select(BotTrafficVisit).where(BotTrafficVisit.created_at >= start))).all())
     visit_ids = [v.id for v in visits]
-    events = list((await db.scalars(select(SystemTrafficEvent).where(SystemTrafficEvent.visit_id.in_(visit_ids)))).all()) if visit_ids else []
-    by_visit: dict[str, list[SystemTrafficEvent]] = {}
+    events = list((await db.scalars(select(BotTrafficEvent).where(BotTrafficEvent.bot_visit_id.in_(visit_ids)))).all()) if visit_ids else []
+    by_visit: dict[str, list[BotTrafficEvent]] = {}
     for event in events:
-        by_visit.setdefault(event.visit_id, []).append(event)
+        by_visit.setdefault(event.bot_visit_id, []).append(event)
     by_device: dict[str, dict[str, int]] = {}
     for visit in visits:
         device = _diagnostic_device_family_from_user_agent(visit.user_agent) if visit.user_agent else "UNKNOWN"
@@ -829,10 +831,10 @@ async def system_telemetry_report(
 async def system_traffic_event(payload: BrowserTrafficEventIn, request: Request, db: AsyncSession = Depends(get_session)):
     if payload.event_type not in SYSTEM_TELEMETRY_EVENTS - {"SYSTEM_LANDING_RENDERED", "SYSTEM_REDIRECT_SENT", "SYSTEM_BOT_STARTED"}:
         raise HTTPException(400, "unsupported system traffic event")
-    visit = await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == payload.visitor_token))
+    visit = await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == payload.visitor_token))
     if not visit:
         return {"ok": True, "recorded": False}
-    changed = await _system_telemetry_event(db, visit, payload.event_type, {
+    changed = await _bot_telemetry_event(db, visit, payload.event_type, {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
     })
@@ -846,7 +848,7 @@ async def system_metrica_client_id(payload: MetricaClientIdIn, db: AsyncSession 
     client_id = payload.client_id.strip()
     if not re.fullmatch(r"\d{5,64}", client_id):
         raise HTTPException(400, "invalid metrica client id")
-    visit = await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == payload.visitor_token))
+    visit = await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == payload.visitor_token))
     if not visit:
         raise HTTPException(404, "system traffic visit not found")
     if visit.metrica_client_id and visit.metrica_client_id != client_id:
@@ -936,7 +938,7 @@ async def mini(request: Request, db: AsyncSession = Depends(get_session)):
         return FileResponse(mini_dir / "index.html", headers={"Cache-Control": "no-store, max-age=0"})
 
     visit = await db.scalar(select(TrafficVisit).where(TrafficVisit.startapp_token == startapp))
-    system_visit = None if visit else await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == startapp))
+    bot_visit = None if visit else await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == startapp))
     if visit:
         await _traffic_diagnostic_event(
             db,
@@ -951,8 +953,8 @@ async def mini(request: Request, db: AsyncSession = Depends(get_session)):
             {"device_family": _diagnostic_device_family(request)},
         )
         await db.commit()
-    elif system_visit:
-        await _system_telemetry_event(db, system_visit, "MINI_APP_LOADED", {
+    elif bot_visit:
+        await _bot_telemetry_event(db, bot_visit, "MINI_APP_LOADED", {
             "device_family": _diagnostic_device_family(request),
             "browser_family": _diagnostic_browser_family(request),
         })
@@ -1004,40 +1006,48 @@ async def traffic_resolve(
     # left intact, including its target and membership attribution semantics.
     identity_probe = validate_max_init_data(x_max_init_data or "")
     system_token = _signed_startapp(identity_probe)
-    system_visit = await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == system_token)) if system_token else None
-    if system_visit:
+    bot_visit = await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == system_token)) if system_token else None
+    if bot_visit:
         profile = await db.scalar(select(SystemPromotionProfile).where(
             SystemPromotionProfile.system_key == "maxibot",
             SystemPromotionProfile.enabled.is_(True),
         ))
-        if system_visit.destination_type != "BOT" or not profile:
+        if bot_visit.bot_id != settings.max_bot_id or bot_visit.destination_id != settings.max_bot_id or not profile:
             raise HTTPException(409, "handoff destination mismatch")
         user_id = str(identity_probe["external_id"])
-        if system_visit.max_user_id and system_visit.max_user_id != user_id:
+        if bot_visit.max_user_id and bot_visit.max_user_id != user_id:
             raise HTTPException(409, "system visit is already linked to another MAX user")
-        system_visit.max_user_id = user_id
-        system_visit.started_at = system_visit.started_at or model_now()
-        system_visit.status = "BOT_STARTED"
-        await _system_telemetry_event(db, system_visit, "TOKEN_RESOLVED", {"device_family": "MAX_MINI_APP"})
-        await _system_telemetry_event(db, system_visit, "MAX_USER_BOUND", {"device_family": "MAX_MINI_APP"})
-        await _system_telemetry_event(db, system_visit, "HANDOFF_CONFIRMED", {"device_family": "MAX_MINI_APP"})
-        await _system_telemetry_event(db, system_visit, "SYSTEM_BOT_HANDOFF_CONFIRMED", {"device_family": "MAX_MINI_APP"})
-        conversion = await db.scalar(select(SystemConversion).where(
-            SystemConversion.visit_id == system_visit.id,
-            SystemConversion.goal == "bot_started",
+        system_link = await db.scalar(select(BotMaxIdentityLink).where(
+            BotMaxIdentityLink.bot_visit_id == bot_visit.id,
         ))
-        queued = False
-        if not conversion:
-            db.add(SystemConversion(visit_id=system_visit.id, max_user_id=user_id, goal="bot_started", status="pending"))
-            queued = True
-        if queued:
-            await _system_telemetry_event(db, system_visit, "BOT_STARTED_CONVERSION_QUEUED", {"device_family": "MAX_MINI_APP"})
+        if system_link and system_link.max_user_id != user_id:
+            raise HTTPException(409, "system identity is already linked to another MAX user")
+        if not system_link:
+            system_link = BotMaxIdentityLink(
+                bot_visit_id=bot_visit.id,
+                bot_id=bot_visit.bot_id,
+                destination_id=bot_visit.destination_id,
+                max_user_id=user_id,
+                startapp_token=bot_visit.token,
+                init_data_fingerprint=hashlib.sha256(
+                    f"max-init:{bot_visit.token}:{user_id}".encode()
+                ).hexdigest(),
+            )
+            db.add(system_link)
+        # Mini App resolve proves only the technical handoff.  It is not the
+        # MAX bot start event and must not create the business conversion.
+        bot_visit.max_user_id = user_id
+        bot_visit.status = "HANDOFF_CONFIRMED"
+        await _bot_telemetry_event(db, bot_visit, "TOKEN_RESOLVED", {"device_family": "MAX_MINI_APP"})
+        await _bot_telemetry_event(db, bot_visit, "MAX_USER_BOUND", {"device_family": "MAX_MINI_APP"})
+        await _bot_telemetry_event(db, bot_visit, "HANDOFF_CONFIRMED", {"device_family": "MAX_MINI_APP"})
+        await _bot_telemetry_event(db, bot_visit, "SYSTEM_BOT_HANDOFF_CONFIRMED", {"device_family": "MAX_MINI_APP"})
         await db.commit()
         return {
             "ok": True,
-            "recorded": queued,
+            "recorded": True,
             "destination_type": "BOT",
-            "target_url": build_bot_deep_link(settings.max_bot_username, system_visit.token),
+            "target_url": build_bot_deep_link(settings.max_bot_username, bot_visit.token),
             "handoff_confirmed": True,
             "metrica_counter_id": int(profile.yandex_counter_id) if profile.yandex_counter_id and profile.yandex_counter_id.isdigit() else None,
         }

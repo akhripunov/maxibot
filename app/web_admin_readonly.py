@@ -29,7 +29,7 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.qa_observability import UNKNOWN, decode_json, parity_status, persist_qa_result
-from app.web_admin_auth import require_edge_token, require_web_admin
+from app.web_admin_auth import require_edge_token, require_qa_ingest_token, require_web_admin
 
 router = APIRouter(prefix="/admin", tags=["web-admin"])
 
@@ -239,7 +239,7 @@ def _serialize_qa_run(run: QaRun, *, detail: bool = False) -> dict[str, object]:
     return payload
 
 
-@router.post("/qa-runs/ingest", dependencies=[Depends(require_edge_token)])
+@router.post("/qa-runs/ingest", dependencies=[Depends(require_qa_ingest_token)])
 async def admin_qa_ingest(payload: dict = Body(...), db: AsyncSession = Depends(get_session)):
     try:
         run = await persist_qa_result(db, payload)

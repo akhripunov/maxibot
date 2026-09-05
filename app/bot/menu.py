@@ -14,7 +14,7 @@ from sqlalchemy import delete, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, SystemTrafficVisit, SystemTrafficEvent, SystemConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder
+from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder
 from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion, resolve_exact_identity_visit
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
@@ -1891,19 +1891,54 @@ async def owner_admin_stats(db: AsyncSession) -> dict[str, int]:
 
 class MenuRepository:
     async def bind_system_startapp(self, token: str, max_user_id: str) -> bool:
-        if not token or not max_user_id:
+        if not max_user_id:
             return False
         async with self.session_factory() as db:
-            visit = await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == token))
+            visit = await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == token)) if token else None
             if not visit:
+                # A real bot_started update can arrive without the payload
+                # after Mini App resolve.  Recover only the same user's most
+                # recent verified technical handoff.
+                visit = await db.scalar(select(BotTrafficVisit).where(
+                    BotTrafficVisit.max_user_id == str(max_user_id),
+                    BotTrafficVisit.bot_id == settings.max_bot_id,
+                    BotTrafficVisit.destination_id == settings.max_bot_id,
+                    BotTrafficVisit.status.in_(("HANDOFF_CONFIRMED", "BOT_STARTED")),
+                    BotTrafficVisit.created_at >= datetime.now(timezone.utc) - timedelta(hours=settings.traffic_attribution_window_hours),
+                ).order_by(BotTrafficVisit.created_at.desc()))
+            if not visit or visit.bot_id != settings.max_bot_id or visit.destination_id != settings.max_bot_id:
                 return False
-            if visit.max_user_id and visit.max_user_id != str(max_user_id):
+            # Mini App resolve must already have confirmed this exact MAX
+            # identity on this exact original system visit.
+            identity_link = await db.scalar(select(BotMaxIdentityLink).where(
+                BotMaxIdentityLink.bot_visit_id == visit.id,
+                BotMaxIdentityLink.bot_id == settings.max_bot_id,
+                BotMaxIdentityLink.destination_id == settings.max_bot_id,
+                BotMaxIdentityLink.max_user_id == str(max_user_id),
+                BotMaxIdentityLink.startapp_token == visit.token,
+            ))
+            if not identity_link or not visit.max_user_id or visit.max_user_id != str(max_user_id):
                 return False
-            visit.max_user_id = str(max_user_id)
-            # Legacy raw ?start remains routable for organic/old links, but it
-            # is never an ads conversion. Ads require verified Mini App resolve.
-            if visit.status != "BOT_STARTED":
-                visit.status = "LEGACY_BOT_START"
+            if visit.status not in {"HANDOFF_CONFIRMED", "BOT_STARTED"}:
+                return False
+            visit.started_at = visit.started_at or datetime.now(timezone.utc)
+            # This method is called from the canonical MAX bot_started runtime
+            # event, so this is the first point where the business goal may be
+            # recorded.  Mini App resolve above remains telemetry-only.
+            visit.status = "BOT_STARTED"
+            conversion = await db.scalar(select(BotConversion).where(
+                BotConversion.bot_visit_id == visit.id,
+                BotConversion.internal_event == "bot_started",
+            ))
+            if not conversion:
+                db.add(BotConversion(
+                    bot_visit_id=visit.id,
+                    bot_id=visit.bot_id,
+                    destination_id=visit.destination_id,
+                    max_user_id=str(max_user_id),
+                    internal_event="bot_started",
+                    status="pending",
+                ))
             await db.commit()
             return True
 
@@ -1913,23 +1948,27 @@ class MenuRepository:
             return "blocked_no_identity"
         async with self.session_factory() as db:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.traffic_attribution_window_hours)
-            visit = await db.scalar(select(SystemTrafficVisit).where(
-                SystemTrafficVisit.max_user_id == str(max_user_id),
-                SystemTrafficVisit.status == "BOT_STARTED",
-                SystemTrafficVisit.created_at >= cutoff,
-            ).order_by(SystemTrafficVisit.created_at.desc()))
+            visit = await db.scalar(select(BotTrafficVisit).where(
+                BotTrafficVisit.max_user_id == str(max_user_id),
+                BotTrafficVisit.bot_id == settings.max_bot_id,
+                BotTrafficVisit.destination_id == settings.max_bot_id,
+                BotTrafficVisit.status == "BOT_STARTED",
+                BotTrafficVisit.created_at >= cutoff,
+            ).order_by(BotTrafficVisit.created_at.desc()))
             if not visit:
                 return "blocked_no_system_visit"
-            exists_conversion = await db.scalar(select(SystemConversion.id).where(
-                SystemConversion.visit_id == visit.id,
-                SystemConversion.goal == "maxibot_channel_connected",
+            exists_conversion = await db.scalar(select(BotConversion.id).where(
+                BotConversion.bot_visit_id == visit.id,
+                BotConversion.internal_event == "maxibot_channel_connected",
             ))
             if exists_conversion:
                 return "already_queued"
-            db.add(SystemConversion(
-                visit_id=visit.id,
+            db.add(BotConversion(
+                bot_visit_id=visit.id,
+                bot_id=visit.bot_id,
+                destination_id=visit.destination_id,
                 max_user_id=str(max_user_id),
-                goal="maxibot_channel_connected",
+                internal_event="maxibot_channel_connected",
                 status="pending",
             ))
             await db.commit()

@@ -67,6 +67,15 @@ async def require_edge_token(
         raise HTTPException(status_code=401, detail="web admin edge authorization required")
 
 
+async def require_qa_ingest_token(
+    x_maxibot_admin_token: str | None = Header(default=None, alias="X-MAXIBOT-Admin-Token"),
+) -> None:
+    """Authenticate only the protected QA artifact ingest endpoint."""
+    configured = settings.qa_result_ingest_token
+    if not configured or not x_maxibot_admin_token or not secrets.compare_digest(x_maxibot_admin_token, configured):
+        raise HTTPException(status_code=401, detail="QA ingest authorization required")
+
+
 async def require_web_admin(
     request: Request,
     db: AsyncSession = Depends(get_session),

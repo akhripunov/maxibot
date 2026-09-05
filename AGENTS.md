@@ -114,6 +114,25 @@ landing получает yclid/UTM
 - Не выводить токены, cookies, raw frames и персональные данные в логи.
 - Не объявлять E2E/production готовыми только по unit-тестам.
 
+## Production deployment invariants
+
+- Release owner: `ARCHITECT CODEX`. Advertising campaign control is
+  `OWNER_ONLY`; deploy tooling must not start, pause, resume, or mutate Direct,
+  VK, budget, bids, strategy, targeting, or creatives.
+- The canonical production/build platform is `linux/amd64`.
+- Before replacing a production image, enforce `VPS_ARCH == IMAGE_PLATFORM`.
+  `arm64` on the VPS, an unknown platform, failed image inspection, or an
+  unknown source SHA is fail-closed and blocks replacement.
+- Native ARM Mac production builds are forbidden. An explicit
+  `--platform linux/amd64` is allowed only when the resulting image platform
+  is inspected and matches the canonical VPS.
+- Do not improvise `docker build/save/load` deployment flows. Use the
+  repository's canonical Compose/runbook and rollback snapshot.
+- The deployment sequence is: exact-SHA QA GO → SYSADMIN preflight and
+  rollback snapshot → canonical amd64 build and platform/source guard → image
+  replacement → SYSADMIN postdeploy health/polling/error/parity checks →
+  channel regression → ARCHITECT CODEX final verdict.
+
 ## Эксплуатационное правило: MAX updates читаются в одном месте
 
 - Production MAX updates читает только выделенный VPS `worker`.
@@ -163,15 +182,71 @@ mobile landing
 # Canonical Codex orchestration
 
 - `ARCHITECT CODEX` — единственный общий технический orchestrator MAXIBOT.
-- Рабочие роли проекта: `DEV`, `WEBDEV`, `ДИРЕКТОЛОГ`, `QA / ТЕСТИРОВЩИК`.
+- `ARCHITECT_CODEX_REQUIRED = YES` для cross-role и release-задач.
+- `ARCHITECT_CODEX_ROLE = LOCAL TECHNICAL ARCHITECT + ORCHESTRATOR + SINGLE WINDOW`.
+- `ARCHITECT_SOL_ROLE = PRODUCT / SYSTEM ARCHITECT`.
+- `MINIMUM_REQUIRED_ROLES / FAST_PATH`: ARCHITECT CODEX выбирает кратчайший
+  безопасный маршрут; один primary implementer является default, а новые роли
+  подключаются только при фактической scope-потребности, blocker или
+  обязательном независимом gate. Роли не участвуют церемониально.
+- Узкие direct handoff'ы между специалистами разрешены. ARCHITECT CODEX остаётся
+  single window и владельцем состояния, но не обязан быть relay для каждого
+  сообщения. Независимый QA обязателен там, где это требует release policy.
+- SYSADMIN не является обязательным участником каждого deploy: для обычных
+  релизов предпочтительны deterministic automated infra guards; SYSADMIN нужен
+  при реальном infra risk, incident, secret/runtime или deployment blocker.
+- Рабочие роли проекта: `DEV`, `WEBDEV`, `ДИРЕКТОЛОГ`, `QA / ТЕСТИРОВЩИК`,
+  `SYSADMIN`.
   Старые Codex tasks/chats не считаются дополнительными ролями.
 - `ARCHITECT CODEX` выбирает minimum sufficient team, принимает финальное
   техническое решение и после handoff проводит integration review.
 - `DEV` отвечает за backend/bot/DB/API/workers, `WEBDEV` — за сайт и frontend,
   `ДИРЕКТОЛОГ` — consultative по Direct/Metrika/attribution, `QA` — независимый
-  release gate. Specialist roles не принимают финальные архитектурные решения.
+  release gate, `SYSADMIN` — инфраструктурный pre/post-deploy gate.
+  Specialist roles не принимают финальные архитектурные решения.
 - `Ads Codex Worker` — отдельный bounded runtime-контур рекламной аналитики,
   не общий development orchestrator.
+
+## Актуальный DEV ↔ QA routing override
+
+Для release closeout workflow сохраняется узкий direct handoff: DEV имеет
+право передавать кандидат в канонический QA thread:
+`019ffb88-32db-76f1-bdc2-1373b29fca13`.
+Это не удаляет ARCHITECT CODEX из orchestration: он остаётся single window,
+владеет состоянием задачи, exact candidate SHA, integration review и release
+readiness.
+
+Текущая цепочка:
+
+```text
+ARCHITECT SOL → DEV → QA → DEV
+```
+
+При `QA = NO_GO` QA возвращает findings напрямую DEV; DEV исправляет только
+указанные проблемы и повторно передаёт тот же workflow в QA. При `QA = GO`:
+
+```text
+QA → DEV → SYSADMIN predeploy → DEV deploy → SYSADMIN postdeploy
+  → DEV final report → ARCHITECT SOL / OWNER
+```
+
+DEV не должен требовать `ARCHITECT CODEX` для routine QA handoff, получения QA
+verdict или release orchestration. Новый QA chat автоматически не создаётся;
+канонический thread меняется только по явному указанию OWNER.
+
+## Cross-role implementation governance
+
+`ARCHITECT CODEX` остаётся техническим владельцем и single window. Для задач с
+несколькими implementation roles `ARCHITECT SOL` назначает `LEAD_IMPLEMENTER`
+(`DEV`, `WEBDEV` или другого подходящего специалиста) и явно фиксирует scope.
+Lead implementer координирует технические handoff'ы, собирает unified
+candidate, передаёт его QA и отвечает за technical closeout.
+
+DEV и WEBDEV могут делать narrow direct handoff друг другу в рамках уже
+утверждённой архитектуры. Специалист не может самостоятельно менять product
+behavior, core architecture, attribution semantics или security policy. При
+материальном расхождении возвращается `ARCHITECTURE_BLOCKER = YES` напрямую
+`ARCHITECT SOL`.
 - Для подробного ROLE REGISTRY и routing использовать
   [`docs/ROLE_REGISTRY.md`](docs/ROLE_REGISTRY.md) и
   [`docs/ORCHESTRATION_PROTOCOL.md`](docs/ORCHESTRATION_PROTOCOL.md).

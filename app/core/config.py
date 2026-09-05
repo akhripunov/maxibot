@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     max_client_mode: str = "stub"
     max_bot_token: str | None = None
     max_bot_username: str = "maxibot"
+    max_bot_id: str = Field(default="maxibot", validation_alias="MAX_BOT_ID")
     max_miniapp_url: str | None = None
     max_public_url: str = "https://go.maxibot.pro"
     traffic_public_base_url: str = "https://go.maxibot.pro"
@@ -25,6 +26,10 @@ class Settings(BaseSettings):
     traffic_attribution_window_hours: int = 72
     traffic_conversion_policy: str = "CONSERVATIVE"
     traffic_bot_attribution_enabled: bool = False
+    system_conversion_goal_map: str = Field(
+        default="bot_started=bot_started,maxibot_channel_connected=maxibot_channel_connected",
+        validation_alias="SYSTEM_CONVERSION_GOAL_MAP",
+    )
     traffic_startapp_ttl_seconds: int = 900
     traffic_attribution_enabled: bool = True
     attribution_join_window_seconds: int = 120
@@ -62,6 +67,7 @@ class Settings(BaseSettings):
     maxibot_owner_user_id: str | None = Field(default=None, validation_alias="MAXIBOT_OWNER_USER_ID")
     maxibot_support_url: str | None = Field(default=None, validation_alias="MAXIBOT_SUPPORT_URL")
     web_admin_internal_token: str | None = Field(default=None, validation_alias="WEB_ADMIN_INTERNAL_TOKEN")
+    qa_result_ingest_token: str | None = Field(default=None, validation_alias="QA_RESULT_INGEST_TOKEN")
     web_admin_rp_id: str = Field(default="admin.maxibot.pro", validation_alias="WEB_ADMIN_RP_ID")
     web_admin_origin: str = Field(default="https://admin.maxibot.pro", validation_alias="WEB_ADMIN_ORIGIN")
     web_admin_rp_name: str = Field(default="MAXIBOT Owner Console", validation_alias="WEB_ADMIN_RP_NAME")

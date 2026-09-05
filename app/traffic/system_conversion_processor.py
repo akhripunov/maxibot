@@ -7,9 +7,10 @@ from datetime import timezone
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.models import SystemConversion, SystemPromotionProfile, SystemTrafficVisit
+from app.db.models import BotConversion, BotTrafficVisit, SystemPromotionProfile
 from app.integrations.yandex_metrica import YandexMetricaClient
 from app.security_tokens import decrypt_token
+from app.traffic.system_conversion import system_conversion_goal
 
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,10 @@ async def process_system_conversions(session_factory, *, limit: int = 50) -> int
         if not profile or not profile.yandex_oauth_token_encrypted or not profile.yandex_counter_id:
             return 0
         rows = (await db.execute(
-            select(SystemConversion, SystemTrafficVisit)
-            .join(SystemTrafficVisit, SystemTrafficVisit.id == SystemConversion.visit_id)
-            .where(SystemConversion.status == "pending")
-            .order_by(SystemConversion.created_at)
+            select(BotConversion, BotTrafficVisit)
+            .join(BotTrafficVisit, BotTrafficVisit.id == BotConversion.bot_visit_id)
+            .where(BotConversion.status == "pending")
+            .order_by(BotConversion.created_at)
             .limit(limit)
         )).all()
         token = decrypt_token(profile.yandex_oauth_token_encrypted)
@@ -45,13 +46,15 @@ async def process_system_conversions(session_factory, *, limit: int = 50) -> int
             if not visit.yclid or not visit.metrica_client_id:
                 continue
             async with session_factory() as db:
-                current = await db.get(SystemConversion, conversion.id)
+                current = await db.get(BotConversion, conversion.id)
                 if not current or current.status != "pending":
                     continue
                 current.status = "sending"
                 await db.commit()
             try:
-                goal = await client.ensure_action_goal_identifier(counter_id, conversion.goal)
+                goal = await client.ensure_action_goal_identifier(
+                    counter_id, system_conversion_goal(conversion.internal_event)
+                )
                 event_time = visit.started_at or conversion.created_at
                 if event_time.tzinfo is None:
                     event_time = event_time.replace(tzinfo=timezone.utc)
@@ -63,15 +66,15 @@ async def process_system_conversions(session_factory, *, limit: int = 50) -> int
                     str(int(event_time.timestamp())),
                 )
             except Exception:
-                logger.exception("SYSTEM_CONVERSION_SEND_FAILED goal=%s", conversion.goal)
+                logger.exception("BOT_CONVERSION_SEND_FAILED internal_event=%s", conversion.internal_event)
                 async with session_factory() as db:
-                    current = await db.get(SystemConversion, conversion.id)
+                    current = await db.get(BotConversion, conversion.id)
                     if current:
                         current.status = "pending"
                         await db.commit()
                 continue
             async with session_factory() as db:
-                current = await db.get(SystemConversion, conversion.id)
+                current = await db.get(BotConversion, conversion.id)
                 if current:
                     current.status = "sent"
                     await db.commit()

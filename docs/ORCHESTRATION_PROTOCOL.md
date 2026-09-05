@@ -13,7 +13,8 @@ ARCHITECT CODEX (local technical Architect + orchestrator)
   ├── DEV
   ├── WEBDEV
   ├── ДИРЕКТОЛОГ
-  └── QA / ТЕСТИРОВЩИК
+  ├── QA / ТЕСТИРОВЩИК
+  └── SYSADMIN
   ↓
 FINAL ARCHITECT REPORT
   ↓
@@ -24,6 +25,24 @@ ARCHITECT SOL defines product intent, desired behavior, business rules,
 architectural and safety constraints, and acceptance criteria. ARCHITECT CODEX
 defines implementation approach from the verified repository and remains the
 final technical decision owner inside the Codex team.
+
+`ARCHITECT_CODEX_REQUIRED = YES` for cross-role and release work.
+`ARCHITECT CODEX` is the local technical architect, orchestrator, and single
+technical window; `ARCHITECT SOL` is the product/system architect.
+
+## Minimum required roles / FAST_PATH
+
+ARCHITECT CODEX selects the shortest safe execution route. The default is one
+primary implementer; additional roles are added only for actual domain scope,
+real blockers, or mandatory independent validation. Existing roles must not be
+involved ceremonially. Narrow direct specialist handoffs are allowed.
+
+ARCHITECT CODEX remains the single window and task-state owner, but need not
+relay every narrow specialist message. Independent QA remains mandatory where
+the release policy requires it. SYSADMIN is not mandatory for every deployment;
+deterministic automated infrastructure guards are preferred for routine
+releases, with human SYSADMIN involvement reserved for infrastructure risks,
+incidents, secrets/runtime injection, or blockers.
 
 ## MASTER TASK contract
 
@@ -75,6 +94,26 @@ explicit Architect decision and recorded reason.
 | Full attribution flow | DEV + WEBDEV + ДИРЕКТОЛОГ | Yes | Gated | ARCHITECT CODEX |
 | Advertising runtime diagnosis | Existing Ads Codex Worker flow | Per existing runtime gate | No automatic advertising write | ARCHITECT CODEX for product decisions |
 
+## Deployment handoff
+
+Executable release flow is fixed:
+
+```text
+ARCHITECT CODEX exact SHA
+  → independent QA GO
+  → SYSADMIN predeploy snapshot/platform/source guard
+  → canonical linux/amd64 build
+  → SYSADMIN replacement
+  → SYSADMIN postdeploy health/polling/errors/parity
+  → CHANNEL regression
+  → ARCHITECT CODEX final verdict
+```
+
+SYSADMIN may block or roll back a release but cannot approve architecture,
+replace QA, own release decisions, or operate advertising campaigns. A failed
+platform/source guard blocks replacement before any production container is
+recreated.
+
 Do not invoke every role automatically. Specialist roles submit proposals and
 structured handoffs; ARCHITECT CODEX accepts, modifies, or rejects them.
 
@@ -90,6 +129,7 @@ bindings:
 | WEBDEV | `01a053ab-77b0-7dd0-9690-c036899ab6c5` | `DYNAMIC` |
 | ДИРЕКТОЛОГ | `01a0349f-54bc-78c3-8a2f-c6cb70b3cc6f` | `DYNAMIC` |
 | QA | `019ffb88-32db-76f1-bdc2-1373b29fca13` | `DYNAMIC` |
+| SYSADMIN | `NONE` | `MANUAL_HANDOFF_REQUIRED` |
 
 Before every specialist delegation, ARCHITECT CODEX must resolve the current
 project chat for the requested role and compare it with the last-known ID. The
@@ -127,6 +167,48 @@ Consultative roles may replace `FILES_CHANGED` with `ANALYSIS` and return
 must return to ARCHITECT CODEX before implementation.
 
 ## QA and integration review
+
+### Current DEV ↔ QA direct handoff override
+
+For the current release workflow, a narrow direct handoff is allowed: DEV sends
+implementation candidates and receives the independent verdict directly in the
+canonical QA thread
+`019ffb88-32db-76f1-bdc2-1373b29fca13`. Do not create a new QA chat unless the
+OWNER explicitly changes the canonical thread.
+
+This direct QA handoff does not remove ARCHITECT CODEX from orchestration.
+ARCHITECT CODEX remains the single window for task state, integration review,
+exact candidate SHA, release readiness, and final technical reporting.
+
+```text
+ARCHITECT SOL → DEV → QA → DEV
+```
+
+`QA = NO_GO` returns findings directly to DEV; DEV fixes only the reported
+issue and resubmits to QA. After `QA = GO`, the gated sequence is:
+
+```text
+QA → DEV → SYSADMIN predeploy → DEV deploy → SYSADMIN postdeploy
+  → DEV final report → ARCHITECT SOL / OWNER
+```
+
+DEV may route a routine candidate directly to QA and receive its verdict, while
+keeping ARCHITECT CODEX informed. QA remains independent and returns only `GO`
+or `NO_GO` as its validation verdict. Commit, deployment, and release
+orchestration remain under the canonical Architect-controlled gates.
+
+### Cross-role lead implementation
+
+For a task involving multiple implementation roles, `ARCHITECT SOL` explicitly
+assigns one `LEAD_IMPLEMENTER` (`DEV`, `WEBDEV`, or another suitable specialist)
+and records each role's scope. The lead coordinates narrow specialist handoffs,
+assembles the unified candidate, sends it to QA, and owns technical closeout.
+
+DEV and WEBDEV may hand off directly to each other when the architecture is
+already approved. Specialists may coordinate implementation but may not silently
+redefine product behavior, core architecture, attribution semantics, or security
+policy. A material mismatch must be returned as
+`ARCHITECTURE_BLOCKER = YES` directly to `ARCHITECT SOL`.
 
 The canonical QA contract is defined by [QA_ROLE.md](../QA_ROLE.md),
 [QA_PROCESS.md](../QA_PROCESS.md), [qa/TEST_CASES.md](../qa/TEST_CASES.md),

@@ -80,6 +80,8 @@ PRODUCTION="NOT_DEPLOYED"; PRODUCTION_SMOKE="NOT_RUN"; PRODUCTION_CHANGED="NO"
 CURRENT_PROD_SHA="UNKNOWN"; ROLLBACK_SHA="UNKNOWN"; ROLLBACK="NOT_RUN"
 VERDICT="NO_GO"
 IMAGE_BUILT=0
+QA_ARTIFACT_PERSISTENCE="NOT_RUN"
+QA_ARTIFACT_PERSISTENCE_REASON=""
 QA_DOCKER_BUILD_NETWORK="${QA_DOCKER_BUILD_NETWORK:-}"
 QA_DOCKERFILE="${QA_DOCKERFILE:-Dockerfile}"
 
@@ -176,6 +178,9 @@ BUILD = $BUILD
 STAGING = $STAGING
 E2E = $E2E
 
+QA_ARTIFACT_PERSISTENCE = $QA_ARTIFACT_PERSISTENCE
+QA_ARTIFACT_PERSISTENCE_REASON = $QA_ARTIFACT_PERSISTENCE_REASON
+
 CRITICAL_BUGS = $CRITICAL_BUGS
 NON_CRITICAL_BUGS = $NON_CRITICAL_BUGS
 
@@ -222,7 +227,7 @@ write_machine_result() {
   duration_ms=$(( (finished_epoch - RUN_STARTED_EPOCH) * 1000 ))
   export RELEASE_ID CANDIDATE_SHA VERDICT CURRENT_PROD_SHA PRODUCTION PRODUCTION_SMOKE PRODUCTION_CHANGED
   export STATIC UNIT INTEGRATION REGRESSION BUILD STAGING E2E TOTAL_TESTS PASSED FAILED SKIPPED
-  export UNKNOWN UNKNOWN_CRITICAL
+  export UNKNOWN UNKNOWN_CRITICAL QA_ARTIFACT_PERSISTENCE QA_ARTIFACT_PERSISTENCE_REASON
   export UNIT_TESTS UNIT_PASSED UNIT_FAILED UNIT_SKIPPED UNIT_DURATION_MS
   export INTEGRATION_TESTS INTEGRATION_PASSED INTEGRATION_FAILED INTEGRATION_SKIPPED INTEGRATION_DURATION_MS
   export REGRESSION_TESTS REGRESSION_PASSED REGRESSION_FAILED REGRESSION_SKIPPED REGRESSION_DURATION_MS
@@ -261,6 +266,8 @@ payload = {
     "current_main_sha": os.environ["CANDIDATE_SHA"],
     "production_sha": os.environ.get("CURRENT_PROD_SHA") or "UNKNOWN",
     "verdict": os.environ["VERDICT"],
+    "qa_artifact_persistence": os.environ["QA_ARTIFACT_PERSISTENCE"],
+    "qa_artifact_persistence_reason": os.environ.get("QA_ARTIFACT_PERSISTENCE_REASON", ""),
     "timing": {
         "started_at": os.environ["RELEASE_ID"],
         "finished_at": os.environ["FINISHED_AT"],
@@ -299,6 +306,13 @@ PY
 
 finalize() {
   resolve_production_sha
+  if [ -z "${QA_RESULT_INGEST_URL:-}" ] || [ -z "${QA_RESULT_INGEST_TOKEN:-}" ]; then
+    QA_ARTIFACT_PERSISTENCE="WARN"
+    QA_ARTIFACT_PERSISTENCE_REASON="ingest configuration missing; local artifacts retained"
+  else
+    QA_ARTIFACT_PERSISTENCE="PASS"
+    QA_ARTIFACT_PERSISTENCE_REASON="protected ingest configured"
+  fi
   write_status
   local history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}.md"
   if [ -e "$history_path" ]; then
@@ -311,12 +325,16 @@ finalize() {
     artifact_history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}_${RELEASE_ID}.json"
   fi
   cp "$LOG_DIR/qa-result.json" "$artifact_history_path"
-  if [ -n "${QA_RESULT_INGEST_URL:-}" ]; then
+  if [ -n "${QA_RESULT_INGEST_URL:-}" ] && [ -n "${QA_RESULT_INGEST_TOKEN:-}" ]; then
     if [ -z "${QA_RESULT_INGEST_TOKEN:-}" ] || ! curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" \
       -X POST -H "X-MAXIBOT-Admin-Token: $QA_RESULT_INGEST_TOKEN" -H "Content-Type: application/json" \
       --data-binary "@$LOG_DIR/qa-result.json" "$QA_RESULT_INGEST_URL" >"$LOG_DIR/qa-ingest.json" 2>"$LOG_DIR/qa-ingest.log"; then
-      echo "QA artifact ingestion failed" >&2
-      return 1
+      QA_ARTIFACT_PERSISTENCE="WARN"
+      QA_ARTIFACT_PERSISTENCE_REASON="protected ingest failed; local artifacts retained"
+      echo "WARNING: QA artifact ingestion failed; product QA verdict remains independent" >&2
+      write_status
+      write_machine_result
+      cp "$LOG_DIR/qa-result.json" "$artifact_history_path"
     fi
   fi
   printf 'RELEASE = %s\nNEW_FEATURE = %s\nREGRESSION = %s\nTESTS = %s/%s\nSTAGING = %s\nE2E = %s\nCRITICAL_BUGS = %s\nQA_VERDICT = %s\nPRODUCTION = %s\n' \
@@ -324,7 +342,11 @@ finalize() {
 }
 
 fail_gate() { VERDICT="NO_GO"; finalize; exit 1; }
-require_ingest_config || exit 2
+if ! require_ingest_config; then
+  QA_ARTIFACT_PERSISTENCE="WARN"
+  QA_ARTIFACT_PERSISTENCE_REASON="ingest configuration missing; local artifacts retained"
+  echo "WARNING: QA artifact persistence unavailable; product QA gates continue" >&2
+fi
 read_case_registry || { echo "test-case registry cannot be read" >&2; fail_gate; }
 read_previous_case_counts || { echo "previous test-case counts cannot be read" >&2; fail_gate; }
 NEW_TEST_CASES=$((TOTAL_CASES - PREVIOUS_TOTAL_CASES)); [ "$NEW_TEST_CASES" -lt 0 ] && NEW_TEST_CASES=0

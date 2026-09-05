@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-from app.web_admin_auth import require_edge_token
+from app.web_admin_auth import require_edge_token, require_qa_ingest_token
 from app.web_admin_readonly import canonical_metric_definitions
 
 
@@ -32,6 +32,26 @@ async def test_web_admin_accepts_only_configured_internal_auth(monkeypatch):
     assert await require_edge_token("expected") is None
     with pytest.raises(HTTPException) as exc:
         await require_edge_token("wrong")
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_qa_ingest_accepts_only_dedicated_token(monkeypatch):
+    monkeypatch.setattr("app.web_admin_auth.settings.qa_result_ingest_token", "qa-expected")
+    monkeypatch.setattr("app.web_admin_auth.settings.web_admin_internal_token", "web-expected")
+    assert await require_qa_ingest_token("qa-expected") is None
+    for value in (None, "web-expected", "wrong"):
+        with pytest.raises(HTTPException) as exc:
+            await require_qa_ingest_token(value)
+        assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_web_admin_token_does_not_authenticate_qa_ingest(monkeypatch):
+    monkeypatch.setattr("app.web_admin_auth.settings.qa_result_ingest_token", "qa-expected")
+    monkeypatch.setattr("app.web_admin_auth.settings.web_admin_internal_token", "web-expected")
+    with pytest.raises(HTTPException) as exc:
+        await require_qa_ingest_token("web-expected")
     assert exc.value.status_code == 401
 
 

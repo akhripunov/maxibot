@@ -1,5 +1,60 @@
 # MAX mobile handoff release runbook
 
+## Deployment invariants and evidence
+
+The release owner is `ARCHITECT CODEX`; infrastructure execution belongs to
+`SYSADMIN`. The canonical production host and build platform are
+`135.106.166.46` and `linux/amd64`. Native ARM Mac production builds are not
+allowed. Before replacement, record the exact source SHA, VPS architecture,
+image architecture, disk/volume state, current API/worker images, migration
+head, and rollback compose snapshot. Enforce `VPS_ARCH == IMAGE_PLATFORM` and
+block on unknown architecture, failed inspection, or source-SHA mismatch.
+
+Use the canonical Compose procedure: exact-SHA QA GO, rollback snapshot,
+amd64 image build, `scripts/deploy_platform_guard.py`, image replacement,
+health/ready/live checks, API/worker image parity, `MAX_RUN_POLLING=false` on
+API and `true` only on the production worker, duplicate-poller checks, fresh
+error checks, and frozen CHANNEL regression. Confirm disk space before build
+and cleanup only known release artifacts after evidence is retained. Do not
+run Direct/VK or campaign mutations; advertising control remains OWNER_ONLY.
+
+Rollback restores the saved Compose file and prior API/worker image tags,
+then repeats health, polling, error, parity, and CHANNEL checks. Do not
+downgrade an additive database migration as an improvised rollback step.
+
+### SYSADMIN release checklist
+
+```text
+EXPECTED_SHA=<40-hex commit approved by ARCHITECT CODEX>
+HOST=135.106.166.46
+VPS_ARCH=$(docker info --format '{{.Architecture}}')
+IMAGE_ARCH=$(docker image inspect <image> --format '{{.Architecture}}')
+SOURCE_SHA=$(git rev-parse HEAD)
+```
+
+Required evidence before replacement:
+
+- `EXPECTED_SHA`, `SOURCE_SHA`, and the image label/tag match exactly;
+- `VPS_ARCH=amd64` and `IMAGE_ARCH=amd64`; unknown or mismatch is BLOCKED;
+- `df -h` and Docker disk usage have sufficient free space for build and
+  rollback image;
+- rollback directory contains the exact Compose file, API/worker image tags,
+  and migration head;
+- canonical build uses `docker build --platform linux/amd64`; inspect the
+  resulting image before `compose up`;
+- replacement is limited to the authorized API/worker services.
+
+Required evidence after replacement:
+
+- `/health/live` and `/health/ready` are healthy and report the exact SHA;
+- API/worker image IDs and source SHA are equal;
+- API `MAX_RUN_POLLING=false`, sole production worker `true`, legacy worker
+  stopped with restart policy `no`;
+- restart status is healthy, recent logs contain no new traceback/error surge,
+  and no duplicate poller exists;
+- frozen CHANNEL landing/startapp/Mini App/resolve/open/attribution regression
+  passes before Architect CODEX gives the final verdict.
+
 ## Locked production behavior
 
 ```text

@@ -18,28 +18,51 @@ def test_bot_destination_is_explicit_and_channel_default_is_preserved():
     assert 'revision = "0066_shared_bot_handoff"' in (ROOT / "alembic/versions/0066_shared_bot_handoff_destination.py").read_text()
 
 
+def test_generic_bot_attribution_requires_bot_and_destination_identity():
+    assert 'class BotTrafficVisit(Base):' in MODELS
+    assert 'bot_id: Mapped[str]' in MODELS
+    assert 'destination_id: Mapped[str]' in MODELS
+    assert 'class BotMaxIdentityLink(Base):' in MODELS
+    migration = (ROOT / "alembic/versions/0068_generic_bot_traffic.py").read_text()
+    assert 'down_revision = "0067_system_max_identity_links"' in migration
+    assert "system_traffic_visits" in migration
+    assert "DROP TABLE system_traffic_visits" not in migration.upper()
+
+
 def test_bot_resolve_requires_verified_identity_and_correct_system_destination():
     section = _resolve_section()
     assert "validate_max_init_data(x_max_init_data or \"\")" in section
-    assert "SystemTrafficVisit.token == system_token" in section
-    assert 'system_visit.destination_type != "BOT"' in section
+    assert "BotTrafficVisit.token == system_token" in section
+    assert 'bot_visit.bot_id != settings.max_bot_id' in section
     assert 'SYSTEM_BOT_HANDOFF_CONFIRMED' in section
-    assert 'goal == "bot_started"' in section
+    assert 'bot_visit.status = "HANDOFF_CONFIRMED"' in section
+    assert "BotMaxIdentityLink(" in section
+    assert 'BotConversion(' not in section
 
 
 def test_bot_conversion_queue_is_unique_and_yclid_is_not_required_for_internal_event():
     section = _resolve_section()
-    assert 'UniqueConstraint("visit_id", "goal"' in MODELS
-    assert 'if not conversion:' in section
-    assert 'SystemConversion(visit_id=system_visit.id, max_user_id=user_id, goal="bot_started"' in section
+    assert 'UniqueConstraint("bot_visit_id", "internal_event"' in MODELS
+    start = MENU[MENU.index("async def bind_system_startapp"):MENU.index("async def queue_system_channel_connected")]
+    assert 'if not conversion:' in start
+    assert 'internal_event="bot_started"' in start
     assert "yclid" not in section
 
 
-def test_raw_bot_start_is_legacy_only_and_not_an_ads_conversion():
+def test_real_bot_start_is_the_only_bot_conversion_entrypoint():
     start = MENU[MENU.index("async def bind_system_startapp"):MENU.index("async def queue_system_channel_connected")]
-    assert 'visit.status = "LEGACY_BOT_START"' in start
-    assert "SystemConversion" not in start
-    assert "verified Mini App resolve" in start
+    assert 'visit.status = "BOT_STARTED"' in start
+    assert 'BotConversion(' in start
+    assert 'BotTrafficVisit.status.in_(("HANDOFF_CONFIRMED", "BOT_STARTED"))' in start
+    assert 'not identity_link or not visit.max_user_id or visit.max_user_id != str(max_user_id)' in start
+
+
+def test_bot_start_does_not_fabricate_channel_identity_link():
+    start = MENU[MENU.index("async def bind_system_startapp"):MENU.index("async def queue_system_channel_connected")]
+    assert "MaxIdentityLink(" not in start
+    assert "BotMaxIdentityLink" in start
+    assert "BotMaxIdentityLink.bot_visit_id == visit.id" in start
+    assert "BotMaxIdentityLink.max_user_id == str(max_user_id)" in start
 
 
 def test_mini_app_resolves_bot_without_touching_channel_open_branch():
@@ -87,7 +110,7 @@ def test_bot_landing_is_operationally_separate_from_channel_redirect():
     end = MAIN.index('@app.get("/health/live")', start)
     section = MAIN[start:end]
     assert "_traffic_redirect" not in section
-    assert "SystemTrafficVisit" in section
+    assert "BotTrafficVisit" in section
     assert "select(TrafficVisit)" not in section
     assert "channel_id" not in section
     assert "user_added" not in section

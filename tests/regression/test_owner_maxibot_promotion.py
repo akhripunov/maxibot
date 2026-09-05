@@ -51,7 +51,7 @@ def test_system_yandex_uses_separate_oauth_and_bot_started_goal():
     assert "ensure_system_setup(encrypted)" in MAIN
     assert "create_system_state" in OAUTH
     assert "SystemPromotionProfile" in OAUTH
-    assert 'goal_name = "bot_started"' in METRICA
+    assert 'system_conversion_goal("bot_started")' in METRICA
 
 
 def test_system_start_does_not_enter_channel_flow():
@@ -133,7 +133,7 @@ def test_system_landing_captures_attribution_metadata_and_client_id_safely():
 def test_system_client_id_endpoint_is_separate_from_channel_traffic_endpoint():
     assert '@app.post("/system/traffic/metrica/client-id")' in MAIN
     endpoint = MAIN[MAIN.index('@app.post("/system/traffic/metrica/client-id")'):MAIN.index('@app.get("/health/live")')]
-    assert "SystemTrafficVisit" in endpoint
+    assert "BotTrafficVisit" in endpoint
     assert "select(TrafficVisit)" not in endpoint
 
 
@@ -156,8 +156,8 @@ def test_system_promotion_displays_yandex_owner_login_without_cross_channel_look
 
 
 def test_system_channel_connected_goal_is_provisioned_without_replacing_bot_started():
-    assert 'goal_name = "bot_started"' in METRICA
-    assert 'channel_goal_name = "maxibot_channel_connected"' in METRICA
+    assert 'system_conversion_goal("bot_started")' in METRICA
+    assert 'system_conversion_goal("maxibot_channel_connected")' in METRICA
     assert 'ensure_action_goal(counter_id, channel_goal_name)' in METRICA
 
 
@@ -167,7 +167,7 @@ def test_system_conversion_allows_one_visit_per_goal_and_keeps_linkage_fail_clos
     assert 'UniqueConstraint("visit_id", "goal"' in models
     assert "uq_system_conversion_visit_goal" in migration
     assert "blocked_no_system_visit" in MENU
-    assert 'goal="maxibot_channel_connected"' in MENU
+    assert 'internal_event="maxibot_channel_connected"' in MENU
 
 
 def test_official_channel_connect_queues_only_the_system_bot_branch_goal():

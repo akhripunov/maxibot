@@ -220,6 +220,19 @@ class SystemTrafficVisit(Base):
     status: Mapped[str] = mapped_column(String(24), default="LANDING_VISIT", nullable=False)
     destination_type: Mapped[str] = mapped_column(String(16), default="BOT", server_default="BOT", nullable=False)
 
+
+class SystemMaxIdentityLink(Base):
+    """Verified MAX identity for one system-scoped BOT handoff."""
+    __tablename__ = "system_max_identity_links"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    system_visit_id: Mapped[str] = mapped_column(
+        ForeignKey("system_traffic_visits.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    max_user_id: Mapped[str] = mapped_column(String(128), index=True)
+    startapp_token: Mapped[str] = mapped_column(String(96), index=True)
+    init_data_fingerprint: Mapped[str] = mapped_column(String(64))
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
 class SystemTrafficEvent(Base):
     """Safe, aggregateable lifecycle event for a system promotion visit."""
     __tablename__ = "system_traffic_events"
@@ -239,6 +252,65 @@ class SystemConversion(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     __table_args__ = (UniqueConstraint("visit_id", "goal", name="uq_system_conversion_visit_goal"),)
+
+
+class BotTrafficVisit(Base):
+    """Generic promoted-BOT visit; CHANNEL traffic has a separate model."""
+    __tablename__ = "bot_traffic_visits"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    token: Mapped[str] = mapped_column(String(96), unique=True, index=True)
+    bot_id: Mapped[str] = mapped_column(String(128), index=True)
+    destination_id: Mapped[str] = mapped_column(String(128), index=True)
+    yclid: Mapped[Optional[str]] = mapped_column(String(255), index=True)
+    utm_source: Mapped[Optional[str]] = mapped_column(String(255))
+    utm_medium: Mapped[Optional[str]] = mapped_column(String(255))
+    utm_campaign: Mapped[Optional[str]] = mapped_column(String(255))
+    utm_content: Mapped[Optional[str]] = mapped_column(String(255))
+    utm_term: Mapped[Optional[str]] = mapped_column(String(255))
+    metrica_client_id: Mapped[Optional[str]] = mapped_column(String(255))
+    referer: Mapped[Optional[str]] = mapped_column(String(2048))
+    user_agent: Mapped[Optional[str]] = mapped_column(Text)
+    max_user_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(24), default="LANDING_VISIT", nullable=False)
+
+
+class BotMaxIdentityLink(Base):
+    __tablename__ = "bot_max_identity_links"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    bot_visit_id: Mapped[str] = mapped_column(ForeignKey("bot_traffic_visits.id", ondelete="CASCADE"), unique=True, index=True)
+    bot_id: Mapped[str] = mapped_column(String(128), index=True)
+    destination_id: Mapped[str] = mapped_column(String(128), index=True)
+    max_user_id: Mapped[str] = mapped_column(String(128), index=True)
+    startapp_token: Mapped[str] = mapped_column(String(96), index=True)
+    init_data_fingerprint: Mapped[str] = mapped_column(String(64))
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BotTrafficEvent(Base):
+    __tablename__ = "bot_traffic_events"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    bot_visit_id: Mapped[str] = mapped_column(ForeignKey("bot_traffic_visits.id", ondelete="CASCADE"), index=True)
+    bot_id: Mapped[str] = mapped_column(String(128), index=True)
+    destination_id: Mapped[str] = mapped_column(String(128), index=True)
+    event_type: Mapped[str] = mapped_column(String(48), index=True)
+    event_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text)
+    dedupe_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+
+
+class BotConversion(Base):
+    __tablename__ = "bot_conversion_queue"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    bot_visit_id: Mapped[str] = mapped_column(ForeignKey("bot_traffic_visits.id", ondelete="CASCADE"), index=True)
+    bot_id: Mapped[str] = mapped_column(String(128), index=True)
+    destination_id: Mapped[str] = mapped_column(String(128), index=True)
+    max_user_id: Mapped[str] = mapped_column(String(128), index=True)
+    internal_event: Mapped[str] = mapped_column(String(64), default="bot_started", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    __table_args__ = (UniqueConstraint("bot_visit_id", "internal_event", name="uq_bot_conversion_visit_event"),)
 
 class TrafficVisit(Base):
     __tablename__ = "traffic_visits"

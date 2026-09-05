@@ -1,15 +1,32 @@
 # MAXIBOT canonical role registry
 
-This is the repository-level registry for the five working Codex roles. Old
+This is the repository-level registry for the six working Codex roles. Old
 Codex tasks or chats are coordination records, not additional roles.
+
+`ARCHITECT_CODEX_REQUIRED = YES` for cross-role and release work.
+`ARCHITECT CODEX` is the local technical architect, orchestrator, and single
+technical window. `ARCHITECT SOL` is the product/system architect.
+
+## Minimum required roles / FAST_PATH
+
+ARCHITECT CODEX selects the shortest safe execution route. One primary
+implementer is preferred by default; additional specialists are added only for
+actual scope needs, real blockers, or mandatory independent gates. Roles must
+not participate ceremonially. Narrow direct specialist handoffs are allowed.
+ARCHITECT CODEX owns global task state as the single window but is not a
+mandatory message relay between every specialist interaction. Independent QA
+remains mandatory where release policy requires it. SYSADMIN is required for
+actual infrastructure risks, incidents, secrets/runtime injection, or deploy
+blockers, not automatically for every release.
 
 | Name | Status | Purpose | Owner scope | Write scope | Delegation rule | Reports to | Can approve architecture | Can deploy | Notes |
 |---|---|---|---|---|---|---|---|---|---|
 | ARCHITECT CODEX | ACTIVE / ORCHESTRATOR | Audit the repository, decompose MASTER TASKs, select roles, coordinate work, review integration, and issue the final technical status | Whole MAXIBOT technical solution | May coordinate approved work; no product intent changes by itself | Selects the minimum sufficient team and owns all specialist routing | ARCHITECT SOL | YES, final technical decision inside Codex | May authorize a gated deployment plan; does not bypass QA or owner approval | Local technical Architect; not Product Owner |
-| DEV | ACTIVE | Backend, bot, Python, database, migrations, API, services, workers, business logic, and MAX integrations | Server/application implementation | Code, migrations, and runtime implementation only when explicitly delegated | Receives implementation tasks from ARCHITECT CODEX; may submit a DEV_PROPOSAL for architecture changes | ARCHITECT CODEX | NO | Only through the project release gates | One working role; historical task duplication does not create another role |
+| DEV | ACTIVE | Backend, bot, Python, database, migrations, API, services, workers, business logic, and MAX integrations | Server/application implementation | Code, migrations, runtime implementation, and routine direct QA handoff for delegated work | Receives implementation tasks from the governing Architect; may submit a DEV_PROPOSAL for architecture changes; may send candidates directly to canonical QA | ARCHITECT SOL for product/architecture; QA directly for validation verdict | NO | Only through the project release gates | One working role; historical task duplication does not create another role |
 | WEBDEV | ACTIVE | maxibot.pro, landing, frontend, HTML/CSS/JS, browser flow, web UX, and web tracking implementation | Website and web-specific implementation | Web code only when explicitly delegated | Receives web tasks from ARCHITECT CODEX | ARCHITECT CODEX | NO | Only through the project release gates | Does not own backend or product architecture |
 | ДИРЕКТОЛОГ | ACTIVE / CONSULTATIVE | Yandex Direct, Metrika, goals, yclid, ClientID, UTM, offline conversions, attribution, and advertising diagnostics | Advertising interpretation and bounded related technical analysis | No advertising writes by default; no Direct/VK writes without explicit owner authorization | Gives analysis/proposals; is not implementation owner | ARCHITECT CODEX | NO | NO | Recommendations must distinguish evidence from inference |
-| QA / ТЕСТИРОВЩИК | ACTIVE / INDEPENDENT GATE | Tests, regression, E2E, acceptance criteria, and release verdict | Independent validation of candidates | Tests, fixtures, smoke checks, and release tooling; no business-logic changes just to make a gate green | Reviews code/runtime candidates after implementation | ARCHITECT CODEX | NO | NO | Returns GO or NO_GO; BLOCKED/NOT_RUN are never PASS |
+| QA / ТЕСТИРОВЩИК | ACTIVE / INDEPENDENT GATE | Tests, regression, E2E, acceptance criteria, and release verdict | Independent validation of candidates | Tests, fixtures, smoke checks, and release tooling; no business-logic changes just to make a gate green | Reviews candidates received directly from DEV in the canonical QA thread | DEV for routine handoff; ARCHITECT SOL / OWNER for product escalation | NO | NO | Returns GO or NO_GO directly to DEV; BLOCKED/NOT_RUN are never PASS |
+| SYSADMIN | ACTIVE / INFRASTRUCTURE GATE | VPS, infrastructure, Docker, health, polling, duplicate-process checks, backups, errors, image architecture, and pre/post-deploy verification | Production operations only | Deployment tooling/configuration, rollback snapshots, health and platform guards; no feature or business-logic changes | ARCHITECT CODEX | NO | Only an Architect-authorized gated deployment | Not an architect, feature developer, QA replacement, release owner, or advertising operator |
 
 ## Separate runtime subsystem
 
@@ -51,7 +68,25 @@ ROLE=QA
 RESOLUTION_MODE=DYNAMIC
 LAST_KNOWN_CHAT=019ffb88-32db-76f1-bdc2-1373b29fca13
 CURRENT_STATUS=NOT_LOADED
+
+ROLE=SYSADMIN
+RESOLUTION_MODE=MANUAL_HANDOFF_REQUIRED
+LAST_KNOWN_CHAT=NONE
+CURRENT_STATUS=ACTIVE
 ```
+
+## Cross-role lead and escalation rules
+
+`ARCHITECT SOL` назначает `LEAD_IMPLEMENTER` для multi-role задач. Lead
+implementer координирует narrow specialist handoffs, собирает unified candidate,
+направляет его в QA и закрывает техническую часть задачи. Примеры: backend-heavy
+→ DEV, frontend-heavy → WEBDEV.
+
+DEV и WEBDEV могут обмениваться прямыми implementation handoff'ами по уже
+утверждённой архитектуре. Они не могут самостоятельно переопределять product
+behavior, core architecture, attribution semantics или security policy. При
+необходимости существенного изменения возвращается `ARCHITECTURE_BLOCKER = YES`
+напрямую `ARCHITECT SOL`.
 
 If an owner replaces a role chat, the latest owner-established matching
 project chat wins. If no current match exists, block routing; if multiple

@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 
 from app.core.config import settings
 from app.security_tokens import decrypt_token
+from app.traffic.system_conversion import system_conversion_goal
 
 logger = logging.getLogger(__name__)
 
@@ -173,9 +174,9 @@ async def ensure_system_setup(encrypted_token: str) -> dict[str, int | str]:
         counter_id = int(counter["id"]) if counter else await client.create_counter(name, settings.traffic_public_base_url)
         if not (counter or {}).get("owner_login"):
             counter = await client.get_counter(counter_id)
-        goal_name = "bot_started"
+        goal_name = system_conversion_goal("bot_started")
         goal_id = await client.ensure_action_goal(counter_id, goal_name)
-        channel_goal_name = "maxibot_channel_connected"
+        channel_goal_name = system_conversion_goal("maxibot_channel_connected")
         channel_goal_id = await client.ensure_action_goal(counter_id, channel_goal_name)
         result: dict[str, int | str] = {
             "counter_id": counter_id,
