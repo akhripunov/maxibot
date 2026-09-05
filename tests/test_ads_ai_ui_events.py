@@ -150,3 +150,71 @@ def test_live_completion_payload_path_uses_canonical_renderer_contract():
     assert "self.repo.render" in section
     assert "format_ads_result" in menu
     assert "build_report_view" in menu
+
+
+def _quality_render_snapshot(action="PLACEMENT_REVIEW", *, evolution="UNKNOWN", wait=None, outcome="UNKNOWN"):
+    return {"QUALITY_DECISION_SNAPSHOT": {"primary_candidate": {
+        "safe_label": "yandex[.]ru", "action_level": action, "data_sufficiency": "SUFFICIENT",
+        "relative_deviation": .82, "spend_share": .3122, "signal_evolution": evolution,
+        "WHY_THIS": "Сигнал основан на сравнении с итогом кампании и отобранных данных.",
+        "WHY_NOW": "Есть достаточная выборка для проверки.",
+        "NEXT_STEP": "Проверить сигнал вручную; автоматические изменения отключены.",
+        "WAIT_CONDITION": wait,
+    }, "history_state": "AVAILABLE", "outcome_state": outcome},
+        "report_view": {"primary_findings": [{"dimension": "PLACEMENT", "label": "yandex.ru", "finding_type": "HIGH_CPA", "metrics": {"cpa": 36.52, "cost_share": .3122}, "campaign_cpa": 20}], "comparison": {"placement": {"available": 381, "included": 25, "state": "AVAILABLE"}}}}
+
+
+def _render_quality(snapshot):
+    return format_ads_result(
+        headline="done", channel_title="Москва 365", direct_connected=True,
+        campaign_name="campaign", ai_status="done", checked_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        fact_values={"cost_7d": 100, "conversions_7d": 5, "actual_cpa_7d": 20},
+        diagnosis="общая оценка", recommendation="fallback", confidence="HIGH", completed=True,
+        v2_analysis=snapshot,
+    )
+
+
+def test_quality_renderer_uses_placement_review_without_conflicting_watch_copy():
+    body = _render_quality(_quality_render_snapshot("PLACEMENT_REVIEW"))
+    assert "Проверить вручную" in body
+    assert "Можно рассмотреть изменение" not in body
+    assert "Пока только наблюдать" not in body
+
+
+def test_quality_renderer_maps_watch_and_no_action():
+    assert "Наблюдать" in _render_quality(_quality_render_snapshot("WATCH"))
+    assert "Ничего менять не нужно" in _render_quality(_quality_render_snapshot("NO_ACTION"))
+
+
+def test_quality_renderer_maps_change_levels_and_has_one_sufficiency_sentence():
+    body = _render_quality(_quality_render_snapshot("CONSIDER_CHANGE"))
+    assert "Можно рассмотреть изменение" in body
+    assert body.count("Данных достаточно для такой проверки") == 1
+    assert "CONSIDER_CHANGE" not in body
+
+
+def test_quality_renderer_maps_investigate_and_strong_recommendation():
+    assert "Проверить вручную" in _render_quality(_quality_render_snapshot("INVESTIGATE"))
+    assert "Есть веские основания для изменения" in _render_quality(_quality_render_snapshot("STRONG_RECOMMENDATION"))
+
+
+def test_quality_renderer_shows_history_only_for_proven_evolution():
+    body = _render_quality(_quality_render_snapshot("WATCH", evolution="PERSISTENT"))
+    assert "Динамика сигнала: сигнал сохраняется" in body
+    assert "История: история доступна" not in body
+    unknown = _render_quality(_quality_render_snapshot("WATCH", evolution="UNKNOWN"))
+    assert "Динамика сигнала:" not in unknown
+
+
+def test_quality_renderer_shows_wait_once_and_keeps_pending_pending():
+    body = _render_quality(_quality_render_snapshot("INVESTIGATE", wait="ещё нужны данные", outcome="PENDING"))
+    assert body.count("Условие ожидания: ещё нужны данные") == 1
+    assert "Измерение результата ещё ожидается" in body
+    assert "Измеренный результат доступен" not in body
+
+
+def test_quality_renderer_does_not_repeat_primary_label_in_summary_and_recommendation():
+    body = _render_quality(_quality_render_snapshot("PLACEMENT_REVIEW"))
+    assert body.count("yandex[.]ru") == 1
+    assert "WHY_THIS" not in body
+    assert "WHY_NOW" not in body

@@ -425,6 +425,13 @@ def _user_facing_ai_text(text: str, v2_analysis: dict | None = None) -> str:
 
 
 def _structured_summary(v2_analysis: dict | None, fact_values: dict, fallback: str) -> str:
+    if _quality_decision_snapshot(v2_analysis):
+        parts = []
+        conversions = fact_values.get("conversions_7d")
+        cpa = fact_values.get("actual_cpa_7d")
+        if conversions is not None and cpa is not None:
+            parts.append(f"По данным Яндекса кампания показывает {_ru_number(conversions, 0)} конверсий за 7 дней при CPA {_ru_number(cpa)} ₽.")
+        return "\n\n".join(parts) or "Общая оценка кампании сформирована по доступным данным."
     view = build_report_view(v2_analysis or {})
     findings = view.get("primary_findings") or []
     placement = next((item for item in findings if item.get("dimension") == "PLACEMENT"), None)
@@ -445,6 +452,14 @@ def _structured_summary(v2_analysis: dict | None, fact_values: dict, fallback: s
 
 
 def _structured_recommendation(v2_analysis: dict | None, fallback: str) -> str:
+    snapshot = _quality_decision_snapshot(v2_analysis)
+    if snapshot:
+        candidate = snapshot.get("primary_candidate") or {}
+        action = _QUALITY_ACTION_LABELS.get(str(candidate.get("action_level") or ""))
+        if action:
+            if action == "Проверить":
+                action = "Проверить вручную"
+            return f"{action}. Автоматические изменения отключены."
     view = build_report_view(v2_analysis or {})
     placement = next((item for item in (view.get("primary_findings") or []) if item.get("dimension") == "PLACEMENT"), None)
     if not placement:
@@ -465,7 +480,6 @@ _QUALITY_ACTION_LABELS = {
     "STRONG_RECOMMENDATION": "Есть веские основания для изменения",
     "NO_ACTION": "Ничего менять не нужно",
 }
-_QUALITY_HISTORY_LABELS = {"AVAILABLE": "история доступна", "UNKNOWN": "история не подтверждена"}
 _QUALITY_EVOLUTION_LABELS = {
     "NEW": "новый сигнал",
     "PERSISTENT": "сигнал сохраняется",
@@ -489,10 +503,16 @@ def _format_quality_decision_snapshot(snapshot: dict | None) -> str:
     action = _QUALITY_ACTION_LABELS.get(str(candidate.get("action_level") or ""))
     if not action:
         return ""
-    lines = [f"Решение: {action}"]
+    lines = []
+    deviation = candidate.get("relative_deviation")
+    spend_share = candidate.get("spend_share")
+    if deviation is not None:
+        lines.append(f"CPA отклоняется от среднего по кампании на {_ru_number(abs(float(deviation)) * 100)}%.")
+    if spend_share is not None:
+        lines.append(f"Доля расходов по сигналу: {_ru_number(float(spend_share) * 100)}%.")
     for key in ("WHY_THIS", "WHY_NOW"):
         value = candidate.get(key) or candidate.get(key.lower())
-        if value:
+        if value and not str(value).startswith(("Сигнал основан на сравнении", "Есть достаточная выборка")):
             lines.append(str(value))
     sufficiency = candidate.get("data_sufficiency")
     if sufficiency == "SUFFICIENT":
@@ -507,12 +527,10 @@ def _format_quality_decision_snapshot(snapshot: dict | None) -> str:
     wait = candidate.get("WAIT_CONDITION") or candidate.get("wait_condition")
     if wait:
         lines.append(f"Условие ожидания: {wait}")
-    evolution = _QUALITY_EVOLUTION_LABELS.get(str(candidate.get("signal_evolution") or ""))
-    if evolution:
+    evolution_code = str(candidate.get("signal_evolution") or "")
+    evolution = _QUALITY_EVOLUTION_LABELS.get(evolution_code) if evolution_code in {"PERSISTENT", "STRENGTHENING", "WEAKENING", "RESOLVED"} else None
+    if evolution and snapshot.get("history_state") != "UNKNOWN":
         lines.append(f"Динамика сигнала: {evolution}")
-    history = snapshot.get("history_state")
-    if history and history != "UNKNOWN":
-        lines.append(f"История: {_QUALITY_HISTORY_LABELS.get(history, 'подтверждена')}")
     outcome = snapshot.get("outcome_state")
     if outcome == "PENDING":
         lines.append("Измерение результата ещё ожидается.")
