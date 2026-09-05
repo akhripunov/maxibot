@@ -133,7 +133,8 @@ def test_traffic_miniapp_is_silent_and_opens_channel_automatically():
     assert "openViaAnchor(targetUrl)" in source
     assert "link.target = '_blank'" in source
     assert "link.click()" in source
-    assert "webApp.close()" not in source
+    channel_handoff = source[source.index("function openChannel"):source.index("async function resolveChannel")]
+    assert "webApp.close()" not in channel_handoff
     assert "Открыть канал" not in source
     assert "Проверить подписку" not in source
     assert "slowTimer" in source

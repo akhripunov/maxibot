@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Переход в канал</title>
+  <title>Переход в MAX</title>
   <style>
     html,body{margin:0;width:100%;height:100%;background:#fff;font-family:system-ui,-apple-system,sans-serif}
     main{display:grid;box-sizing:border-box;min-height:100%;place-items:center;text-align:center;padding:32px;color:#687386;visibility:hidden}
@@ -18,8 +18,8 @@
 <main>
   <div>
   <div class="spinner"></div>
-  <p id="status">Открываем канал…</p>
-  <a id="fallback" href="#">Перейти в канал</a>
+    <p id="status">Открываем MAX…</p>
+    <a id="fallback" href="#">Продолжить</a>
   </div>
 </main>
 <script src="https://st.max.ru/js/max-web-app.js"></script>
@@ -164,6 +164,12 @@ async function resolveChannel() {
   }
   const data = await response.json();
   reportMaxOpened(data.metrica_counter_id);
+  if (data.destination_type === 'BOT') {
+    clearTimeout(slowTimer);
+    clearTimeout(fallbackTimer);
+    if (typeof webApp?.close === 'function') webApp.close();
+    return;
+  }
   openChannel(data.target_url);
 }
 resolveChannel().catch(error => {

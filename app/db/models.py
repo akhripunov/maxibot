@@ -218,6 +218,7 @@ class SystemTrafficVisit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(24), default="LANDING_VISIT", nullable=False)
+    destination_type: Mapped[str] = mapped_column(String(16), default="BOT", server_default="BOT", nullable=False)
 
 class SystemTrafficEvent(Base):
     """Safe, aggregateable lifecycle event for a system promotion visit."""
@@ -265,6 +266,7 @@ class TrafficVisit(Base):
     max_opened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     to_channel_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     converted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    destination_type: Mapped[str] = mapped_column(String(16), default="CHANNEL", server_default="CHANNEL", nullable=False)
 
 class MembershipEvent(Base):
     __tablename__ = "membership_events"

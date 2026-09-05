@@ -1900,15 +1900,10 @@ class MenuRepository:
             if visit.max_user_id and visit.max_user_id != str(max_user_id):
                 return False
             visit.max_user_id = str(max_user_id)
-            visit.started_at = visit.started_at or datetime.now(timezone.utc)
-            visit.status = "BOT_STARTED"
-            dedupe = f"system-telemetry:{visit.id}:SYSTEM_BOT_STARTED"
-            if not await db.scalar(select(SystemTrafficEvent.id).where(SystemTrafficEvent.dedupe_key == dedupe)):
-                db.add(SystemTrafficEvent(visit_id=visit.id, event_type="SYSTEM_BOT_STARTED",
-                                          event_time=datetime.now(timezone.utc), metadata_json="{}", dedupe_key=dedupe))
-            exists_conversion = await db.scalar(select(SystemConversion.id).where(SystemConversion.visit_id == visit.id))
-            if not exists_conversion:
-                db.add(SystemConversion(visit_id=visit.id, max_user_id=str(max_user_id), goal="bot_started", status="pending"))
+            # Legacy raw ?start remains routable for organic/old links, but it
+            # is never an ads conversion. Ads require verified Mini App resolve.
+            if visit.status != "BOT_STARTED":
+                visit.status = "LEGACY_BOT_START"
             await db.commit()
             return True
 

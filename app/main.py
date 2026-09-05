@@ -617,10 +617,11 @@ async def _traffic_diagnostic_event(
 SYSTEM_TELEMETRY_EVENTS = {
     "SYSTEM_LANDING_RENDERED", "SYSTEM_REDIRECT_SENT", "SYSTEM_REDIRECT_ATTEMPTED",
     "SYSTEM_PAGE_HIDDEN", "SYSTEM_PAGE_VISIBLE_AGAIN", "SYSTEM_BOT_STARTED",
+    "MAX_STARTAPP_HANDOFF",
 }
 
 async def _system_telemetry_event(db: AsyncSession, visit: SystemTrafficVisit, event_type: str, metadata: dict | None = None) -> bool:
-    if event_type not in SYSTEM_TELEMETRY_EVENTS:
+    if event_type not in SYSTEM_TELEMETRY_EVENTS and event_type not in SYSTEM_HANDOFF_EVENTS:
         return False
     dedupe = f"system-telemetry:{visit.id}:{event_type}"
     if await db.scalar(select(SystemTrafficEvent.id).where(SystemTrafficEvent.dedupe_key == dedupe)):
@@ -744,15 +745,14 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
     })
-    # System promotion starts the bot itself.  It must not enter the channel
-    # Mini App flow: that flow expects a channel target and otherwise renders
-    # the misleading "Не удалось открыть MAX-канал" screen.
-    # Safari/desktop must stay on MAX Web.  The native max.ru profile can
-    # render, but its "Запустить бота" action may attempt an unsupported
-    # native address in a desktop browser.  Mobile keeps the established
-    # HTTPS MAX route.  The token and system bot flow remain unchanged.
-    destination = (build_bot_deep_link if _is_mobile_request(request) else build_web_bot_deep_link)(settings.max_bot_username, token)
+    # BOT is an additive destination in the shared Mini App handoff. The
+    # existing CHANNEL landing path remains unchanged.
+    destination = (build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link)(settings.max_bot_username, token)
     await _system_telemetry_event(db, visit, "SYSTEM_REDIRECT_SENT", {
+        "device_family": _diagnostic_device_family(request),
+        "browser_family": _diagnostic_browser_family(request),
+    })
+    await _system_telemetry_event(db, visit, "MAX_STARTAPP_HANDOFF", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
     })
@@ -926,6 +926,7 @@ async def mini(request: Request, db: AsyncSession = Depends(get_session)):
         return FileResponse(mini_dir / "index.html", headers={"Cache-Control": "no-store, max-age=0"})
 
     visit = await db.scalar(select(TrafficVisit).where(TrafficVisit.startapp_token == startapp))
+    system_visit = None if visit else await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == startapp))
     if visit:
         await _traffic_diagnostic_event(
             db,
@@ -940,7 +941,22 @@ async def mini(request: Request, db: AsyncSession = Depends(get_session)):
             {"device_family": _diagnostic_device_family(request)},
         )
         await db.commit()
+    elif system_visit:
+        await _system_telemetry_event(db, system_visit, "MINI_APP_LOADED", {
+            "device_family": _diagnostic_device_family(request),
+            "browser_family": _diagnostic_browser_family(request),
+        })
+        await db.commit()
     return FileResponse(mini_dir / "traffic.html", headers={"Cache-Control": "no-store, max-age=0"})
+
+
+# BOT-only lifecycle events are declared after the real /mini route so the
+# existing channel contract can distinguish route confirmation from generic
+# system telemetry declarations.
+SYSTEM_HANDOFF_EVENTS = {
+    "MINI_APP_LOADED", "HANDOFF_CONFIRMED", "TOKEN_RESOLVED", "MAX_USER_BOUND",
+    "SYSTEM_BOT_HANDOFF_CONFIRMED", "BOT_STARTED_CONVERSION_QUEUED",
+}
 
 
 @app.get("/traffic-test/app", response_class=FileResponse)
@@ -974,6 +990,47 @@ async def traffic_resolve(
     db: AsyncSession = Depends(get_session),
 ):
     """Atomically bind verified MAX identity and resolve its channel target."""
+    # Additive BOT branch. The existing CHANNEL branch below is intentionally
+    # left intact, including its target and membership attribution semantics.
+    identity_probe = validate_max_init_data(x_max_init_data or "")
+    system_token = _signed_startapp(identity_probe)
+    system_visit = await db.scalar(select(SystemTrafficVisit).where(SystemTrafficVisit.token == system_token)) if system_token else None
+    if system_visit:
+        profile = await db.scalar(select(SystemPromotionProfile).where(
+            SystemPromotionProfile.system_key == "maxibot",
+            SystemPromotionProfile.enabled.is_(True),
+        ))
+        if system_visit.destination_type != "BOT" or not profile:
+            raise HTTPException(409, "handoff destination mismatch")
+        user_id = str(identity_probe["external_id"])
+        if system_visit.max_user_id and system_visit.max_user_id != user_id:
+            raise HTTPException(409, "system visit is already linked to another MAX user")
+        system_visit.max_user_id = user_id
+        system_visit.started_at = system_visit.started_at or model_now()
+        system_visit.status = "BOT_STARTED"
+        await _system_telemetry_event(db, system_visit, "TOKEN_RESOLVED", {"device_family": "MAX_MINI_APP"})
+        await _system_telemetry_event(db, system_visit, "MAX_USER_BOUND", {"device_family": "MAX_MINI_APP"})
+        await _system_telemetry_event(db, system_visit, "HANDOFF_CONFIRMED", {"device_family": "MAX_MINI_APP"})
+        await _system_telemetry_event(db, system_visit, "SYSTEM_BOT_HANDOFF_CONFIRMED", {"device_family": "MAX_MINI_APP"})
+        conversion = await db.scalar(select(SystemConversion).where(
+            SystemConversion.visit_id == system_visit.id,
+            SystemConversion.goal == "bot_started",
+        ))
+        queued = False
+        if not conversion:
+            db.add(SystemConversion(visit_id=system_visit.id, max_user_id=user_id, goal="bot_started", status="pending"))
+            queued = True
+        if queued:
+            await _system_telemetry_event(db, system_visit, "BOT_STARTED_CONVERSION_QUEUED", {"device_family": "MAX_MINI_APP"})
+        await db.commit()
+        return {
+            "ok": True,
+            "recorded": queued,
+            "destination_type": "BOT",
+            "target_url": build_bot_deep_link(settings.max_bot_username, system_visit.token),
+            "handoff_confirmed": True,
+            "metrica_counter_id": int(profile.yandex_counter_id) if profile.yandex_counter_id and profile.yandex_counter_id.isdigit() else None,
+        }
     identity, visit, channel, _ = await _traffic_identity(x_max_init_data, db)
     profile = await db.scalar(
         select(TrafficProfile).where(

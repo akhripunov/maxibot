@@ -1,0 +1,110 @@
+{
+  "artifact_sha256": "1283c09e9705e41c2c79ea4f3d5e7dbd760b15ca73c86e99af15726ef04ce92d",
+  "case_registry": {
+    "unknown": 0,
+    "unknown_critical": 0
+  },
+  "counts": {
+    "failed": 0,
+    "passed": 1061,
+    "skipped": 0,
+    "total_tests": 1061
+  },
+  "current_main_sha": "6f2fd45669a1acded32887fbfb442f9cbb069e42",
+  "failures": [],
+  "production": {
+    "changed": false,
+    "smoke": "NOT_RUN",
+    "status": "WAITING_OWNER_APPROVAL"
+  },
+  "production_sha": "UNKNOWN",
+  "release_id": "2026-09-05T141922Z",
+  "schema_version": "qa_observability.v1",
+  "source_path": "scripts/qa_check.sh",
+  "suites": [
+    {
+      "duration_ms": null,
+      "failed": null,
+      "failures": [],
+      "name": "static",
+      "passed": null,
+      "skipped": null,
+      "status": "PASS",
+      "total_tests": null,
+      "unverified": []
+    },
+    {
+      "duration_ms": 3000,
+      "failed": 0,
+      "failures": [],
+      "name": "unit",
+      "passed": 520,
+      "skipped": 0,
+      "status": "PASS",
+      "total_tests": 520,
+      "unverified": []
+    },
+    {
+      "duration_ms": 1000,
+      "failed": 0,
+      "failures": [],
+      "name": "integration",
+      "passed": 21,
+      "skipped": 0,
+      "status": "PASS",
+      "total_tests": 21,
+      "unverified": []
+    },
+    {
+      "duration_ms": 2000,
+      "failed": 0,
+      "failures": [],
+      "name": "regression",
+      "passed": 520,
+      "skipped": 0,
+      "status": "PASS",
+      "total_tests": 520,
+      "unverified": []
+    },
+    {
+      "duration_ms": null,
+      "failed": null,
+      "failures": [],
+      "name": "build",
+      "passed": null,
+      "skipped": null,
+      "status": "PASS",
+      "total_tests": null,
+      "unverified": []
+    },
+    {
+      "duration_ms": null,
+      "failed": null,
+      "failures": [],
+      "name": "staging",
+      "passed": null,
+      "skipped": null,
+      "status": "PASS",
+      "total_tests": null,
+      "unverified": []
+    },
+    {
+      "duration_ms": null,
+      "failed": null,
+      "failures": [],
+      "name": "e2e",
+      "passed": null,
+      "skipped": null,
+      "status": "PASS",
+      "total_tests": null,
+      "unverified": []
+    }
+  ],
+  "tested_sha": "6f2fd45669a1acded32887fbfb442f9cbb069e42",
+  "timing": {
+    "duration_ms": 22000,
+    "finished_at": "2026-09-05T14:19:44Z",
+    "started_at": "2026-09-05T141922Z"
+  },
+  "verdict": "GO"
+}

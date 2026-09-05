@@ -132,3 +132,19 @@ async def test_already_non_pending_row_is_skipped_idempotently(monkeypatch):
     assert await processor.process_system_conversions(FakeFactory(db)) == 0
     assert conversion.status == "sent"
     assert FakeMetrica.instances[0].uploads == []
+
+
+@pytest.mark.asyncio
+async def test_missing_yclid_keeps_internal_conversion_unsent(monkeypatch):
+    monkeypatch.setattr(settings, "yandex_conversion_dry_run", False)
+    monkeypatch.setattr(processor, "decrypt_token", lambda value: "opaque-token")
+    monkeypatch.setattr(processor, "YandexMetricaClient", FakeMetrica)
+    FakeMetrica.instances.clear()
+    conversion = SimpleNamespace(id="conversion-no-yclid", status="pending", goal="bot_started", created_at=datetime.now(timezone.utc))
+    visit = SimpleNamespace(yclid=None, metrica_client_id="client-1", started_at=None)
+    profile = SimpleNamespace(yandex_oauth_token_encrypted="encrypted", yandex_counter_id="123")
+    db = FakeDb(profile, [(conversion, visit)], conversion)
+
+    assert await processor.process_system_conversions(FakeFactory(db)) == 0
+    assert conversion.status == "pending"
+    assert FakeMetrica.instances[0].uploads == []
