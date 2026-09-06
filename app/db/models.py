@@ -307,6 +307,7 @@ class BotConversion(Base):
     bot_id: Mapped[str] = mapped_column(String(128), index=True)
     destination_id: Mapped[str] = mapped_column(String(128), index=True)
     max_user_id: Mapped[str] = mapped_column(String(128), index=True)
+    paid_journey_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     internal_event: Mapped[str] = mapped_column(String(64), default="bot_started", nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -315,7 +316,10 @@ class BotConversion(Base):
     last_result: Mapped[Optional[str]] = mapped_column(String(32))
     last_error_class: Mapped[Optional[str]] = mapped_column(String(64))
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("bot_visit_id", "internal_event", name="uq_bot_conversion_visit_event"),)
+    __table_args__ = (
+        UniqueConstraint("bot_visit_id", "internal_event", name="uq_bot_conversion_visit_event"),
+        UniqueConstraint("paid_journey_key", name="uq_bot_conversion_paid_journey"),
+    )
 
 class TrafficVisit(Base):
     __tablename__ = "traffic_visits"

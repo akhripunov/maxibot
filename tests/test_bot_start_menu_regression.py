@@ -51,8 +51,8 @@ def test_observability_start_path_keeps_conversion_single_and_start_only():
     bind = menu_source[menu_source.index("async def bind_system_startapp"):menu_source.index("async def queue_system_channel_connected")]
     start = runtime_source[runtime_source.index("    async def _start("):runtime_source.index("    async def _callback(")]
 
-    assert "if not conversion:" in bind
-    assert 'internal_event="bot_started"' in bind
+    assert '"paid_journey_key": paid_journey_key' in bind
+    assert '"internal_event": "bot_started"' in bind
     assert 'await self._render(user_id, "home", force_new=True)' in start
     assert "bind_system_startapp" in start
     assert "BotConversion" not in start

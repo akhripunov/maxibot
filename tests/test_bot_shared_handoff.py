@@ -43,9 +43,10 @@ def test_bot_resolve_requires_verified_identity_and_correct_system_destination()
 def test_bot_conversion_queue_is_unique_and_yclid_is_not_required_for_internal_event():
     section = _resolve_section()
     assert 'UniqueConstraint("bot_visit_id", "internal_event"' in MODELS
+    assert 'UniqueConstraint("paid_journey_key"' in MODELS
     start = MENU[MENU.index("async def bind_system_startapp"):MENU.index("async def queue_system_channel_connected")]
-    assert 'if not conversion:' in start
-    assert 'internal_event="bot_started"' in start
+    assert "paid_bot_conversion_key" in start
+    assert '"internal_event": "bot_started"' in start
     assert "yclid" not in section
 
 

@@ -10,7 +10,9 @@ import socket
 import secrets
 from zoneinfo import ZoneInfo
 from urllib.parse import quote, unquote
-from sqlalchemy import delete, exists, func, select
+from sqlalchemy import delete, exists, func, insert, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -27,6 +29,7 @@ from app.integrations.max_connection import PRIMARY, BOT_CONNECTION
 from app.traffic.join_intent import consume_single_active_join_intent
 from app.traffic.analytics import traffic_stats_for_channels
 from app.traffic.bot_start_observability import dropoff_classification, start_wait_timeout_reached
+from app.traffic.bot_conversion_dedupe import paid_bot_conversion_key
 from app.ads.service import can_access_ads, campaigns_for_channel, latest_view
 from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
@@ -1970,19 +1973,31 @@ class MenuRepository:
             # event, so this is the first point where the business goal may be
             # recorded.  Mini App resolve above remains telemetry-only.
             visit.status = "BOT_STARTED"
-            conversion = await db.scalar(select(BotConversion).where(
-                BotConversion.bot_visit_id == visit.id,
-                BotConversion.internal_event == "bot_started",
-            ))
-            if not conversion:
-                db.add(BotConversion(
-                    bot_visit_id=visit.id,
-                    bot_id=visit.bot_id,
-                    destination_id=visit.destination_id,
-                    max_user_id=str(max_user_id),
-                    internal_event="bot_started",
-                    status="pending",
-                ))
+            paid_journey_key = paid_bot_conversion_key(
+                bot_id=visit.bot_id,
+                max_user_id=str(max_user_id),
+                yclid=visit.yclid,
+            )
+            values = {
+                "bot_visit_id": visit.id,
+                "bot_id": visit.bot_id,
+                "destination_id": visit.destination_id,
+                "max_user_id": str(max_user_id),
+                "internal_event": "bot_started",
+                "status": "pending",
+                "paid_journey_key": paid_journey_key,
+            }
+            if paid_journey_key:
+                dialect = db.bind.dialect.name
+                if dialect == "postgresql":
+                    stmt = postgres_insert(BotConversion).values(**values).on_conflict_do_nothing()
+                elif dialect == "sqlite":
+                    stmt = sqlite_insert(BotConversion).values(**values).on_conflict_do_nothing()
+                else:
+                    stmt = insert(BotConversion).values(**values)
+                await db.execute(stmt)
+            else:
+                db.add(BotConversion(**values))
             await db.commit()
             return True
 

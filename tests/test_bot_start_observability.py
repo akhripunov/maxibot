@@ -62,7 +62,7 @@ def test_runtime_contract_dedupes_real_start_before_conversion():
     section = source[start:end]
     assert 'event_type="REAL_START_RECEIVED"' in section
     assert 'dedupe_key=f"bot-telemetry:{visit.id}:REAL_START_RECEIVED"' in section
-    assert 'internal_event="bot_started"' in section
+    assert '"internal_event": "bot_started"' in section
 
 
 def test_timeout_processor_is_diagnostic_and_identity_scoped():
