@@ -241,6 +241,32 @@ def test_about_screen_labels_home_navigation_explicitly():
     assert '{"text": "⬅️ Главное меню", "callback_data": "home"}' in section
 
 
+def test_service_subscription_is_in_home_and_not_channel_menu():
+    from pathlib import Path
+
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    home = menu[menu.index('return menu_text(len(channels)'):menu.index('if screen == "ads_storage"')]
+    assert '("📚 Мои каналы", "promotion")' in home
+    assert '("💳 Оформить подписку", "subscription")' in home
+    assert home.index('("📚 Мои каналы", "promotion")') < home.index('("💳 Оформить подписку", "subscription")') < home.index('("ℹ️ О сервисе", "about")')
+
+    channel = menu[menu.index('if screen.startswith("promotion_channel:")'):menu.index('if screen.startswith("promotion_landing:")')]
+    assert '"💳 Оформить подписку"' not in channel
+    assert '"🗑 Удалить канал"' in channel
+
+
+def test_service_subscription_order_has_no_channel_dependency():
+    from pathlib import Path
+
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    runtime = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    model = (Path(__file__).parents[1] / "app" / "db" / "models.py").read_text()
+    assert 'f"subscription_plan:service:{months}"' in menu
+    assert 'service_subscription = selected_id == "service"' in runtime
+    assert 'channel_id=channel.id if channel else None' in runtime
+    assert 'Mapped[Optional[str]]' in model
+
+
 def test_navigation_callback_returns_the_rendered_screen_to_active_max_client():
     from pathlib import Path
 

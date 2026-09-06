@@ -819,7 +819,7 @@ class MaxBotRuntime:
                 if recovered:
                     await self._render(user_id, f"subscription:{recovered.id}", recovered.id)
                     return
-            await self._render(user_id, "promotion")
+            await self._render(user_id, "subscription")
             return
         if screen == "ads_campaigns" and not channel_id:
             # Some MAX clients emit the callback label without the channel
@@ -856,7 +856,8 @@ class MaxBotRuntime:
                 await self._render(user_id, action, selected_id)
         elif action.startswith("subscription_plan:"):
             selected_id, months_text = action.split(":", 2)[1:]
-            if await self.repo.channel_owned(user_id, selected_id):
+            service_subscription = selected_id == "service"
+            if service_subscription or await self.repo.channel_owned(user_id, selected_id):
                 try:
                     months = int(months_text)
                     amount = amount_for_months(months)
@@ -867,16 +868,18 @@ class MaxBotRuntime:
                     return
                 async with self.session_factory() as db:
                     admin = await db.scalar(select(Admin).where(Admin.external_id == str(user_id)))
-                    channel = await db.scalar(select(Channel).where(
-                        Channel.id == selected_id,
-                        Channel.admin_id == admin.id if admin else False,
-                    ))
-                    if not channel or not admin:
+                    channel = None
+                    if not service_subscription:
+                        channel = await db.scalar(select(Channel).where(
+                            Channel.id == selected_id,
+                            Channel.admin_id == admin.id if admin else False,
+                        ))
+                    if (not service_subscription and not channel) or not admin:
                         return
                     order = SubscriptionOrder(
                         invoice_id=int(time.time() * 1000),
                         admin_id=admin.id,
-                        channel_id=channel.id,
+                        channel_id=channel.id if channel else None,
                         months=months,
                         amount=amount,
                         status="pending",
@@ -884,7 +887,7 @@ class MaxBotRuntime:
                     db.add(order)
                     await db.commit()
                     order_id = order.id
-                await self._render(user_id, f"subscription_payment:{order_id}", selected_id)
+                await self._render(user_id, f"subscription_payment:{order_id}", None if service_subscription else selected_id)
                 return
         elif action.startswith("ads_check:"):
             selected_id = action.split(":", 1)[1]

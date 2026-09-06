@@ -144,7 +144,7 @@ class SubscriptionOrder(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     invoice_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     admin_id: Mapped[str] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True, nullable=True)
     months: Mapped[int] = mapped_column(Integer, nullable=False)
     amount: Mapped[Numeric] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True, nullable=False)

@@ -676,6 +676,10 @@ def subscription_text(channel_title: str) -> str:
     )
 
 
+def service_subscription_text() -> str:
+    return "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nВыберите период подписки:"
+
+
 def promotion_yandex_summary(channel_title: str, connected: bool,
                              counter_id: str | None, conversions: int) -> str:
     return (
@@ -787,6 +791,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return menu_text(len(channels), connected_bots), buttons(
             ("📢 Подключить канал", "connect_channel"),
             ("📚 Мои каналы", "promotion"),
+            ("💳 Оформить подписку", "subscription"),
             ("ℹ️ О сервисе", "about"),
         )
     if screen == "ads_storage":
@@ -859,6 +864,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return promotion_intro_text(), buttons(*rows)
     if screen == "promotion_connect":
         return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
+    if screen == "subscription":
+        plan_buttons = [(label, f"subscription_plan:service:{months}") for label, months in SUBSCRIPTION_PLANS]
+        return service_subscription_text(), buttons(*plan_buttons, ("⬅️ Главное меню", "home"))
     if screen == "promotion_maxibot":
         if not is_maxibot_owner(admin):
             return await render_screen(db, admin, "promotion")
@@ -1004,7 +1012,6 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             (("⛔ Отключить ежедневные отчёты" if channel.daily_reports_enabled else "✅ Включить ежедневные отчёты"),
              f"daily_reports:{channel.id}:{'off' if channel.daily_reports_enabled else 'on'}"),
             ("📩 Обращения / Предложка", f"channel:{channel.id}"),
-            ("💳 Оформить подписку", f"subscription:{channel.id}"),
             ("🗑 Удалить канал", f"delete:{channel.id}"),
             ("⬅️ Назад", "promotion"),
         ])
@@ -1053,20 +1060,25 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         ))
         if not order:
             return await render_screen(db, admin, "promotion")
-        channel = await db.get(Channel, order.channel_id)
-        if not channel:
+        channel = await db.get(Channel, order.channel_id) if order.channel_id else None
+        if order.channel_id and not channel:
             return await render_screen(db, admin, "promotion")
+        title = f"📣 Канал: {channel.title}" if channel else "🤖 MAXIBOT"
+        description = (
+            f"MAXIBOT — подписка на канал «{channel.title}», {order.months} мес."
+            if channel else f"MAXIBOT — тариф на весь сервис, {order.months} мес."
+        )
         url = payment_url(
             invoice_id=order.invoice_id,
             amount=order.amount,
-            description=f"MAXIBOT — подписка на канал «{channel.title}», {order.months} мес.",
+            description=description,
         )
         return (
-            f"💳 Оплата тарифа\n\n📣 Канал: {channel.title}\n"
+            f"💳 Оплата тарифа\n\n{title}\n"
             f"Период: {order.months} мес.\nСумма: {order.amount:.0f} ₽\n\n"
             "Нажмите кнопку для перехода к оплате.",
             [[{"text": "💳 Перейти к оплате", "type": "link", "url": url}],
-             [{"text": "⬅️ Назад", "callback_data": f"subscription:{channel.id}"}]],
+             [{"text": "⬅️ Назад", "callback_data": f"subscription:{channel.id}" if channel else "subscription"}]],
         )
     if screen.startswith("ads:"):
         selected_id = screen.split(":", 1)[1]
