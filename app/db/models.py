@@ -310,6 +310,11 @@ class BotConversion(Base):
     internal_event: Mapped[str] = mapped_column(String(64), default="bot_started", nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_attempt_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_result: Mapped[Optional[str]] = mapped_column(String(32))
+    last_error_class: Mapped[Optional[str]] = mapped_column(String(64))
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("bot_visit_id", "internal_event", name="uq_bot_conversion_visit_event"),)
 
 class TrafficVisit(Base):
