@@ -16,11 +16,20 @@ def test_handoff_attempt_is_recorded_without_new_visit_or_token():
 
 
 def test_handoff_confirmation_requires_real_mini_route():
-    mini = MAIN_SOURCE[MAIN_SOURCE.index('@app.get("/mini"') : MAIN_SOURCE.index('@app.get("/traffic-test/app"')]
+    mini_start = MAIN_SOURCE.index('@app.get("/mini"')
+    mini = MAIN_SOURCE[mini_start : MAIN_SOURCE.index('@app.get("/traffic-test/app"')]
+    resolve_start = MAIN_SOURCE.index('@app.post("/api/traffic/resolve")')
+    resolve = MAIN_SOURCE[resolve_start : MAIN_SOURCE.index('@app.post("/api/traffic/miniapp-event")')]
     assert '"HANDOFF_CONFIRMED"' in mini
     assert '"MINI_APP_LOADED"' in mini
     assert "TrafficVisit.startapp_token == startapp" in mini
-    assert "HANDOFF_CONFIRMED" not in MAIN_SOURCE[0 : MAIN_SOURCE.index('@app.get("/mini"')]
+    # The pre-Mini code may inspect telemetry textually, but it must not emit
+    # a structured BOT_HANDOFF_CONFIRMED event.  The producer is the verified
+    # Mini App resolve path below, not the owner telemetry report.
+    before_mini = MAIN_SOURCE[:mini_start]
+    assert 'event_type="BOT_HANDOFF_CONFIRMED"' not in before_mini
+    assert 'await _bot_telemetry_event(db, bot_visit, "BOT_HANDOFF_CONFIRMED"' in resolve
+    assert 'bot_visit.status = "HANDOFF_CONFIRMED"' in resolve
 
 
 def test_admin_diagnostics_expose_attempt_and_confirmation_stages():

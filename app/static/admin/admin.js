@@ -250,12 +250,38 @@
     try { await loadOverview(); } catch (error) { if (!String(error.message).startsWith('AUTH_')) { resetLockedView(); renderAuthState(lastAuthState); authMessage.textContent = 'Данные временно недоступны. Попробуйте обновить страницу.'; } } finally { refreshButton.disabled = false; refreshButton.textContent = 'Обновить'; }
   }
 
+  const journeyStatusClass = value => String(value || 'UNKNOWN').toLowerCase();
+  const journeyText = value => value === null || value === undefined ? 'N/A' : esc(value);
+  const journeyYesNo = value => value === 'UNKNOWN' ? 'UNKNOWN' : value ? 'YES' : 'NO';
+  function renderJourney(data = {}) {
+    const summary = data.summary || {};
+    const summaryNode = document.querySelector('#journey-summary');
+    const cards = [['Каналы', summary.channels], ['Боты', summary.bots], ['Активные journey', summary.active_journeys], ['Проблемные объекты', summary.problem_objects], ['Общий статус', summary.overall_status]];
+    summaryNode.innerHTML = cards.map(([label, value], index) => `<article class="metric-card ${index === 4 ? 'accent' : ''}"><span>${label}</span><strong>${journeyText(value)}</strong><small>${index === 4 ? 'по наблюдаемым данным' : 'за выбранный период'}</small></article>`).join('');
+    const stageHtml = stages => (stages || []).map(stage => `<div class="journey-stage"><small>${journeyText(stage.name)}</small><strong>${journeyText(stage.count)}</strong><span class="journey-stage-status ${journeyStatusClass(stage.status)}">${journeyText(stage.status)}${stage.conversion_from_previous_percent === null || stage.conversion_from_previous_percent === undefined ? '' : ` · ${stage.conversion_from_previous_percent}%`}</span></div>`).join('');
+    document.querySelector('#journey-normalized').innerHTML = stageHtml(data.normalized_funnel) || '<div class="journey-empty">UNKNOWN</div>';
+    const problems = data.problem_objects || [];
+    document.querySelector('#journey-problems').innerHTML = problems.length ? problems.map(item => `<div class="journey-problem"><div><strong>${journeyText(item.name)}</strong><small>${item.type === 'bot' ? 'Бот' : 'Канал'} · ${journeyText(item.reason)}</small></div><span class="journey-status ${journeyStatusClass(item.status)}">${journeyText(item.status)}</span></div>`).join('') : '<div class="journey-empty">Проблем не обнаружено или недостаточно данных</div>';
+    const objects = data.objects || [];
+    document.querySelector('#journey-objects').innerHTML = objects.length ? objects.map(item => `<div class="journey-object"><div class="journey-object-main"><strong>${journeyText(item.name)}</strong><small>${item.type === 'bot' ? 'Бот' : 'Канал'} · ${journeyText(item.reason || 'Каноническая воронка')}</small><div class="journey-object-stages">${(item.stages || []).map(stage => `<span>${journeyText(stage.name)}: ${journeyText(stage.count)}</span>`).join('')}</div></div><span class="journey-status ${journeyStatusClass(item.status)}">${journeyText(item.status)}</span></div>`).join('') : '<div class="journey-empty">Нет данных за выбранный период</div>';
+    const journeys = data.recent_journeys || [];
+    document.querySelector('#journey-recent').innerHTML = journeys.length ? journeys.map(item => `<tr><td>${journeyText(new Date(item.time).toLocaleString('ru-RU'))}</td><td>${journeyText(item.object)}<br><span class="muted">${journeyText(item.type)}</span></td><td>${journeyText(item.source)}</td><td>${journeyYesNo(item.yclid_present)}</td><td>${journeyYesNo(item.identity_resolved)}</td><td>${journeyYesNo(item.destination_reached)}</td><td>${journeyYesNo(item.product_conversion)}</td><td>${journeyYesNo(item.metrica)}</td><td><span class="journey-status ${journeyStatusClass(item.status)}">${journeyText(item.status)}</span></td></tr>`).join('') : '<tr><td colspan="9" class="muted">Нет данных</td></tr>';
+  }
+  async function loadJourney() {
+    const params = new URLSearchParams({days: document.querySelector('#journey-days').value, object_type: document.querySelector('#journey-type').value, problem: document.querySelector('#journey-problem').value, search: document.querySelector('#journey-search').value});
+    try { renderJourney(await getJson(`/journey?${params}`)); } catch (error) { if (!String(error.message).startsWith('AUTH_')) document.querySelector('#journey-objects').innerHTML = '<div class="journey-empty">Данные временно недоступны</div>'; }
+  }
+
   if (globalThis.__MAXIBOT_ADMIN_TEST__) Object.assign(globalThis.__MAXIBOT_ADMIN_TEST__, {resetLockedView, renderAuthState, renderQA, loadQA, checkAuth, loadOverview, logout, passkeyLogin});
 
   document.querySelectorAll('.side-link').forEach(link => link.addEventListener('click', () => {
     document.querySelectorAll('.side-link').forEach(item => item.classList.toggle('active', item === link));
     document.querySelectorAll('.page-section').forEach(section => section.classList.toggle('active-section', section.id === link.dataset.section));
+    if (link.dataset.section === 'journey' && lastAuthState.authenticated) loadJourney();
   }));
+  ['journey-type', 'journey-problem', 'journey-days'].forEach(id => document.querySelector(`#${id}`)?.addEventListener('change', loadJourney));
+  document.querySelector('#journey-search')?.addEventListener('input', () => { clearTimeout(globalThis.__journeySearchTimer); globalThis.__journeySearchTimer = setTimeout(loadJourney, 250); });
+  document.querySelector('#journey-refresh')?.addEventListener('click', loadJourney);
   refreshButton.addEventListener('click', refresh);
   logoutButton.addEventListener('click', () => logout().catch(error => { resetLockedView(); renderAuthState({enrolled: lastAuthState.enrolled, authenticated: false}); authMessage.textContent = `Выход не выполнен: ${error.message}`; }));
   loginButton.addEventListener('click', () => passkeyLogin().catch(error => { resetLockedView(); renderAuthState({enrolled: true, authenticated: false}); authMessage.textContent = `Вход не выполнен: ${error.message}`; }));

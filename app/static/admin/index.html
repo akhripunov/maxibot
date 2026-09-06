@@ -16,6 +16,7 @@
       </a>
       <nav class="side-nav">
         <a class="side-link active" href="#overview" data-section="overview"><span>⌂</span>Обзор</a>
+        <a class="side-link" href="#journey" data-section="journey"><span>⌁</span>Путь пользователя</a>
         <a class="side-link" href="#clients" data-section="clients"><span>◌</span>Клиенты</a>
         <a class="side-link" href="#subscriptions" data-section="subscriptions"><span>₽</span>Подписки и оплаты</a>
         <a class="side-link" href="#channels" data-section="channels"><span>◫</span>Каналы</a>
@@ -62,6 +63,24 @@
           <article class="panel usage-panel"><div class="panel-heading"><div><p class="eyebrow">ПРОДУКТ</p><h3>Использование</h3></div><span class="panel-caption">Всего</span></div><div id="usage-list" class="usage-list"><div><span>Каналы</span><strong>—</strong></div><div><span>Боты</span><strong>—</strong></div><div><span>Диалоги</span><strong>—</strong></div><div><span>AI-запуски</span><strong>—</strong></div></div></article>
           <article class="panel definitions-panel"><div class="panel-heading"><div><p class="eyebrow">ДОВЕРИЕ К ДАННЫМ</p><h3>Что мы считаем</h3></div></div><p>Показатели строятся по реальным записям клиентов, заказов и подписок. Если в системе нет подтверждённого источника, значение остаётся <span class="inline-unknown">UNKNOWN</span>, а не превращается в ноль.</p><div class="definition-row"><span class="mini-icon">✓</span><span>Без выдуманных цифр и графиков</span></div><div class="definition-row"><span class="mini-icon">◉</span><span>Без действий изменения данных</span></div></article>
         </div>
+      </section>
+
+      <section id="journey" class="page-section" data-page="journey">
+        <div class="section-heading"><div><p class="eyebrow">АНАЛИТИКА</p><h2>Путь пользователя</h2><p class="section-subtitle">Сквозная аналитика по всем каналам и ботам — от первого касания до конверсии.</p></div><span class="read-only-badge">READ-ONLY</span></div>
+        <div class="journey-filters panel">
+          <label>Объекты<select id="journey-type"><option value="all">Все объекты</option><option value="channel">Каналы</option><option value="bot">Боты</option></select></label>
+          <label>Статус<select id="journey-problem"><option value="all">Все</option><option value="problem">Проблемные</option><option value="healthy">Без проблем</option></select></label>
+          <label>Период<select id="journey-days"><option value="1">Сегодня</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label>
+          <label class="journey-search">Поиск<input id="journey-search" type="search" placeholder="Название или identifier"></label>
+          <button id="journey-refresh" class="refresh-button" type="button">Обновить</button>
+        </div>
+        <div id="journey-summary" class="metric-grid journey-summary"></div>
+        <div class="journey-layout">
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">СКВОЗНАЯ ВОРОНКА</p><h3>Сравнимые этапы</h3></div><span class="panel-caption">Без синтетической конверсии</span></div><div id="journey-normalized" class="journey-funnel"></div></article>
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">ДИАГНОСТИКА</p><h3>Проблемные объекты</h3></div></div><div id="journey-problems" class="journey-problems"></div></article>
+        </div>
+        <article class="panel journey-objects-panel"><div class="panel-heading"><div><p class="eyebrow">ОБЪЕКТЫ</p><h3>Канонические воронки</h3></div></div><div id="journey-objects" class="journey-objects"></div></article>
+        <article class="panel"><div class="panel-heading"><div><p class="eyebrow">ПОСЛЕДНИЕ ПУТИ</p><h3>Recent journeys</h3></div><span class="panel-caption">до 100 записей, без raw identifiers</span></div><div class="journey-table-wrap"><table class="journey-table"><thead><tr><th>Время</th><th>Объект</th><th>Источник</th><th>yclid</th><th>Identity</th><th>Destination</th><th>Конверсия</th><th>Metrika</th><th>Статус</th></tr></thead><tbody id="journey-recent"></tbody></table></div></article>
       </section>
 
       <section id="clients" class="page-section" data-page="clients"><div class="section-heading"><div><p class="eyebrow">BUSINESS DATA</p><h2>Клиенты</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">◌</span><h3>Раздел готовится</h3><p>Список клиентов будет подключён после утверждения browser-auth контракта. Здесь не показываются сырые идентификаторы или персональные данные.</p></div></section>

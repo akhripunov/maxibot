@@ -18,6 +18,16 @@ def test_metric_definitions_are_explicit_about_paid_and_active_sources():
     assert "subscription_expires_at" in definitions["active_subscriptions"]["definition"]
 
 
+def test_journey_endpoint_preserves_separate_domains_and_bounded_recent_rows():
+    source = open("app/web_admin_readonly.py", encoding="utf-8").read()
+    assert '@router.get("/journey")' in source
+    assert "BotTrafficVisit" in source and "TrafficVisit" in source
+    assert "CHANNEL and BOT rows are deliberately loaded and aggregated separately" in source
+    assert "][0:100]" not in source  # bounded with an explicit slice below via `[:100]`
+    assert "[:100]" in source
+    assert '"direct": "UNKNOWN"' in source
+
+
 @pytest.mark.asyncio
 async def test_web_admin_rejects_missing_internal_auth(monkeypatch):
     monkeypatch.setattr("app.web_admin_auth.settings.web_admin_internal_token", "expected")

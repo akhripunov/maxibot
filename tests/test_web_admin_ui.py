@@ -16,6 +16,18 @@ def test_admin_shell_is_separate_read_only_owner_dashboard():
     assert "password" not in text.lower()
 
 
+def test_user_journey_is_first_class_read_only_section_between_overview_and_clients():
+    text = (ROOT / "app/static/admin/index.html").read_text(encoding="utf-8")
+    overview = text.index('data-section="overview"')
+    journey = text.index('data-section="journey"')
+    clients = text.index('data-section="clients"')
+    assert overview < journey < clients
+    for marker in ("journey-type", "journey-problem", "journey-days", "journey-normalized", "journey-recent"):
+        assert marker in text
+    script = (ROOT / "app/static/admin/admin.js").read_text(encoding="utf-8")
+    assert "getJson(`/journey?${params}`)" in script
+
+
 def test_admin_shell_has_no_fake_business_values_and_distinguishes_unknown():
     text = (ROOT / "app/static/admin/index.html").read_text(encoding="utf-8")
     script = (ROOT / "app/static/admin/admin.js").read_text(encoding="utf-8")
