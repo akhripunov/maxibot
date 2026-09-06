@@ -48,7 +48,7 @@ router = APIRouter(prefix="/admin", tags=["web-admin"])
 
 JOURNEY_STAGES = {
     "channel": ("Источник", "Landing", "Token / MAX", "MAX identity", "Канал открыт", "Join request", "user_added", "Подписка", "Metrika", "Direct"),
-    "bot": ("Источник", "Landing", "Token / MAX", "MAX identity", "Handoff подтверждён", "Destination reached", "Real /start", "bot_started", "Metrika", "Direct"),
+    "bot": ("Источник", "Landing", "Token / MAX", "MAX identity", "Bot handoff initiated", "Destination reached", "Real /start", "bot_started", "Metrika", "Direct"),
 }
 
 
@@ -213,26 +213,26 @@ async def admin_journey(
         if needle and needle not in f"{bot_name} {name} {bot_id}".lower():
             continue
         visit_ids = {item.id for item in visits}
-        handoff = sum(bool(bot_events_by_visit[item.id] & {"BOT_HANDOFF_CONFIRMED", "HANDOFF_CONFIRMED", "MINI_APP_LOADED"}) for item in visits)
+        handoff_started = sum("BOT_HANDOFF_STARTED" in bot_events_by_visit[item.id] for item in visits)
         identity = sum(item.bot_visit_id in visit_ids for item in bot_links)
         real_starts = sum("REAL_START_RECEIVED" in bot_events_by_visit[item.id] for item in visits)
         started = sum(item.status == "BOT_STARTED" for item in visits)
         metrica = sum(_successful_metrika(item) for item in bot_conversions if item.bot_visit_id in visit_ids)
         failures = int(started > real_starts or any(item.bot_visit_id in visit_ids and item.bot_visit_id not in bot_links_by_visit for item in bot_conversions))
-        warnings = int(bool(visits) and (not identity or (identity and not real_starts)))
+        warnings = int(bool(visits) and (not identity or (identity and not handoff_started) or (handoff_started and not real_starts)))
         status = _status(visits=len(visits), failures=failures, warnings=warnings)
         if (problem == "problem" and status not in {"FAIL", "WARN"}) or (problem == "healthy" and status in {"FAIL", "WARN"}):
             continue
-        counts = [len(visits), len(visits), handoff, identity, handoff, None, real_starts, started, metrica, None]
+        counts = [len(visits), len(visits), len(visits), identity, handoff_started, None, real_starts, started, metrica, None]
         rows.append({"id": name, "name": bot_name, "type": "bot", "status": status,
                      "counts": {"landing": len(visits), "identity": identity, "destination": None, "conversion": started, "metrica": metrica},
                      "stages": _stage_payload(JOURNEY_STAGES["bot"], counts),
-                     "reason": "bot_started without real /start" if status == "FAIL" else ("partial handoff evidence" if status == "WARN" else None)})
+                     "reason": "bot_started without real /start" if status == "FAIL" else ("Переход в бот инициирован, /start не получен" if status == "WARN" and identity and handoff_started and not real_starts else ("partial handoff evidence" if status == "WARN" else None))})
         for visit in visits:
             event_types = bot_events_by_visit[visit.id]
             journey_rows.append({"time": visit.created_at.isoformat(), "object": bot_name, "type": "Бот",
                 "source": visit.utm_source or ("Yandex Direct" if visit.yclid else "Неизвестно"), "yclid_present": bool(visit.yclid),
-                "identity_resolved": visit.id in bot_links_by_visit, "destination_reached": "UNKNOWN",
+                "identity_resolved": visit.id in bot_links_by_visit, "handoff_started": visit.id in bot_events_by_visit and "BOT_HANDOFF_STARTED" in bot_events_by_visit[visit.id], "destination_reached": "UNKNOWN",
                 "product_conversion": visit.status == "BOT_STARTED", "metrica": bool(bot_conversions_by_visit[visit.id] and any(_successful_metrika(c) for c in bot_conversions if c.bot_visit_id == visit.id)),
                 "direct": "UNKNOWN", "status": "PASS" if visit.status == "BOT_STARTED" else ("WARN" if event_types else "UNKNOWN")})
 

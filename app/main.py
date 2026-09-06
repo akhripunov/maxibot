@@ -723,9 +723,41 @@ async def _telemetry_visit_from_payload(
         return await db.scalar(select(TrafficVisit).where(TrafficVisit.startapp_token == payload.start_param)), False
     return None, False
 
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "maxibot"}
+
+
+async def _bot_handoff_visit_from_payload(
+    payload: MiniAppTelemetryIn,
+    init_data: str | None,
+    db: AsyncSession,
+) -> tuple[BotTrafficVisit | None, bool]:
+    """Resolve a verified system BOT visit for handoff-only telemetry."""
+    if not init_data:
+        return None, False
+    try:
+        identity = validate_max_init_data(init_data)
+        startapp = _signed_startapp(identity)
+    except Exception:
+        return None, False
+    if not startapp:
+        return None, False
+    visit = await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == startapp))
+    user_id = str(identity["external_id"])
+    if not visit or visit.bot_id != settings.max_bot_id or visit.destination_id != settings.max_bot_id:
+        return None, False
+    if visit.max_user_id != user_id or visit.status not in {"HANDOFF_CONFIRMED", "BOT_STARTED"}:
+        return None, False
+    link = await db.scalar(select(BotMaxIdentityLink).where(
+        BotMaxIdentityLink.bot_visit_id == visit.id,
+        BotMaxIdentityLink.bot_id == visit.bot_id,
+        BotMaxIdentityLink.destination_id == visit.destination_id,
+        BotMaxIdentityLink.max_user_id == user_id,
+        BotMaxIdentityLink.startapp_token == visit.token,
+    ))
+    return (visit, True) if link else (None, False)
 
 
 @app.get("/system/{public_id}", response_class=HTMLResponse)
@@ -1008,7 +1040,7 @@ async def mini(request: Request, db: AsyncSession = Depends(get_session)):
 SYSTEM_HANDOFF_EVENTS = {
     "MINI_APP_LOADED", "HANDOFF_CONFIRMED", "TOKEN_RESOLVED", "MAX_USER_BOUND",
     "SYSTEM_BOT_HANDOFF_CONFIRMED", "BOT_STARTED_CONVERSION_QUEUED", "BOT_HANDOFF_CONFIRMED",
-    "REAL_START_RECEIVED",
+    "BOT_HANDOFF_STARTED", "REAL_START_RECEIVED",
 }
 
 
@@ -1194,8 +1226,23 @@ async def traffic_miniapp_telemetry(
     start_param is lookup-only and the event is explicitly untrusted; neither
     branch can create identity, attribution, membership, or conversion state.
     """
-    if payload.event_type not in TELEMETRY_EVENTS:
+    if payload.event_type not in TELEMETRY_EVENTS and payload.event_type != "BOT_HANDOFF_STARTED":
         raise HTTPException(400, "unsupported miniapp telemetry event")
+    if payload.event_type == "BOT_HANDOFF_STARTED":
+        bot_visit, trusted = await _bot_handoff_visit_from_payload(payload, x_max_init_data, db)
+        if not bot_visit:
+            return {"ok": True, "recorded": False, "reason": "bot_visit_not_resolved"}
+        changed = await _bot_telemetry_event(
+            db,
+            bot_visit,
+            "BOT_HANDOFF_STARTED",
+            metadata={
+                "device_family": _diagnostic_device_family_from_signals(payload.raw_signals, request),
+                "browser_family": _diagnostic_browser_family(request),
+            },
+        )
+        await db.commit()
+        return {"ok": True, "recorded": changed, "trusted": trusted}
     visit, trusted = await _telemetry_visit_from_payload(payload, x_max_init_data, db)
     if not visit:
         return {"ok": True, "recorded": False, "reason": "visit_not_resolved"}

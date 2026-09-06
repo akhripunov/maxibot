@@ -28,6 +28,14 @@ def test_journey_endpoint_preserves_separate_domains_and_bounded_recent_rows():
     assert '"direct": "UNKNOWN"' in source
 
 
+def test_bot_journey_exposes_handoff_attempt_without_claiming_destination_opened():
+    source = open("app/web_admin_readonly.py", encoding="utf-8").read()
+    assert '"Bot handoff initiated"' in source
+    assert '"BOT_HANDOFF_STARTED"' in source
+    assert '"destination_reached": "UNKNOWN"' in source
+    assert "Переход в бот инициирован, /start не получен" in source
+
+
 @pytest.mark.asyncio
 async def test_web_admin_rejects_missing_internal_auth(monkeypatch):
     monkeypatch.setattr("app.web_admin_auth.settings.web_admin_internal_token", "expected")

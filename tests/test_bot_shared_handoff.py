@@ -87,14 +87,41 @@ def test_bot_post_resolve_copies_platform_open_without_closing_miniapp():
     assert "MINIAPP_CHANNEL_HANDOFF_STARTED" not in bot
 
 
+def test_bot_handoff_started_is_verified_diagnostic_telemetry_only():
+    bot = MINI[MINI.index("function openBot"):MINI.index("function reportMaxOpened")]
+    endpoint = MAIN[MAIN.index("async def traffic_miniapp_telemetry"):MAIN.index("async def traffic_channel_open")]
+    assert "miniTelemetry('BOT_HANDOFF_STARTED')" in bot
+    assert 'payload.event_type == "BOT_HANDOFF_STARTED"' in endpoint
+    assert 'await _bot_handoff_visit_from_payload(payload, x_max_init_data, db)' in endpoint
+    assert 'await _bot_telemetry_event(' in endpoint
+    assert '"BOT_HANDOFF_STARTED"' in MAIN
+    assert 'BotConversion' not in endpoint
+
+
+def test_bot_handoff_started_dedupes_by_exact_visit_and_keeps_channel_branch_separate():
+    endpoint = MAIN[MAIN.index("async def traffic_miniapp_telemetry"):MAIN.index("async def traffic_channel_open")]
+    assert 'dedupe = f"bot-telemetry:{visit.id}:{event_type}"' in MAIN
+    assert 'if payload.event_type == "BOT_HANDOFF_STARTED":' in endpoint
+    assert 'visit, trusted = await _telemetry_visit_from_payload(payload, x_max_init_data, db)' in endpoint
+    assert 'BotTrafficEvent' in MAIN
+
+
 def test_required_safe_handoff_event_names_are_present_without_raw_identity_logging():
     for event in (
         "SYSTEM_LANDING_RENDERED", "SYSTEM_REDIRECT_ATTEMPTED", "MAX_STARTAPP_HANDOFF",
         "MINI_APP_LOADED", "HANDOFF_CONFIRMED", "TOKEN_RESOLVED", "MAX_USER_BOUND",
         "SYSTEM_BOT_HANDOFF_CONFIRMED", "BOT_STARTED_CONVERSION_QUEUED",
+        "BOT_HANDOFF_STARTED",
     ):
         assert event in MAIN
     assert "raw initData" not in MAIN.lower()
+
+
+def test_bot_handoff_started_does_not_claim_bot_open_confirmation():
+    observability = (ROOT / "app/traffic/bot_start_observability.py").read_text(encoding="utf-8")
+    assert '"bot_open_confirmed": UNPROVEN' in observability
+    assert '"start_screen_shown": UNPROVEN' in observability
+    assert "BOT_OPEN_CONFIRMED" not in MAIN
 
 
 def test_bot_landing_uses_official_https_max_startapp_contract_only():
