@@ -19,6 +19,7 @@ from app.ads.periodic import process_periodic_collection
 from app.traffic.membership_reconciliation import reconcile_active_memberships
 from app.traffic.metrica_upload_tracker import refresh_metrica_upload_statuses
 from app.traffic.system_conversion_processor import process_system_conversions
+from app.traffic.bot_start_observability import process_bot_start_timeouts
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ async def main() -> None:
                 system_processed = await process_system_conversions(SessionLocal)
                 if system_processed:
                     logger.info("SYSTEM_CONVERSIONS_PROCESSED count=%s", system_processed)
+                timeout_processed = await process_bot_start_timeouts(SessionLocal)
+                if timeout_processed:
+                    logger.info("BOT_START_TIMEOUTS_PERSISTED count=%s", timeout_processed)
             except asyncio.CancelledError:
                 raise
             except Exception:

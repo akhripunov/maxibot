@@ -835,6 +835,7 @@ async def system_telemetry_report(
         if visit.status == "BOT_STARTED":
             bucket["system_conversion"] += 1
         handoff_event = next((event for event in visit_events if event.event_type == "BOT_HANDOFF_CONFIRMED"), None)
+        timeout_event = next((event for event in visit_events if event.event_type == "BOT_START_TIMEOUT_REACHED"), None)
         real_start = visit.status == "BOT_STARTED" or any(
             event.event_type == "REAL_START_RECEIVED" for event in visit_events
         )
@@ -844,7 +845,7 @@ async def system_telemetry_report(
                 handoff_meta = json.loads(handoff_event.metadata_json or "{}")
             except (TypeError, ValueError):
                 handoff_meta = {}
-        timeout_reached = start_wait_timeout_reached(
+        timeout_reached = bool(timeout_event) or start_wait_timeout_reached(
             handoff_event.event_time if handoff_event else None,
             now=datetime.now(timezone.utc),
             wait_seconds=settings.bot_start_wait_seconds,
