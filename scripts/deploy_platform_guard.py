@@ -7,6 +7,15 @@ import subprocess
 import sys
 
 
+def normalize_architecture(arch: str) -> str:
+    return {
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }.get(arch.strip().lower(), arch.strip().lower())
+
+
 def validate(vps_arch: str, image_arch: str, source_sha: str, expected_sha: str) -> None:
     values = {
         "VPS_ARCH": vps_arch,
@@ -16,7 +25,7 @@ def validate(vps_arch: str, image_arch: str, source_sha: str, expected_sha: str)
     }
     if any(not value or value.upper() in {"UNKNOWN", "UNVERIFIED"} for value in values.values()):
         raise RuntimeError("DEPLOY_PLATFORM_GUARD_BLOCKED=unknown platform or source SHA")
-    if vps_arch != "amd64" or image_arch != "amd64":
+    if normalize_architecture(vps_arch) != normalize_architecture(image_arch):
         raise RuntimeError("DEPLOY_PLATFORM_GUARD_BLOCKED=platform mismatch")
     if source_sha != expected_sha:
         raise RuntimeError("DEPLOY_PLATFORM_GUARD_BLOCKED=source SHA mismatch")
@@ -39,6 +48,8 @@ def main(argv: list[str]) -> int:
         image_arch = _run("docker", "image", "inspect", image, "--format", "{{.Architecture}}")
         source_sha = _run("git", "rev-parse", "HEAD")
         validate(vps_arch, image_arch, source_sha, expected_sha)
+        if normalize_architecture(vps_arch) != "amd64":
+            raise RuntimeError("DEPLOY_PLATFORM_GUARD_BLOCKED=canonical platform must be amd64")
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
