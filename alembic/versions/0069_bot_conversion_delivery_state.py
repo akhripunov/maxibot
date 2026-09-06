@@ -4,7 +4,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0069_bot_conversion_delivery_state"
+revision = "0069_bot_delivery_state"
 down_revision = "0068_generic_bot_traffic"
 branch_labels = None
 depends_on = None
