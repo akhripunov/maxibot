@@ -1,11 +1,19 @@
 from datetime import datetime, timedelta, timezone
+import json
 
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.db.models import BotMaxIdentityLink, BotTrafficEvent, BotTrafficVisit
+from app.traffic import bot_start_observability as observability
 from app.traffic.bot_start_observability import (
     dropoff_classification,
     first_time_bot_user,
     handoff_snapshot,
     start_wait_timeout_reached,
     timeout_event_metadata,
+    process_bot_start_timeouts,
 )
 
 
@@ -67,6 +75,62 @@ def test_timeout_processor_is_diagnostic_and_identity_scoped():
     assert "~real_start_exists" in processor
     assert "BotConversion" not in processor
     assert "send_message" not in processor
+
+
+@pytest.mark.asyncio
+async def test_timeout_processor_executes_correlated_exists_query(monkeypatch):
+    """Execute the ORM query so SQLAlchemy auto-correlation regressions fail here."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        for model in (BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent):
+            await connection.run_sync(model.__table__.create)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    # SQLite's DateTime emulation returns naive values; production PostgreSQL
+    # returns the timezone-aware value used by the processor.
+    handoff_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=60)
+    class SQLiteDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return super().now(tz).replace(tzinfo=None)
+
+    monkeypatch.setattr(observability, "datetime", SQLiteDateTime)
+    async with sessions() as db:
+        db.add(BotTrafficVisit(
+            id="visit-timeout-regression",
+            token="token-timeout-regression",
+            bot_id="bot-1",
+            destination_id="bot-1",
+            status="HANDOFF_CONFIRMED",
+        ))
+        db.add(BotMaxIdentityLink(
+            id="link-timeout-regression",
+            bot_visit_id="visit-timeout-regression",
+            bot_id="bot-1",
+            destination_id="bot-1",
+            max_user_id="user-1",
+            startapp_token="token-timeout-regression",
+            init_data_fingerprint="f" * 64,
+        ))
+        db.add(BotTrafficEvent(
+            id="handoff-timeout-regression",
+            bot_visit_id="visit-timeout-regression",
+            bot_id="bot-1",
+            destination_id="bot-1",
+            event_type="BOT_HANDOFF_CONFIRMED",
+            event_time=handoff_at,
+            metadata_json=json.dumps({"bot_start_wait_seconds": 30}),
+            dedupe_key="handoff-timeout-regression",
+        ))
+        await db.commit()
+
+    assert await process_bot_start_timeouts(sessions) == 1
+    async with sessions() as db:
+        timeout = await db.scalar(select(BotTrafficEvent).where(
+            BotTrafficEvent.bot_visit_id == "visit-timeout-regression",
+            BotTrafficEvent.event_type == "BOT_START_TIMEOUT_REACHED",
+        ))
+        assert timeout is not None
+    await engine.dispose()
 
 
 def test_worker_runs_timeout_processor_without_changing_conversion_loop():

@@ -60,11 +60,11 @@ async def process_bot_start_timeouts(session_factory, *, limit: int = 100) -> in
         timeout_exists = exists(select(BotTrafficEvent.id).where(
             BotTrafficEvent.bot_visit_id == BotTrafficVisit.id,
             BotTrafficEvent.event_type == "BOT_START_TIMEOUT_REACHED",
-        ))
+        ).correlate(BotTrafficVisit))
         real_start_exists = exists(select(BotTrafficEvent.id).where(
             BotTrafficEvent.bot_visit_id == BotTrafficVisit.id,
             BotTrafficEvent.event_type == "REAL_START_RECEIVED",
-        ))
+        ).correlate(BotTrafficVisit))
         rows = list((await db.execute(
             select(BotTrafficVisit, BotTrafficEvent)
             .join(BotTrafficEvent, BotTrafficEvent.bot_visit_id == BotTrafficVisit.id)
