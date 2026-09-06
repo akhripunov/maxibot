@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     max_auto_approve_chat_ids: str = ""
     max_auto_approve_delay_ms: int = 0
     max_auto_approve_max_attempts: int = 3
+    bot_start_wait_seconds: int = Field(default=30, ge=0, validation_alias="BOT_START_WAIT_SECONDS")
     max_api_base_url: str = "https://platform-api2.max.ru"
     max_updates_mode: str = "longpoll"
     max_webhook_url: str | None = None

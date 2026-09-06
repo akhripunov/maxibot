@@ -35,6 +35,7 @@ from app.traffic.deep_link import build_bot_deep_link, build_miniapp_deep_link, 
 from app.traffic.metrica_tag import metrica_tag_html, valid_counter_id
 from app.traffic.funnel_reporting import FunnelObservation, canonical_paid_click_report
 from app.traffic.funnel_reporting import campaign_matches
+from app.traffic.bot_start_observability import first_time_bot_user, handoff_snapshot, start_wait_timeout_reached, dropoff_classification
 from app.traffic.analytics import traffic_stats_for_channels
 from app.traffic.join_intent import activate_join_intent
 from app.security_tokens import decrypt_token
@@ -626,7 +627,13 @@ async def _bot_telemetry_event(db: AsyncSession, visit: BotTrafficVisit, event_t
     dedupe = f"bot-telemetry:{visit.id}:{event_type}"
     if await db.scalar(select(BotTrafficEvent.id).where(BotTrafficEvent.dedupe_key == dedupe)):
         return False
-    safe = {k: v for k, v in (metadata or {}).items() if k in {"device_family", "browser_family", "error_class"} and isinstance(v, (str, int, float, bool))}
+    safe_keys = {
+        "device_family", "browser_family", "error_class",
+        "bot_handoff_confirmed", "bot_open_confirmed", "first_time_bot_user",
+        "start_screen_expected", "start_screen_shown", "real_start_received",
+        "start_wait_timeout_reached", "bot_start_wait_seconds", "dropoff_classification",
+    }
+    safe = {k: v for k, v in (metadata or {}).items() if k in safe_keys and isinstance(v, (str, int, float, bool))}
     db.add(BotTrafficEvent(bot_visit_id=visit.id, bot_id=visit.bot_id, destination_id=visit.destination_id,
                            event_type=event_type, event_time=model_now(),
                            metadata_json=json.dumps(safe, ensure_ascii=False), dedupe_key=dedupe))
@@ -818,14 +825,45 @@ async def system_telemetry_report(
     for event in events:
         by_visit.setdefault(event.bot_visit_id, []).append(event)
     by_device: dict[str, dict[str, int]] = {}
+    diagnostics: list[dict[str, object]] = []
     for visit in visits:
         device = _diagnostic_device_family_from_user_agent(visit.user_agent) if visit.user_agent else "UNKNOWN"
         bucket = by_device.setdefault(device, {name: 0 for name in SYSTEM_TELEMETRY_EVENTS} | {"system_conversion": 0})
-        for event in by_visit.get(visit.id, []):
+        visit_events = by_visit.get(visit.id, [])
+        for event in visit_events:
             bucket[event.event_type] = bucket.get(event.event_type, 0) + 1
         if visit.status == "BOT_STARTED":
             bucket["system_conversion"] += 1
-    return {"scope": {"hours": hours}, "counts": {"visits": len(visits), "unique_yclid": len({v.yclid for v in visits if v.yclid}), "system_conversions": sum(1 for v in visits if v.status == "BOT_STARTED")}, "by_device": by_device}
+        handoff_event = next((event for event in visit_events if event.event_type == "BOT_HANDOFF_CONFIRMED"), None)
+        real_start = visit.status == "BOT_STARTED" or any(
+            event.event_type == "REAL_START_RECEIVED" for event in visit_events
+        )
+        handoff_meta = {}
+        if handoff_event:
+            try:
+                handoff_meta = json.loads(handoff_event.metadata_json or "{}")
+            except (TypeError, ValueError):
+                handoff_meta = {}
+        timeout_reached = start_wait_timeout_reached(
+            handoff_event.event_time if handoff_event else None,
+            now=datetime.now(timezone.utc),
+            wait_seconds=settings.bot_start_wait_seconds,
+        ) and not real_start
+        diagnostics.append({
+            "visit_hash": hashlib.sha256(visit.id.encode()).hexdigest()[:16],
+            "bot_handoff_confirmed": bool(handoff_event),
+            "bot_open_confirmed": handoff_meta.get("bot_open_confirmed", "UNPROVEN"),
+            "first_time_bot_user": handoff_meta.get("first_time_bot_user", "UNKNOWN"),
+            "start_screen_expected": handoff_meta.get("start_screen_expected", "UNKNOWN"),
+            "start_screen_shown": handoff_meta.get("start_screen_shown", "UNPROVEN"),
+            "real_start_received": "YES" if real_start else "NO",
+            "start_wait_timeout_reached": "YES" if timeout_reached else "NO",
+            "dropoff_classification": dropoff_classification(
+                real_start_received=real_start,
+                timeout_reached=timeout_reached,
+            ),
+        })
+    return {"scope": {"hours": hours}, "counts": {"visits": len(visits), "unique_yclid": len({v.yclid for v in visits if v.yclid}), "system_conversions": sum(1 for v in visits if v.status == "BOT_STARTED")}, "by_device": by_device, "diagnostics": diagnostics}
 
 @app.post("/system/traffic/events")
 async def system_traffic_event(payload: BrowserTrafficEventIn, request: Request, db: AsyncSession = Depends(get_session)):
@@ -967,7 +1005,8 @@ async def mini(request: Request, db: AsyncSession = Depends(get_session)):
 # system telemetry declarations.
 SYSTEM_HANDOFF_EVENTS = {
     "MINI_APP_LOADED", "HANDOFF_CONFIRMED", "TOKEN_RESOLVED", "MAX_USER_BOUND",
-    "SYSTEM_BOT_HANDOFF_CONFIRMED", "BOT_STARTED_CONVERSION_QUEUED",
+    "SYSTEM_BOT_HANDOFF_CONFIRMED", "BOT_STARTED_CONVERSION_QUEUED", "BOT_HANDOFF_CONFIRMED",
+    "REAL_START_RECEIVED",
 }
 
 
@@ -1038,6 +1077,21 @@ async def traffic_resolve(
         # MAX bot start event and must not create the business conversion.
         bot_visit.max_user_id = user_id
         bot_visit.status = "HANDOFF_CONFIRMED"
+        prior_real_start_count = await db.scalar(
+            select(func.count(BotTrafficVisit.id)).where(
+                BotTrafficVisit.bot_id == settings.max_bot_id,
+                BotTrafficVisit.destination_id == settings.max_bot_id,
+                BotTrafficVisit.max_user_id == user_id,
+                BotTrafficVisit.status == "BOT_STARTED",
+                BotTrafficVisit.started_at.is_not(None),
+                BotTrafficVisit.id != bot_visit.id,
+            )
+        )
+        snapshot = handoff_snapshot(
+            first_time=first_time_bot_user(prior_real_start_count),
+            wait_seconds=settings.bot_start_wait_seconds,
+        )
+        await _bot_telemetry_event(db, bot_visit, "BOT_HANDOFF_CONFIRMED", snapshot)
         await _bot_telemetry_event(db, bot_visit, "TOKEN_RESOLVED", {"device_family": "MAX_MINI_APP"})
         await _bot_telemetry_event(db, bot_visit, "MAX_USER_BOUND", {"device_family": "MAX_MINI_APP"})
         await _bot_telemetry_event(db, bot_visit, "HANDOFF_CONFIRMED", {"device_family": "MAX_MINI_APP"})

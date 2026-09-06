@@ -26,6 +26,7 @@ from app.traffic.metrica_sender import send_user_subscribed
 from app.integrations.max_connection import PRIMARY, BOT_CONNECTION
 from app.traffic.join_intent import consume_single_active_join_intent
 from app.traffic.analytics import traffic_stats_for_channels
+from app.traffic.bot_start_observability import dropoff_classification, start_wait_timeout_reached
 from app.ads.service import can_access_ads, campaigns_for_channel, latest_view
 from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
@@ -1921,7 +1922,38 @@ class MenuRepository:
                 return False
             if visit.status not in {"HANDOFF_CONFIRMED", "BOT_STARTED"}:
                 return False
-            visit.started_at = visit.started_at or datetime.now(timezone.utc)
+            started_at = visit.started_at or datetime.now(timezone.utc)
+            handoff_event = await db.scalar(select(BotTrafficEvent).where(
+                BotTrafficEvent.bot_visit_id == visit.id,
+                BotTrafficEvent.event_type == "BOT_HANDOFF_CONFIRMED",
+            ))
+            timeout_reached = start_wait_timeout_reached(
+                handoff_event.event_time if handoff_event else None,
+                now=started_at,
+                wait_seconds=settings.bot_start_wait_seconds,
+            )
+            if not await db.scalar(select(BotTrafficEvent.id).where(
+                BotTrafficEvent.bot_visit_id == visit.id,
+                BotTrafficEvent.event_type == "REAL_START_RECEIVED",
+            )):
+                db.add(BotTrafficEvent(
+                    bot_visit_id=visit.id,
+                    bot_id=visit.bot_id,
+                    destination_id=visit.destination_id,
+                    event_type="REAL_START_RECEIVED",
+                    event_time=started_at,
+                    metadata_json=json.dumps({
+                        "real_start_received": True,
+                        "start_wait_timeout_reached": "YES" if timeout_reached else "NO",
+                        "dropoff_classification": dropoff_classification(
+                            real_start_received=True,
+                            timeout_reached=timeout_reached,
+                        ),
+                        "bot_start_wait_seconds": max(0, settings.bot_start_wait_seconds),
+                    }, ensure_ascii=False),
+                    dedupe_key=f"bot-telemetry:{visit.id}:REAL_START_RECEIVED",
+                ))
+            visit.started_at = started_at
             # This method is called from the canonical MAX bot_started runtime
             # event, so this is the first point where the business goal may be
             # recorded.  Mini App resolve above remains telemetry-only.
