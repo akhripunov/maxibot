@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.db.base import Base
 from app.db.session import engine, get_session
-from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, BotConnection, AdsAiRun, SubscriptionOrder
+from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, BotConnection, AdsAiRun, SubscriptionOrder
 from app.domain.services import WELCOME, SENT, editable_welcome, render_channel_welcome_message, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
@@ -731,10 +731,11 @@ async def health():
 @app.get("/system/{public_id}", response_class=HTMLResponse)
 async def system_landing(public_id: str, request: Request, db: AsyncSession = Depends(get_session)):
     """System MAXIBOT landing; never resolves to a channel or channel profile."""
-    profile = await db.scalar(select(SystemPromotionProfile).where(
-        SystemPromotionProfile.system_key == "maxibot",
-        SystemPromotionProfile.enabled.is_(True),
-        SystemPromotionProfile.public_id == public_id,
+    profile = await db.scalar(select(BotPromotionProfile).where(
+        BotPromotionProfile.bot_key == "maxibot",
+        BotPromotionProfile.bot_type == "SYSTEM",
+        BotPromotionProfile.enabled.is_(True),
+        BotPromotionProfile.public_id == public_id,
     ))
     if not profile:
         raise HTTPException(404, "system landing not found")
@@ -1048,9 +1049,10 @@ async def traffic_resolve(
     system_token = _signed_startapp(identity_probe)
     bot_visit = await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == system_token)) if system_token else None
     if bot_visit:
-        profile = await db.scalar(select(SystemPromotionProfile).where(
-            SystemPromotionProfile.system_key == "maxibot",
-            SystemPromotionProfile.enabled.is_(True),
+        profile = await db.scalar(select(BotPromotionProfile).where(
+            BotPromotionProfile.bot_key == "maxibot",
+            BotPromotionProfile.bot_type == "SYSTEM",
+            BotPromotionProfile.enabled.is_(True),
         ))
         if bot_visit.bot_id != settings.max_bot_id or bot_visit.destination_id != settings.max_bot_id or not profile:
             raise HTTPException(409, "handoff destination mismatch")
@@ -1969,7 +1971,10 @@ async def yandex_oauth_callback(code: str | None = None, state: str | None = Non
             encrypted = await save_system_token(flow["admin"], payload, db=db)
             stage = "system_metrica_setup"
             metrica_setup = await ensure_system_setup(encrypted)
-            profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
+            profile = await db.scalar(select(BotPromotionProfile).where(
+                BotPromotionProfile.bot_key == "maxibot",
+                BotPromotionProfile.bot_type == "SYSTEM",
+            ))
             if not profile:
                 raise ValueError("system promotion profile unavailable")
             profile.yandex_counter_id = str(metrica_setup["counter_id"])
@@ -2509,10 +2514,11 @@ async def max_deeplink_poc() -> HTMLResponse:
 # intentionally a single opaque path segment: https://go.maxibot.pro/<public_id>.
 @app.get("/{public_id}", response_class=HTMLResponse)
 async def landing_root(public_id: str, request: Request, db: AsyncSession = Depends(get_session)):
-    system = await db.scalar(select(SystemPromotionProfile).where(
-        SystemPromotionProfile.system_key == "maxibot",
-        SystemPromotionProfile.public_id == public_id,
-        SystemPromotionProfile.enabled.is_(True),
+    system = await db.scalar(select(BotPromotionProfile).where(
+        BotPromotionProfile.bot_key == "maxibot",
+        BotPromotionProfile.bot_type == "SYSTEM",
+        BotPromotionProfile.public_id == public_id,
+        BotPromotionProfile.enabled.is_(True),
     ))
     if system:
         return await system_landing(public_id, request, db)

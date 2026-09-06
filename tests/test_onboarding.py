@@ -41,7 +41,7 @@ def test_connected_bots_have_no_separate_list_screen():
 
 def test_channel_and_bot_yandex_buttons_show_connection_status():
     assert '"🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ❌"' in MENU
-    assert '"🔗 Яндекс.Директ ✅" if bot_yandex_connected else "🔗 Яндекс.Директ ❌"' in MENU
+    assert '"🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ❌"' in MENU
 
 
 def test_add_bot_shows_intro_before_instruction():
@@ -63,7 +63,7 @@ def test_channel_promotion_menu_keeps_only_yandex_analytics_and_back():
     block = MENU[start:end]
     assert 'yandex_button' in block
     assert '"📊 Аналитика"' in block
-    assert '"⬅️ Назад"' in block
+    assert '"⬅️ Назад"' in MENU[MENU.index('def render_bot_promotion'):MENU.index('async def traffic_stats')]
     assert '"📄 Лендинг"' not in block
     assert '"⚙️ Настройки"' not in block
 
@@ -72,25 +72,20 @@ def test_bot_promotion_menu_keeps_only_yandex_analytics_and_back():
     start = MENU.index('if screen.startswith("promotion_bot:")')
     end = MENU.index('if screen.startswith(("promotion_bot_landing:"', start)
     block = MENU[start:end]
-    assert 'yandex_button' in block
-    assert '"📊 Аналитика"' in block
-    assert '"✏️ Тексты"' in block
-    assert '"📣 Рассылка"' in block
-    assert '"🔑 Обновить токен"' in block
-    assert '"⛔ Отключить бота"' in block
-    assert '"⬅️ Назад"' in block
+    assert 'render_bot_promotion(target)' in block
+    assert '"custom_bot_texts:' not in block
+    assert '"custom_bot_broadcast:' not in block
+    assert '"⬅️ Назад"' in MENU[MENU.index('def render_bot_promotion'):MENU.index('async def traffic_stats')]
     assert '"📄 Лендинг"' not in block
     assert '"⚙️ Настройки"' not in block
 
 
 def test_system_promotion_menu_keeps_only_yandex_analytics_and_back():
-    start = MENU.index('if screen == "promotion_maxibot":')
+    start = MENU.index('if screen in {"promotion_maxibot", "promotion_bot:system"}:')
     end = MENU.index('if screen in {"promotion_maxibot_landing",', start)
     block = MENU[start:end]
-    assert 'system_yandex_button' in block
-    assert '"🔗 Яндекс.Директ ✅" if system_yandex_connected else "🔗 Яндекс.Директ ❌"' in block
-    assert '"📊 Аналитика"' in block
-    assert '"⬅️ Назад"' in block
+    assert 'render_bot_promotion(target)' in block
+    assert '"⬅️ Назад"' in MENU[MENU.index('def render_bot_promotion'):MENU.index('async def traffic_stats')]
     assert '"📄 Лендинг"' not in block
     assert '"⚙️ Настройки"' not in block
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -16,7 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder
+from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder
 from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion, resolve_exact_identity_visit
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
@@ -706,6 +707,95 @@ def yandex_connection_instructions() -> str:
     )
 
 
+@dataclass(frozen=True)
+class BotPromotionTarget:
+    """Canonical promotion view for every BOT, including the system BOT.
+
+    Storage remains compatibility-preserving: the system profile and customer
+    BotConnection are adapters into this one presentation/domain contract.
+    CHANNEL promotion is intentionally not represented here.
+    """
+
+    key: str
+    title: str
+    yandex_value: str | None
+    counter_id: str | None
+    landing_url: str | None
+    yandex_action: str
+    analytics_action: str
+
+
+async def _bot_promotion_target(db: AsyncSession, admin: Admin, bot_key: str) -> BotPromotionTarget | None:
+    """Resolve one owner-scoped BOT into the shared promotion contract."""
+    if bot_key == "system":
+        if not is_maxibot_owner(admin):
+            return None
+        profile = await db.scalar(select(BotPromotionProfile).where(
+            BotPromotionProfile.bot_key == "maxibot",
+            BotPromotionProfile.bot_type == "SYSTEM",
+        ))
+        if not profile:
+            return BotPromotionTarget(
+                key="system", title="MAXIBOT", yandex_value=None, counter_id=None,
+                landing_url=None, yandex_action="promotion_maxibot_yandex",
+                analytics_action="promotion_maxibot_analytics",
+            )
+        connected = await system_connection_status(db=db)
+        return BotPromotionTarget(
+            key="system",
+            title="MAXIBOT",
+            yandex_value=profile.yandex_owner_login if profile.yandex_owner_login else ("Подключён" if connected else None),
+            counter_id=profile.yandex_counter_id,
+            landing_url=profile.landing_url,
+            yandex_action="promotion_maxibot_yandex",
+            analytics_action="promotion_maxibot_analytics",
+        )
+
+    bot = await db.scalar(select(BotConnection).where(
+        BotConnection.id == bot_key,
+        BotConnection.owner_admin_id == admin.id,
+    ))
+    if not bot:
+        return None
+    profile = await db.scalar(select(BotPromotionProfile).where(
+        BotPromotionProfile.bot_connection_id == bot.id,
+        BotPromotionProfile.owner_admin_id == admin.id,
+    ))
+    yandex_value = None
+    if profile and profile.yandex_owner_login:
+        yandex_value = profile.yandex_owner_login
+    elif profile and profile.yandex_oauth_token_encrypted:
+        try:
+            decrypt_token(profile.yandex_oauth_token_encrypted)
+            yandex_value = "Подключён"
+        except Exception:
+            yandex_value = None
+    return BotPromotionTarget(
+        key=bot.id,
+        title=bot.display_name or (f"@{bot.username.lstrip('@')}" if bot.username else "Бот"),
+        yandex_value=yandex_value,
+        counter_id=profile.yandex_counter_id if profile else None,
+        landing_url=profile.landing_url if profile else None,
+        yandex_action=f"promotion_bot_yandex:{bot.id}",
+        analytics_action=f"promotion_bot_analytics:{bot.id}",
+    )
+
+
+def render_bot_promotion(target: BotPromotionTarget) -> tuple[str, list[list[dict]]]:
+    """Single-source BOT promotion template for SYSTEM and CUSTOMER bots."""
+    return (
+        f"📣 Продвижение\n\nБот: {target.title}\n\n"
+        f"Яндекс.Директ: {target.yandex_value or '—'}\n"
+        f"Метрика: {target.counter_id or '—'}\n"
+        f"Лендинг: {target.landing_url or '—'}",
+        buttons(
+            ("🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ❌", target.yandex_action),
+            ("📊 Аналитика", target.analytics_action),
+            ("⬅️ Назад", "promotion"),
+        ),
+    )
+
+
 async def traffic_stats(db: AsyncSession, channel_id: str) -> dict[str, int | float]:
     return await traffic_stats_for_channels(db, [channel_id])
 
@@ -870,29 +960,16 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
     if screen == "subscription":
         plan_buttons = [(label, f"subscription_plan:service:{months}") for label, months in SUBSCRIPTION_PLANS]
         return service_subscription_text(), buttons(*plan_buttons, ("⬅️ Главное меню", "home"))
-    if screen == "promotion_maxibot":
-        if not is_maxibot_owner(admin):
-            return await render_screen(db, admin, "promotion")
-        profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
-        system_yandex = (profile.yandex_owner_login if profile and profile.yandex_owner_login else ("Подключён" if profile and profile.yandex_oauth_token_encrypted else "-"))
-        system_yandex_connected = await system_connection_status(db=db)
-        system_counter = profile.yandex_counter_id if profile and profile.yandex_counter_id else "-"
-        system_landing = profile.landing_url if profile and profile.landing_url else "-"
-        system_yandex_button = "🔗 Яндекс.Директ ✅" if system_yandex_connected else "🔗 Яндекс.Директ ❌"
-        keyboard = buttons((system_yandex_button, "promotion_maxibot_yandex"),
-                           ("📊 Аналитика", "promotion_maxibot_analytics"),
-                           ("⬅️ Назад", "promotion"))
-        return (
-            f"📣 Продвижение\n\nКанал: MAXIBOT\n\n"
-            f"Яндекс.Директ: {system_yandex}\n"
-            f"Метрика: {system_counter}\n"
-            f"Лендинг: {system_landing}",
-            keyboard,
-        )
+    if screen in {"promotion_maxibot", "promotion_bot:system"}:
+        target = await _bot_promotion_target(db, admin, "system")
+        return render_bot_promotion(target) if target else await render_screen(db, admin, "promotion")
     if screen in {"promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}:
         if not is_maxibot_owner(admin):
             return await render_screen(db, admin, "promotion")
-        profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
+        profile = await db.scalar(select(BotPromotionProfile).where(
+            BotPromotionProfile.bot_key == "maxibot",
+            BotPromotionProfile.bot_type == "SYSTEM",
+        ))
         if screen == "promotion_maxibot_landing":
             detail = f"🔗 {profile.landing_url}" if profile and profile.landing_url else "⛔ Системный landing ещё не настроен."
             body = f"📄 Лендинг\n\n🤖 MAXIBOT\n\n{detail}\n\nАтрибуция обычных каналов сюда не переносится."
@@ -914,45 +991,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return (body, buttons(("⬅️ MAXIBOT", "promotion_maxibot"), ("⬅️ Продвижение", "promotion")))
     if screen.startswith("promotion_bot:"):
         bot_id = screen.split(":", 1)[1]
-        bot = await db.scalar(select(BotConnection).where(
-            BotConnection.id == bot_id,
-            BotConnection.owner_admin_id == admin.id,
-        ))
-        if not bot:
-            return await render_screen(db, admin, "promotion")
-        username = f"@{bot.username.lstrip('@')}" if bot.username else "не указан"
-        bot_channels = list((await db.scalars(select(Channel).where(
-            Channel.admin_id == admin.id,
-            Channel.bot_connection_id == bot.id,
-        ))).all())
-        bot_yandex_connected = False
-        for channel in bot_channels:
-            if await connection_status(admin.external_id, channel.id, db=db):
-                bot_yandex_connected = True
-                break
-        yandex_button = "🔗 Яндекс.Директ ✅" if bot_yandex_connected else "🔗 Яндекс.Директ ❌"
-        status = {
-            "ACTIVE": "работает",
-            "WAITING_ADMIN_START": "ожидает запуска владельцем",
-            "DISABLED": "отключён",
-            "INVALID_TOKEN": "ошибка токена",
-            "ERROR": "ошибка",
-        }.get(bot.status, bot.status.lower())
-        return (
-            f"📣 Продвижение\n\n🤖 Бот: {bot.display_name or username}\n"
-            f"{username}\n\nСтатус: {status}\n\n"
-            "Это отдельная bot-scoped конфигурация. Данные каналов и MAXIBOT сюда не подставляются.",
-            buttons(
-                ("✏️ Тексты", f"custom_bot_texts:{bot.id}"),
-                ("📣 Рассылка", f"custom_bot_broadcast:{bot.id}"),
-                ("📊 Статистика", f"custom_bot_stats:{bot.id}"),
-                ("🔑 Обновить токен", f"custom_bot_refresh:{bot.id}"),
-                ("⛔ Отключить бота", f"custom_bot_disable:{bot.id}"),
-                (yandex_button, f"promotion_bot_yandex:{bot.id}"),
-                ("📊 Аналитика", f"promotion_bot_analytics:{bot.id}"),
-                ("⬅️ Назад", "promotion"),
-            ),
-        )
+        target = await _bot_promotion_target(db, admin, bot_id)
+        return render_bot_promotion(target) if target else await render_screen(db, admin, "promotion")
     if screen.startswith(("promotion_bot_landing:", "promotion_bot_yandex:", "promotion_bot_analytics:", "promotion_bot_settings:")):
         bot_id = screen.split(":", 1)[1]
         bot = await db.scalar(select(BotConnection).where(
@@ -2078,6 +2118,18 @@ class MenuRepository:
                     public_id=new_landing_public_id(),
                     encrypted_token=encrypted_token, status="WAITING_ADMIN_START")
                 db.add(bot)
+                await db.flush()
+            promotion = await db.scalar(select(BotPromotionProfile).where(
+                BotPromotionProfile.bot_connection_id == bot.id,
+            ))
+            if not promotion:
+                db.add(BotPromotionProfile(
+                    bot_key=bot.max_bot_id,
+                    bot_type="CUSTOMER",
+                    owner_admin_id=admin.id,
+                    bot_connection_id=bot.id,
+                    enabled=True,
+                ))
             await db.commit(); await db.refresh(bot)
             return bot
 

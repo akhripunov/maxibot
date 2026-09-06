@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import Admin, Channel, TrafficProfile, SystemPromotionProfile
+from app.db.models import Admin, Channel, TrafficProfile, SystemPromotionProfile, BotPromotionProfile
 from app.security_tokens import decrypt_token, encrypt_token
 
 METRICA_SCOPES = ("metrika:read", "metrika:write")
@@ -134,16 +134,22 @@ async def save_token(admin_external_id: str, channel_id: str, token_payload: dic
 
 async def save_system_token(admin_external_id: str, token_payload: dict, *, db: AsyncSession) -> str:
     encrypted = encrypt_token(token_payload["access_token"])
-    profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
+    profile = await db.scalar(select(BotPromotionProfile).where(
+        BotPromotionProfile.bot_key == "maxibot",
+        BotPromotionProfile.bot_type == "SYSTEM",
+    ))
     if not profile:
-        raise ValueError("system promotion profile unavailable for OAuth connection")
+        raise ValueError("canonical system BOT promotion profile unavailable")
     profile.yandex_oauth_token_encrypted = encrypted
     profile.yandex_oauth_connected_at = datetime.now(timezone.utc)
     return encrypted
 
 
 async def system_connection_status(*, db: AsyncSession) -> dict | None:
-    profile = await db.scalar(select(SystemPromotionProfile).where(SystemPromotionProfile.system_key == "maxibot"))
+    profile = await db.scalar(select(BotPromotionProfile).where(
+        BotPromotionProfile.bot_key == "maxibot",
+        BotPromotionProfile.bot_type == "SYSTEM",
+    ))
     if not profile or not profile.yandex_oauth_token_encrypted:
         return None
     try:

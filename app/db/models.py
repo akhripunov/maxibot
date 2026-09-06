@@ -200,6 +200,34 @@ class SystemPromotionProfile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
 
+
+class BotPromotionProfile(Base):
+    """Canonical BOT-scoped promotion configuration.
+
+    ``BotConnection`` owns credentials and runtime state.  This model owns
+    promotion data for both SYSTEM (MaxiBot) and CUSTOMER bots.  The legacy
+    ``SystemPromotionProfile`` remains available only for compatibility with
+    historical landing records during the convergence rollout.
+    """
+    __tablename__ = "bot_promotion_profiles"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    bot_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    bot_type: Mapped[str] = mapped_column(String(16), default="CUSTOMER", nullable=False, index=True)
+    owner_admin_id: Mapped[Optional[str]] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
+    bot_connection_id: Mapped[Optional[str]] = mapped_column(ForeignKey("bot_connections.id", ondelete="CASCADE"), unique=True, index=True)
+    legacy_system_key: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True)
+    public_id: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True)
+    landing_url: Mapped[Optional[str]] = mapped_column(String(2048))
+    target_url: Mapped[Optional[str]] = mapped_column(String(2048))
+    yandex_counter_id: Mapped[Optional[str]] = mapped_column(String(128))
+    yandex_goal_name: Mapped[Optional[str]] = mapped_column(String(128))
+    yandex_owner_login: Mapped[Optional[str]] = mapped_column(String(255))
+    yandex_oauth_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    yandex_oauth_connected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
 class SystemTrafficVisit(Base):
     """A system-scoped ad visit; intentionally independent from channels."""
     __tablename__ = "system_traffic_visits"

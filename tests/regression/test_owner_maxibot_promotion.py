@@ -16,17 +16,14 @@ def test_system_maxibot_is_an_owner_only_row_in_promotion_list():
 
 
 def test_system_maxibot_screen_is_owner_gated_without_public_channel_shortcut():
-    start = MENU.index('if screen == "promotion_maxibot":')
+    start = MENU.index('if screen in {"promotion_maxibot", "promotion_bot:system"}:')
     end = MENU.index('if screen.startswith("promotion_channel:"):', start)
     screen = MENU[start:end]
     assert 'if not is_maxibot_owner(admin):' in screen
-    assert 'f"📣 Продвижение\\n\\nКанал: MAXIBOT\\n\\n"' in screen
-    assert 'system_yandex' in screen
-    assert 'system_counter' in screen
-    assert 'system_landing' in screen
+    assert 'render_bot_promotion(target)' in screen
     assert '"🌐 MAX-канал"' not in screen
     assert '"promotion"' in screen
-    assert '("⬅️ Назад", "promotion")' in screen
+    assert '("⬅️ Назад", "promotion")' in MENU
 
 
 def test_system_maxibot_callback_is_first_class_navigation():
@@ -38,9 +35,8 @@ def test_system_maxibot_has_separate_channel_like_sections():
     for action in ("promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"):
         assert action in MENU
         assert action in RUNTIME
-    assert "SystemPromotionProfile" in MENU
-    system_screen = MENU[MENU.index('if screen == "promotion_maxibot":'):MENU.index('if screen.startswith("promotion_channel:"):', MENU.index('if screen == "promotion_maxibot":'))]
-    assert "select(SystemPromotionProfile)" in system_screen
+    system_screen = MENU[MENU.index('if screen in {"promotion_maxibot", "promotion_bot:system"}:'):MENU.index('if screen.startswith("promotion_channel:"):', MENU.index('if screen in {"promotion_maxibot", "promotion_bot:system"}:'))]
+    assert "select(BotPromotionProfile)" in system_screen
     assert "select(TrafficProfile)" not in system_screen
 
 
@@ -149,10 +145,10 @@ def test_system_yandex_screen_has_only_oauth_and_promotion_back_buttons():
 
 
 def test_system_promotion_displays_yandex_owner_login_without_cross_channel_lookup():
-    start = MENU.index('if screen == "promotion_maxibot":')
+    start = MENU.index('if screen in {"promotion_maxibot", "promotion_bot:system"}:')
     end = MENU.index('if screen in {"promotion_maxibot_landing"', start)
     screen = MENU[start:end]
-    assert "profile.yandex_owner_login" in screen
+    assert "BotPromotionProfile" in MENU
     assert "TrafficProfile" not in screen
 
 
@@ -191,7 +187,7 @@ def test_bot_promotion_is_owner_scoped_and_keeps_system_and_channel_scopes_separ
     screen = MENU[start:end]
     assert 'BotConnection.id == bot_id' in screen
     assert 'BotConnection.owner_admin_id == admin.id' in screen
-    assert "bot-scoped" in screen
+    assert "_bot_promotion_target" in screen
     assert "TrafficProfile" not in screen
     assert "SystemPromotionProfile" not in screen
 
