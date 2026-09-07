@@ -689,10 +689,10 @@ class MaxBotRuntime:
             bool(clicked_mid),
         )
 
-    async def _ack_callback_in_background(self, callback_id: str) -> None:
+    async def _ack_callback_in_background(self, callback_id: str, notification: str | None = None) -> None:
         """Acknowledge a slow MAX callback without blocking the UI update."""
         try:
-            await self.client.answer_callback(callback_id)
+            await self.client.answer_callback(callback_id, notification=notification)
         except Exception:
             logger.exception("MAX_CALLBACK_ACK_FAILED callback_id_present=%s", bool(callback_id))
 
@@ -769,7 +769,10 @@ class MaxBotRuntime:
             # MAX /answers can intermittently take several seconds.  The
             # token-entry panel is safe to render immediately; the callback
             # acknowledgement is independent and must not hold the UI path.
-            asyncio.create_task(self._ack_callback_in_background(update.callback_id))
+            asyncio.create_task(self._ack_callback_in_background(
+                update.callback_id,
+                "Готово — отправьте токен следующим сообщением.",
+            ))
         elif update.callback_id:
             await self.client.answer_callback(update.callback_id)
         # Old MAX message copies can contain channel/landing IDs that were
