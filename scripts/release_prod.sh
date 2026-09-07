@@ -186,6 +186,32 @@ PREVIOUS_IMAGE=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Config.Im
 CURRENT_ALEMBIC=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
 [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ && -n "$PREVIOUS_IMAGE" && -n "$CURRENT_ALEMBIC" ]] || die "rollback metadata incomplete"
 remote "set -eu; cp \"$PREVIOUS_CONFIG\" \"$PRODUCTION_ROOT/releases/$TARGET_SHA/rollback-compose.vps.yml\""
+say PRE_DEPLOY_SHA "$PREVIOUS_SHA"
+say PRE_DEPLOY_ALEMBIC_HEAD "$CURRENT_ALEMBIC"
+
+# A migration is not allowed to start until a validated, restricted, bounded
+# database backup exists. The custom pg_dump format is compressed by postgres
+# itself and can be inspected by pg_restore without exposing secrets.
+BACKUP_PATH=$(remote "set -eu
+backup_dir='$PRODUCTION_ROOT/backups'
+free_kb=\$(df -Pk '$PRODUCTION_ROOT' | awk 'NR==2 {print \$4}')
+test \"\$free_kb\" -ge 1048576
+mkdir -p \"\$backup_dir\"
+chmod 700 \"\$backup_dir\"
+stamp=\$(date -u +%Y%m%dT%H%M%SZ)
+backup_path=\"\$backup_dir/maxibot-db-${TARGET_SHA}-\${stamp}.dump\"
+docker exec maxibot-vps-db-1 pg_dump -U maxibot -d maxibot --format=custom --no-owner --no-privileges > \"\$backup_path\"
+test -s \"\$backup_path\"
+chmod 600 \"\$backup_path\"
+docker exec -i maxibot-vps-db-1 pg_restore --list < \"\$backup_path\" > /dev/null
+find \"\$backup_dir\" -maxdepth 1 -type f -name 'maxibot-db-*.dump' -printf '%T@ %p\\n' | sort -nr | awk 'NR > 5 {sub(/^[^ ]+ /, \"\"); print}' | xargs -r rm -f --
+printf '%s\\n' \$backup_path")
+[[ "$BACKUP_PATH" == "$PRODUCTION_ROOT/backups/maxibot-db-${TARGET_SHA}-"*.dump ]] || die "backup path validation failed"
+say BACKUP PASS
+say BACKUP_VALIDATION PASS
+say BACKUP_DISK_PREFLIGHT PASS
+say BACKUP_PATH "$BACKUP_PATH"
+say ROLLBACK_READY YES
 
 # This is the migration safety gate. No DB write or runtime switch precedes it.
 remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose -p maxibot-vps -f docker-compose.vps.yml config --quiet; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx api; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx worker"

@@ -8,7 +8,7 @@ import sqlalchemy as sa
 
 
 revision = "0076_ads_directologist_decision_engine_v1"
-down_revision = "0075_ads_canonical_v2"
+down_revision = "0075a_alembic_version_width"
 branch_labels = None
 depends_on = None
 
