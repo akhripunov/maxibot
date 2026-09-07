@@ -51,6 +51,13 @@ def test_add_bot_shows_intro_before_instruction():
     assert 'if screen == "connect_bot":' in MENU
 
 
+def test_continue_bot_connection_acks_immediately_and_keeps_original_token_screen():
+    assert 'action == "custom_bot_token"' in RUNTIME
+    assert 'notification="Открываю форму подключения…"' in RUNTIME
+    assert 'asyncio.create_task(self._render_custom_bot_token_background(user_id))' in RUNTIME
+    assert 'await self._render(user_id, "custom_bot_token")' in RUNTIME
+
+
 def test_admin_command_uses_platform_owner_allowlist():
     assert 'async def is_platform_admin' in MENU
     assert 'await self.repo.is_platform_admin(target_id)' in RUNTIME

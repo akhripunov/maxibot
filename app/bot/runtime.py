@@ -655,6 +655,7 @@ class MaxBotRuntime:
             len(keyboard),
             sum(len(row) for row in keyboard),
         )
+
         if screen.startswith("promotion_channel:"):
             logger.warning(
                 "ADS_MENU_OUTBOUND_TRACE screen=promotion_channel instance_pid=%s buttons=%s",
@@ -688,6 +689,13 @@ class MaxBotRuntime:
             screen,
             bool(clicked_mid),
         )
+
+    async def _render_custom_bot_token_background(self, user_id: str) -> None:
+        """Keep the original token screen, outside the callback latency path."""
+        try:
+            await self._render(user_id, "custom_bot_token")
+        except Exception:
+            logger.exception("CUSTOM_BOT_TOKEN_SCREEN_RENDER_FAILED")
 
     async def _callback(self, update: MaxUpdate):
         user_id = self._event_user_id(update)
@@ -758,6 +766,16 @@ class MaxBotRuntime:
             return
         # Non-navigation callbacks keep the immediate acknowledgement to
         # avoid retries while their action performs longer work.
+        if update.callback_id and action == "custom_bot_token":
+            # MAX can take ~4s to PUT this exact screen.  Acknowledge the tap
+            # immediately, then render the unchanged original token screen.
+            if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):
+                await self.client.answer_callback(
+                    update.callback_id,
+                    notification="Открываю форму подключения…",
+                )
+                asyncio.create_task(self._render_custom_bot_token_background(user_id))
+            return
         if update.callback_id:
             await self.client.answer_callback(update.callback_id)
         # Old MAX message copies can contain channel/landing IDs that were
