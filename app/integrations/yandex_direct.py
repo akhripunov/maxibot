@@ -103,7 +103,7 @@ class YandexDirectClient:
                 "ads",
                 selection={"CampaignIds": ids[start:start + 10]},
                 fields=("Id", "CampaignId", "Type", "Subtype", "State", "Status", "StatusClarification"),
-                extra_params={"TextAdFieldNames": ["Href"]},
+                extra_params={"TextAdFieldNames": ["Title", "Title2", "Text", "Href", "DisplayUrlPath"]},
             ))
         batches = await asyncio.gather(*requests) if requests else []
         return [ad for batch in batches for ad in batch]

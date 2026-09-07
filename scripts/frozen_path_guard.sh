@@ -119,7 +119,8 @@ def ads_only_shared_change(path: str) -> bool:
             "user_added", "max_subscriber", "bot_started", "Metrika",
             "paid_dedupe", "cross_object",
         )
-        return "AdsPromotionCampaignLink" in text and not any(marker in text for marker in frozen_markers)
+        ads_markers = ("AdsAccount", "AdsCampaign", "AdsEntity", "AdsCreative", "AdsObservation", "AdsCollectionRun", "AdsAnalysisSnapshot", "AdsAiOutcome", "AdsPromotionCampaignLink")
+        return any(marker in text for marker in ads_markers) and not any(marker in text for marker in frozen_markers)
     if path.startswith("alembic/versions/"):
         text = changed_lines(path)
         frozen_markers = (
@@ -130,12 +131,25 @@ def ads_only_shared_change(path: str) -> bool:
         return "ads_promotion_campaign_links" in text and not any(marker in text.lower() for marker in frozen_markers)
     return False
 
+def ads_only_channel_ui_change(path: str) -> bool:
+    """Allow ADS storage labels in the shared menu without exempting flow code."""
+    if path != "app/bot/menu.py":
+        return False
+    text = changed_lines(path)
+    if not text or not any(marker in text for marker in ("ads_", "AdsAi", "AdsV2")):
+        return False
+    frozen_markers = (
+        "TrafficVisit", "BotTrafficVisit", "MaxIdentityLink", "BotMaxIdentityLink",
+        "user_added", "max_subscriber", "bot_started", "Metrika", "custom_bot",
+    )
+    return not any(marker in text for marker in frozen_markers)
+
 bot_scoped = {
     path for path in changed
     if any(path == scoped_path and marker in diff_for(path) for scoped_path, marker in scoped_bot_only)
 }
 bot_direct = [p for p in changed if any(matches(x, p) for x in lists.get("bot_direct", []))]
-channel_direct = [p for p in changed if any(matches(x, p) for x in lists.get("channel_direct", []))]
+channel_direct = [p for p in changed if any(matches(x, p) for x in lists.get("channel_direct", [])) and not ads_only_channel_ui_change(p)]
 shared = [p for p in changed if any(matches(x, p) for x in lists.get("shared_dependencies", []))]
 shared_for_impact = [p for p in shared if p not in bot_scoped and not ads_only_shared_change(p)]
 protected = sorted(set(bot_direct + channel_direct + shared_for_impact))

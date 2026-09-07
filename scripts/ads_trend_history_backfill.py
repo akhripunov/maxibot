@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 
 from app.ads.providers.yandex import GRANULAR_REPORTS, YandexAdsProvider
 from app.ads.v2 import _entity, _identity, _metric, _upsert_daily_aggregate
-from app.db.models import Admin, AdsCampaign, AdsChannelCampaignLink, AdsSnapshot, AdsV2DailyAggregate, AdsV2Entity, AdsV2ReportRun, Channel
+from app.db.models import Admin, AdsAnalysisSnapshot, AdsCampaign, AdsDailyAggregate, AdsEntity, AdsPromotionCampaignLink, AdsReportRun, Channel
 from app.db.session import SessionLocal
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
@@ -41,7 +41,7 @@ async def _campaign_context(db, external_id: str):
     campaign = await db.scalar(select(AdsCampaign).where(AdsCampaign.external_id == external_id))
     if not campaign:
         raise RuntimeError("CAMPAIGN_NOT_FOUND")
-    link = await db.scalar(select(AdsChannelCampaignLink).where(AdsChannelCampaignLink.campaign_id == campaign.id, AdsChannelCampaignLink.status == "ACTIVE"))
+    link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.status == "ACTIVE"))
     channel = await db.get(Channel, link.channel_id) if link else None
     admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
     encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
@@ -52,16 +52,16 @@ async def _campaign_context(db, external_id: str):
 
 async def _report_run(db, *, report_type: str, campaign_id: str, date_from: date, date_to: date, fields: tuple[str, ...], fetched_at: datetime, rows: int, status: str = "SUCCESS", error_code: str | None = None):
     request_hash = hashlib.sha256(json.dumps({"source": SOURCE, "version": VERSION, "campaign": campaign_id, "report_type": report_type, "from": date_from.isoformat(), "to": date_to.isoformat(), "fields": fields}, sort_keys=True).encode()).hexdigest()
-    item = AdsV2ReportRun(provider="YANDEX_DIRECT", report_type=report_type, campaign_provider_id=campaign_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(fields), request_hash=request_hash, fetched_at=fetched_at, row_count=rows, parser_version=VERSION, status=status, error_code=error_code, freshness_caveat="historical exact Date backfill; delayed provider reconciliation is bounded")
+    item = AdsReportRun(provider="YANDEX_DIRECT", report_type=report_type, campaign_provider_id=campaign_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(fields), request_hash=request_hash, fetched_at=fetched_at, row_count=rows, parser_version=VERSION, status=status, error_code=error_code, freshness_caveat="historical exact Date backfill; delayed provider reconciliation is bounded")
     db.add(item)
     await db.flush()
     return item
 
 
 async def _persist_daily(db, *, campaign, dimension: str, rows: list[dict], report_run_id: str, fetched_at: datetime, date_from: date, date_to: date) -> tuple[int, int]:
-    campaign_entity = await db.scalar(select(AdsV2Entity.id).where(AdsV2Entity.provider == "YANDEX_DIRECT", AdsV2Entity.entity_type == "CAMPAIGN", AdsV2Entity.provider_entity_id == campaign.external_id))
+    campaign_entity = await db.scalar(select(AdsEntity.id).where(AdsEntity.provider == "YANDEX_DIRECT", AdsEntity.entity_type == "CAMPAIGN", AdsEntity.provider_entity_id == campaign.external_id))
     if not campaign_entity:
-        entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state})
+        entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
         campaign_entity = entity.id
     daily: dict[tuple[str | None, str | None, date], dict[str, float]] = defaultdict(lambda: {metric: 0.0 for metric in ("impressions", "clicks", "cost", "conversions")})
     for row in rows:
@@ -98,8 +98,8 @@ async def run(external_id: str, date_from: date, date_to: date) -> dict:
         raise RuntimeError("BACKFILL_RANGE_MUST_BE_30_COMPLETED_DAYS")
     async with SessionLocal() as db:
         campaign, channel, token = await _campaign_context(db, external_id)
-        before = int(await db.scalar(select(func.count(AdsV2DailyAggregate.id))) or 0)
-        snapshot = AdsSnapshot(channel_id=channel.id, campaign_id=campaign.id, source=SOURCE, period_from=date_from, period_to=date_to, facts_json=json.dumps({"source": SOURCE, "version": VERSION, "current_partial_day_excluded": True}, ensure_ascii=False))
+        before = int(await db.scalar(select(func.count(AdsDailyAggregate.id))) or 0)
+        snapshot = AdsAnalysisSnapshot(channel_id=channel.id, campaign_id=campaign.id, source=SOURCE, period_from=date_from, period_to=date_to, facts_json=json.dumps({"source": SOURCE, "version": VERSION, "current_partial_day_excluded": True}, ensure_ascii=False))
         db.add(snapshot)
         await db.flush()
         provider = YandexAdsProvider(token)
@@ -127,7 +127,7 @@ async def run(external_id: str, date_from: date, date_to: date) -> dict:
         finally:
             await provider.close()
         await db.commit()
-        after = int(await db.scalar(select(func.count(AdsV2DailyAggregate.id))) or 0)
+        after = int(await db.scalar(select(func.count(AdsDailyAggregate.id))) or 0)
     return {"source": SOURCE, "version": VERSION, "campaign_external_id": external_id, "date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "timezone": "Europe/Moscow", "daily_rows_before": before, "daily_rows_after": after, **result, "duplicates_created": 0}
 
 

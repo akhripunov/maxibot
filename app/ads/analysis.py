@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AdsCampaign, AdsSnapshot, AdsV2DailyAggregate, AdsV2Observation
+from app.db.models import AdsAnalysisSnapshot, AdsCampaign, AdsDailyAggregate, AdsObservation
 from app.ads.facts import CampaignFactSet
 from app.ads.trends import build_trend_features
 from app.core.config import settings
@@ -495,12 +495,12 @@ async def build_v2_analysis_dataset(
 ) -> dict[str, Any]:
     cutoff = cutoff or (datetime.now(timezone.utc).astimezone(__import__("zoneinfo").ZoneInfo("Europe/Moscow")).date() - timedelta(days=6))
     rows = list((await db.scalars(
-        select(AdsV2Observation)
-        .join(AdsSnapshot, AdsSnapshot.id == AdsV2Observation.snapshot_id)
-        .where(AdsSnapshot.campaign_id == campaign.id, AdsV2Observation.date_to >= cutoff)
-        .order_by(AdsV2Observation.created_at.desc())
+        select(AdsObservation)
+        .join(AdsAnalysisSnapshot, AdsAnalysisSnapshot.id == AdsObservation.snapshot_id)
+        .where(AdsAnalysisSnapshot.campaign_id == campaign.id, AdsObservation.date_to >= cutoff)
+        .order_by(AdsObservation.created_at.desc())
     )).all())
-    latest: dict[tuple[Any, ...], AdsV2Observation] = {}
+    latest: dict[tuple[Any, ...], AdsObservation] = {}
     for row in rows:
         key = (row.dimension_type, row.entity_id, row.dimension_value, row.date_from, row.date_to, row.window)
         latest.setdefault(key, row)
@@ -577,7 +577,7 @@ async def build_v2_analysis_dataset(
             "truncated": len(notable) < len(calculated), "selection_method": "deterministic_multi_rank_v1",
             "sufficiency_gate_version": "impressions>=30 OR clicks>=3 OR conversions>=1",
         }
-    daily_rows = list((await db.scalars(select(AdsV2DailyAggregate).where(AdsV2DailyAggregate.campaign_id == campaign.id).order_by(AdsV2DailyAggregate.aggregate_date, AdsV2DailyAggregate.dimension_type))).all())
+    daily_rows = list((await db.scalars(select(AdsDailyAggregate).where(AdsDailyAggregate.campaign_id == campaign.id).order_by(AdsDailyAggregate.aggregate_date, AdsDailyAggregate.dimension_type))).all())
     trend_rows = []
     trend_evidence: dict[str, Any] = {}
     for aggregate in daily_rows:
@@ -618,7 +618,7 @@ async def build_v2_analysis_dataset(
         if key in referenced_trend_evidence
     }
     dataset = {
-        "dataset_version": "ads_v2_analysis_v1",
+        "dataset_version": "ads_canonical_analysis_v2",
         "campaign_id": campaign.id,
         "period": {"from": cutoff.isoformat(), "to": max((r.date_to for r in latest.values() if r.date_to), default=cutoff).isoformat(), "timezone": "Europe/Moscow"},
         "data_cutoff": datetime.now(timezone.utc).isoformat(),

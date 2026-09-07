@@ -20,7 +20,7 @@ from app.db.models import (
     Admin,
     AdsAiRun,
     AdsMemory,
-    AdsSnapshot,
+    AdsAnalysisSnapshot,
     BotConnection,
     BotConversion,
     BotMaxIdentityLink,
@@ -672,7 +672,7 @@ async def admin_ads_storage(
     return {
         "counts": {
             "ai_runs": await _count(db, AdsAiRun),
-            "snapshots": await _count(db, AdsSnapshot),
+            "snapshots": await _count(db, AdsAnalysisSnapshot),
             "memories": await _count(db, AdsMemory),
         },
         "secrets_exposed": False,

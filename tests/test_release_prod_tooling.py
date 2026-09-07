@@ -5,7 +5,7 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
-CURRENT_HEAD_MIGRATION = "0074_ads_provider_neutral_links"
+CURRENT_HEAD_MIGRATION = "0075_ads_canonical_v2"
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -90,10 +90,12 @@ def test_production_ssh_target_is_explicit_and_canonical():
 def test_frozen_guard_exempts_only_ads_schema_plumbing():
     source = (ROOT / "scripts/frozen_path_guard.sh").read_text()
     assert "def ads_only_shared_change(path: str)" in source
-    assert '"AdsPromotionCampaignLink" in text' in source
+    assert '"AdsPromotionCampaignLink")' in source
     assert '"ads_promotion_campaign_links" in text' in source
     assert "shared_for_impact" in source
     assert 'print("FROZEN_PATH_GUARD=BLOCK")' in source
+    assert "def ads_only_channel_ui_change(path: str)" in source
+    assert "app/bot/menu.py" in source
 
 
 def test_release_context_excludes_appledouble_and_keeps_alembic_preflight():
@@ -132,7 +134,7 @@ def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0073_free_trial_v1" in result.stdout
+    assert "TARGET_DOWN_REVISION=0074_ads_provider_neutral_links" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():

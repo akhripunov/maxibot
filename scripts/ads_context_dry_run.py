@@ -16,7 +16,7 @@ from app.ads.llm import provider_from_settings
 from app.ads.memory import retrieve
 from app.ads.service import _context
 from app.core.config import settings
-from app.db.models import AdsCampaign, AdsChannelCampaignLink
+from app.db.models import AdsCampaign, AdsPromotionCampaignLink
 from app.db.session import SessionLocal
 from app.traffic.analytics import traffic_stats_for_channels
 
@@ -33,9 +33,10 @@ async def main(external_id: str) -> None:
         now = datetime.now(timezone.utc)
         today = now.astimezone(__import__("zoneinfo").ZoneInfo("Europe/Moscow")).date()
         dataset = await build_v2_analysis_dataset(db, campaign=campaign)
-        channel_id = await db.scalar(select(AdsChannelCampaignLink.channel_id).where(
-            AdsChannelCampaignLink.campaign_id == campaign.id,
-            AdsChannelCampaignLink.status == "ACTIVE",
+        channel_id = await db.scalar(select(AdsPromotionCampaignLink.channel_id).where(
+            AdsPromotionCampaignLink.object_type == "CHANNEL",
+            AdsPromotionCampaignLink.campaign_id == campaign.id,
+            AdsPromotionCampaignLink.status == "ACTIVE",
         ))
         if not channel_id:
             raise SystemExit("campaign has no active channel mapping")

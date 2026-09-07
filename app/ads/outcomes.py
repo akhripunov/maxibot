@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AdsAiRun, AdsRecommendation, AdsV2Outcome
+from app.db.models import AdsAiRun, AdsAiOutcome, AdsRecommendation
 
 OUTCOME_HORIZONS = (("24h", timedelta(hours=24)), ("72h", timedelta(hours=72)), ("7d", timedelta(days=7)))
 OUTCOME_METRICS = ("impressions_7d", "clicks_7d", "cost_7d", "conversions_7d")
@@ -26,7 +26,7 @@ async def ensure_outcome_checkpoints(
     """Idempotently create the three advisory checkpoints from recommendation time."""
     existing = {
         row.horizon
-        for row in (await db.scalars(select(AdsV2Outcome).where(AdsV2Outcome.recommendation_id == recommendation.id))).all()
+        for row in (await db.scalars(select(AdsAiOutcome).where(AdsAiOutcome.recommendation_id == recommendation.id))).all()
     }
     if baseline_snapshot_id is None and recommendation.ai_run_id:
         ai = await db.get(AdsAiRun, recommendation.ai_run_id)
@@ -38,7 +38,7 @@ async def ensure_outcome_checkpoints(
     for horizon, delta in OUTCOME_HORIZONS:
         if horizon in existing:
             continue
-        db.add(AdsV2Outcome(
+        db.add(AdsAiOutcome(
             recommendation_id=recommendation.id,
             horizon=horizon,
             due_at=created_at + delta,
@@ -64,13 +64,13 @@ async def backfill_missing_outcome_checkpoints(db: AsyncSession, *, limit: int =
     return created
 
 
-async def claim_due_outcomes(db: AsyncSession, *, now: datetime | None = None, limit: int = 20) -> list[AdsV2Outcome]:
+async def claim_due_outcomes(db: AsyncSession, *, now: datetime | None = None, limit: int = 20) -> list[AdsAiOutcome]:
     now = now or datetime.now(timezone.utc)
     async with db.begin():
         rows = list((await db.scalars(
-            select(AdsV2Outcome)
-            .where(or_(AdsV2Outcome.status == "PENDING", AdsV2Outcome.status == "RETRYABLE_FAILED"), AdsV2Outcome.due_at <= now, or_(AdsV2Outcome.next_retry_at.is_(None), AdsV2Outcome.next_retry_at <= now))
-            .order_by(AdsV2Outcome.due_at)
+            select(AdsAiOutcome)
+            .where(or_(AdsAiOutcome.status == "PENDING", AdsAiOutcome.status == "RETRYABLE_FAILED"), AdsAiOutcome.due_at <= now, or_(AdsAiOutcome.next_retry_at.is_(None), AdsAiOutcome.next_retry_at <= now))
+            .order_by(AdsAiOutcome.due_at)
             .with_for_update(skip_locked=True)
             .limit(limit)
         )).all())
@@ -80,14 +80,14 @@ async def claim_due_outcomes(db: AsyncSession, *, now: datetime | None = None, l
     return rows
 
 
-async def mark_outcome_retryable(db: AsyncSession, outcome: AdsV2Outcome, error_code: str) -> None:
+async def mark_outcome_retryable(db: AsyncSession, outcome: AdsAiOutcome, error_code: str) -> None:
     outcome.status = "RETRYABLE_FAILED" if outcome.attempts < 3 else "FAILED"
     outcome.error_code = error_code
     outcome.next_retry_at = datetime.now(timezone.utc) + timedelta(hours=min(24, 6 * max(1, outcome.attempts))) if outcome.status == "RETRYABLE_FAILED" else None
     await db.commit()
 
 
-async def mark_outcome_completed(db: AsyncSession, outcome: AdsV2Outcome, *, followup_snapshot_id: str, delta: dict) -> None:
+async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, followup_snapshot_id: str, delta: dict) -> None:
     import json
     outcome.status = "COMPLETED"
     outcome.followup_snapshot_id = followup_snapshot_id

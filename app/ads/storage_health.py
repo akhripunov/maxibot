@@ -12,8 +12,11 @@ from app.ads.periodic import collection_health
 from app.core.config import settings
 
 TABLES = (
-    "ads_v2_entities", "ads_v2_report_runs", "ads_v2_observations",
-    "ads_v2_outcomes", "ads_v2_collection_runs", "ads_v2_daily_aggregates",
+    "ads_accounts", "ads_campaigns", "ads_promotion_campaign_links",
+    "ads_entities", "ads_creatives", "ads_observations",
+    "ads_daily_aggregates", "ads_collection_runs", "ads_report_runs",
+    "ads_analysis_snapshots", "ads_ai_runs", "ads_recommendations",
+    "ads_ai_outcomes", "ads_memories", "ads_memory_evidence", "ads_data_health",
 )
 MOSCOW = ZoneInfo("Europe/Moscow")
 
@@ -68,7 +71,7 @@ async def diagnostics(db: AsyncSession) -> dict:
         "periodic": periodic,
         "growth_7d": None, "growth_30d": None,
         "projection": None,
-        "retention": {"hourly_days": settings.ads_hourly_retention_days, "daily_days": settings.ads_daily_retention_days, "downsampling": "PREPARED; deletion disabled"},
+        "retention": {"hourly_days": settings.ads_hourly_retention_days, "daily_days": settings.ads_daily_retention_days, "downsampling": "BOUNDED_INTERVAL_PURGE_WITH_DAILY_GUARD"},
         "downsampling": {"eligible": None, "protected": None, "dry_run": True},
         "status": storage_status(free_percent=free_percent, stale=int(periodic.get("stale_campaigns", 0)), retry_backlog=int(periodic.get("retry_backlog", 0))),
         "checked_at": datetime.now(timezone.utc).isoformat(),

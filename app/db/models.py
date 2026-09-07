@@ -712,6 +712,11 @@ class AdsAccount(Base):
     admin_id: Mapped[str] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
     provider: Mapped[str] = mapped_column(String(32), default="YANDEX_DIRECT", nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="CONNECTED", nullable=False, index=True)
+    external_account_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String(255))
+    connection_status: Mapped[Optional[str]] = mapped_column(String(24), index=True)
+    provider_metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    metadata_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (UniqueConstraint("admin_id", "provider", name="uq_ads_account_provider"),)
@@ -726,19 +731,27 @@ class AdsCampaign(Base):
     state: Mapped[Optional[str]] = mapped_column(String(64))
     status: Mapped[Optional[str]] = mapped_column(String(64))
     raw_json: Mapped[Optional[str]] = mapped_column(Text)
+    ads_account_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_accounts.id", ondelete="CASCADE"), index=True)
+    external_campaign_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    campaign_type: Mapped[Optional[str]] = mapped_column(String(64))
+    start_date: Mapped[Optional[date]] = mapped_column(Date)
+    end_date: Mapped[Optional[date]] = mapped_column(Date)
+    strategy_type: Mapped[Optional[str]] = mapped_column(String(128))
+    budget_type: Mapped[Optional[str]] = mapped_column(String(64))
+    daily_budget: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    weekly_budget: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    currency: Mapped[Optional[str]] = mapped_column(String(16))
+    optimization_goal: Mapped[Optional[str]] = mapped_column(String(128))
+    target_cpa: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    target_roi: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    target_conversion_value: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    settings_json: Mapped[Optional[str]] = mapped_column(Text)
+    provider_metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    config_hash: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    metadata_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (UniqueConstraint("account_id", "external_id", name="uq_ads_campaign_external"),)
-
-
-class AdsChannelCampaignLink(Base):
-    __tablename__ = "ads_channel_campaign_links"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
-    campaign_id: Mapped[str] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(24), default="ACTIVE", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    __table_args__ = (UniqueConstraint("channel_id", "campaign_id", name="uq_ads_channel_campaign"),)
 
 
 class AdsPromotionCampaignLink(Base):
@@ -763,8 +776,8 @@ class AdsPromotionCampaignLink(Base):
     )
 
 
-class AdsSnapshot(Base):
-    __tablename__ = "ads_snapshots"
+class AdsAnalysisSnapshot(Base):
+    __tablename__ = "ads_analysis_snapshots"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="SET NULL"), index=True)
@@ -775,24 +788,51 @@ class AdsSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
-class AdsV2Entity(Base):
-    """Provider-independent canonical entity registry for ADS V2."""
-    __tablename__ = "ads_v2_entities"
+class AdsCreative(Base):
+    __tablename__ = "ads_creatives"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    campaign_id: Mapped[str] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), nullable=False, index=True)
+    ad_entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_entities.id", ondelete="SET NULL"), index=True)
+    external_creative_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    creative_type: Mapped[Optional[str]] = mapped_column(String(64))
+    title: Mapped[Optional[str]] = mapped_column(Text)
+    title2: Mapped[Optional[str]] = mapped_column(Text)
+    body: Mapped[Optional[str]] = mapped_column(Text)
+    cta: Mapped[Optional[str]] = mapped_column(String(512))
+    href: Mapped[Optional[str]] = mapped_column(String(2048))
+    display_url: Mapped[Optional[str]] = mapped_column(String(2048))
+    image_ref: Mapped[Optional[str]] = mapped_column(String(2048))
+    video_ref: Mapped[Optional[str]] = mapped_column(String(2048))
+    provider_metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    metadata_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("campaign_id", "external_creative_id", name="uq_ads_creative_external"),)
+
+
+class AdsEntity(Base):
+    """Provider-independent canonical entity registry."""
+    __tablename__ = "ads_entities"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     entity_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     provider_entity_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    parent_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_v2_entities.id", ondelete="SET NULL"), index=True)
+    campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), index=True)
+    external_entity_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    parent_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_entities.id", ondelete="SET NULL"), index=True)
     display_name: Mapped[Optional[str]] = mapped_column(String(512))
     status: Mapped[Optional[str]] = mapped_column(String(64))
     provider_metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    metadata_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-    __table_args__ = (UniqueConstraint("provider", "entity_type", "provider_entity_id", name="uq_ads_v2_entity_identity"),)
+    __table_args__ = (UniqueConstraint("provider", "entity_type", "provider_entity_id", name="uq_ads_entity_identity"),)
 
 
-class AdsV2ReportRun(Base):
-    __tablename__ = "ads_v2_report_runs"
+class AdsReportRun(Base):
+    __tablename__ = "ads_report_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     report_type: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -810,14 +850,18 @@ class AdsV2ReportRun(Base):
     freshness_caveat: Mapped[Optional[str]] = mapped_column(Text)
 
 
-class AdsV2CollectionRun(Base):
+class AdsCollectionRun(Base):
     """Idempotent server-side read-only collection slot/run."""
-    __tablename__ = "ads_v2_collection_runs"
+    __tablename__ = "ads_collection_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    account_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    campaign_id: Mapped[str] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), nullable=False, index=True)
-    collection_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    collection_type: Mapped[str] = mapped_column(String(32), default="MANUAL_AI_SYNC", nullable=False)
+    run_type: Mapped[str] = mapped_column(String(48), default="PERIODIC_CAMPAIGN", nullable=False, index=True)
+    trigger: Mapped[str] = mapped_column(String(32), default="PERIODIC", nullable=False)
+    summary_json: Mapped[Optional[str]] = mapped_column(Text)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     slot_key: Mapped[str] = mapped_column(String(192), nullable=False, unique=True, index=True)
     status: Mapped[str] = mapped_column(String(24), default="PENDING", nullable=False, index=True)
@@ -825,16 +869,16 @@ class AdsV2CollectionRun(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
-    snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_snapshots.id", ondelete="SET NULL"), index=True)
+    snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="SET NULL"), index=True)
     error_code: Mapped[Optional[str]] = mapped_column(String(96))
     freshness_caveat: Mapped[Optional[str]] = mapped_column(Text)
 
 
-class AdsV2Observation(Base):
-    __tablename__ = "ads_v2_observations"
+class AdsObservation(Base):
+    __tablename__ = "ads_observations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    snapshot_id: Mapped[str] = mapped_column(ForeignKey("ads_snapshots.id", ondelete="CASCADE"), index=True)
-    entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_v2_entities.id", ondelete="SET NULL"), index=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="CASCADE"), index=True)
+    entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_entities.id", ondelete="SET NULL"), index=True)
     dimension_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     dimension_value: Mapped[Optional[str]] = mapped_column(String(256))
     window: Mapped[str] = mapped_column(String(8), nullable=False, index=True)
@@ -845,20 +889,20 @@ class AdsV2Observation(Base):
     cost: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
     conversions: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
     fact_id: Mapped[Optional[str]] = mapped_column(String(32), index=True)
-    report_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_v2_report_runs.id", ondelete="SET NULL"), index=True)
-    collection_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_v2_collection_runs.id", ondelete="SET NULL"), index=True)
+    report_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_report_runs.id", ondelete="SET NULL"), index=True)
+    collection_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_collection_runs.id", ondelete="SET NULL"), index=True)
     logical_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     provenance_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
-class AdsV2DailyAggregate(Base):
+class AdsDailyAggregate(Base):
     """Canonical downsample target; raw hourly rows are retained in dry-run mode."""
-    __tablename__ = "ads_v2_daily_aggregates"
+    __tablename__ = "ads_daily_aggregates"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     campaign_id: Mapped[str] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), nullable=False, index=True)
-    entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_v2_entities.id", ondelete="SET NULL"), index=True)
+    entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_entities.id", ondelete="SET NULL"), index=True)
     dimension_type: Mapped[str] = mapped_column(String(32), nullable=False)
     dimension_value: Mapped[Optional[str]] = mapped_column(String(256))
     aggregate_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
@@ -872,38 +916,26 @@ class AdsV2DailyAggregate(Base):
     aggregation_version: Mapped[str] = mapped_column(String(32), default="v1", nullable=False)
     provenance_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
-    __table_args__ = (UniqueConstraint("provider", "campaign_id", "entity_id", "dimension_type", "dimension_value", "aggregate_date", name="uq_ads_v2_daily_aggregate_identity"),)
+    __table_args__ = (UniqueConstraint("provider", "campaign_id", "entity_id", "dimension_type", "dimension_value", "aggregate_date", name="uq_ads_daily_aggregate_identity"),)
 
 
-class AdsV2Outcome(Base):
-    __tablename__ = "ads_v2_outcomes"
+class AdsAiOutcome(Base):
+    __tablename__ = "ads_ai_outcomes"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     recommendation_id: Mapped[str] = mapped_column(ForeignKey("ads_recommendations.id", ondelete="CASCADE"), index=True)
     horizon: Mapped[str] = mapped_column(String(8), nullable=False)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(24), default="PENDING", nullable=False, index=True)
     execution_status: Mapped[str] = mapped_column(String(32), default="RECOMMENDATION_ONLY", nullable=False)
-    baseline_snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_snapshots.id", ondelete="SET NULL"), index=True)
-    followup_snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_snapshots.id", ondelete="SET NULL"), index=True)
+    baseline_snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="SET NULL"), index=True)
+    followup_snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="SET NULL"), index=True)
     observed_delta_json: Mapped[Optional[str]] = mapped_column(Text)
     error_code: Mapped[Optional[str]] = mapped_column(String(96))
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("recommendation_id", "horizon", name="uq_ads_v2_outcome_horizon"),)
-
-
-class AdsSyncRun(Base):
-    __tablename__ = "ads_sync_runs"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(24), default="RUNNING", nullable=False, index=True)
-    trigger: Mapped[str] = mapped_column(String(32), default="MANUAL", nullable=False)
-    summary_json: Mapped[Optional[str]] = mapped_column(Text)
-    error_code: Mapped[Optional[str]] = mapped_column(String(96))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("recommendation_id", "horizon", name="uq_ads_ai_outcome_horizon"),)
 
 
 class AdsAiRun(Base):
@@ -913,7 +945,7 @@ class AdsAiRun(Base):
     status: Mapped[str] = mapped_column(String(24), default="NOT_RUN", nullable=False, index=True)
     provider: Mapped[Optional[str]] = mapped_column(String(64))
     model: Mapped[Optional[str]] = mapped_column(String(128))
-    input_snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_snapshots.id", ondelete="SET NULL"))
+    input_snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="SET NULL"))
     output_json: Mapped[Optional[str]] = mapped_column(Text)
     campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="SET NULL"), index=True)
     prompt_version: Mapped[Optional[str]] = mapped_column(String(64))
@@ -979,7 +1011,7 @@ class AdsMemoryEvidence(Base):
     memory_id: Mapped[str] = mapped_column(ForeignKey("ads_memories.id", ondelete="CASCADE"), index=True)
     evidence_type: Mapped[str] = mapped_column(String(32), nullable=False)
     evidence_ref_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_snapshots.id", ondelete="SET NULL"))
+    snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="SET NULL"))
     ai_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_ai_runs.id", ondelete="SET NULL"))
     description: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -1013,3 +1045,15 @@ class AdsExperiment(Base):
     hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
     result_json: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+# Import compatibility for bounded historical tests/callers.  Runtime tables
+# and all new persistence use the canonical physical names above.
+AdsSnapshot = AdsAnalysisSnapshot
+AdsV2Entity = AdsEntity
+AdsV2ReportRun = AdsReportRun
+AdsV2CollectionRun = AdsCollectionRun
+AdsV2Observation = AdsObservation
+AdsV2DailyAggregate = AdsDailyAggregate
+AdsV2Outcome = AdsAiOutcome
+AdsSyncRun = AdsCollectionRun

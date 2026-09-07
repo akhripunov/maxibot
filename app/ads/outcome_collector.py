@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ads.facts import build_campaign_facts
 from app.ads.outcomes import backfill_missing_outcome_checkpoints, claim_due_outcomes, mark_outcome_completed, mark_outcome_retryable, outcome_metrics_sufficient
 from app.ads.v2 import collect_yandex_v2
-from app.db.models import Admin, AdsAiRun, AdsCampaign, AdsRecommendation, AdsSnapshot, AdsV2Outcome, Channel
+from app.db.models import Admin, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsRecommendation, AdsAiOutcome, Channel
 from app.core.config import settings
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
@@ -18,7 +18,7 @@ from app.traffic.analytics import traffic_stats_for_channels
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 
 
-async def collect_one_outcome(db: AsyncSession, outcome: AdsV2Outcome) -> None:
+async def collect_one_outcome(db: AsyncSession, outcome: AdsAiOutcome) -> None:
     if outcome.due_at > datetime.now(timezone.utc):
         raise ValueError("OUTCOME_NOT_DUE")
     recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
@@ -32,15 +32,15 @@ async def collect_one_outcome(db: AsyncSession, outcome: AdsV2Outcome) -> None:
     # Prefer a real periodic observation near the checkpoint.  The fallback
     # provider fetch below remains available when the timeline has a gap.
     tolerance = timedelta(minutes=settings.ads_collection_outcome_tolerance_minutes)
-    periodic = await db.scalar(select(AdsSnapshot).where(
-        AdsSnapshot.campaign_id == campaign.id,
-        AdsSnapshot.source == "PERIODIC_COLLECTION",
-        AdsSnapshot.created_at >= outcome.due_at - tolerance,
-        AdsSnapshot.created_at <= outcome.due_at + tolerance,
-        AdsSnapshot.created_at <= datetime.now(timezone.utc),
-    ).order_by(AdsSnapshot.created_at))
+    periodic = await db.scalar(select(AdsAnalysisSnapshot).where(
+        AdsAnalysisSnapshot.campaign_id == campaign.id,
+        AdsAnalysisSnapshot.source == "PERIODIC_COLLECTION",
+        AdsAnalysisSnapshot.created_at >= outcome.due_at - tolerance,
+        AdsAnalysisSnapshot.created_at <= outcome.due_at + tolerance,
+        AdsAnalysisSnapshot.created_at <= datetime.now(timezone.utc),
+    ).order_by(AdsAnalysisSnapshot.created_at))
     if periodic:
-        baseline = await db.get(AdsSnapshot, outcome.baseline_snapshot_id) if outcome.baseline_snapshot_id else None
+        baseline = await db.get(AdsAnalysisSnapshot, outcome.baseline_snapshot_id) if outcome.baseline_snapshot_id else None
         before = json.loads(baseline.facts_json).get("facts", {}) if baseline else {}
         after = json.loads(periodic.facts_json).get("facts", {})
         if not baseline or not outcome_metrics_sufficient(after):
@@ -62,11 +62,11 @@ async def collect_one_outcome(db: AsyncSession, outcome: AdsV2Outcome) -> None:
     snapshot_at = datetime.now(timezone.utc)
     fact_set = build_campaign_facts(report.rows, campaign_start=None, traffic=traffic, now=snapshot_at)
     facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_set.context(report_date_from=date_from, report_date_to=date_to, report_fetched_at=fetched_at, snapshot_at=snapshot_at), "followup": True}
-    snapshot = AdsSnapshot(channel_id=channel.id, campaign_id=campaign.id, source="V2_OUTCOME_FOLLOWUP", period_from=date_from, period_to=date_to, facts_json=json.dumps(facts, ensure_ascii=False))
+    snapshot = AdsAnalysisSnapshot(channel_id=channel.id, campaign_id=campaign.id, source="V2_OUTCOME_FOLLOWUP", period_from=date_from, period_to=date_to, facts_json=json.dumps(facts, ensure_ascii=False))
     db.add(snapshot)
     await db.flush()
     await collect_yandex_v2(db, token=decrypt_token(encrypted), campaign=campaign, snapshot=snapshot, report_rows=report.rows, date_from=date_from, date_to=date_to, fetched_at=fetched_at)
-    baseline = await db.get(AdsSnapshot, outcome.baseline_snapshot_id) if outcome.baseline_snapshot_id else None
+    baseline = await db.get(AdsAnalysisSnapshot, outcome.baseline_snapshot_id) if outcome.baseline_snapshot_id else None
     before = json.loads(baseline.facts_json).get("facts", {}) if baseline else {}
     after = facts.get("facts", {})
     if not baseline or not outcome_metrics_sufficient(after):
@@ -85,7 +85,7 @@ async def process_due_outcomes(session_factory) -> int:
     processed = 0
     for outcome_id in ids:
         async with session_factory() as db:
-            outcome = await db.get(AdsV2Outcome, outcome_id)
+            outcome = await db.get(AdsAiOutcome, outcome_id)
             if not outcome or outcome.status != "PROCESSING":
                 continue
             try:

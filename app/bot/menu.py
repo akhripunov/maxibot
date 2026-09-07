@@ -35,7 +35,7 @@ from app.traffic.bot_conversion_dedupe import paid_bot_conversion_key
 from app.ads.service import can_access_ads, campaigns_for_channel, latest_view
 from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
-from app.db.models import AdsAiRun, AdsMemory, AdsRecommendation, AdsV2Outcome
+from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation
 from app.ads.storage_health import diagnostics as storage_diagnostics, human_size, ui_time
 from app.integrations.robokassa import payment_url
 from app.integrations.subscriptions import subscription_status, free_trial_status, channel_promotion_entitlement as resolve_channel_promotion_entitlement
@@ -979,9 +979,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         periodic = storage["periodic"]
         status = {"NORMAL": "🟢 Норма", "WARNING": "🟡 Внимание", "CRITICAL": "🔴 Критично", "UNKNOWN": "⚠️ Недоступно"}.get(storage["status"], "⚠️ Недоступно")
         table_lines = {
-            "ads_v2_observations": "наблюдения", "ads_v2_entities": "сущности",
-            "ads_v2_report_runs": "отчёты", "ads_v2_outcomes": "outcomes",
-            "ads_v2_collection_runs": "collection runs", "ads_v2_daily_aggregates": "дневные агрегаты",
+            "ads_observations": "наблюдения", "ads_entities": "сущности",
+            "ads_report_runs": "отчёты", "ads_ai_outcomes": "outcomes",
+            "ads_collection_runs": "collection runs", "ads_daily_aggregates": "дневные агрегаты",
+            "ads_creatives": "креативы", "ads_analysis_snapshots": "AI snapshots",
         }
         rows = "\n".join(f"• {label}: {human_size(storage['tables'][table]['total'])}" for table, label in table_lines.items())
         last = ui_time(periodic.get("last_successful_collection"))
@@ -1364,7 +1365,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 f"• {row.created_at:%d.%m %H:%M} — {_owner_short_text(recommendation_by_run[row.id].title) if row.id in recommendation_by_run else 'Рекомендация ещё не сформирована' }"
                 for row in rows
             ) or "Истории рекомендаций пока нет."
-            outcomes = list((await db.scalars(select(AdsV2Outcome).join(AdsRecommendation, AdsV2Outcome.recommendation_id == AdsRecommendation.id).where(AdsRecommendation.ai_run_id.in_(recommendation_ids)))).all()) if recommendation_ids else []
+            outcomes = list((await db.scalars(select(AdsAiOutcome).join(AdsRecommendation, AdsAiOutcome.recommendation_id == AdsRecommendation.id).where(AdsRecommendation.ai_run_id.in_(recommendation_ids)))).all()) if recommendation_ids else []
             if outcomes:
                 detail += "\n\nИзмерение результата:\n" + "\n".join(f"• {item.horizon}: {'завершено' if item.status == 'COMPLETED' else 'ещё ожидается'}" for item in outcomes)
             title = "🕘 История рекомендаций"

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import func, select
 
 from app.ads.storage_health import diagnostics
-from app.db.models import AdsV2CollectionRun, AdsV2Entity, AdsV2Observation, AdsV2ReportRun
+from app.db.models import AdsCollectionRun, AdsEntity, AdsObservation, AdsReportRun
 from app.db.session import SessionLocal
 
 
@@ -27,10 +27,10 @@ async def snapshot() -> dict[str, object]:
     async with SessionLocal() as db:
         health = await diagnostics(db)
         counts = {
-            "observations": int(await db.scalar(select(func.count(AdsV2Observation.id))) or 0),
-            "report_runs": int(await db.scalar(select(func.count(AdsV2ReportRun.id))) or 0),
-            "collection_runs": int(await db.scalar(select(func.count(AdsV2CollectionRun.id))) or 0),
-            "entities": int(await db.scalar(select(func.count(AdsV2Entity.id))) or 0),
+            "observations": int(await db.scalar(select(func.count(AdsObservation.id))) or 0),
+            "report_runs": int(await db.scalar(select(func.count(AdsReportRun.id))) or 0),
+            "collection_runs": int(await db.scalar(select(func.count(AdsCollectionRun.id))) or 0),
+            "entities": int(await db.scalar(select(func.count(AdsEntity.id))) or 0),
         }
     return {
         "captured_at": datetime.now(timezone.utc).isoformat(),

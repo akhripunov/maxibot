@@ -17,7 +17,7 @@ from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v
 from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_maxibot_metrics
 from app.core.config import settings
-from app.db.models import Admin, AdsAccount, AdsAiRun, AdsCampaign, AdsDataHealth, AdsMemory, AdsPromotionCampaignLink, AdsRecommendation, AdsSnapshot, AdsSyncRun, AdsV2Observation, AdsV2Outcome, Channel, LandingPage, TrafficProfile
+from app.db.models import Admin, AdsAccount, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCollectionRun, AdsDataHealth, AdsMemory, AdsObservation, AdsPromotionCampaignLink, AdsRecommendation, AdsAiOutcome, Channel, LandingPage, TrafficProfile
 from app.integrations.yandex_direct import YandexDirectClient
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
@@ -26,6 +26,24 @@ from app.traffic.analytics import traffic_stats_for_channels
 _CAMPAIGN_SCOPE_CACHE: dict[str, tuple[float, set[str]]] = {}
 MOSCOW = ZoneInfo("Europe/Moscow")
 
+
+def _campaign_metadata(raw: dict[str, Any]) -> dict[str, Any]:
+    return {key: raw.get(key) for key in (
+        "Id", "Name", "Type", "State", "Status", "StatusPayment",
+        "StartDate", "EndDate",
+    )}
+
+
+def _provider_date(value: Any) -> date | None:
+    if isinstance(value, date):
+        return value
+    if value:
+        try:
+            return date.fromisoformat(str(value))
+        except ValueError:
+            return None
+    return None
+
 def can_access_ads(admin_external_id: str) -> bool:
     owner = (settings.maxibot_owner_user_id or "").strip()
     return bool(settings.ads_enabled and owner and str(admin_external_id) == owner)
@@ -33,7 +51,7 @@ def can_access_ads(admin_external_id: str) -> bool:
 async def _account(db: AsyncSession, admin_id: str) -> AdsAccount:
     value = await db.scalar(select(AdsAccount).where(AdsAccount.admin_id == admin_id, AdsAccount.provider == "YANDEX_DIRECT"))
     if value: return value
-    value = AdsAccount(admin_id=admin_id); db.add(value); await db.flush(); return value
+    value = AdsAccount(admin_id=admin_id, connection_status="CONNECTED"); db.add(value); await db.flush(); return value
 
 async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str, report_campaign_ids: set[str] | None = None) -> tuple[list[AdsCampaign], dict[str, list[dict[str, Any]]]]:
     client = YandexDirectClient(decrypt_token(encrypted)); reports: dict[str, list[dict[str, Any]]] = {}
@@ -42,9 +60,22 @@ async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str,
             external_id = str(raw.get("Id") or "")
             if not external_id: continue
             campaign = await db.scalar(select(AdsCampaign).where(AdsCampaign.account_id == account.id, AdsCampaign.external_id == external_id))
-            if not campaign: campaign = AdsCampaign(account_id=account.id, external_id=external_id, name=str(raw.get("Name") or external_id)); db.add(campaign); await db.flush()
+            if not campaign:
+                campaign = AdsCampaign(account_id=account.id, ads_account_id=account.id, external_id=external_id, external_campaign_id=external_id, name=str(raw.get("Name") or external_id))
+                db.add(campaign)
+                await db.flush()
+            metadata = _campaign_metadata(raw)
+            metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+            metadata_hash = __import__("hashlib").sha256(metadata_json.encode()).hexdigest()
             campaign.name, campaign.state, campaign.status = str(raw.get("Name") or external_id), raw.get("State"), raw.get("Status")
-            campaign.raw_json = json.dumps({key: raw.get(key) for key in ("Id", "Name", "State", "Status", "StartDate", "EndDate")}, ensure_ascii=False)
+            campaign.ads_account_id, campaign.external_campaign_id = account.id, external_id
+            campaign.campaign_type = raw.get("Type")
+            campaign.start_date, campaign.end_date = _provider_date(raw.get("StartDate")), _provider_date(raw.get("EndDate"))
+            campaign.raw_json = json.dumps(metadata, ensure_ascii=False)
+            if campaign.config_hash != metadata_hash:
+                campaign.provider_metadata_json = metadata_json
+                campaign.config_hash = metadata_hash
+                campaign.metadata_updated_at = datetime.now(timezone.utc)
         await db.flush()
         campaigns = list((await db.scalars(select(AdsCampaign).where(AdsCampaign.account_id == account.id))).all())
         # Statistics are owned by ADS Data Layer V2. This flow only discovers
@@ -95,11 +126,11 @@ async def _closed_loop_context(db: AsyncSession, channel_id: str, campaign_id: s
         .limit(5)
     )).all())
     outcomes = list((await db.scalars(
-        select(AdsV2Outcome)
-        .join(AdsRecommendation, AdsRecommendation.id == AdsV2Outcome.recommendation_id)
+        select(AdsAiOutcome)
+        .join(AdsRecommendation, AdsRecommendation.id == AdsAiOutcome.recommendation_id)
         .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
         .where(AdsRecommendation.channel_id == channel_id, AdsAiRun.campaign_id == campaign_id)
-        .order_by(AdsV2Outcome.due_at.desc())
+        .order_by(AdsAiOutcome.due_at.desc())
         .limit(15)
     )).all())
     previous = [{
@@ -129,7 +160,7 @@ async def _closed_loop_context(db: AsyncSession, channel_id: str, campaign_id: s
         })
     return {"PREVIOUS_RECOMMENDATIONS": previous, "MEASURED_OUTCOMES": measured}
 
-async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Channel, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime) -> AdsAiRun:
+async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channel: Channel, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime) -> AdsAiRun:
     closed_loop = await _closed_loop_context(db, channel.id, campaign.id)
     dataset = await build_v2_analysis_dataset(
         db,
@@ -177,7 +208,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsSyncRun, channel: Cha
     }
     facts["report_trace"] = {"source": "ADS Data Layer V2", "source_fields": ["Date", "Impressions", "Clicks", "Cost", "Conversions"], "date_from": report_date_from.isoformat(), "date_to": report_date_to.isoformat(), "report_timezone": "Europe/Moscow", "aggregation": "deterministic V2 dataset; dimensions analyzed independently", "snapshot_timestamp_utc": snapshot_at.isoformat(), "freshness": "based on latest persisted V2 observations"}
     facts["current_day_quality"] = {"status": "POSSIBLY_INCOMPLETE_CURRENT_DAY", "window": "1d", "reason": "current calendar-day report values can be partial or delayed", "ai_guidance": "do not treat current-day zero cost/conversions as strong deterioration evidence; prefer confirmed 3d/7d data"}
-    snapshot = AdsSnapshot(channel_id=channel.id, campaign_id=campaign.id, source="MANUAL_CHECK", period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
+    snapshot = AdsAnalysisSnapshot(channel_id=channel.id, campaign_id=campaign.id, source="MANUAL_CHECK", period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
     db.add(snapshot); await db.flush()
     snapshot.facts_json = json.dumps(facts, ensure_ascii=False)
     db.add(AdsDataHealth(channel_id=channel.id, status=health["status"], reasons_json=json.dumps(health, ensure_ascii=False)))
@@ -229,7 +260,7 @@ async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str
     if not can_access_ads(admin_external_id): raise PermissionError("ADS access denied")
     channel = await db.scalar(select(Channel).join(Admin).where(Channel.id == channel_id, Admin.external_id == str(admin_external_id)))
     if not channel: raise PermissionError("channel is not owned")
-    run = AdsSyncRun(channel_id=channel.id, trigger="MANUAL"); db.add(run); await db.flush()
+    run = AdsCollectionRun(provider="INTERNAL", channel_id=channel.id, collection_type="MANUAL_AI_SYNC", run_type="MANUAL_AI_SYNC", trigger="MANUAL", scheduled_at=datetime.now(timezone.utc), slot_key=f"manual-ai-sync:{channel.id}:{datetime.now(timezone.utc).isoformat()}"); db.add(run); await db.flush()
     profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel.id)); traffic = await traffic_stats_for_channels(db, [channel.id])
     mapped = await _mapped(db, channel.id)
     encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db); campaigns: list[AdsCampaign] = []; reports: dict[str, list[dict]] = {}; error = None
@@ -255,9 +286,9 @@ async def latest_view(db: AsyncSession, channel_id: str) -> dict[str, Any]:
     # A periodic granular snapshot may be newer but intentionally contains
     # only collection metadata. Prefer the snapshot that produced the current
     # AI run so the dashboard keeps its campaign facts and provenance.
-    snapshot = await db.get(AdsSnapshot, ai.input_snapshot_id) if ai and ai.input_snapshot_id else None
+    snapshot = await db.get(AdsAnalysisSnapshot, ai.input_snapshot_id) if ai and ai.input_snapshot_id else None
     if snapshot is None:
-        snapshot = await db.scalar(select(AdsSnapshot).where(AdsSnapshot.channel_id == channel_id, AdsSnapshot.source != "PERIODIC_GRANULAR").order_by(AdsSnapshot.created_at.desc()))
+        snapshot = await db.scalar(select(AdsAnalysisSnapshot).where(AdsAnalysisSnapshot.channel_id == channel_id, AdsAnalysisSnapshot.source != "PERIODIC_GRANULAR").order_by(AdsAnalysisSnapshot.created_at.desc()))
     health = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.channel_id == channel_id).order_by(AdsDataHealth.checked_at.desc())); memories = list((await db.scalars(select(AdsMemory).where(AdsMemory.channel_id == channel_id).order_by(AdsMemory.updated_at.desc()).limit(20))).all())
     recommendation = await db.scalar(select(AdsRecommendation).where(AdsRecommendation.channel_id == channel_id, AdsRecommendation.status == "OPEN").order_by(AdsRecommendation.created_at.desc()))
     return {"facts": json.loads(snapshot.facts_json) if snapshot else None, "health": json.loads(health.reasons_json) if health else {"status": "UNKNOWN", "checks": {}}, "memories": memories, "checked_at": snapshot.created_at if snapshot else None, "ai": ai, "recommendation": recommendation}

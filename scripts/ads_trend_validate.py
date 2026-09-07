@@ -9,13 +9,13 @@ from datetime import date
 from sqlalchemy import select
 
 from app.ads.trends import build_trend_features
-from app.db.models import AdsV2DailyAggregate
+from app.db.models import AdsDailyAggregate
 from app.db.session import SessionLocal
 
 
 async def main() -> None:
     async with SessionLocal() as db:
-        aggregates = list((await db.scalars(select(AdsV2DailyAggregate).order_by(AdsV2DailyAggregate.aggregate_date))).all())
+        aggregates = list((await db.scalars(select(AdsDailyAggregate).order_by(AdsDailyAggregate.aggregate_date))).all())
     rows = [{
         "window": "1d", "date_from": row.aggregate_date, "date_to": row.aggregate_date,
         "dimension_type": row.dimension_type, "entity_id": row.entity_id,

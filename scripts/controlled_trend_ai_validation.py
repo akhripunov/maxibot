@@ -8,7 +8,7 @@ import json
 from sqlalchemy import select
 
 from app.ads.service import run_check
-from app.db.models import Admin, AdsCampaign, AdsChannelCampaignLink, Channel
+from app.db.models import Admin, AdsCampaign, AdsPromotionCampaignLink, Channel
 from app.db.session import SessionLocal
 
 
@@ -18,9 +18,9 @@ async def main() -> None:
             select(Admin.external_id, Channel.id)
             .select_from(Channel)
             .join(Admin, Channel.admin_id == Admin.id)
-            .join(AdsChannelCampaignLink, AdsChannelCampaignLink.channel_id == Channel.id)
-            .join(AdsCampaign, AdsCampaign.id == AdsChannelCampaignLink.campaign_id)
-            .where(AdsCampaign.external_id == "713798021", AdsChannelCampaignLink.status == "ACTIVE")
+            .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.channel_id == Channel.id)
+            .join(AdsCampaign, AdsCampaign.id == AdsPromotionCampaignLink.campaign_id)
+            .where(AdsPromotionCampaignLink.object_type == "CHANNEL", AdsCampaign.external_id == "713798021", AdsPromotionCampaignLink.status == "ACTIVE")
             .limit(1)
         )
         target = row.one_or_none()
