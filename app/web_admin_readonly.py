@@ -46,10 +46,47 @@ from app.web_admin_auth import require_edge_token, require_qa_ingest_token, requ
 router = APIRouter(prefix="/admin", tags=["web-admin"])
 
 
-JOURNEY_STAGES = {
-    "channel": ("Источник", "Landing", "Token / MAX", "MAX identity", "Канал открыт", "Join request", "user_added", "Подписка", "Metrika", "Direct"),
-    "bot": ("Источник", "Landing", "Token / MAX", "MAX identity", "Bot handoff initiated", "Destination reached", "Real /start", "bot_started", "Metrika", "Direct"),
-}
+CHANNEL_STAGES = (
+    ("direct_in", "Direct", "UNKNOWN", "Внешний отчёт Яндекс.Директ"),
+    ("landing", "Landing", "EXACT", "TrafficVisit"),
+    ("traffic_visit", "TrafficVisit(channel_id)", "EXACT", "TrafficVisit(channel_id)"),
+    ("token", "Token", "EXACT", "visit_token"),
+    ("startapp", "Startapp", "EXACT", "startapp_token"),
+    ("miniapp", "MAX Mini App", "EXACT", "MINI_APP_LOADED"),
+    ("identity", "Verified MAX user", "EXACT", "verified initData"),
+    ("resolve", "Resolve token", "EXACT", "RESOLVE_OK"),
+    ("identity_link", "MaxIdentityLink", "EXACT", "MaxIdentityLink"),
+    ("channel_validation", "Проверка channel_id", "DERIVED", "успешный resolve/channel guard"),
+    ("channel_open", "Открытие конкретного канала", "ATTEMPT", "MINIAPP_CHANNEL_HANDOFF_STARTED; actual open UNKNOWN"),
+    ("join_request", "Join request", "EXACT", "join_request_created/join_request"),
+    ("approve", "Approve", "DERIVED", "user_added после ручного approve; прямой approve event может отсутствовать"),
+    ("user_added", "user_added(user_id + channel_id)", "EXACT", "official MAX user_added"),
+    ("revalidation", "Повторная проверка channel_id + MaxIdentityLink", "DERIVED", "exact attributed membership"),
+    ("restore", "Восстановление TrafficVisit / yclid", "EXACT", "attributed_visit_id / EXACT attribution"),
+    ("subscriber", "max_subscriber", "EXACT", "TrafficMembership exact conversion"),
+    ("metrika", "Metrika", "EXACT", "OfflineConversion accepted/uploaded"),
+    ("direct_out", "Direct", "UNKNOWN", "внешняя reporting evidence с задержкой"),
+)
+BOT_STAGES = (
+    ("direct_in", "Direct", "UNKNOWN", "Внешний отчёт Яндекс.Директ"),
+    ("landing", "Landing", "EXACT", "BotTrafficVisit"),
+    ("traffic_visit", "BotTrafficVisit(bot_id)", "EXACT", "BotTrafficVisit(bot_id)"),
+    ("token", "Token", "EXACT", "opaque BotTrafficVisit.token"),
+    ("startapp", "Startapp", "EXACT", "startapp token"),
+    ("miniapp", "MAX Mini App", "EXACT", "MINI_APP_LOADED"),
+    ("identity", "Verified MAX user", "EXACT", "verified initData"),
+    ("resolve", "Resolve token", "EXACT", "TOKEN_RESOLVED"),
+    ("identity_link", "BotMaxIdentityLink", "EXACT", "BotMaxIdentityLink"),
+    ("bot_validation", "Проверка bot_id", "DERIVED", "успешный bot/destination guard"),
+    ("bot_open", "Открытие конкретного бота", "ATTEMPT", "BOT_HANDOFF_STARTED; actual open UNKNOWN"),
+    ("real_start", "Реальный /start", "EXACT", "REAL_START_RECEIVED"),
+    ("revalidation", "Повторная проверка bot_id + BotMaxIdentityLink", "DERIVED", "canonical /start guard"),
+    ("restore", "Восстановление BotTrafficVisit / yclid", "EXACT", "paid journey correlation"),
+    ("started", "bot_started", "EXACT", "canonical runtime /start"),
+    ("metrika", "Metrika", "EXACT", "BotConversion ACCEPTED"),
+    ("direct_out", "Direct", "UNKNOWN", "внешняя reporting evidence с задержкой"),
+)
+JOURNEY_STAGES = {"channel": CHANNEL_STAGES, "bot": BOT_STAGES}
 
 
 def _journey_period(days: int) -> tuple[datetime, datetime]:
@@ -71,15 +108,26 @@ def _status(*, visits: int, failures: int, warnings: int) -> str:
     return "PASS" if visits else "UNKNOWN"
 
 
-def _stage_payload(names: tuple[str, ...], counts: list[int]) -> list[dict[str, object]]:
+def _stage_payload(definitions: tuple[tuple[str, str, str, str], ...], counts: list[int | None], denominator: int | None) -> list[dict[str, object]]:
     result = []
     previous = None
-    for name, count in zip(names, counts):
-        ratio = None if previous in (None, 0) else round(count / previous * 100, 1)
-        result.append({"name": name, "count": count, "conversion_from_previous_percent": ratio,
-                       "status": "UNKNOWN" if count is None else "PASS"})
-        previous = count
+    for (stage_id, name, evidence_level, evidence), count in zip(definitions, counts):
+        ratio = None if count is None or previous in (None, 0) else round(count / previous * 100, 1)
+        from_start = None if denominator in (None, 0) or count is None else round(count / denominator * 100, 1)
+        result.append({"id": stage_id, "name": name, "count": count, "conversion_from_previous_percent": ratio,
+                       "conversion_from_start_percent": from_start, "evidence_level": evidence_level,
+                       "evidence": evidence, "status": "UNKNOWN" if count is None else "PASS"})
+        if count is not None:
+            previous = count
     return result
+
+
+def _canonical_journeys(visits: list[TrafficVisit] | list[BotTrafficVisit]) -> list[list[TrafficVisit | BotTrafficVisit]]:
+    """Group repeated paid landing rows into one journey without merging no-yclid visits."""
+    grouped: dict[tuple[str, str], list[TrafficVisit | BotTrafficVisit]] = defaultdict(list)
+    for visit in visits:
+        grouped[("yclid", visit.yclid) if visit.yclid else ("visit", visit.id)].append(visit)
+    return list(grouped.values())
 
 
 def canonical_metric_definitions() -> dict[str, dict[str, object]]:
@@ -107,15 +155,16 @@ async def _count(db: AsyncSession, model) -> int:
 async def admin_journey(
     days: int = Query(default=7, ge=1, le=30),
     object_type: str = Query(default="all", pattern="^(all|channel|bot)$"),
+    source: str = Query(default="all", pattern="^(all|yandex|organic)$"),
     problem: str = Query(default="all", pattern="^(all|problem|healthy)$"),
     search: str = Query(default="", max_length=120),
     _: str = Depends(require_web_admin),
     db: AsyncSession = Depends(get_session),
 ):
-    """Bounded read-only cross-domain journey diagnostics.
+    """Bounded read-only journey diagnostics.
 
     CHANNEL and BOT rows are deliberately loaded and aggregated separately;
-    the normalized view below contains only comparable milestones.
+    each selected domain retains its own canonical funnel.
     """
     start, end = _journey_period(days)
     needle = search.strip().lower()
@@ -143,6 +192,12 @@ async def admin_journey(
     bot_events = list((await db.scalars(select(BotTrafficEvent).where(BotTrafficEvent.bot_visit_id.in_(bot_visit_ids)))).all()) if bot_visit_ids else []
     bot_links = list((await db.scalars(select(BotMaxIdentityLink).where(BotMaxIdentityLink.bot_visit_id.in_(bot_visit_ids)))).all()) if bot_visit_ids else []
     bot_conversions = list((await db.scalars(select(BotConversion).where(BotConversion.bot_visit_id.in_(bot_visit_ids)))).all()) if bot_visit_ids else []
+
+    # Paid source is observable through yclid.  Keep the query read-only and do
+    # not infer an unobserved advertising source for non-yclid journeys.
+    if source != "all":
+        channel_visits = [item for item in channel_visits if bool(item.yclid) == (source == "yandex")]
+        bot_visits = [item for item in bot_visits if bool(item.yclid) == (source == "yandex")]
 
     channel_events_by_visit: dict[str, set[str]] = defaultdict(set)
     for event in channel_events:
@@ -173,28 +228,48 @@ async def admin_journey(
         if needle and needle not in f"{channel.title} {channel.id}".lower():
             continue
         visit_ids = {item.id for item in visits}
-        handoff = sum(bool(channel_events_by_visit[item.id] & {"MAX_REDIRECT_SENT", "HANDOFF_CONFIRMED", "MINI_APP_LOADED", "RESOLVE_OK"}) for item in visits)
-        identity = sum(item.visitor_id in visit_ids for item in channel_links)
-        opened = sum(bool(item.to_channel_at) for item in visits)
+        journeys = _canonical_journeys(visits)
+        has_event = lambda journey, event: any(event in channel_events_by_visit[item.id] for item in journey)
+        has_link = lambda journey: any(item.id in links_by_visit for item in journey)
+        has_membership = lambda journey: any(channel_members_by_visit[item.id] for item in journey)
+        has_metrika = lambda journey: any(
+            _successful_metrika(conversion)
+            for visit in journey for conversion in channel_conversions if conversion.visit_id == visit.id
+        )
+        miniapp = sum(has_event(journey, "MINI_APP_LOADED") for journey in journeys)
+        resolved = sum(has_event(journey, "RESOLVE_OK") for journey in journeys)
+        handoff = sum(has_event(journey, "MINIAPP_CHANNEL_HANDOFF_STARTED") for journey in journeys)
+        identity = sum(has_link(journey) for journey in journeys)
+        opened = sum(any(bool(item.to_channel_at) for item in journey) for journey in journeys)
+        subscribed = sum(has_membership(journey) for journey in journeys)
+        metrica = sum(has_metrika(journey) for journey in journeys)
+        # A join request has no visit foreign key.  Preserve the canonical stage
+        # but leave it UNKNOWN rather than attributing channel-wide raw events.
         joins = joins_by_channel.get(channel.id, Counter())
-        approved = joins.get("user_added", 0)
-        subscribed = sum(channel_members_by_visit[item.id] for item in visits)
-        metrica = sum(_successful_metrika(item) for item in channel_conversions if item.visit_id in visit_ids)
+        approved = subscribed
         failures = int(approved > subscribed or (subscribed and metrica == 0 and any(item.yclid for item in visits)))
         warnings = int(bool(visits) and (not identity or not opened))
         status = _status(visits=len(visits), failures=failures, warnings=warnings)
         if (problem == "problem" and status not in {"FAIL", "WARN"}) or (problem == "healthy" and status in {"FAIL", "WARN"}):
             continue
-        counts = [len(visits), sum(bool(item.startapp_token) for item in visits), handoff, identity, opened, joins.get("join_request", 0), approved, subscribed, metrica, None]
+        denominator = len(journeys)
+        counts = [None, denominator, denominator, sum(any(bool(item.visit_token) for item in journey) for journey in journeys),
+                  sum(any(bool(item.startapp_token) for item in journey) for journey in journeys), miniapp, identity, resolved, identity,
+                  identity, handoff, None, approved, approved,
+                  subscribed, subscribed, subscribed, metrica, None]
         rows.append({"id": channel.id, "name": channel.title, "type": "channel", "status": status,
                      "counts": {"landing": len(visits), "identity": identity, "destination": opened, "conversion": subscribed, "metrica": metrica},
-                     "stages": _stage_payload(JOURNEY_STAGES["channel"], counts),
+                     "journey_denominator": denominator,
+                     "conversion_kpi": {"label": "Конверсия в подписчика", "count": subscribed, "rate": None if not denominator else round(subscribed / denominator * 100, 1)},
+                     "metrika_rate": None if not denominator else round(metrica / denominator * 100, 1),
+                     "stages": _stage_payload(JOURNEY_STAGES["channel"], counts, denominator),
                      "reason": "manual approve pending or incomplete evidence" if status == "WARN" else ("channel stage contradiction" if status == "FAIL" else None)})
         for visit in visits:
             event_types = channel_events_by_visit[visit.id]
             journey_rows.append({"time": visit.landing_at.isoformat(), "object": channel.title, "type": "Канал",
                 "source": visit.utm_source or ("Yandex Direct" if visit.yclid else "Неизвестно"), "yclid_present": bool(visit.yclid),
                 "identity_resolved": visit.id in links_by_visit, "destination_reached": bool(visit.to_channel_at),
+                "authoritative_confirmation": bool(joins_by_channel.get(channel.id, Counter()).get("user_added", 0)),
                 "product_conversion": bool(channel_members_by_visit[visit.id]), "metrica": bool(channel_conversions_by_visit[visit.id] and any(_successful_metrika(c) for c in channel_conversions if c.visit_id == visit.id)),
                 "direct": "UNKNOWN", "status": "PASS" if channel_members_by_visit[visit.id] else ("WARN" if event_types else "UNKNOWN")})
 
@@ -213,43 +288,88 @@ async def admin_journey(
         if needle and needle not in f"{bot_name} {name} {bot_id}".lower():
             continue
         visit_ids = {item.id for item in visits}
-        handoff_started = sum("BOT_HANDOFF_STARTED" in bot_events_by_visit[item.id] for item in visits)
-        identity = sum(item.bot_visit_id in visit_ids for item in bot_links)
-        real_starts = sum("REAL_START_RECEIVED" in bot_events_by_visit[item.id] for item in visits)
-        started = sum(item.status == "BOT_STARTED" for item in visits)
-        metrica = sum(_successful_metrika(item) for item in bot_conversions if item.bot_visit_id in visit_ids)
+        journeys = _canonical_journeys(visits)
+        has_event = lambda journey, event: any(event in bot_events_by_visit[item.id] for item in journey)
+        has_link = lambda journey: any(item.id in bot_links_by_visit for item in journey)
+        has_started = lambda journey: any(item.status == "BOT_STARTED" for item in journey)
+        has_metrika = lambda journey: any(
+            _successful_metrika(conversion)
+            for visit in journey for conversion in bot_conversions if conversion.bot_visit_id == visit.id
+        )
+        handoff_started = sum(has_event(journey, "BOT_HANDOFF_STARTED") for journey in journeys)
+        identity = sum(has_link(journey) for journey in journeys)
+        real_starts = sum(has_event(journey, "REAL_START_RECEIVED") for journey in journeys)
+        started = sum(has_started(journey) for journey in journeys)
+        metrica = sum(has_metrika(journey) for journey in journeys)
         failures = int(started > real_starts or any(item.bot_visit_id in visit_ids and item.bot_visit_id not in bot_links_by_visit for item in bot_conversions))
         warnings = int(bool(visits) and (not identity or (identity and not handoff_started) or (handoff_started and not real_starts)))
         status = _status(visits=len(visits), failures=failures, warnings=warnings)
         if (problem == "problem" and status not in {"FAIL", "WARN"}) or (problem == "healthy" and status in {"FAIL", "WARN"}):
             continue
-        counts = [len(visits), len(visits), len(visits), identity, handoff_started, None, real_starts, started, metrica, None]
+        miniapp = sum(has_event(journey, "MINI_APP_LOADED") for journey in journeys)
+        resolved = sum(has_event(journey, "TOKEN_RESOLVED") for journey in journeys)
+        denominator = len(journeys)
+        paid_restored = sum(any(item.status == "BOT_STARTED" and bool(item.yclid) for item in journey) for journey in journeys)
+        counts = [None, denominator, denominator, denominator, denominator, miniapp, identity, resolved,
+                  identity, identity, handoff_started or None, real_starts, real_starts,
+                  paid_restored, started, metrica, None]
         rows.append({"id": name, "name": bot_name, "type": "bot", "status": status,
                      "counts": {"landing": len(visits), "identity": identity, "destination": None, "conversion": started, "metrica": metrica},
-                     "stages": _stage_payload(JOURNEY_STAGES["bot"], counts),
+                     "journey_denominator": denominator,
+                     "conversion_kpi": {"label": "Конверсия в bot_started", "count": started, "rate": None if not denominator else round(started / denominator * 100, 1)},
+                     "metrika_rate": None if not denominator else round(metrica / denominator * 100, 1),
+                     "stages": _stage_payload(JOURNEY_STAGES["bot"], counts, denominator),
                      "reason": "bot_started without real /start" if status == "FAIL" else ("Переход в бот инициирован, /start не получен" if status == "WARN" and identity and handoff_started and not real_starts else ("partial handoff evidence" if status == "WARN" else None))})
         for visit in visits:
             event_types = bot_events_by_visit[visit.id]
             journey_rows.append({"time": visit.created_at.isoformat(), "object": bot_name, "type": "Бот",
                 "source": visit.utm_source or ("Yandex Direct" if visit.yclid else "Неизвестно"), "yclid_present": bool(visit.yclid),
                 "identity_resolved": visit.id in bot_links_by_visit, "handoff_started": visit.id in bot_events_by_visit and "BOT_HANDOFF_STARTED" in bot_events_by_visit[visit.id], "destination_reached": "UNKNOWN",
+                "real_start": visit.id in bot_events_by_visit and "REAL_START_RECEIVED" in bot_events_by_visit[visit.id],
                 "product_conversion": visit.status == "BOT_STARTED", "metrica": bool(bot_conversions_by_visit[visit.id] and any(_successful_metrika(c) for c in bot_conversions if c.bot_visit_id == visit.id)),
                 "direct": "UNKNOWN", "status": "PASS" if visit.status == "BOT_STARTED" else ("WARN" if event_types else "UNKNOWN")})
 
     journey_rows.sort(key=lambda item: item["time"], reverse=True)
     selected_rows = [item for item in journey_rows if object_type == "all" or (object_type == "channel" and item["type"] == "Канал") or (object_type == "bot" and item["type"] == "Бот")][:100]
     problem_objects = [item for item in rows if item["status"] in {"FAIL", "WARN"}]
-    all_visits = sum(int(item["counts"]["landing"]) for item in rows)
-    destination_counts = [item["counts"]["destination"] for item in rows if item["counts"]["destination"] is not None]
-    normalized = [all_visits, all_visits, sum(int(stage["count"]) for item in rows for stage in item["stages"] if stage["name"] == "MAX identity"),
-                  sum(destination_counts) if destination_counts else None, sum(item["counts"]["conversion"] for item in rows),
-                  sum(item["counts"]["metrica"] for item in rows), None]
+    all_journeys = sum(int(item["journey_denominator"]) for item in rows)
+
+    def aggregate_domain(kind: str) -> dict[str, object] | None:
+        members = [item for item in rows if item["type"] == kind]
+        if not members:
+            return None
+        definitions = JOURNEY_STAGES[kind]
+        counts: list[int | None] = []
+        for index in range(len(definitions)):
+            observed = [item["stages"][index]["count"] for item in members if item["stages"][index]["count"] is not None]
+            counts.append(sum(int(value) for value in observed) if observed else None)
+        denominator = sum(int(item["journey_denominator"]) for item in members)
+        final_key = "conversion"
+        final_count = sum(int(item["counts"][final_key]) for item in members)
+        metrika_count = sum(int(item["counts"]["metrica"]) for item in members)
+        return {
+            "id": f"all-{kind}",
+            "name": "Все каналы" if kind == "channel" else "Все боты",
+            "type": kind,
+            "status": "FAIL" if any(item["status"] == "FAIL" for item in members) else ("WARN" if any(item["status"] == "WARN" for item in members) else "PASS"),
+            "journey_denominator": denominator,
+            "conversion_kpi": {
+                "label": "Конверсия в подписчика" if kind == "channel" else "Конверсия в bot_started",
+                "count": final_count,
+                "rate": None if not denominator else round(final_count / denominator * 100, 1),
+            },
+            "metrika_rate": None if not denominator else round(metrika_count / denominator * 100, 1),
+            "stages": _stage_payload(definitions, counts, denominator),
+        }
+
+    domain_funnels = [item for item in (aggregate_domain("channel"), aggregate_domain("bot")) if item is not None]
     return {"read_only": True, "scope": {"from": start.isoformat(), "to": end.isoformat(), "days": days, "timezone": "UTC"},
-            "filters": {"type": object_type, "problem": problem, "search": search},
+            "filters": {"type": object_type, "source": source, "problem": problem, "search": search},
             "summary": {"channels": sum(item["type"] == "channel" for item in rows), "bots": sum(item["type"] == "bot" for item in rows),
-                        "active_journeys": all_visits, "problem_objects": len(problem_objects),
+                        "active_journeys": all_journeys, "problem_objects": len(problem_objects),
                         "overall_status": "FAIL" if any(item["status"] == "FAIL" for item in rows) else ("WARN" if problem_objects else ("PASS" if rows else "UNKNOWN"))},
-            "normalized_funnel": _stage_payload(("Источник", "Landing", "MAX identity", "Destination reached", "Product conversion", "Metrika", "Direct"), normalized),
+            "domain_funnels": domain_funnels,
+            "normalized_funnel": [],
             "objects": rows, "problem_objects": problem_objects, "recent_journeys": selected_rows,
             "semantics": {"channel_manual_approve": True, "bot_real_start_distinct_from_bot_started": True, "direct": "UNKNOWN when no confirmation source exists"}}
 

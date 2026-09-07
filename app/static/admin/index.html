@@ -66,9 +66,11 @@
       </section>
 
       <section id="journey" class="page-section" data-page="journey">
-        <div class="section-heading"><div><p class="eyebrow">АНАЛИТИКА</p><h2>Путь пользователя</h2><p class="section-subtitle">Сквозная аналитика по всем каналам и ботам — от первого касания до конверсии.</p></div><span class="read-only-badge">READ-ONLY</span></div>
+        <div class="section-heading"><div><p class="eyebrow">АНАЛИТИКА</p><h2>Путь пользователя</h2><p class="section-subtitle">Сквозная диагностика каналов и ботов — от клика до конверсии.</p></div><div><span id="journey-updated" class="panel-caption">Обновлено —</span> <span class="read-only-badge">READ-ONLY</span></div></div>
         <div class="journey-filters panel">
-          <label>Объекты<select id="journey-type"><option value="all">Все объекты</option><option value="channel">Каналы</option><option value="bot">Боты</option></select></label>
+          <label>Объект<select id="journey-object"><option value="all">Все объекты</option></select></label>
+          <label>Тип<select id="journey-type"><option value="all">Все</option><option value="channel">Каналы</option><option value="bot">Боты</option></select></label>
+          <label>Источник<select id="journey-source"><option value="all">Все</option><option value="yandex">Яндекс.Директ</option><option value="organic">Органика</option></select></label>
           <label>Статус<select id="journey-problem"><option value="all">Все</option><option value="problem">Проблемные</option><option value="healthy">Без проблем</option></select></label>
           <label>Период<select id="journey-days"><option value="1">Сегодня</option><option value="7" selected>7 дней</option><option value="30">30 дней</option></select></label>
           <label class="journey-search">Поиск<input id="journey-search" type="search" placeholder="Название или identifier"></label>
@@ -76,11 +78,11 @@
         </div>
         <div id="journey-summary" class="metric-grid journey-summary"></div>
         <div class="journey-layout">
-          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">СКВОЗНАЯ ВОРОНКА</p><h3>Сравнимые этапы</h3></div><span class="panel-caption">Без синтетической конверсии</span></div><div id="journey-normalized" class="journey-funnel"></div></article>
+          <article class="panel"><div class="panel-heading"><div><p class="eyebrow">КАНОНИЧЕСКИЙ ПУТЬ</p><h3>Точные этапы</h3></div><span class="panel-caption">Каждый этап сохраняет собственное evidence</span></div><div id="journey-normalized" class="journey-funnels"></div></article>
           <article class="panel"><div class="panel-heading"><div><p class="eyebrow">ДИАГНОСТИКА</p><h3>Проблемные объекты</h3></div></div><div id="journey-problems" class="journey-problems"></div></article>
         </div>
         <article class="panel journey-objects-panel"><div class="panel-heading"><div><p class="eyebrow">ОБЪЕКТЫ</p><h3>Канонические воронки</h3></div></div><div id="journey-objects" class="journey-objects"></div></article>
-        <article class="panel"><div class="panel-heading"><div><p class="eyebrow">ПОСЛЕДНИЕ ПУТИ</p><h3>Recent journeys</h3></div><span class="panel-caption">до 100 записей, без raw identifiers</span></div><div class="journey-table-wrap"><table class="journey-table"><thead><tr><th>Время</th><th>Объект</th><th>Источник</th><th>yclid</th><th>Identity</th><th>Destination</th><th>Конверсия</th><th>Metrika</th><th>Статус</th></tr></thead><tbody id="journey-recent"></tbody></table></div></article>
+        <article class="panel"><div class="panel-heading"><div><p class="eyebrow">ПОСЛЕДНИЕ ПУТИ</p><h3>Последние пути</h3></div><span class="panel-caption">до 100 записей, без raw identifiers</span></div><div class="journey-table-wrap"><table class="journey-table"><thead><tr><th>Время</th><th>Объект</th><th>Тип</th><th>Источник</th><th>yclid</th><th>Identity</th><th>Destination</th><th>Подтверждение</th><th>Конверсия</th><th>Метрика</th><th>Direct</th><th>Статус</th></tr></thead><tbody id="journey-recent"></tbody></table></div></article>
       </section>
 
       <section id="clients" class="page-section" data-page="clients"><div class="section-heading"><div><p class="eyebrow">BUSINESS DATA</p><h2>Клиенты</h2></div></div><div class="panel placeholder-panel"><span class="placeholder-icon">◌</span><h3>Раздел готовится</h3><p>Список клиентов будет подключён после утверждения browser-auth контракта. Здесь не показываются сырые идентификаторы или персональные данные.</p></div></section>

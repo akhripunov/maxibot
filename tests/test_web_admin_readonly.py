@@ -2,7 +2,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.web_admin_auth import require_edge_token, require_qa_ingest_token
-from app.web_admin_readonly import canonical_metric_definitions
+from app.web_admin_readonly import BOT_STAGES, CHANNEL_STAGES, _stage_payload, canonical_metric_definitions
 
 
 def test_metric_definitions_mark_unsupported_business_metrics_unknown():
@@ -30,10 +30,45 @@ def test_journey_endpoint_preserves_separate_domains_and_bounded_recent_rows():
 
 def test_bot_journey_exposes_handoff_attempt_without_claiming_destination_opened():
     source = open("app/web_admin_readonly.py", encoding="utf-8").read()
-    assert '"Bot handoff initiated"' in source
+    assert '"Открытие конкретного бота"' in source
     assert '"BOT_HANDOFF_STARTED"' in source
+    assert '"ATTEMPT"' in source
     assert '"destination_reached": "UNKNOWN"' in source
     assert "Переход в бот инициирован, /start не получен" in source
+
+
+def test_exact_channel_and_bot_stage_order_is_exposed_without_normalizing_domains():
+    assert [item[1] for item in CHANNEL_STAGES] == [
+        "Direct", "Landing", "TrafficVisit(channel_id)", "Token", "Startapp", "MAX Mini App",
+        "Verified MAX user", "Resolve token", "MaxIdentityLink", "Проверка channel_id",
+        "Открытие конкретного канала", "Join request", "Approve", "user_added(user_id + channel_id)",
+        "Повторная проверка channel_id + MaxIdentityLink", "Восстановление TrafficVisit / yclid",
+        "max_subscriber", "Metrika", "Direct",
+    ]
+    assert [item[1] for item in BOT_STAGES] == [
+        "Direct", "Landing", "BotTrafficVisit(bot_id)", "Token", "Startapp", "MAX Mini App",
+        "Verified MAX user", "Resolve token", "BotMaxIdentityLink", "Проверка bot_id",
+        "Открытие конкретного бота", "Реальный /start", "Повторная проверка bot_id + BotMaxIdentityLink",
+        "Восстановление BotTrafficVisit / yclid", "bot_started", "Metrika", "Direct",
+    ]
+
+
+def test_stage_payload_reports_both_conversion_rates_and_unknown_without_zero_substitution():
+    stages = _stage_payload(BOT_STAGES[:3], [None, 20, 10], 20)
+    assert stages[0]["status"] == "UNKNOWN"
+    assert stages[0]["conversion_from_start_percent"] is None
+    assert stages[1]["conversion_from_previous_percent"] is None
+    assert stages[1]["conversion_from_start_percent"] == 100.0
+    assert stages[2]["conversion_from_previous_percent"] == 50.0
+    assert stages[2]["conversion_from_start_percent"] == 50.0
+
+
+def test_journey_uses_unique_denominator_and_separate_domain_aggregates():
+    source = open("app/web_admin_readonly.py", encoding="utf-8").read()
+    assert '"journey_denominator"' in source
+    assert '"domain_funnels": domain_funnels' in source
+    assert '"active_journeys": all_journeys' in source
+    assert 'source: str = Query(default="all", pattern="^(all|yandex|organic)$")' in source
 
 
 @pytest.mark.asyncio

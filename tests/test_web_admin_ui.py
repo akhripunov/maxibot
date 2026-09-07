@@ -22,10 +22,14 @@ def test_user_journey_is_first_class_read_only_section_between_overview_and_clie
     journey = text.index('data-section="journey"')
     clients = text.index('data-section="clients"')
     assert overview < journey < clients
-    for marker in ("journey-type", "journey-problem", "journey-days", "journey-normalized", "journey-recent"):
+    for marker in ("journey-object", "journey-type", "journey-source", "journey-problem", "journey-days", "journey-normalized", "journey-recent"):
         assert marker in text
     script = (ROOT / "app/static/admin/admin.js").read_text(encoding="utf-8")
     assert "getJson(`/journey?${params}`)" in script
+    assert "conversion_from_previous_percent" in script
+    assert "conversion_from_start_percent" in script
+    assert "Metrika conversion rate" in script
+    assert "domain_funnels" in script
 
 
 def test_admin_shell_has_no_fake_business_values_and_distinguishes_unknown():
