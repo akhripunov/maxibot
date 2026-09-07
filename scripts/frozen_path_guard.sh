@@ -119,7 +119,7 @@ def ads_only_shared_change(path: str) -> bool:
             "user_added", "max_subscriber", "bot_started", "Metrika",
             "paid_dedupe", "cross_object",
         )
-        ads_markers = ("AdsAccount", "AdsCampaign", "AdsEntity", "AdsCreative", "AdsObservation", "AdsCollectionRun", "AdsAnalysisSnapshot", "AdsAiOutcome", "AdsPromotionCampaignLink")
+        ads_markers = ("AdsAccount", "AdsCampaign", "AdsEntity", "AdsCreative", "AdsObservation", "AdsCollectionRun", "AdsAnalysisSnapshot", "AdsAiOutcome", "AdsPromotionCampaignLink", "evaluation_status", "implementation_confirmed", "implementation_evidence_json", "baseline_metrics_json", "expected_direction", "actual_metrics_json", "reason_json", "problem_json", "root_cause_json", "expected_impact_json", "evaluation_window_days", "promotion_object_type", "promotion_object_id")
         return any(marker in text for marker in ads_markers) and not any(marker in text for marker in frozen_markers)
     if path.startswith("alembic/versions/"):
         text = changed_lines(path)
@@ -128,7 +128,9 @@ def ads_only_shared_change(path: str) -> bool:
             "bot_max_identity_links", "bot_started", "max_subscriber",
             "metrika", "paid_dedupe",
         )
-        return "ads_promotion_campaign_links" in text and not any(marker in text.lower() for marker in frozen_markers)
+        table_names = set(re.findall(r'"(ads_[a-z0-9_]+)"', text.lower()))
+        allowed_tables = {"ads_recommendations", "ads_ai_outcomes"}
+        return bool(table_names) and table_names <= allowed_tables and not any(marker in text.lower() for marker in frozen_markers)
     return False
 
 def ads_only_channel_ui_change(path: str) -> bool:

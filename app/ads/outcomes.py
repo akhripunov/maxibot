@@ -11,6 +11,13 @@ OUTCOME_HORIZONS = (("24h", timedelta(hours=24)), ("72h", timedelta(hours=72)), 
 OUTCOME_METRICS = ("impressions_7d", "clicks_7d", "cost_7d", "conversions_7d")
 
 
+def classify_outcome(*, implementation_confirmed: str, valid_window: bool, sufficient_data: bool, success_criteria_met: bool | None) -> str:
+    """Causal close-loop gate; observation alone can never be SUCCESS/FAIL."""
+    if implementation_confirmed != "YES" or not valid_window or not sufficient_data or success_criteria_met is None:
+        return "INCONCLUSIVE"
+    return "SUCCESS" if success_criteria_met else "FAIL"
+
+
 def outcome_metrics_sufficient(facts: dict | None) -> bool:
     """Return true only when all campaign totals needed for a delta are known."""
     values = (facts or {}).get("facts", facts or {})
@@ -44,6 +51,8 @@ async def ensure_outcome_checkpoints(
             due_at=created_at + delta,
             execution_status="RECOMMENDATION_ONLY",
             baseline_snapshot_id=baseline_snapshot_id,
+            evaluation_status="PENDING",
+            implementation_confirmed="UNKNOWN",
         ))
         created += 1
     if created:
@@ -90,7 +99,16 @@ async def mark_outcome_retryable(db: AsyncSession, outcome: AdsAiOutcome, error_
 async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, followup_snapshot_id: str, delta: dict) -> None:
     import json
     outcome.status = "COMPLETED"
+    outcome.evaluation_status = classify_outcome(
+        implementation_confirmed=outcome.implementation_confirmed,
+        valid_window=True,
+        sufficient_data=outcome_metrics_sufficient(delta),
+        success_criteria_met=None,
+    )
     outcome.followup_snapshot_id = followup_snapshot_id
     outcome.observed_delta_json = json.dumps(delta, ensure_ascii=False)
+    outcome.actual_metrics_json = json.dumps(delta, ensure_ascii=False)
+    outcome.confidence = "LOW" if outcome.evaluation_status == "INCONCLUSIVE" else outcome.confidence
+    outcome.reason_json = json.dumps({"reason": "Наблюдение после рекомендации не доказывает причинность; implementation evidence отсутствует."}, ensure_ascii=False)
     outcome.completed_at = datetime.now(timezone.utc)
     await db.commit()

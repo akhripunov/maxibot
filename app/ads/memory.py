@@ -11,7 +11,14 @@ async def retrieve(db: AsyncSession, *, channel_id: str, campaign_id: str | None
     if campaign_id: query = query.order_by((AdsMemory.campaign_id == campaign_id).desc(), AdsMemory.updated_at.desc())
     return list((await db.scalars(query.limit(12))).all())
 
-async def create_candidates(db: AsyncSession, *, channel_id: str, campaign_id: str | None, ai_run_id: str, snapshot_id: str, candidates: list[dict], known_evidence: set[str]) -> list[AdsMemory]:
+async def create_candidates(db: AsyncSession, *, channel_id: str, campaign_id: str | None, ai_run_id: str, snapshot_id: str, candidates: list[dict], known_evidence: set[str], proven_outcome: bool = False) -> list[AdsMemory]:
+    """Persist memory only after a proven closed-loop outcome.
+
+    AI suggestions remain in the validated run payload until an outcome has
+    implementation evidence and a causal SUCCESS/FAIL classification.
+    """
+    if not proven_outcome:
+        return []
     created: list[AdsMemory] = []
     for item in candidates:
         statement = str(item.get("statement") or "").strip()

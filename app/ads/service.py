@@ -185,7 +185,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     # does not repeat the same trend object a second time.
     context_dataset = json.loads(json.dumps(dataset, ensure_ascii=False))
     context_dataset.pop("trends", None)
-    facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "TRENDS": dataset.get("trends", {}), "V2_ANALYSIS": context_dataset, "QUALITY_DECISION_SNAPSHOT": dataset.get("QUALITY_DECISION_SNAPSHOT")}
+    facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "TRENDS": dataset.get("trends", {}), "DIRECTOLOGIST": dataset.get("DIRECTOLOGIST"), "V2_ANALYSIS": context_dataset, "QUALITY_DECISION_SNAPSHOT": dataset.get("QUALITY_DECISION_SNAPSHOT")}
     facts.update(closed_loop)
     membership_rate = fact_set.maxibot_qualified_membership_rate
     facts["confidence_axes"] = {
@@ -248,7 +248,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                 verdict = policy(valid, suff)
                 ai.status, ai.validated_output_json, ai.policy_result_json = "COMPLETED", json.dumps(valid, ensure_ascii=False), json.dumps(verdict)
                 rec = valid["recommendation"]
-                recommendation = AdsRecommendation(channel_id=channel.id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict))
+                recommendation = AdsRecommendation(channel_id=channel.id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"]}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=dataset.get("DIRECTOLOGIST", {}).get("object_type"))
                 db.add(recommendation); await db.flush(); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
                 await create_candidates(db, channel_id=channel.id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids)
         except Exception as exc:
@@ -377,7 +377,7 @@ async def persist_development_result(db: AsyncSession, *, channel_id: str, outpu
         ai.status, ai.validation_error, ai.completed_at = ("CODEX_FAILED" if worker else "SCHEMA_INVALID"), error, datetime.now(timezone.utc); await db.commit(); return ai
     verdict = policy(valid, context.get("DATA_SUFFICIENCY", "INSUFFICIENT")); ai.status, ai.validated_output_json, ai.policy_result_json, ai.validation_error, ai.completed_at = ("CODEX_COMPLETED" if worker else "COMPLETED"), json.dumps(valid, ensure_ascii=False), json.dumps(verdict), None, datetime.now(timezone.utc)
     rec = valid["recommendation"]
-    recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict))
+    recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14))
     db.add(recommendation)
     await db.flush()
     await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=ai.input_snapshot_id)

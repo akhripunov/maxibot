@@ -935,6 +935,15 @@ class AdsAiOutcome(Base):
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    evaluation_status: Mapped[Optional[str]] = mapped_column(String(24), index=True)
+    implementation_confirmed: Mapped[str] = mapped_column(String(16), default="UNKNOWN", nullable=False)
+    implementation_evidence_json: Mapped[Optional[str]] = mapped_column(Text)
+    baseline_metrics_json: Mapped[Optional[str]] = mapped_column(Text)
+    expected_direction: Mapped[Optional[str]] = mapped_column(String(16))
+    expected_impact_json: Mapped[Optional[str]] = mapped_column(Text)
+    actual_metrics_json: Mapped[Optional[str]] = mapped_column(Text)
+    confidence: Mapped[Optional[str]] = mapped_column(String(16))
+    reason_json: Mapped[Optional[str]] = mapped_column(Text)
     __table_args__ = (UniqueConstraint("recommendation_id", "horizon", name="uq_ads_ai_outcome_horizon"),)
 
 
@@ -985,6 +994,14 @@ class AdsRecommendation(Base):
     confidence: Mapped[str] = mapped_column(String(16), default="LOW", nullable=False)
     data_sufficiency: Mapped[str] = mapped_column(String(24), default="INSUFFICIENT", nullable=False)
     policy_json: Mapped[Optional[str]] = mapped_column(Text)
+    problem_json: Mapped[Optional[str]] = mapped_column(Text)
+    root_cause_json: Mapped[Optional[str]] = mapped_column(Text)
+    hypothesis: Mapped[Optional[str]] = mapped_column(Text)
+    expected_impact_json: Mapped[Optional[str]] = mapped_column(Text)
+    evaluation_window_days: Mapped[Optional[int]] = mapped_column(Integer)
+    evaluation_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16))
+    promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

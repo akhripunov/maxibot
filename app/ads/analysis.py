@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AdsAnalysisSnapshot, AdsCampaign, AdsDailyAggregate, AdsObservation
 from app.ads.facts import CampaignFactSet
+from app.ads.directologist import build_decision_pack, finalize_decision_pack
 from app.ads.trends import build_trend_features
 from app.core.config import settings
 import json
@@ -391,6 +392,7 @@ def bound_v2_dataset(dataset: dict[str, Any], *, max_bytes: int, max_evidence: i
                 referenced.update(item.get("evidence_ids") or [])
         for item in (data.get("trends") or {}).get("findings", []):
             referenced.update(item.get("evidence_ids") or [])
+        referenced.update((data.get("DIRECTOLOGIST") or {}).get("evidence", {}).keys())
         data["evidence"] = {key: value for key, value in data.get("evidence", {}).items() if key in referenced}
     def sync_report_view() -> None:
         view = data.get("report_view")
@@ -578,6 +580,7 @@ async def build_v2_analysis_dataset(
             "sufficiency_gate_version": "impressions>=30 OR clicks>=3 OR conversions>=1",
         }
     daily_rows = list((await db.scalars(select(AdsDailyAggregate).where(AdsDailyAggregate.campaign_id == campaign.id).order_by(AdsDailyAggregate.aggregate_date, AdsDailyAggregate.dimension_type))).all())
+    decision_pack = await build_decision_pack(db, campaign=campaign, daily_rows=daily_rows)
     trend_rows = []
     trend_evidence: dict[str, Any] = {}
     for aggregate in daily_rows:
@@ -627,10 +630,13 @@ async def build_v2_analysis_dataset(
         "selection": selection,
         "data_quality": {"rows_loaded": len(rows), "rows_after_dedupe": len(latest), "history_days": len({r.date_to for r in latest.values() if r.date_to}), "insufficient_history_for_trend": len({r.date_to for r in latest.values() if r.date_to}) < 3, "missing_dimensions": [dimension for dimension in DIMENSIONS if not grouped[dimension]], "source": "ADS_DATA_LAYER_V2"},
         "provenance_summary": {"provider": "YANDEX_DIRECT", "normalized_only": True, "observation_rows_analyzed": len(latest)},
+        "DIRECTOLOGIST": decision_pack,
         "evidence": {**evidence, **trend_evidence},
         "trends": trends,
     }
     dataset["findings"] = build_deterministic_findings(dataset)
+    dataset["DIRECTOLOGIST"] = finalize_decision_pack(dataset["DIRECTOLOGIST"], dataset["findings"])
+    dataset["evidence"].update(dataset["DIRECTOLOGIST"].get("evidence", {}))
     dataset["recommendation_quality"] = build_recommendation_quality_layer(
         dataset["findings"],
         campaign_metrics=campaign_metrics,

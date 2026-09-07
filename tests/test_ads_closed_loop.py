@@ -9,6 +9,7 @@ from app.ads.outcomes import (
     OUTCOME_HORIZONS,
     ensure_outcome_checkpoints,
     outcome_metrics_sufficient,
+    classify_outcome,
 )
 from app.db.models import AdsRecommendation, AdsV2Outcome
 
@@ -117,6 +118,12 @@ def test_no_causality_claim():
 
 def test_recommendations_are_advisory():
     assert "never propose execution" in SYSTEM_PROMPT.lower()
+
+
+def test_causality_gate_keeps_unimplemented_observation_inconclusive():
+    assert classify_outcome(implementation_confirmed="UNKNOWN", valid_window=True, sufficient_data=True, success_criteria_met=True) == "INCONCLUSIVE"
+    assert classify_outcome(implementation_confirmed="YES", valid_window=True, sufficient_data=True, success_criteria_met=True) == "SUCCESS"
+    assert classify_outcome(implementation_confirmed="YES", valid_window=True, sufficient_data=True, success_criteria_met=False) == "FAIL"
 
 
 def test_outcome_horizon_due_offsets_are_fixed():

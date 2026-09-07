@@ -599,7 +599,7 @@ def _owner_confidence(value: object) -> str:
     return {"LOW": "низкая", "MEDIUM": "средняя", "HIGH": "высокая", "INSUFFICIENT": "недостаточно данных"}.get(str(value or ""), "не определена")
 
 
-def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: str, summary: str, recommendation: str, confidence: str, health_status: str | None = None) -> str:
+def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: str, summary: str, recommendation: str, confidence: str, health_status: str | None = None, decision_pack: dict | None = None) -> str:
     checked = checked_at.astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M") if checked_at else "ещё не выполнялась"
     status = {
         "WAITING_FOR_CODEX": "Проверка ожидает анализа",
@@ -608,6 +608,11 @@ def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: s
         "CODEX_FAILED": "Анализ не завершён",
     }.get(ai_status, "Анализ ещё не выполнялся")
     warning = "\n\n⚠️ Данные неполные\nАнализ может быть менее точным." if health_status not in {None, "HEALTHY"} else ""
+    pack = decision_pack or {}
+    outcomes = pack.get("outcomes") or {}
+    outcome_label = {"CHANNEL": "подписчик", "BOT": "запуск бота"}.get(pack.get("object_type"), "подтверждённый результат")
+    outcome_value = outcomes.get("attributed_outcomes")
+    outcome_line = f"\nПодтверждённые результаты ({outcome_label}): {outcome_value if outcome_value is not None else 'UNKNOWN'}" if pack else ""
     return (
         "🤖 AI Продвижение\n\n"
         f"Кампания: {campaign_name or 'не выбрана'}\n"
@@ -615,7 +620,7 @@ def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: s
         f"Статус: {status}\n\n"
         f"Главный вывод:\n{_owner_short_text(summary, 'Данных для вывода пока нет.')}\n\n"
         f"Почему сейчас:\n{_owner_short_text(recommendation, 'Новых сигналов пока нет.')}\n\n"
-        f"Уверенность: {_owner_confidence(confidence)}"
+        f"Уверенность: {_owner_confidence(confidence)}{outcome_line}"
         f"{warning}\n\n"
         "🔒 AI анализирует и советует, но ничего автоматически не меняет."
     )
@@ -1267,6 +1272,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         campaign = facts.get("campaign") or {}
         fact_values = facts.get("facts") or {}
         confidence_axes = facts.get("confidence_axes") or {}
+        decision_pack = facts.get("DIRECTOLOGIST") or {}
         status_map = {"WAITING_FOR_CODEX": "⏳ Ожидает Codex Worker", "CODEX_PROCESSING": "⚙️ Codex анализирует рекламу", "CODEX_COMPLETED": "✅ Завершён", "CODEX_FAILED": "🔴 Не завершён"}
         ai_status = status_map.get(ai.status, "AI-анализ ещё не выполнялся.") if ai else "AI-анализ ещё не выполнялся."
         if ai and ai.status == "CODEX_COMPLETED" and ai.validated_output_json:
@@ -1287,6 +1293,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             recommendation=owner_reason,
             confidence=owner_confidence,
             health_status=health.get("status"),
+            decision_pack=decision_pack,
         )
         return (body, buttons(
             ("🔄 Проверить рекламу", f"ads_check:{channel.id}"),
