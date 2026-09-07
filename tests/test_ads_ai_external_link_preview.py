@@ -61,7 +61,10 @@ def test_existing_ai_promotion_buttons_are_preserved():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
-    assert 'f"🔄 Проверить снова"' in source or '"🔄 Проверить снова"' in source
+    assert '("🔄 Проверить рекламу", f"ads_check:{channel.id}")' in source
+    assert '("🔎 Почему AI так решил", f"ads_context:{channel.id}")' in source
+    assert '("🕘 История рекомендаций", f"ads_history:{channel.id}")' in source
+    assert '"🧠 Память AI"' not in source[source.index('if screen.startswith("ads:"):'):source.index('if screen.startswith("ads_campaigns:"):')]
     assert 'f"ads_check:{channel.id}"' in source
 
 

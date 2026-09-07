@@ -587,6 +587,40 @@ def format_ads_result(*, headline: str, channel_title: str, direct_connected: bo
     return result + "🔒 Теневой режим\nAI анализирует и советует, но ничего автоматически не изменяет."
 
 
+def _owner_short_text(value: object, fallback: str = "—", limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip()).strip()
+    if not text:
+        return fallback
+    first_sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
+    return (first_sentence[:limit - 1].rstrip() + "…") if len(first_sentence) >= limit else first_sentence
+
+
+def _owner_confidence(value: object) -> str:
+    return {"LOW": "низкая", "MEDIUM": "средняя", "HIGH": "высокая", "INSUFFICIENT": "недостаточно данных"}.get(str(value or ""), "не определена")
+
+
+def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: str, summary: str, recommendation: str, confidence: str, health_status: str | None = None) -> str:
+    checked = checked_at.astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M") if checked_at else "ещё не выполнялась"
+    status = {
+        "WAITING_FOR_CODEX": "Проверка ожидает анализа",
+        "CODEX_PROCESSING": "AI анализирует данные",
+        "CODEX_COMPLETED": "Анализ завершён",
+        "CODEX_FAILED": "Анализ не завершён",
+    }.get(ai_status, "Анализ ещё не выполнялся")
+    warning = "\n\n⚠️ Данные неполные\nАнализ может быть менее точным." if health_status not in {None, "HEALTHY"} else ""
+    return (
+        "🤖 AI Продвижение\n\n"
+        f"Кампания: {campaign_name or 'не выбрана'}\n"
+        f"Проверено: {checked}\n"
+        f"Статус: {status}\n\n"
+        f"Главный вывод:\n{_owner_short_text(summary, 'Данных для вывода пока нет.')}\n\n"
+        f"Почему сейчас:\n{_owner_short_text(recommendation, 'Новых сигналов пока нет.')}\n\n"
+        f"Уверенность: {_owner_confidence(confidence)}"
+        f"{warning}\n\n"
+        "🔒 AI анализирует и советует, но ничего автоматически не меняет."
+    )
+
+
 def _author_color(user_external_id: str) -> str:
     """Stable visual author color for the lifetime of a channel feed."""
     palette = ("🔵", "🟢", "🟣", "🟠", "🔴", "🟡", "🟤")
@@ -1241,33 +1275,24 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             result = {}; diagnosis = "Ответ AI не прошёл проверку или worker недоступен."; recommendation = "Попробуйте запустить проверку снова."; confidence = "—"; headline = "🔴 AI-анализ не завершён"
         else:
             result = {}; diagnosis = "—"; recommendation = "—"; confidence = "—"; headline = "🤖 AI Продвижение"
-        body = format_ads_result(
-            headline=headline,
-            channel_title=channel.title,
-            direct_connected=direct_connected,
+        owner_summary = (result.get("summary") if result else None) or (rec.title if rec else diagnosis)
+        owner_reason = ((result.get("recommendation") or {}).get("reason") if result else None) or (rec.rationale if rec else recommendation)
+        owner_confidence = (result.get("confidence") if result else None) or (rec.confidence if rec else confidence)
+        body = format_ads_owner_main(
             campaign_name=campaign.get("name"),
-            ai_status=ai_status,
             checked_at=view["checked_at"],
-            fact_values=fact_values,
-            diagnosis=diagnosis,
-            recommendation=recommendation,
-            confidence=confidence,
-            performance_confidence=confidence_axes.get("performance_confidence", confidence),
-            attribution_confidence=confidence_axes.get("attribution_confidence", "—"),
-            completed=bool(ai and ai.status == "CODEX_COMPLETED"),
-            trends=facts.get("TRENDS"),
-            campaign_specific_matching=(facts.get("MAXIBOT_METRICS") or {}).get("campaign_specific", {}).get("value", "UNKNOWN"),
-            v2_analysis=facts.get("V2_ANALYSIS"),
+            ai_status=ai.status if ai else "",
+            summary=owner_summary,
+            recommendation=owner_reason,
+            confidence=owner_confidence,
+            health_status=health.get("status"),
         )
         return (body, buttons(
-            (("🔄 Проверить снова" if ai and ai.status == "CODEX_COMPLETED" else "🔄 Проверить рекламу"), f"ads_check:{channel.id}"),
-            (("🔄 Обновить статус", f"ads_status:{channel.id}") if ai and ai.status in {"WAITING_FOR_CODEX", "CODEX_PROCESSING"} else ("💡 Подробнее", f"ads_recommendations:{channel.id}")),
+            ("🔄 Проверить рекламу", f"ads_check:{channel.id}"),
             ("🎯 Кампания", f"ads_campaigns:{channel.id}"),
             ("💡 Рекомендации", f"ads_recommendations:{channel.id}"),
-            ("🧠 Память AI", f"ads_memory:{channel.id}"),
-            ("🔎 Что видел AI", f"ads_context:{channel.id}"),
-            ("📜 История решений", f"ads_history:{channel.id}"),
-            ("⚠️ Data Health", f"ads_health:{channel.id}"),
+            ("🔎 Почему AI так решил", f"ads_context:{channel.id}"),
+            ("🕘 История рекомендаций", f"ads_history:{channel.id}"),
             ("⬅️ Назад", f"promotion_channel:{channel.id}"),
         ))
     if screen.startswith("ads_campaigns:"):
@@ -1281,8 +1306,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if not channel or not can_access_ads(admin.external_id):
             return await render_screen(db, admin, "promotion")
         campaigns = await campaigns_for_channel(db, channel.id)
+        view = await latest_view(db, channel.id)
+        fact_values = (view["facts"] or {}).get("facts") or {}
+        metric_labels = (("Показы", "impressions_7d"), ("Клики", "clicks_7d"), ("Расход", "cost_7d"), ("Конверсии", "conversions_7d"), ("CTR", "ctr_7d"), ("CPC", "cpc_7d"), ("CPA", "actual_cpa_7d"), ("CR", "conversion_rate_7d"))
+        available_metrics = [f"{label}: {_metric(key, fact_values.get(key))}" for label, key in metric_labels if fact_values.get(key) is not None]
+        metrics_text = "\n".join(available_metrics) if available_metrics else "Метрики пока недоступны в сохранённых данных."
         if not campaigns:
-            return (f"🎯 Кампании канала\n\n📢 {channel.title}\n\nКампаний пока нет в локальном read-only снимке. Нажмите «Проверить сейчас» в AI Продвижении.", buttons(("⬅️ AI Продвижение", f"ads:{channel.id}")))
+            return (f"🎯 Кампания\n\n📢 {channel.title}\n\n{metrics_text}\n\nКампании пока нет в сохранённых данных.", buttons(("⬅️ AI Продвижение", f"ads:{channel.id}")))
         page_size = 10
         page = campaigns[offset:offset + page_size]
         rows = [(f"{'✅' if linked else '◻️'} {campaign.name[:42]}", f"ads_campaign_select:{channel.id}:{campaign.id}") for campaign, linked in page]
@@ -1291,7 +1321,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if offset + page_size < len(campaigns):
             rows.append(("Следующие ➡️", f"ads_campaigns:{channel.id}:{offset + page_size}"))
         rows.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
-        return (f"🎯 Кампании канала\n\n📢 {channel.title}\n\nПоказано {offset + 1}–{min(offset + page_size, len(campaigns))} из {len(campaigns)}. Выберите кампанию вручную. Связка явная и не меняет кампании в Яндекс.Директе.", buttons(*rows))
+        return (f"🎯 Кампания\n\n📢 {channel.title}\n\n{metrics_text}\n\nВыберите кампанию: {offset + 1}–{min(offset + page_size, len(campaigns))} из {len(campaigns)}.\n\n🔒 Только просмотр: данные рекламы не изменяются.", buttons(*rows))
     if screen.startswith("ads_context:") or screen.startswith("ads_history:") or screen.startswith("ads_recommendations:") or (screen.startswith("ads_memory:") and not screen.startswith("ads_memory_detail:")) or screen.startswith("ads_health:"):
         selected_id = screen.split(":", 1)[1]
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
@@ -1300,52 +1330,49 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         view = await latest_view(db, channel.id)
         if screen.startswith("ads_memory:"):
             rows = view["memories"]
-            detail = "\n".join(f"• [{row.status}] {row.content}\n  ID: {row.id}" for row in rows) or "Пока нет сохранённых наблюдений."
-            title = "🧠 Память AI"
+            detail = "\n".join(f"• {_owner_short_text(row.content)}" for row in rows) or "Пока нет сохранённых наблюдений."
+            title = "🔎 Почему AI так решил"
         elif screen.startswith("ads_health:"):
             health = view["health"]
-            v2 = (view["facts"] or {}).get("V2") or {}
-            detail = f"Статус: {health.get('status', 'UNKNOWN')}\n\n" + "\n".join(f"• {name}: {value}" for name, value in health.get("checks", {}).items())
-            detail += f"\n\nV2 entities: {v2.get('entities', {})}\nV2 dimensions: {v2.get('dimensions', {})}\nMissing: {', '.join(v2.get('missing_data', [])) or 'нет'}"
-            title = "⚠️ Data Health"
+            health_label = {"HEALTHY": "Данные в норме", "PARTIAL": "Данные частично доступны", "WARNING": "Данные требуют внимания", "UNHEALTHY": "Данные неполные"}.get(health.get("status"), "Качество данных не определено")
+            detail = f"{health_label}.\n\n" + "\n".join(f"• {name}: {value}" for name, value in health.get("checks", {}).items())
+            title = "🔎 Почему AI так решил"
         elif screen.startswith("ads_context:"):
             ai = await db.scalar(select(AdsAiRun).where(AdsAiRun.channel_id == channel.id).order_by(AdsAiRun.created_at.desc()))
             raw = json.loads(ai.safe_context_json) if ai and ai.safe_context_json else {}
-            v2 = raw.get("FACTS", {}).get("V2_ANALYSIS") or {}
-            sections = v2.get("sections") or {}
-            selection = v2.get("selection") or {}
-            findings = v2.get("findings") or {}
-            trends = raw.get("FACTS", {}).get("TRENDS") or {}
-            counts = trends.get("counts") or {}
-            report_view = v2.get("report_view") or {}
-            comparison = report_view.get("comparison") or {}
-            coverage_labels = {"ad_group": "группы", "ad": "объявления", "placement": "площадки", "region": "регионы", "device": "устройства", "demographics": "демография", "criteria": "критерии"}
-            coverage = ", ".join(f"{coverage_labels[key]} {item.get('included', 0)}/{item.get('available', 0)}" for key, item in comparison.items() if item.get("available")) or "нет доступных измерений"
-            detail = (f"Статус: {ai.status if ai else '-'}\n\n"
-                      f"Facts: {len(raw.get('FACTS', {}).get('evidence', {}))}\n"
-                      f"Память использована: {len(raw.get('RETRIEVED_PRIVATE_MEMORIES', []))}\n"
-                      f"Недостаёт: {', '.join(raw.get('MISSING_DATA', [])) or 'нет'}\n"
-                      f"Достаточность: {raw.get('DATA_SUFFICIENCY', 'UNKNOWN')}\n"
-                      f"\nAI получил:\n"
-                      f"• измерения: {coverage}\n"
-                      f"\nТренды: история {trends.get('history_days_available', 0)} дн.; улучшение {counts.get('IMPROVING', 0)}, ухудшение {counts.get('DEGRADING', 0)}, нестабильно {counts.get('VOLATILE', 0)}, мало данных {0 if trends.get('history_sufficient') else 1}\n"
-                      f"Значимые findings: +{len(findings.get('positive', []))}, watch {len(findings.get('watch', []))}, недостаточно данных {findings.get('insufficient_rows', 0)}\n"
-                      f"Размер контекста: {v2.get('context_budget', {}).get('bytes', 'н/д')} байт; evidence: {v2.get('context_budget', {}).get('evidence_entries', 'н/д')}")
-            title = "🔎 Последний контекст AI"
+            facts = (view["facts"] or {}).get("facts") or {}
+            result = json.loads(ai.validated_output_json) if ai and ai.validated_output_json else {}
+            recommendation = result.get("recommendation") or {}
+            health = view["health"] or {}
+            health_label = {"HEALTHY": "Данные в норме", "PARTIAL": "Данные частично доступны", "WARNING": "Данные требуют внимания", "UNHEALTHY": "Данные неполные"}.get(health.get("status"), "Качество данных не определено")
+            detail = (
+                f"Что увидел AI:\n{_owner_short_text(result.get('summary') or 'Последний анализ не содержит итогового вывода.')}\n\n"
+                f"Почему такой вывод:\n{_owner_short_text(recommendation.get('reason') or 'Недостаточно подтверждённых сигналов для объяснения.')}\n\n"
+                f"Уверенность: {_owner_confidence(result.get('confidence'))}\n"
+                f"Качество данных: {health_label}\n"
+                f"AI учитывал предыдущие проверки: {len(raw.get('RETRIEVED_PRIVATE_MEMORIES', []))}"
+            )
+            if facts.get("missing_data") or raw.get("MISSING_DATA"):
+                detail += "\n\n⚠️ Данные неполные — анализ может быть менее точным."
+            title = "🔎 Почему AI так решил"
         elif screen.startswith("ads_history:"):
             rows = list((await db.scalars(select(AdsAiRun).where(AdsAiRun.channel_id == channel.id).order_by(AdsAiRun.created_at.desc()).limit(10))).all())
-            detail = "\n".join(f"• {row.created_at:%d.%m %H:%M} — {row.status} — NOT EXECUTED" for row in rows) or "Истории запусков пока нет."
             recommendation_ids = [row.id for row in rows]
+            recommendations = list((await db.scalars(select(AdsRecommendation).where(AdsRecommendation.ai_run_id.in_(recommendation_ids)))).all()) if recommendation_ids else []
+            recommendation_by_run = {item.ai_run_id: item for item in recommendations}
+            detail = "\n".join(
+                f"• {row.created_at:%d.%m %H:%M} — {_owner_short_text(recommendation_by_run[row.id].title) if row.id in recommendation_by_run else 'Рекомендация ещё не сформирована' }"
+                for row in rows
+            ) or "Истории рекомендаций пока нет."
             outcomes = list((await db.scalars(select(AdsV2Outcome).join(AdsRecommendation, AdsV2Outcome.recommendation_id == AdsRecommendation.id).where(AdsRecommendation.ai_run_id.in_(recommendation_ids)))).all()) if recommendation_ids else []
             if outcomes:
-                detail += "\n\nOutcomes:\n" + "\n".join(f"• {item.horizon}: {item.status}" for item in outcomes)
-            title = "📜 История решений"
+                detail += "\n\nИзмерение результата:\n" + "\n".join(f"• {item.horizon}: {'завершено' if item.status == 'COMPLETED' else 'ещё ожидается'}" for item in outcomes)
+            title = "🕘 История рекомендаций"
         else:
             rec = await db.scalar(select(AdsRecommendation).where(AdsRecommendation.channel_id == channel.id, AdsRecommendation.status == "OPEN").order_by(AdsRecommendation.created_at.desc()))
-            detail = (f"Диагноз: {rec.title}\nУверенность: {rec.confidence}\nДанные: {rec.data_sufficiency}\n\nРекомендация: {rec.action_code}\n{rec.rationale or ''}\n\n⚠️ Только рекомендация. Автоматические изменения отключены." if rec else "Нет valid recommendation. Сначала нужны достаточные данные и доступный AI provider.")
+            detail = (f"Что рекомендуется:\n{_owner_short_text(rec.title)}\n\nПочему:\n{_owner_short_text(rec.rationale)}\n\nПриоритет: {rec.priority}\nУверенность: {_owner_confidence(rec.confidence)}\nСтатус сигнала: {rec.data_sufficiency}\n\n⚠️ Только рекомендация. Автоматические изменения отключены." if rec else "Сейчас нет рекомендаций, требующих действий.")
             title = "💡 Рекомендации"
-        controls = [(f"🔎 {row.id[:8]}", f"ads_memory_detail:{channel.id}:{row.id}") for row in view["memories"]] if screen.startswith("ads_memory:") else []
-        controls.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+        controls = [("⬅️ AI Продвижение", f"ads:{channel.id}")]
         return (f"{title}\n\n📢 {channel.title}\n\n{detail}", buttons(*controls))
     if screen.startswith("ads_memory_detail:"):
         _, _, channel_id_value, memory_id = screen.split(":", 3)
