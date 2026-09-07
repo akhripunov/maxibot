@@ -649,15 +649,8 @@ def promotion_channel_summary(channel_title: str, yandex_value: str | None,
                               subscription_expires_at: datetime | None = None) -> str:
     """Render only channel-scoped, non-secret promotion readiness fields."""
     daily_reports_status = "✅ Включены" if daily_reports_enabled else "🔴 Отключены"
-    subscription_line = "Тариф: не активирован"
-    if subscription_expires_at:
-        subscription_line = (
-            f"Тариф: {'✅ Активен' if subscription_status(subscription_expires_at) == 'активен' else '🔴 Истёк'} "
-            f"до {subscription_expires_at.astimezone(MOSCOW):%d.%m.%Y}"
-        )
     return (
         f"📣 Продвижение\n\nКанал: {channel_title}\n"
-        f"{subscription_line}\n"
         f"Ежедневные отчёты: {daily_reports_status}\n\n"
         f"Яндекс: {yandex_value or '-'}\n"
         f"Метрика: {counter_id or '-'}\n"
