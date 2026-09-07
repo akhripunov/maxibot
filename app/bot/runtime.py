@@ -696,13 +696,6 @@ class MaxBotRuntime:
         except Exception:
             logger.exception("MAX_CALLBACK_ACK_FAILED callback_id_present=%s", bool(callback_id))
 
-    async def _delete_service_message_in_background(self, message_id: str) -> None:
-        """Remove a replaced panel after the new one is already visible."""
-        try:
-            await self.client.delete_message(message_id)
-        except Exception:
-            logger.info("MAX_OLD_SERVICE_PANEL_DELETE_FAILED")
-
     async def _callback(self, update: MaxUpdate):
         user_id = self._event_user_id(update)
         if not user_id or str(user_id) == "0":
@@ -988,21 +981,11 @@ class MaxBotRuntime:
             # The token-waiting state is set only after the owner continues.
             await self._render(user_id, "connect_bot_intro")
         elif action == "custom_bot_token":
-            if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):
-                # MAX currently takes about four seconds to PUT-edit this
-                # particular card.  POSTing the new panel is fast; replace
-                # the old one asynchronously only after it is visible.
-                text, keyboard, old_message_id, media = await self.repo.render(
-                    user_id, "custom_bot_token"
-                )
-                new_message_id = await self.client.send_message(
-                    user_id, text, keyboard, media
-                )
-                await self.repo.save_service_message(user_id, new_message_id)
-                if old_message_id and old_message_id != new_message_id:
-                    asyncio.create_task(
-                        self._delete_service_message_in_background(old_message_id)
-                    )
+            # MAX takes about four seconds to render the next bot-token card
+            # because it contains a business-link keyboard.  The current
+            # screen already explains the next action, so arm token input
+            # immediately and leave the visible panel untouched.
+            await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")
         elif action == "custom_bot_help":
             # Keep token input state active while the owner reads the short help.
             await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")

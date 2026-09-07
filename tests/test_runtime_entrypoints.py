@@ -271,7 +271,7 @@ def test_navigation_callback_returns_the_rendered_screen_to_active_max_client():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
-    section = source[source.index("    async def _navigation_callback("):source.index("    async def _ack_callback_in_background(")]
+    section = source[source.index("    async def _navigation_callback("):source.index("    async def _callback(")]
     assert "replacement = self._callback_replacement_body(text, keyboard, media)" in section
     assert "await self.client.answer_callback(update.callback_id, replacement)" in section
     assert "await self.client.delete_message" not in section
