@@ -29,6 +29,7 @@ class Admin(Base):
     support_input_mode: Mapped[bool]=mapped_column(Boolean, default=False, nullable=False)
     support_input_ticket_id: Mapped[Optional[str]]=mapped_column(String(36))
     subscription_expires_at: Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True), index=True)
+    pending_free_trial: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     custom_bot_state: Mapped[Optional[str]]=mapped_column(String(32))
     pending_custom_bot_id: Mapped[Optional[str]]=mapped_column(String(36))
     channels=relationship("Channel", back_populates="admin", cascade="all, delete-orphan")
@@ -151,6 +152,21 @@ class SubscriptionOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
+
+class FreeTrial(Base):
+    """One service-level seven-day entitlement per verified MAX user."""
+    __tablename__ = "free_trials"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    admin_id: Mapped[str] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), unique=True, index=True)
+    # This is a quota marker, not the scope of the service entitlement.
+    activated_channel_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("channels.id", ondelete="SET NULL"), index=True,
+    )
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE", nullable=False, index=True)
+    trial_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    trial_end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now, nullable=False)
 class LandingPage(Base):
     __tablename__ = "landing_pages"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

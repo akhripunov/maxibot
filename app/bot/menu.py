@@ -17,7 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder
+from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder, FreeTrial
 from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion, resolve_exact_identity_visit
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
@@ -37,7 +37,7 @@ from app.ads.memory import set_status
 from app.db.models import AdsAiRun, AdsMemory, AdsRecommendation, AdsV2Outcome
 from app.ads.storage_health import diagnostics as storage_diagnostics, human_size, ui_time
 from app.integrations.robokassa import payment_url
-from app.integrations.subscriptions import subscription_status
+from app.integrations.subscriptions import subscription_status, free_trial_status
 
 logger = logging.getLogger(__name__)
 
@@ -677,6 +677,25 @@ def service_subscription_text() -> str:
     return "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nВыберите период подписки:"
 
 
+FREE_TRIAL_INFO_TEXT = (
+    "🎁 7 дней бесплатно\n\n"
+    "Попробуйте MAXIBOT бесплатно в течение 7 дней.\n\n"
+    "✅ Один канал\n"
+    "✅ Все функции продвижения\n"
+    "✅ Интеграция с Яндекс.Директ\n"
+    "✅ Аналитика и ежедневные отчёты\n\n"
+    "Бесплатный период доступен один раз."
+)
+
+
+def free_trial_active_text(channel_title: str, trial_end_at: datetime) -> str:
+    return f"🎁 Бесплатный период уже активен\n\nКанал: {channel_title}\nАктивен до: {trial_end_at.astimezone(MOSCOW):%d.%m.%Y}"
+
+
+def free_trial_used_text() -> str:
+    return "🎁 Бесплатный период уже использован.\n\nВыберите подходящий тариф, чтобы продолжить пользоваться MAXIBOT."
+
+
 def promotion_yandex_summary(channel_title: str, connected: bool,
                              counter_id: str | None, conversions: int) -> str:
     return (
@@ -952,7 +971,31 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
     if screen == "subscription":
         plan_buttons = [(label, f"subscription_plan:service:{months}") for label, months in SUBSCRIPTION_PLANS]
-        return service_subscription_text(), buttons(*plan_buttons, ("⬅️ Главное меню", "home"))
+        return service_subscription_text(), buttons(("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons, ("⬅️ Главное меню", "home"))
+    if screen == "free_trial":
+        return FREE_TRIAL_INFO_TEXT, buttons(("🚀 Начать бесплатно", "free_trial_start"), ("⬅️ Назад", "subscription"))
+    if screen == "free_trial_start":
+        trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id))
+        if trial:
+            status = free_trial_status(trial.trial_end_at)
+            if status == "активен":
+                channel = await db.get(Channel, trial.activated_channel_id) if trial.activated_channel_id else None
+                return free_trial_active_text(channel.title if channel else "Канал удалён", trial.trial_end_at), buttons(("⬅️ Назад", "subscription"))
+            return free_trial_used_text(), buttons(("💳 Выбрать тариф", "subscription"), ("⬅️ Назад", "subscription"))
+        if not channels:
+            return (
+                "🎁 Начало бесплатного периода\n\n"
+                "Сначала подключите один канал. После успешного подключения бесплатный период будет активирован автоматически.",
+                buttons(("📢 Подключить канал", "free_trial_connect"), ("⬅️ Назад", "subscription")),
+            )
+        if len(channels) == 1:
+            return (
+                f"🎁 Выберите канал для бесплатного периода\n\nКанал: {channels[0].title}",
+                buttons(("🚀 Начать для этого канала", f"free_trial_activate:{channels[0].id}"), ("⬅️ Назад", "subscription")),
+            )
+        rows = [[(f"📣 {channel.title}", f"free_trial_activate:{channel.id}")] for channel in channels]
+        rows.append([{"text": "⬅️ Назад", "callback_data": "subscription"}])
+        return "🎁 Выберите один канал для бесплатного периода", rows
     if screen in {"promotion_maxibot", "promotion_bot:system"}:
         target = await _bot_promotion_target(db, admin, "system")
         return render_bot_promotion(target) if target else await render_screen(db, admin, "promotion")
@@ -2266,6 +2309,75 @@ class MenuRepository:
     async def channel_owned(self, external_id: str, channel_id: str) -> bool:
         async with self.session_factory() as db:
             return bool(await db.scalar(select(Channel.id).join(Admin).where(Channel.id == channel_id, Admin.external_id == external_id)))
+
+    async def free_trial_state(self, admin_external_id: str) -> dict[str, object]:
+        """Return service-level trial state and the one-channel quota marker."""
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)))
+            trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id)) if admin else None
+            if not trial:
+                return {"status": "AVAILABLE", "activated_channel_id": None, "trial_end_at": None}
+            status = free_trial_status(trial.trial_end_at)
+            return {
+                "status": "ACTIVE" if status == "активен" else "EXPIRED",
+                "activated_channel_id": trial.activated_channel_id,
+                "trial_end_at": trial.trial_end_at,
+            }
+
+    async def begin_free_trial(self, admin_external_id: str) -> dict[str, object]:
+        """Remember explicit intent until a channel is successfully connected."""
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)))
+            if not admin:
+                return {"status": "UNAVAILABLE"}
+            trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id))
+            if trial:
+                status = free_trial_status(trial.trial_end_at)
+                return {"status": "ACTIVE" if status == "активен" else "EXPIRED"}
+            admin.pending_free_trial = True
+            await db.commit()
+            return {"status": "PENDING"}
+
+    async def cancel_free_trial_intent(self, admin_external_id: str) -> None:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)))
+            if admin and admin.pending_free_trial:
+                admin.pending_free_trial = False
+                await db.commit()
+
+    async def activate_free_trial(self, admin_external_id: str, channel_id: str) -> dict[str, object]:
+        """Atomically grant the service entitlement and consume one channel quota."""
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)).with_for_update())
+            channel = await db.scalar(select(Channel).where(
+                Channel.id == str(channel_id), Channel.admin_id == admin.id if admin else False,
+            ))
+            if not admin or not channel:
+                return {"status": "NOT_ALLOWED"}
+            trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id).with_for_update())
+            if trial:
+                status = free_trial_status(trial.trial_end_at)
+                return {"status": "ACTIVE" if status == "активен" else "EXPIRED", "activated_channel_id": trial.activated_channel_id}
+            started = datetime.now(timezone.utc)
+            trial = FreeTrial(
+                admin_id=admin.id,
+                activated_channel_id=channel.id,
+                status="ACTIVE",
+                trial_start_at=started,
+                trial_end_at=started + timedelta(days=7),
+            )
+            db.add(trial)
+            admin.pending_free_trial = False
+            await db.commit()
+            return {"status": "ACTIVE", "activated_channel_id": channel.id, "trial_end_at": trial.trial_end_at}
+
+    async def activate_pending_free_trial(self, admin_external_id: str, channel_id: str) -> dict[str, object] | None:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)))
+            pending = bool(admin and admin.pending_free_trial)
+        if not pending:
+            return None
+        return await self.activate_free_trial(admin_external_id, channel_id)
 
     async def connect_channel_from_bot_added(self, channel_external_id: str,
                                              initiator_user_id: str | None,

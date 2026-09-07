@@ -41,3 +41,25 @@ def subscription_status(expires_at: datetime | None, *, now: datetime | None = N
     current = now or datetime.now(timezone.utc)
     expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
     return "активен" if expiry > current else "истёк"
+
+
+def free_trial_status(trial_end_at: datetime | None, *, now: datetime | None = None) -> str:
+    if not trial_end_at:
+        return "не использован"
+    current = now or datetime.now(timezone.utc)
+    expiry = trial_end_at if trial_end_at.tzinfo else trial_end_at.replace(tzinfo=timezone.utc)
+    return "активен" if expiry > current else "истёк"
+
+
+def service_entitlement_active(
+    paid_expires_at: datetime | None,
+    trial_end_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Service-level access is granted by either paid subscription or trial."""
+    current = now or datetime.now(timezone.utc)
+    return (
+        subscription_status(paid_expires_at, now=current) == "активен"
+        or free_trial_status(trial_end_at, now=current) == "активен"
+    )

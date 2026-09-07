@@ -642,6 +642,7 @@ class MaxBotRuntime:
     async def _navigation_callback(self, update: MaxUpdate, user_id: str, action: str) -> None:
         """Replace exactly the service message that supplied the callback."""
         if action == "home":
+            await self.repo.cancel_free_trial_intent(user_id)
             screen, channel_id = "home", None
         elif action == "channels":
             screen, channel_id = "channels", None
@@ -841,7 +842,7 @@ class MaxBotRuntime:
         callback_message_id = update.message.external_message_id if update.message else ""
         current_message_id = await self.repo.service_message_id(user_id)
         action = update.button_payload or "home"
-        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "ads_storage"} or action.startswith(("promotion_", "subscription", "channels", "channel:", "settings:", "channel_admin_", "ads"))
+        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "ads_storage"} or action.startswith(("promotion_", "subscription", "free_trial", "channels", "channel:", "settings:", "channel_admin_", "ads"))
         if callback_message_id and current_message_id and callback_message_id != current_message_id and not navigation_action:
             logger.info("MAX stale callback ignored")
             return
@@ -885,6 +886,18 @@ class MaxBotRuntime:
             await self._render(user_id, "promotion")
         elif action == "promotion_connect":
             await self._render(user_id, "promotion_connect")
+        elif action == "free_trial":
+            await self._render(user_id, "free_trial")
+        elif action == "free_trial_start":
+            await self._render(user_id, "free_trial_start")
+        elif action == "free_trial_connect":
+            await self.repo.begin_free_trial(str(user_id))
+            await self._render(user_id, "connect_channel")
+        elif action.startswith("free_trial_activate:"):
+            selected_id = action.split(":", 1)[1]
+            if await self.repo.channel_owned(user_id, selected_id):
+                await self.repo.activate_free_trial(str(user_id), selected_id)
+                await self._render(user_id, "free_trial_start")
         elif action.startswith("promotion_channel:"):
             selected_id = action.split(":", 1)[1].split(":", 1)[0]
             if await self.repo.channel_owned(user_id, selected_id):
@@ -1653,6 +1666,7 @@ class MaxBotRuntime:
             return
         result = await self.repo.connect_channel_from_bot_added(channel_external_id, owner_id, chat)
         if result.get("status") in {"created", "updated", "duplicate"}:
+            await self.repo.activate_pending_free_trial(str(owner_id), str(result["channel_id"]))
             await self.client.send_message(owner_id, f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.")
             await self._render(owner_id, "channels")
         else:
@@ -1744,6 +1758,7 @@ class MaxBotRuntime:
                             ]],
                         )
                         return
+                    await self.repo.activate_pending_free_trial(str(update.user_id), str(result["channel_id"]))
                     await self.client.send_message(
                         str(update.user_id),
                         f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.",
@@ -1998,6 +2013,7 @@ class MaxBotRuntime:
             data = await self.client.validate_forwarded_post(message)
             data["external_id"] = forwarded_channel_id
             channel_id = await self.repo.create_channel(admin_id, data)
+            await self.repo.activate_pending_free_trial(str(admin_id), str(channel_id))
             # A forwarded post is already the newest MAX message.  Recreate
             # the service panel so the add confirmation is also newest and
             # visible immediately instead of editing a panel far above it.
