@@ -87,6 +87,15 @@ def test_production_ssh_target_is_explicit_and_canonical():
     assert "SSH_PREFLIGHT PASS" in source
 
 
+def test_frozen_guard_exempts_only_ads_schema_plumbing():
+    source = (ROOT / "scripts/frozen_path_guard.sh").read_text()
+    assert "def ads_only_shared_change(path: str)" in source
+    assert '"AdsPromotionCampaignLink" in text' in source
+    assert '"ads_promotion_campaign_links" in text' in source
+    assert "shared_for_impact" in source
+    assert 'print("FROZEN_PATH_GUARD=BLOCK")' in source
+
+
 def test_release_context_excludes_appledouble_and_keeps_alembic_preflight():
     source = SCRIPT.read_text()
     assert "find \"$WORK\" \\( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \\) -exec rm -rf {} +" in source

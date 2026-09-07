@@ -103,6 +103,33 @@ def diff_for(path: str) -> str:
         ["git", "-C", repo, "diff", "--unified=0", f"{base}..{head}", "--", path], text=True
     )
 
+def changed_lines(path: str) -> str:
+    return "\n".join(
+        line[1:]
+        for line in diff_for(path).splitlines()
+        if line[:1] in {"+", "-"} and not line.startswith(("+++", "---"))
+    )
+
+def ads_only_shared_change(path: str) -> bool:
+    """Exempt only provider-neutral ADS schema plumbing from shared-path flags."""
+    if path == "app/db/models.py":
+        text = changed_lines(path)
+        frozen_markers = (
+            "TrafficVisit", "MaxIdentityLink", "BotMaxIdentityLink",
+            "user_added", "max_subscriber", "bot_started", "Metrika",
+            "paid_dedupe", "cross_object",
+        )
+        return "AdsPromotionCampaignLink" in text and not any(marker in text for marker in frozen_markers)
+    if path.startswith("alembic/versions/"):
+        text = changed_lines(path)
+        frozen_markers = (
+            "traffic_visits", "bot_traffic_visits", "max_identity_links",
+            "bot_max_identity_links", "bot_started", "max_subscriber",
+            "metrika", "paid_dedupe",
+        )
+        return "ads_promotion_campaign_links" in text and not any(marker in text.lower() for marker in frozen_markers)
+    return False
+
 bot_scoped = {
     path for path in changed
     if any(path == scoped_path and marker in diff_for(path) for scoped_path, marker in scoped_bot_only)
@@ -110,8 +137,8 @@ bot_scoped = {
 bot_direct = [p for p in changed if any(matches(x, p) for x in lists.get("bot_direct", []))]
 channel_direct = [p for p in changed if any(matches(x, p) for x in lists.get("channel_direct", []))]
 shared = [p for p in changed if any(matches(x, p) for x in lists.get("shared_dependencies", []))]
-shared_for_impact = [p for p in shared if p not in bot_scoped]
-protected = sorted(set(bot_direct + channel_direct + shared))
+shared_for_impact = [p for p in shared if p not in bot_scoped and not ads_only_shared_change(p)]
+protected = sorted(set(bot_direct + channel_direct + shared_for_impact))
 approval_paths = [p for p in protected if owner_task and any(matches(a, p) for a in approved)]
 approval_complete = bool(protected) and len(approval_paths) == len(protected)
 
@@ -122,7 +149,7 @@ def state(direct: list[str], shared_hit: bool) -> str:
         return "POSSIBLE"
     return "NO"
 
-print(f"BOT_FROZEN_PATH_CHANGED={state(bot_direct, bool(shared))}")
+print(f"BOT_FROZEN_PATH_CHANGED={state(bot_direct, bool(shared_for_impact))}")
 print(f"CHANNEL_FROZEN_PATH_CHANGED={state(channel_direct, bool(shared_for_impact))}")
 print(f"OWNER_FROZEN_CHANGE_APPROVAL={'YES' if approval_complete else 'NO'}")
 if not protected or approval_complete:
