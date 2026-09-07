@@ -771,18 +771,49 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
     ))
     if not profile:
         raise HTTPException(404, "system landing not found")
-    token = secrets.token_urlsafe(24)
-    visit = BotTrafficVisit(token=token, bot_id=settings.max_bot_id, destination_id=settings.max_bot_id,
-                            yclid=request.query_params.get("yclid"),
-                               utm_source=request.query_params.get("utm_source"),
-                               utm_medium=request.query_params.get("utm_medium"),
-                               utm_campaign=request.query_params.get("utm_campaign"),
-                               utm_content=request.query_params.get("utm_content"),
-                               utm_term=request.query_params.get("utm_term"),
-                               referer=request.headers.get("referer"),
-                               user_agent=request.headers.get("user-agent"))
-    db.add(visit)
-    await db.commit()
+    bot_id = settings.max_bot_id
+    yclid = request.query_params.get("yclid")
+    now = model_now()
+    visit = None
+    if yclid:
+        # Mirror the CHANNEL landing reuse rule without crossing domains:
+        # same BOT destination, same yclid, recent window, and no verified
+        # MAX identity yet.  A reused visit keeps its original opaque token.
+        visit = await db.scalar(
+            select(BotTrafficVisit)
+            .where(
+                BotTrafficVisit.bot_id == bot_id,
+                BotTrafficVisit.destination_id == bot_id,
+                BotTrafficVisit.yclid == yclid,
+                BotTrafficVisit.max_user_id.is_(None),
+                BotTrafficVisit.created_at >= now - timedelta(minutes=15),
+            )
+            .order_by(BotTrafficVisit.created_at.desc())
+            .limit(1)
+        )
+        if (
+            visit
+            and visit.token
+            and visit.created_at
+            and (now - visit.created_at).total_seconds() > settings.traffic_startapp_ttl_seconds
+        ):
+            visit.status = "EXPIRED"
+            visit = None
+    if not visit:
+        token = secrets.token_urlsafe(24)
+        visit = BotTrafficVisit(token=token, bot_id=settings.max_bot_id, destination_id=settings.max_bot_id,
+                                yclid=yclid,
+                                utm_source=request.query_params.get("utm_source"),
+                                utm_medium=request.query_params.get("utm_medium"),
+                                utm_campaign=request.query_params.get("utm_campaign"),
+                                utm_content=request.query_params.get("utm_content"),
+                                utm_term=request.query_params.get("utm_term"),
+                                referer=request.headers.get("referer"),
+                                user_agent=request.headers.get("user-agent"))
+        db.add(visit)
+        await db.commit()
+    else:
+        token = visit.token
     await _bot_telemetry_event(db, visit, "SYSTEM_LANDING_RENDERED", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),

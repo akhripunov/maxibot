@@ -127,6 +127,31 @@ def test_system_landing_captures_attribution_metadata_and_client_id_safely():
     assert "build_native_miniapp_deep_link" in system_landing
 
 
+def test_system_landing_reuses_only_recent_unfinished_same_bot_yclid_visit():
+    start = MAIN.index('@app.get("/system/{public_id}"')
+    end = MAIN.index('@app.get("/health/live")', start)
+    system_landing = MAIN[start:end]
+    assert "BotTrafficVisit.bot_id == bot_id" in system_landing
+    assert "BotTrafficVisit.destination_id == bot_id" in system_landing
+    assert "BotTrafficVisit.yclid == yclid" in system_landing
+    assert "BotTrafficVisit.max_user_id.is_(None)" in system_landing
+    assert "BotTrafficVisit.created_at >= now - timedelta(minutes=15)" in system_landing
+    assert ".order_by(BotTrafficVisit.created_at.desc())" in system_landing
+    assert 'visit.status = "EXPIRED"' in system_landing
+    assert "settings.traffic_startapp_ttl_seconds" in system_landing
+    assert "if not visit:" in system_landing
+    assert "token = visit.token" in system_landing
+
+
+def test_system_landing_reuse_keeps_bot_domain_isolated_from_channel():
+    start = MAIN.index('@app.get("/system/{public_id}"')
+    end = MAIN.index('@app.get("/health/live")', start)
+    system_landing = MAIN[start:end]
+    assert "select(TrafficVisit)" not in system_landing
+    assert "landing_page_id" not in system_landing
+    assert "BotTrafficVisit.destination_id == bot_id" in system_landing
+
+
 def test_system_client_id_endpoint_is_separate_from_channel_traffic_endpoint():
     assert '@app.post("/system/traffic/metrica/client-id")' in MAIN
     endpoint = MAIN[MAIN.index('@app.post("/system/traffic/metrica/client-id")'):MAIN.index('@app.get("/health/live")')]
