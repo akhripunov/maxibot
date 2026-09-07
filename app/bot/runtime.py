@@ -86,9 +86,11 @@ class MaxBotRuntime:
         if self._ads_ai_event_task is None or self._ads_ai_event_task.done():
             self._ads_ai_event_task = asyncio.create_task(self._ads_ai_event_loop())
         self.marker = await self._load_primary_marker()
+        updates_failure_streak = 0
         while not self._stop.is_set():
             try:
                 updates, next_marker = await self.client.updates(self.marker)
+                updates_failure_streak = 0
                 for update in updates:
                     try:
                         await self.handle(update)
@@ -107,9 +109,28 @@ class MaxBotRuntime:
                     self._custom_poll_task = asyncio.create_task(self._poll_custom_bots())
             except asyncio.CancelledError:
                 raise
+            except MaxApiError as exc:
+                if exc.status_code >= 500:
+                    updates_failure_streak += 1
+                    retry_delay = self._primary_updates_retry_delay(updates_failure_streak)
+                    logger.warning(
+                        "MAX_UPDATES_TRANSIENT_ERROR status=%s retry_delay_s=%.2f streak=%s",
+                        exc.status_code,
+                        retry_delay,
+                        updates_failure_streak,
+                    )
+                    await asyncio.sleep(retry_delay)
+                    continue
+                logger.exception("MAX update cycle failed")
+                await asyncio.sleep(3)
             except Exception:
                 logger.exception("MAX update cycle failed")
                 await asyncio.sleep(3)
+
+    @staticmethod
+    def _primary_updates_retry_delay(failure_streak: int) -> float:
+        """Bound retries for transient MAX /updates failures without a hot loop."""
+        return min(0.25 * (2 ** max(0, failure_streak - 1)), 3.0)
 
     async def _load_primary_marker(self) -> int | None:
         """Load the durable cursor before the first MAX /updates request."""

@@ -18,6 +18,15 @@ def test_admin_command_is_distinct_from_start_payload_and_supports_bot_suffix():
     assert MaxBotRuntime._is_admin_command("admin") is False
 
 
+def test_primary_updates_transient_retry_is_fast_and_bounded():
+    assert MaxBotRuntime._primary_updates_retry_delay(1) == 0.25
+    assert MaxBotRuntime._primary_updates_retry_delay(2) == 0.5
+    assert MaxBotRuntime._primary_updates_retry_delay(3) == 1.0
+    assert MaxBotRuntime._primary_updates_retry_delay(4) == 2.0
+    assert MaxBotRuntime._primary_updates_retry_delay(5) == 3.0
+    assert MaxBotRuntime._primary_updates_retry_delay(99) == 3.0
+
+
 def test_admin_command_routes_through_database_admin_check_and_denies_non_admin():
     from pathlib import Path
 
