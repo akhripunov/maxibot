@@ -71,3 +71,13 @@ def test_paid_tariff_screen_keeps_trial_above_the_three_existing_plans():
     block = source[start:end]
     assert '"🎁 Попробовать бесплатно", "free_trial"' in block
     assert 'buttons(("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons' in block
+
+
+def test_start_free_reuses_canonical_channel_connection_without_activating_trial():
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    start = source.index('elif action == "free_trial_start":')
+    end = source.index('elif action == "free_trial_connect":', start)
+    block = source[start:end]
+    assert 'await self._render(user_id, "connect_channel")' in block
+    assert "begin_free_trial" not in block
+    assert "activate_free_trial" not in block
