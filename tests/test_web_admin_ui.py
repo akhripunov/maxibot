@@ -28,7 +28,7 @@ def test_user_journey_is_first_class_read_only_section_between_overview_and_clie
     assert "getJson(`/journey?${params}`)" in script
     assert "conversion_from_previous_percent" in script
     assert "conversion_from_start_percent" in script
-    assert "Metrika conversion rate" in script
+    assert "accepted paid / eligible" in script
     assert "domain_funnels" in script
 
 

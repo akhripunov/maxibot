@@ -2,7 +2,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.web_admin_auth import require_edge_token, require_qa_ingest_token
-from app.web_admin_readonly import BOT_STAGES, CHANNEL_STAGES, _stage_payload, canonical_metric_definitions
+from app.web_admin_readonly import BOT_STAGES, CHANNEL_STAGES, _bot_integrity_status, _main_drop, _stage_payload, canonical_metric_definitions
 
 
 def test_metric_definitions_mark_unsupported_business_metrics_unknown():
@@ -69,6 +69,21 @@ def test_journey_uses_unique_denominator_and_separate_domain_aggregates():
     assert '"domain_funnels": domain_funnels' in source
     assert '"active_journeys": all_journeys' in source
     assert 'source: str = Query(default="all", pattern="^(all|yandex|organic)$")' in source
+
+
+def test_historical_real_start_telemetry_gap_is_not_a_technical_fail():
+    source = open("app/web_admin_readonly.py", encoding="utf-8").read()
+    assert "Historical bot_started rows can predate REAL_START_RECEIVED telemetry" in source
+    assert 'failures = 0' in source
+    assert "Историческая observability gap" in source
+    assert _bot_integrity_status(visits=1, warnings=1, proven_bypass=False) == "WARN"
+    assert _bot_integrity_status(visits=1, warnings=0, proven_bypass=True) == "FAIL"
+
+
+def test_main_drop_is_user_dropoff_not_technical_failure():
+    stages = _stage_payload(BOT_STAGES[10:13], [19, 4, 4], 20)
+    drop = _main_drop(stages)
+    assert drop == {"from": "Открытие конкретного бота", "to": "Реальный /start", "from_count": 19, "to_count": 4, "rate": 21.1, "kind": "USER_DROPOFF", "reason": "Пользовательский отвал; техническая причина не доказана"}
 
 
 @pytest.mark.asyncio

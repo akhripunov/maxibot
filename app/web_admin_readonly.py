@@ -108,6 +108,11 @@ def _status(*, visits: int, failures: int, warnings: int) -> str:
     return "PASS" if visits else "UNKNOWN"
 
 
+def _bot_integrity_status(*, visits: int, warnings: int, proven_bypass: bool) -> str:
+    """A missing historical telemetry event is not evidence of a /start bypass."""
+    return _status(visits=visits, failures=int(proven_bypass), warnings=warnings)
+
+
 def _stage_payload(definitions: tuple[tuple[str, str, str, str], ...], counts: list[int | None], denominator: int | None) -> list[dict[str, object]]:
     result = []
     previous = None
@@ -128,6 +133,28 @@ def _canonical_journeys(visits: list[TrafficVisit] | list[BotTrafficVisit]) -> l
     for visit in visits:
         grouped[("yclid", visit.yclid) if visit.yclid else ("visit", visit.id)].append(visit)
     return list(grouped.values())
+
+
+def _main_drop(stages: list[dict[str, object]]) -> dict[str, object] | None:
+    measured = [stage for stage in stages if stage["count"] is not None]
+    candidates = [(before, after) for before, after in zip(measured, measured[1:]) if int(before["count"]) > 0 and int(after["count"]) < int(before["count"])]
+    if not candidates:
+        return None
+    before, after = max(candidates, key=lambda pair: int(pair[0]["count"]) - int(pair[1]["count"]))
+    return {"from": before["name"], "to": after["name"], "from_count": before["count"], "to_count": after["count"],
+            "rate": round(int(after["count"]) / int(before["count"]) * 100, 1), "kind": "USER_DROPOFF", "reason": "Пользовательский отвал; техническая причина не доказана"}
+
+
+def _journey_last_stage(stages: list[dict[str, object]], *, is_bot: bool, real_start: bool, conversion: bool, metrika: bool) -> tuple[str, str]:
+    if metrika:
+        return "Метрика", "Конверсия передана в Метрику"
+    if conversion:
+        return ("bot_started", "Конверсия") if is_bot else ("max_subscriber", "Подписка подтверждена")
+    if is_bot and real_start:
+        return "Реальный /start", "Ожидается конверсия"
+    if is_bot and any(stage["id"] == "bot_open" and stage["count"] for stage in stages):
+        return "Переход в бот инициирован", "Нет /start"
+    return "Нет подтверждённых данных", "В пути"
 
 
 def canonical_metric_definitions() -> dict[str, dict[str, object]]:
@@ -247,7 +274,7 @@ async def admin_journey(
         # but leave it UNKNOWN rather than attributing channel-wide raw events.
         joins = joins_by_channel.get(channel.id, Counter())
         approved = subscribed
-        failures = int(approved > subscribed or (subscribed and metrica == 0 and any(item.yclid for item in visits)))
+        failures = 0
         warnings = int(bool(visits) and (not identity or not opened))
         status = _status(visits=len(visits), failures=failures, warnings=warnings)
         if (problem == "problem" and status not in {"FAIL", "WARN"}) or (problem == "healthy" and status in {"FAIL", "WARN"}):
@@ -257,12 +284,13 @@ async def admin_journey(
                   sum(any(bool(item.startapp_token) for item in journey) for journey in journeys), miniapp, identity, resolved, identity,
                   identity, handoff, None, approved, approved,
                   subscribed, subscribed, subscribed, metrica, None]
+        stages = _stage_payload(JOURNEY_STAGES["channel"], counts, denominator)
         rows.append({"id": channel.id, "name": channel.title, "type": "channel", "status": status,
                      "counts": {"landing": len(visits), "identity": identity, "destination": opened, "conversion": subscribed, "metrica": metrica},
                      "journey_denominator": denominator,
                      "conversion_kpi": {"label": "Конверсия в подписчика", "count": subscribed, "rate": None if not denominator else round(subscribed / denominator * 100, 1)},
                      "metrika_rate": None if not denominator else round(metrica / denominator * 100, 1),
-                     "stages": _stage_payload(JOURNEY_STAGES["channel"], counts, denominator),
+                     "stages": stages, "main_drop": _main_drop(stages),
                      "reason": "manual approve pending or incomplete evidence" if status == "WARN" else ("channel stage contradiction" if status == "FAIL" else None)})
         for visit in visits:
             event_types = channel_events_by_visit[visit.id]
@@ -271,7 +299,8 @@ async def admin_journey(
                 "identity_resolved": visit.id in links_by_visit, "destination_reached": bool(visit.to_channel_at),
                 "authoritative_confirmation": bool(joins_by_channel.get(channel.id, Counter()).get("user_added", 0)),
                 "product_conversion": bool(channel_members_by_visit[visit.id]), "metrica": bool(channel_conversions_by_visit[visit.id] and any(_successful_metrika(c) for c in channel_conversions if c.visit_id == visit.id)),
-                "direct": "UNKNOWN", "status": "PASS" if channel_members_by_visit[visit.id] else ("WARN" if event_types else "UNKNOWN")})
+                "direct": "UNKNOWN", "status": "PASS" if channel_members_by_visit[visit.id] else ("WARN" if event_types else "UNKNOWN"),
+                "last_stage": ("Метрика", "Конверсия передана в Метрику") if channel_conversions_by_visit[visit.id] else (("max_subscriber", "Подписка подтверждена") if channel_members_by_visit[visit.id] else ("Переход в канал инициирован" if "MINIAPP_CHANNEL_HANDOFF_STARTED" in event_types else "Нет подтверждённых данных", "В пути")),})
 
     profile_by_bot_id: dict[str, tuple[str, str, str]] = {}
     for profile in profiles:
@@ -301,9 +330,11 @@ async def admin_journey(
         real_starts = sum(has_event(journey, "REAL_START_RECEIVED") for journey in journeys)
         started = sum(has_started(journey) for journey in journeys)
         metrica = sum(has_metrika(journey) for journey in journeys)
-        failures = int(started > real_starts or any(item.bot_visit_id in visit_ids and item.bot_visit_id not in bot_links_by_visit for item in bot_conversions))
+        # Historical bot_started rows can predate REAL_START_RECEIVED telemetry.
+        # Missing telemetry is an observability gap, never proof of a bypass.
+        failures = 0
         warnings = int(bool(visits) and (not identity or (identity and not handoff_started) or (handoff_started and not real_starts)))
-        status = _status(visits=len(visits), failures=failures, warnings=warnings)
+        status = _bot_integrity_status(visits=len(visits), warnings=warnings, proven_bypass=False)
         if (problem == "problem" and status not in {"FAIL", "WARN"}) or (problem == "healthy" and status in {"FAIL", "WARN"}):
             continue
         miniapp = sum(has_event(journey, "MINI_APP_LOADED") for journey in journeys)
@@ -313,13 +344,14 @@ async def admin_journey(
         counts = [None, denominator, denominator, denominator, denominator, miniapp, identity, resolved,
                   identity, identity, handoff_started or None, real_starts, real_starts,
                   paid_restored, started, metrica, None]
+        stages = _stage_payload(JOURNEY_STAGES["bot"], counts, denominator)
         rows.append({"id": name, "name": bot_name, "type": "bot", "status": status,
                      "counts": {"landing": len(visits), "identity": identity, "destination": None, "conversion": started, "metrica": metrica},
                      "journey_denominator": denominator,
                      "conversion_kpi": {"label": "Конверсия в bot_started", "count": started, "rate": None if not denominator else round(started / denominator * 100, 1)},
                      "metrika_rate": None if not denominator else round(metrica / denominator * 100, 1),
-                     "stages": _stage_payload(JOURNEY_STAGES["bot"], counts, denominator),
-                     "reason": "bot_started without real /start" if status == "FAIL" else ("Переход в бот инициирован, /start не получен" if status == "WARN" and identity and handoff_started and not real_starts else ("partial handoff evidence" if status == "WARN" else None))})
+                     "stages": stages, "main_drop": _main_drop(stages),
+                     "reason": "Переход в бот инициирован, /start не получен" if status == "WARN" and identity and handoff_started and not real_starts else ("Историческая observability gap: нет отдельного REAL_START_RECEIVED" if started and not real_starts else None)})
         for visit in visits:
             event_types = bot_events_by_visit[visit.id]
             journey_rows.append({"time": visit.created_at.isoformat(), "object": bot_name, "type": "Бот",
@@ -327,7 +359,8 @@ async def admin_journey(
                 "identity_resolved": visit.id in bot_links_by_visit, "handoff_started": visit.id in bot_events_by_visit and "BOT_HANDOFF_STARTED" in bot_events_by_visit[visit.id], "destination_reached": "UNKNOWN",
                 "real_start": visit.id in bot_events_by_visit and "REAL_START_RECEIVED" in bot_events_by_visit[visit.id],
                 "product_conversion": visit.status == "BOT_STARTED", "metrica": bool(bot_conversions_by_visit[visit.id] and any(_successful_metrika(c) for c in bot_conversions if c.bot_visit_id == visit.id)),
-                "direct": "UNKNOWN", "status": "PASS" if visit.status == "BOT_STARTED" else ("WARN" if event_types else "UNKNOWN")})
+                "direct": "UNKNOWN", "status": "PASS" if visit.status == "BOT_STARTED" else ("WARN" if event_types else "UNKNOWN"),
+                "last_stage": _journey_last_stage(stages, is_bot=True, real_start="REAL_START_RECEIVED" in event_types, conversion=visit.status == "BOT_STARTED", metrika=bool(bot_conversions_by_visit[visit.id])),})
 
     journey_rows.sort(key=lambda item: item["time"], reverse=True)
     selected_rows = [item for item in journey_rows if object_type == "all" or (object_type == "channel" and item["type"] == "Канал") or (object_type == "bot" and item["type"] == "Бот")][:100]
@@ -363,6 +396,8 @@ async def admin_journey(
         }
 
     domain_funnels = [item for item in (aggregate_domain("channel"), aggregate_domain("bot")) if item is not None]
+    for item in domain_funnels:
+        item["main_drop"] = _main_drop(item["stages"])
     return {"read_only": True, "scope": {"from": start.isoformat(), "to": end.isoformat(), "days": days, "timezone": "UTC"},
             "filters": {"type": object_type, "source": source, "problem": problem, "search": search},
             "summary": {"channels": sum(item["type"] == "channel" for item in rows), "bots": sum(item["type"] == "bot" for item in rows),
