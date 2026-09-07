@@ -167,6 +167,41 @@ def ads_only_shared_change(path: str) -> bool:
             "bot_max_identity_links", "bot_started", "max_subscriber",
             "metrika", "paid_dedupe",
         )
+        if path == "alembic/versions/0075a_alembic_version_width.py":
+            allowed_lines = {
+                '"""Widen Alembic\'s version column before long ADS revisions are recorded."""',
+                "from alembic import op",
+                "import sqlalchemy as sa",
+                'revision = "0075a_alembic_version_width"',
+                'down_revision = "0075_ads_canonical_v2"',
+                "branch_labels = None",
+                "depends_on = None",
+                "def upgrade() -> None:",
+                "def downgrade() -> None:",
+                "op.alter_column(",
+                '"alembic_version",',
+                '"version_num",',
+                "existing_type=sa.String(length=32),",
+                "type_=sa.String(length=64),",
+                "existing_nullable=False,",
+                "existing_type=sa.String(length=64),",
+                "type_=sa.String(length=32),",
+                ")",
+            }
+            changed = [line.strip() for line in text.splitlines() if line.strip()]
+            return (
+                changed.count("op.alter_column(") == 2
+                and changed.count(")") == 2
+                and all(line in allowed_lines for line in changed)
+                and '"alembic_version",' in changed
+                and '"version_num",' in changed
+            )
+        if path == "alembic/versions/0076_ads_directologist_decision_engine_v1.py":
+            changed = [line.strip() for line in text.splitlines() if line.strip()]
+            return changed == [
+                'down_revision = "0075_ads_canonical_v2"',
+                'down_revision = "0075a_alembic_version_width"',
+            ]
         table_names = set(re.findall(r'"(ads_[a-z0-9_]+)"', text.lower()))
         allowed_tables = {"ads_recommendations", "ads_ai_outcomes", "ads_observations", "ads_collection_runs", "ads_report_runs"}
         return bool(table_names) and table_names <= allowed_tables and not any(marker in text.lower() for marker in frozen_markers)
