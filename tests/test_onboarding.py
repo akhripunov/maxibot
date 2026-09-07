@@ -51,6 +51,17 @@ def test_add_bot_shows_intro_before_instruction():
     assert 'if screen == "connect_bot":' in MENU
 
 
+def test_continue_bot_connection_uses_atomic_navigation_replacement():
+    start = RUNTIME.index('    async def _navigation_callback(')
+    end = RUNTIME.index('    async def _callback(', start)
+    navigation = RUNTIME[start:end]
+    assert 'action == "custom_bot_token"' in navigation
+    assert 'await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")' in navigation
+    callback_start = RUNTIME.index('    async def _callback(')
+    callback = RUNTIME[callback_start:]
+    assert '"custom_bot_token"' in callback[callback.index('navigation = '):]
+
+
 def test_admin_command_uses_platform_owner_allowlist():
     assert 'async def is_platform_admin' in MENU
     assert 'await self.repo.is_platform_admin(target_id)' in RUNTIME

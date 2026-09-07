@@ -630,6 +630,14 @@ class MaxBotRuntime:
             screen, channel_id = "owner_admin", None
         elif action == "promotion_maxibot":
             screen, channel_id = "promotion_maxibot", None
+        elif action == "custom_bot_token":
+            # Enter token setup through the same atomic callback replacement
+            # as the other navigation screens.  Persist the input state before
+            # rendering, but avoid the slower edit-message/fallback path.
+            if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):
+                screen, channel_id = "custom_bot_token", None
+            else:
+                screen, channel_id = "promotion", None
         elif action in {"promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}:
             screen, channel_id = action, None
         elif action.startswith("settings:"):
@@ -751,7 +759,7 @@ class MaxBotRuntime:
         # MAX callback responses can replace exactly the message whose button
         # was pressed.  Prefer this for navigation; editing a separately
         # stored message id leaves an old keyboard visible in some clients.
-        navigation = action in {"home", "channels", "promotion", "promotion_maxibot", "promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}
+        navigation = action in {"home", "channels", "promotion", "promotion_maxibot", "custom_bot_token", "promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}
         navigation = navigation or action.startswith(("channel:", "settings:", "promotion_channel:", "promotion_landing:", "subscription:", "ads:"))
         if navigation and update.callback_id:
             await self._navigation_callback(update, str(user_id), action)
