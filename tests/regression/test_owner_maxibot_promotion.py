@@ -143,6 +143,34 @@ def test_system_landing_reuses_only_recent_unfinished_same_bot_yclid_visit():
     assert "token = visit.token" in system_landing
 
 
+def test_system_landing_reuses_recent_cookie_visit_only_inside_bot_scope():
+    start = MAIN.index('@app.get("/system/{public_id}"')
+    end = MAIN.index('@app.get("/health/live")', start)
+    system_landing = MAIN[start:end]
+    for fragment in (
+        'request.cookies.get("maxibot_bot_traffic_visit")',
+        'if cookie_token and not yclid:',
+        "BotTrafficVisit.token == cookie_token",
+        "BotTrafficVisit.bot_id == bot_id",
+        "BotTrafficVisit.destination_id == bot_id",
+        "BotTrafficVisit.max_user_id.is_(None)",
+        "BotTrafficVisit.created_at >= now - timedelta(minutes=15)",
+        'path=f"/{public_id}"',
+        'response.set_cookie(\n        "maxibot_bot_traffic_visit"',
+    ):
+        assert fragment in system_landing
+
+
+def test_system_landing_cookie_reuse_does_not_replace_yclid_reuse_or_expiry_rules():
+    start = MAIN.index('@app.get("/system/{public_id}"')
+    end = MAIN.index('@app.get("/health/live")', start)
+    system_landing = MAIN[start:end]
+    assert system_landing.index("if cookie_token and not yclid:") < system_landing.index("if yclid:")
+    assert 'visit.status = "EXPIRED"' in system_landing
+    assert "settings.traffic_startapp_ttl_seconds" in system_landing
+    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in system_landing
+
+
 def test_system_landing_reuse_keeps_bot_domain_isolated_from_channel():
     start = MAIN.index('@app.get("/system/{public_id}"')
     end = MAIN.index('@app.get("/health/live")', start)
