@@ -3,7 +3,8 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 from datetime import date, datetime, timezone
-from sqlalchemy import String, Boolean, Date, DateTime, ForeignKey, Text, Integer, BigInteger, Numeric, UniqueConstraint, Sequence
+import sqlalchemy as sa
+from sqlalchemy import String, Boolean, Date, DateTime, ForeignKey, Text, Integer, BigInteger, Numeric, UniqueConstraint, Sequence, CheckConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 def uid(): return str(uuid.uuid4())
@@ -740,10 +741,32 @@ class AdsChannelCampaignLink(Base):
     __table_args__ = (UniqueConstraint("channel_id", "campaign_id", name="uq_ads_channel_campaign"),)
 
 
+class AdsPromotionCampaignLink(Base):
+    """Provider-neutral campaign link for a CHANNEL or BOT promotion object."""
+    __tablename__ = "ads_promotion_campaign_links"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    object_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    bot_promotion_profile_id: Mapped[Optional[str]] = mapped_column(ForeignKey("bot_promotion_profiles.id", ondelete="CASCADE"), index=True)
+    campaign_id: Mapped[str] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="ACTIVE", nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+    __table_args__ = (
+        CheckConstraint(
+            "(object_type = 'CHANNEL' AND channel_id IS NOT NULL AND bot_promotion_profile_id IS NULL) OR "
+            "(object_type = 'BOT' AND channel_id IS NULL AND bot_promotion_profile_id IS NOT NULL)",
+            name="ck_ads_promotion_campaign_link_one_object",
+        ),
+        Index("uq_ads_promotion_campaign_channel", "channel_id", "campaign_id", unique=True, postgresql_where=sa.text("object_type = 'CHANNEL'")),
+        Index("uq_ads_promotion_campaign_bot", "bot_promotion_profile_id", "campaign_id", unique=True, postgresql_where=sa.text("object_type = 'BOT'")),
+    )
+
+
 class AdsSnapshot(Base):
     __tablename__ = "ads_snapshots"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="SET NULL"), index=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     period_from: Mapped[Optional[date]] = mapped_column(Date)

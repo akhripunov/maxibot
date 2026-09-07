@@ -5,7 +5,7 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
-CURRENT_HEAD_MIGRATION = "0073_free_trial_v1"
+CURRENT_HEAD_MIGRATION = "0074_ads_provider_neutral_links"
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -123,7 +123,7 @@ def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0072_canonical_bot_promotion" in result.stdout
+    assert "TARGET_DOWN_REVISION=0073_free_trial_v1" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():

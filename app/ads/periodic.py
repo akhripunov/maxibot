@@ -11,15 +11,15 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.facts import build_campaign_facts
 from app.ads.v2 import _entity, collect_granular_yandex_v2, collect_yandex_v2
 from app.core.config import settings
 from app.db.models import (
-    Admin, AdsAccount, AdsCampaign, AdsChannelCampaignLink, AdsDataHealth,
-    AdsSnapshot, AdsV2CollectionRun, Channel,
+    Admin, AdsAccount, AdsCampaign, AdsDataHealth, AdsPromotionCampaignLink,
+    AdsSnapshot, AdsV2CollectionRun, BotPromotionProfile, Channel,
 )
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
@@ -66,9 +66,9 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
     now = now or datetime.now(timezone.utc)
     rows = list((await db.scalars(
         select(AdsCampaign)
-        .join(AdsChannelCampaignLink, AdsChannelCampaignLink.campaign_id == AdsCampaign.id)
+        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
-        .where(AdsChannelCampaignLink.status == "ACTIVE", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED", or_(AdsCampaign.external_id.in_(settings.ads_periodic_canary_campaign_ids), AdsCampaign.name.in_(settings.ads_periodic_canary_campaign_ids)))
+        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED")
         .distinct().limit(limit)
     )).all())
     created = 0
@@ -109,7 +109,7 @@ async def claim_due_slots(db: AsyncSession, *, now: datetime | None = None, limi
 
 
 async def _health(db: AsyncSession, campaign: AdsCampaign, *, status: str, reason: str) -> None:
-    links = list((await db.scalars(select(AdsChannelCampaignLink.channel_id).where(AdsChannelCampaignLink.campaign_id == campaign.id, AdsChannelCampaignLink.status == "ACTIVE"))).all())
+    links = list((await db.scalars(select(AdsPromotionCampaignLink.channel_id).where(AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.status == "ACTIVE", AdsPromotionCampaignLink.channel_id.is_not(None)))).all())
     for channel_id in links:
         db.add(AdsDataHealth(channel_id=channel_id, status=status, reasons_json=json.dumps({"periodic_collection": reason}, ensure_ascii=False)))
 
@@ -118,11 +118,14 @@ async def _collection_context(db: AsyncSession, run: AdsV2CollectionRun):
     campaign = await db.get(AdsCampaign, run.campaign_id)
     if not campaign:
         raise ValueError("COLLECTION_CAMPAIGN_NOT_FOUND")
-    link = await db.scalar(select(AdsChannelCampaignLink).where(AdsChannelCampaignLink.campaign_id == campaign.id, AdsChannelCampaignLink.status == "ACTIVE"))
-    channel = await db.get(Channel, link.channel_id) if link else None
+    link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.status == "ACTIVE"))
+    channel = await db.get(Channel, link.channel_id) if link and link.object_type == "CHANNEL" and link.channel_id else None
     admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
     encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
-    if not encrypted or not channel:
+    if link and link.object_type == "BOT" and link.bot_promotion_profile_id:
+        profile = await db.get(BotPromotionProfile, link.bot_promotion_profile_id)
+        encrypted = profile.yandex_oauth_token_encrypted if profile else None
+    if not encrypted or not link:
         raise ValueError("COLLECTION_PROVIDER_CREDENTIALS_UNAVAILABLE")
     today = datetime.now(timezone.utc).astimezone(MOSCOW).date()
     return campaign, channel, encrypted, today
@@ -138,9 +141,9 @@ async def collect_campaign_slot(db: AsyncSession, run: AdsV2CollectionRun) -> No
     finally:
         await provider.close()
     fetched_at = report.fetched_at or datetime.now(timezone.utc)
-    traffic = await traffic_stats_for_channels(db, [channel.id])
+    traffic = await traffic_stats_for_channels(db, [channel.id]) if channel else {}
     facts = build_campaign_facts(report.rows, campaign_start=None, traffic=traffic, now=fetched_at)
-    snapshot = AdsSnapshot(channel_id=channel.id, campaign_id=campaign.id, source="PERIODIC_COLLECTION", period_from=date_from, period_to=today, facts_json=json.dumps({"campaign": {"id": campaign.id, "name": campaign.name}, "facts": facts.context(report_date_from=date_from, report_date_to=today, report_fetched_at=fetched_at, snapshot_at=fetched_at), "collection_run_id": run.id}, ensure_ascii=False))
+    snapshot = AdsSnapshot(channel_id=channel.id if channel else None, campaign_id=campaign.id, source="PERIODIC_COLLECTION", period_from=date_from, period_to=today, facts_json=json.dumps({"campaign": {"id": campaign.id, "name": campaign.name}, "facts": facts.context(report_date_from=date_from, report_date_to=today, report_fetched_at=fetched_at, snapshot_at=fetched_at), "collection_run_id": run.id}, ensure_ascii=False))
     db.add(snapshot)
     await db.flush()
     await collect_yandex_v2(db, token=decrypt_token(encrypted), campaign=campaign, snapshot=snapshot, report_rows=report.rows, date_from=date_from, date_to=today, fetched_at=fetched_at, collection_run_id=run.id)
@@ -152,7 +155,7 @@ async def collect_campaign_slot(db: AsyncSession, run: AdsV2CollectionRun) -> No
 async def collect_granular_slot(db: AsyncSession, run: AdsV2CollectionRun) -> None:
     campaign, channel, encrypted, today = await _collection_context(db, run)
     date_from = today - timedelta(days=6)
-    snapshot = AdsSnapshot(channel_id=channel.id, campaign_id=campaign.id, source="PERIODIC_GRANULAR", period_from=date_from, period_to=today, facts_json=json.dumps({"campaign": {"id": campaign.id, "name": campaign.name}, "collection_run_id": run.id}, ensure_ascii=False))
+    snapshot = AdsSnapshot(channel_id=channel.id if channel else None, campaign_id=campaign.id, source="PERIODIC_GRANULAR", period_from=date_from, period_to=today, facts_json=json.dumps({"campaign": {"id": campaign.id, "name": campaign.name}, "collection_run_id": run.id}, ensure_ascii=False))
     db.add(snapshot)
     await db.flush()
     result = await collect_granular_yandex_v2(db, token=decrypt_token(encrypted), campaign=campaign, snapshot=snapshot, date_from=date_from, date_to=today, fetched_at=datetime.now(timezone.utc), collection_run_id=run.id, dimensions=("SEARCH_QUERY",) if run.collection_type == "SEARCH_QUERY" else None)
@@ -226,12 +229,18 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
     if not next_run:
         # The scheduler materializes due slots only.  For a compact admin
         # diagnostic, calculate the next campaign slot without inserting it.
-        eligible_campaigns = list((await db.scalars(select(AdsCampaign).join(AdsChannelCampaignLink, AdsChannelCampaignLink.campaign_id == AdsCampaign.id).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsChannelCampaignLink.status == "ACTIVE", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED", or_(AdsCampaign.external_id.in_(settings.ads_periodic_canary_campaign_ids), AdsCampaign.name.in_(settings.ads_periodic_canary_campaign_ids))).distinct())).all())
+        eligible_campaigns = list((await db.scalars(select(AdsCampaign).join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED").distinct())).all())
         candidates = [_slot_time(now if _slot_time(now, c.id, "CAMPAIGN") > now else now + timedelta(minutes=settings.ads_collection_campaign_interval_minutes), c.id, "CAMPAIGN") for c in eligible_campaigns]
         if candidates:
             next_run = type("NextSlot", (), {"scheduled_at": min(candidates)})()
     from sqlalchemy import func
-    eligible = await db.scalar(select(func.count(func.distinct(AdsCampaign.id))).select_from(AdsCampaign).join(AdsChannelCampaignLink, AdsChannelCampaignLink.campaign_id == AdsCampaign.id).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsChannelCampaignLink.status == "ACTIVE", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED", or_(AdsCampaign.external_id.in_(settings.ads_periodic_canary_campaign_ids), AdsCampaign.name.in_(settings.ads_periodic_canary_campaign_ids))))
+    eligible = await db.scalar(
+        select(func.count(func.distinct(AdsCampaign.id)))
+        .select_from(AdsCampaign)
+        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
+        .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
+        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED")
+    )
     retry_backlog = await db.scalar(select(func.count(AdsV2CollectionRun.id)).where(AdsV2CollectionRun.status == "RETRYABLE_FAILED"))
     failed_runs = await db.scalar(select(func.count(AdsV2CollectionRun.id)).where(AdsV2CollectionRun.status == "FAILED"))
     by_type: dict[str, dict[str, object]] = {}
@@ -252,7 +261,13 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
         AdsV2CollectionRun.status == "COMPLETED",
         AdsV2CollectionRun.completed_at >= now - timedelta(minutes=settings.ads_collection_campaign_interval_minutes * 2),
     )
-    stale = await db.scalar(select(func.count(func.distinct(AdsCampaign.id))).select_from(AdsCampaign).join(AdsChannelCampaignLink, AdsChannelCampaignLink.campaign_id == AdsCampaign.id).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsChannelCampaignLink.status == "ACTIVE", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED", or_(AdsCampaign.external_id.in_(settings.ads_periodic_canary_campaign_ids), AdsCampaign.name.in_(settings.ads_periodic_canary_campaign_ids)), ~exists(recent_campaign)))
+    stale = await db.scalar(
+        select(func.count(func.distinct(AdsCampaign.id)))
+        .select_from(AdsCampaign)
+        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
+        .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
+        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED", ~exists(recent_campaign))
+    )
     return {
         "enabled": settings.ads_periodic_collection_enabled,
         "last_successful_collection": last.completed_at.isoformat() if last and last.completed_at else None,

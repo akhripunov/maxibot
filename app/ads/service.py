@@ -17,7 +17,7 @@ from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v
 from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_maxibot_metrics
 from app.core.config import settings
-from app.db.models import Admin, AdsAccount, AdsAiRun, AdsCampaign, AdsChannelCampaignLink, AdsDataHealth, AdsMemory, AdsRecommendation, AdsSnapshot, AdsSyncRun, AdsV2Observation, AdsV2Outcome, Channel, LandingPage, TrafficProfile
+from app.db.models import Admin, AdsAccount, AdsAiRun, AdsCampaign, AdsDataHealth, AdsMemory, AdsPromotionCampaignLink, AdsRecommendation, AdsSnapshot, AdsSyncRun, AdsV2Observation, AdsV2Outcome, Channel, LandingPage, TrafficProfile
 from app.integrations.yandex_direct import YandexDirectClient
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
@@ -53,7 +53,33 @@ async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str,
     finally: await client.close()
 
 async def _mapped(db: AsyncSession, channel_id: str) -> list[str]:
-    return list((await db.scalars(select(AdsChannelCampaignLink.campaign_id).where(AdsChannelCampaignLink.channel_id == channel_id, AdsChannelCampaignLink.status == "ACTIVE"))).all())
+    return list((await db.scalars(select(AdsPromotionCampaignLink.campaign_id).where(AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.channel_id == channel_id, AdsPromotionCampaignLink.status == "ACTIVE"))).all())
+
+
+async def campaigns_for_promotion_object(db: AsyncSession, *, object_type: str, object_id: str) -> list[AdsCampaign]:
+    """Resolve active campaigns without coupling the ADS layer to one object domain."""
+    if object_type not in {"CHANNEL", "BOT"}:
+        raise ValueError("ADS_PROMOTION_OBJECT_TYPE_UNSUPPORTED")
+    predicate = (
+        AdsPromotionCampaignLink.channel_id == object_id
+        if object_type == "CHANNEL"
+        else AdsPromotionCampaignLink.bot_promotion_profile_id == object_id
+    )
+    return list((await db.scalars(
+        select(AdsCampaign)
+        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
+        .where(
+            AdsPromotionCampaignLink.object_type == object_type,
+            predicate,
+            AdsPromotionCampaignLink.status == "ACTIVE",
+            AdsCampaign.state != "ARCHIVED",
+        )
+        .order_by(AdsCampaign.name)
+    )).all())
+
+
+async def campaigns_for_bot(db: AsyncSession, bot_promotion_profile_id: str) -> list[AdsCampaign]:
+    return await campaigns_for_promotion_object(db, object_type="BOT", object_id=bot_promotion_profile_id)
 
 def _context(campaign: AdsCampaign | None, facts: dict[str, Any], suff: str, missing: list[str], memories: list[AdsMemory]) -> dict[str, Any]:
     return {"context_version": 2, "CURRENT_CAMPAIGN": {"id": campaign.id, "name": campaign.name, "state": campaign.state} if campaign else None, "FACTS": facts, "DATA_SUFFICIENCY": suff, "RECENT_HISTORY": [], "RETRIEVED_PRIVATE_MEMORIES": [{"id": x.id, "status": x.status, "statement": x.content, "evidence_ids": json.loads(x.evidence_ids_json)} for x in memories], "MISSING_DATA": missing, "ALLOWED_RECOMMENDATION_TYPES": ["HOLD", "MONITOR", "INVESTIGATE", "TEST", "SCALE_CANDIDATE", "REDUCE_CANDIDATE", "PLACEMENT_REVIEW", "ATTRIBUTION_REVIEW", "CREATIVE_REVIEW", "TARGETING_REVIEW", "OBSERVE", "REVIEW_GOAL", "REVIEW_ATTRIBUTION", "REVIEW_CREATIVE", "REVIEW_TARGETING", "REVIEW_PLACEMENTS", "INSUFFICIENT_DATA"], "SYSTEM_CONSTRAINTS": {"direct_writes": False, "autopilot": False, "global_learning": False, "execution_allowed": False}}
@@ -295,9 +321,9 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
     return [(row, row.id in active) for row in rows]
 
 async def toggle_campaign_link(db: AsyncSession, *, channel_id: str, campaign_id: str) -> None:
-    link = await db.scalar(select(AdsChannelCampaignLink).where(AdsChannelCampaignLink.channel_id == channel_id, AdsChannelCampaignLink.campaign_id == campaign_id));
+    link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.channel_id == channel_id, AdsPromotionCampaignLink.campaign_id == campaign_id));
     if link: link.status = "INACTIVE" if link.status == "ACTIVE" else "ACTIVE"
-    else: db.add(AdsChannelCampaignLink(channel_id=channel_id, campaign_id=campaign_id))
+    else: db.add(AdsPromotionCampaignLink(object_type="CHANNEL", channel_id=channel_id, campaign_id=campaign_id))
     await db.commit()
 
 async def persist_development_result(db: AsyncSession, *, channel_id: str, output: dict[str, Any], ai: AdsAiRun | None = None, worker: bool = False) -> AdsAiRun:
