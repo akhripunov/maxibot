@@ -82,8 +82,7 @@ class MaxClient(ABC):
     async def send_image_to_channel_user(self, user_id: str, image_url: str, text: str = "") -> bool:
         raise NotImplementedError
 
-    async def answer_callback(self, callback_id: str, message: dict[str, Any] | None = None,
-                              notification: str | None = None) -> bool:
+    async def answer_callback(self, callback_id: str, message: dict[str, Any] | None = None) -> bool:
         return True
 
     async def updates(self, marker: int | None = None) -> tuple[list[MaxUpdate], int | None]:
@@ -343,7 +342,7 @@ class RealMaxClient(MaxClient):
             raise MaxApiError(409, "MAX rejected message edit")
         return str(result.get("message_id", message_id))
 
-    async def answer_callback(self, callback_id, message=None, notification=None):
+    async def answer_callback(self, callback_id, message=None):
         # A callback must be acknowledged through the dedicated MAX API
         # endpoint.  Returning locally leaves the callback pending and MAX
         # retries it, which makes button presses look slow and duplicated.
@@ -351,7 +350,7 @@ class RealMaxClient(MaxClient):
         # runtime edits the persisted message first, then this short
         # acknowledgement confirms the already-updated screen without
         # creating a second message version.
-        payload = {"message": message} if message else {"notification": notification or "Готово"}
+        payload = {"message": message} if message else {"notification": "Готово"}
         result = await self._request(
             "POST",
             "/answers",

@@ -55,7 +55,6 @@ class MaxBotRuntime:
         self._recent_traffic_routes: dict[str, tuple[float, dict]] = {}
         self._recent_traffic_replays: dict[str, float] = {}
         self._recent_callback_ids: dict[str, float] = {}
-        self._recent_token_prompts: dict[str, float] = {}
         self._message_locks: dict[str, asyncio.Lock] = {}
         self._custom_markers: dict[str, int | None] = {}
         self._custom_clients: dict[str, RealMaxClient] = {}
@@ -690,28 +689,6 @@ class MaxBotRuntime:
             bool(clicked_mid),
         )
 
-    async def _ack_callback_in_background(self, callback_id: str, notification: str | None = None) -> None:
-        """Acknowledge a slow MAX callback without blocking the UI update."""
-        try:
-            await self.client.answer_callback(callback_id, notification=notification)
-        except Exception:
-            logger.exception("MAX_CALLBACK_ACK_FAILED callback_id_present=%s", bool(callback_id))
-
-    async def _send_token_prompt_in_background(self, user_id: str) -> None:
-        """Show a fast visible confirmation without the slow link keyboard."""
-        now = time.monotonic()
-        last = self._recent_token_prompts.get(str(user_id), 0.0)
-        if now - last < 5:
-            return
-        self._recent_token_prompts[str(user_id)] = now
-        try:
-            await self.client.send_message(
-                user_id,
-                "✅ Подключение продолжено.\n\nОтправьте токен бота следующим сообщением.",
-            )
-        except Exception:
-            logger.exception("BOT_TOKEN_PROMPT_SEND_FAILED")
-
     async def _callback(self, update: MaxUpdate):
         user_id = self._event_user_id(update)
         if not user_id or str(user_id) == "0":
@@ -781,15 +758,7 @@ class MaxBotRuntime:
             return
         # Non-navigation callbacks keep the immediate acknowledgement to
         # avoid retries while their action performs longer work.
-        if update.callback_id and action == "custom_bot_token":
-            # MAX /answers can intermittently take several seconds.  The
-            # token-entry panel is safe to render immediately; the callback
-            # acknowledgement is independent and must not hold the UI path.
-            asyncio.create_task(self._ack_callback_in_background(
-                update.callback_id,
-                "Готово — отправьте токен следующим сообщением.",
-            ))
-        elif update.callback_id:
+        if update.callback_id:
             await self.client.answer_callback(update.callback_id)
         # Old MAX message copies can contain channel/landing IDs that were
         # replaced during earlier menu repairs. Recover to the current list
@@ -1000,12 +969,8 @@ class MaxBotRuntime:
             # The token-waiting state is set only after the owner continues.
             await self._render(user_id, "connect_bot_intro")
         elif action == "custom_bot_token":
-            # MAX takes about four seconds to render the next bot-token card
-            # because it contains a business-link keyboard.  The current
-            # screen already explains the next action, so arm token input
-            # immediately and leave the visible panel untouched.
             if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):
-                asyncio.create_task(self._send_token_prompt_in_background(user_id))
+                await self._render(user_id, "custom_bot_token")
         elif action == "custom_bot_help":
             # Keep token input state active while the owner reads the short help.
             await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")
