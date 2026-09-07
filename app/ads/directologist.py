@@ -15,6 +15,7 @@ from typing import Any, Iterable
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models import (
     AdsCampaign, AdsDailyAggregate, AdsPromotionCampaignLink, BotConversion,
     BotTrafficVisit, TrafficMembership, TrafficVisit,
@@ -286,6 +287,11 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
         "root_cause": root_cause_status(contributors=[], sufficient=False),
         "confidence": confidence_pack,
         "data_health": {"status": "LIMITED" if confidence_pack["level"] in {"LOW", "INSUFFICIENT"} else "HEALTHY", "reasons": confidence_pack["reasons"]},
+        "retention_policy": {
+            "observations_days": settings.ads_observations_retention_days,
+            "daily_aggregates": "LONG_TERM",
+            "detail_absence_semantics": ["NOT_COLLECTED", "EXPIRED_BY_RETENTION", "MISSING_OR_ERROR"],
+        },
         "policy": "read-only; no Direct mutations; provider conversions are not confirmed MaxiBot outcomes",
         "evidence": {
             "V2-DIRECTOLOGISTCURRENT": {"source": "ADS_DIRECTOLOGIST", "scope": "current_window", "status": metrics["status"]},

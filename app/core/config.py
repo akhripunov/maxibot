@@ -102,8 +102,12 @@ class Settings(BaseSettings):
     ads_collection_max_slots_per_cycle: int = Field(default=2, validation_alias="ADS_COLLECTION_MAX_SLOTS_PER_CYCLE")
     ads_collection_outcome_tolerance_minutes: int = Field(default=120, validation_alias="ADS_COLLECTION_OUTCOME_TOLERANCE_MINUTES")
     ads_periodic_collection_canary_campaigns: str = Field(default="", validation_alias="ADS_PERIODIC_COLLECTION_CANARY_CAMPAIGNS")
-    ads_hourly_retention_days: int = Field(default=60, validation_alias="ADS_HOURLY_RETENTION_DAYS")
-    ads_daily_retention_days: int = Field(default=0, validation_alias="ADS_DAILY_RETENTION_DAYS")
+    ads_observations_retention_days: int = Field(default=60, validation_alias="ADS_OBSERVATIONS_RETENTION_DAYS")
+    ads_operational_retention_days: int = Field(default=90, validation_alias="ADS_OPERATIONAL_RETENTION_DAYS")
+    ads_data_health_retention_days: int = Field(default=90, validation_alias="ADS_DATA_HEALTH_RETENTION_DAYS")
+    ads_retention_enabled: bool = Field(default=True, validation_alias="ADS_RETENTION_ENABLED")
+    ads_retention_batch_size: int = Field(default=500, validation_alias="ADS_RETENTION_BATCH_SIZE")
+    ads_retention_interval_minutes: int = Field(default=1440, validation_alias="ADS_RETENTION_INTERVAL_MINUTES")
     ads_collection_raw_debug_enabled: bool = Field(default=False, validation_alias="ADS_COLLECTION_RAW_DEBUG_ENABLED")
     ads_storage_warning_free_percent: float = Field(default=15.0, validation_alias="ADS_STORAGE_WARNING_FREE_PERCENT")
     ads_storage_critical_free_percent: float = Field(default=8.0, validation_alias="ADS_STORAGE_CRITICAL_FREE_PERCENT")
@@ -123,6 +127,16 @@ class Settings(BaseSettings):
     ads_ai_max_demographic_facts: int = Field(default=16, validation_alias="ADS_AI_MAX_DEMOGRAPHIC_FACTS")
     ads_ai_max_criteria_facts: int = Field(default=12, validation_alias="ADS_AI_MAX_CRITERIA_FACTS")
     ads_sync_interval_seconds: int = Field(default=900, validation_alias="ADS_SYNC_INTERVAL_SECONDS")
+
+    @property
+    def ads_hourly_retention_days(self) -> int:
+        """Backward-compatible name for the canonical observations policy."""
+        return self.ads_observations_retention_days
+
+    @property
+    def ads_daily_retention_days(self) -> int:
+        """Daily aggregates are long-term; zero means no expiry."""
+        return 0
     custom_bot_token_encryption_key: str | None = Field(default=None, validation_alias="CUSTOM_BOT_TOKEN_ENCRYPTION_KEY")
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

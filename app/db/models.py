@@ -877,7 +877,7 @@ class AdsCollectionRun(Base):
 class AdsObservation(Base):
     __tablename__ = "ads_observations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    snapshot_id: Mapped[str] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="CASCADE"), index=True)
+    snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="SET NULL"), index=True)
     entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_entities.id", ondelete="SET NULL"), index=True)
     dimension_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     dimension_value: Mapped[Optional[str]] = mapped_column(String(256))
@@ -1041,27 +1041,6 @@ class AdsDataHealth(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     reasons_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
-
-
-class AdsAction(Base):
-    __tablename__ = "ads_actions"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
-    recommendation_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_recommendations.id", ondelete="SET NULL"), index=True)
-    action_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(24), default="PLANNED", nullable=False)
-    outcome_json: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-
-
-class AdsExperiment(Base):
-    __tablename__ = "ads_experiments"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(24), default="DRAFT", nullable=False)
-    hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
-    result_json: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 # Import compatibility for bounded historical tests/callers.  Runtime tables

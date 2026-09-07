@@ -211,7 +211,13 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     snapshot = AdsAnalysisSnapshot(channel_id=channel.id, campaign_id=campaign.id, source="MANUAL_CHECK", period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
     db.add(snapshot); await db.flush()
     snapshot.facts_json = json.dumps(facts, ensure_ascii=False)
-    db.add(AdsDataHealth(channel_id=channel.id, status=health["status"], reasons_json=json.dumps(health, ensure_ascii=False)))
+    current_health = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.channel_id == channel.id).order_by(AdsDataHealth.checked_at.desc()).limit(1))
+    if current_health:
+        current_health.status = health["status"]
+        current_health.reasons_json = json.dumps({**health, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)
+        current_health.checked_at = datetime.now(timezone.utc)
+    else:
+        db.add(AdsDataHealth(channel_id=channel.id, status=health["status"], reasons_json=json.dumps({**health, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)))
     memories = await retrieve(db, channel_id=channel.id, campaign_id=campaign.id)
     context = _context(campaign, facts, suff, missing, memories)
     context, final_budget = bound_ai_context(

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
+from app.ads.storage_health import diagnostics as ads_storage_diagnostics
 from app.db.models import (
     Admin,
     AdsAiRun,
@@ -669,6 +670,7 @@ async def admin_ads_storage(
     _: str = Depends(require_web_admin),
     db: AsyncSession = Depends(get_session),
 ):
+    storage = await ads_storage_diagnostics(db)
     return {
         "counts": {
             "ai_runs": await _count(db, AdsAiRun),
@@ -676,5 +678,6 @@ async def admin_ads_storage(
             "memories": await _count(db, AdsMemory),
         },
         "secrets_exposed": False,
+        "storage": storage,
         "read_only": True,
     }

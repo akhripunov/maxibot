@@ -8,10 +8,10 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AdsAnalysisSnapshot, AdsCampaign, AdsDailyAggregate, AdsObservation
+from app.db.models import AdsAnalysisSnapshot, AdsCampaign, AdsDailyAggregate, AdsEntity, AdsObservation
 from app.ads.facts import CampaignFactSet
 from app.ads.directologist import build_decision_pack, finalize_decision_pack
 from app.ads.trends import build_trend_features
@@ -498,8 +498,9 @@ async def build_v2_analysis_dataset(
     cutoff = cutoff or (datetime.now(timezone.utc).astimezone(__import__("zoneinfo").ZoneInfo("Europe/Moscow")).date() - timedelta(days=6))
     rows = list((await db.scalars(
         select(AdsObservation)
-        .join(AdsAnalysisSnapshot, AdsAnalysisSnapshot.id == AdsObservation.snapshot_id)
-        .where(AdsAnalysisSnapshot.campaign_id == campaign.id, AdsObservation.date_to >= cutoff)
+        .outerjoin(AdsAnalysisSnapshot, AdsAnalysisSnapshot.id == AdsObservation.snapshot_id)
+        .outerjoin(AdsEntity, AdsEntity.id == AdsObservation.entity_id)
+        .where(or_(AdsAnalysisSnapshot.campaign_id == campaign.id, AdsEntity.campaign_id == campaign.id), AdsObservation.date_to >= cutoff)
         .order_by(AdsObservation.created_at.desc())
     )).all())
     latest: dict[tuple[Any, ...], AdsObservation] = {}

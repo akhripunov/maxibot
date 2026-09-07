@@ -14,16 +14,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ads.facts import build_campaign_facts
-from app.ads.v2 import _entity, collect_granular_yandex_v2, collect_yandex_v2
+from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2
+from app.ads.storage_governance import run_retention
 from app.core.config import settings
 from app.db.models import (
     Admin, AdsAccount, AdsCampaign, AdsDataHealth, AdsPromotionCampaignLink,
-    AdsAnalysisSnapshot, AdsCollectionRun, BotPromotionProfile, Channel,
+    AdsCollectionRun, BotPromotionProfile, Channel,
 )
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
-from app.traffic.analytics import traffic_stats_for_channels
 
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 MAX_ATTEMPTS = 3
@@ -111,7 +110,13 @@ async def claim_due_slots(db: AsyncSession, *, now: datetime | None = None, limi
 async def _health(db: AsyncSession, campaign: AdsCampaign, *, status: str, reason: str) -> None:
     links = list((await db.scalars(select(AdsPromotionCampaignLink.channel_id).where(AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.status == "ACTIVE", AdsPromotionCampaignLink.channel_id.is_not(None)))).all())
     for channel_id in links:
-        db.add(AdsDataHealth(channel_id=channel_id, status=status, reasons_json=json.dumps({"periodic_collection": reason}, ensure_ascii=False)))
+        current = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.channel_id == channel_id).order_by(AdsDataHealth.checked_at.desc()).limit(1))
+        if current:
+            current.status = status
+            current.reasons_json = json.dumps({"periodic_collection": reason, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)
+            current.checked_at = datetime.now(timezone.utc)
+        else:
+            db.add(AdsDataHealth(channel_id=channel_id, status=status, reasons_json=json.dumps({"periodic_collection": reason, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)))
 
 
 async def _collection_context(db: AsyncSession, run: AdsCollectionRun):
@@ -141,13 +146,8 @@ async def collect_campaign_slot(db: AsyncSession, run: AdsCollectionRun) -> None
     finally:
         await provider.close()
     fetched_at = report.fetched_at or datetime.now(timezone.utc)
-    traffic = await traffic_stats_for_channels(db, [channel.id]) if channel else {}
-    facts = build_campaign_facts(report.rows, campaign_start=None, traffic=traffic, now=fetched_at)
-    snapshot = AdsAnalysisSnapshot(channel_id=channel.id if channel else None, campaign_id=campaign.id, source="PERIODIC_COLLECTION", period_from=date_from, period_to=today, facts_json=json.dumps({"campaign": {"id": campaign.id, "name": campaign.name}, "facts": facts.context(report_date_from=date_from, report_date_to=today, report_fetched_at=fetched_at, snapshot_at=fetched_at), "collection_run_id": run.id}, ensure_ascii=False))
-    db.add(snapshot)
-    await db.flush()
-    await collect_yandex_v2(db, token=decrypt_token(encrypted), campaign=campaign, snapshot=snapshot, report_rows=report.rows, date_from=date_from, date_to=today, fetched_at=fetched_at, collection_run_id=run.id)
-    run.snapshot_id, run.status, run.completed_at = snapshot.id, "COMPLETED", datetime.now(timezone.utc)
+    await collect_yandex_v2(db, token=decrypt_token(encrypted), campaign=campaign, snapshot=None, report_rows=report.rows, date_from=date_from, date_to=today, fetched_at=fetched_at, collection_run_id=run.id, include_entity_metadata=False)
+    run.snapshot_id, run.status, run.completed_at = None, "COMPLETED", datetime.now(timezone.utc)
     run.freshness_caveat = "current calendar day may be incomplete or delayed"
     await _health(db, campaign, status="HEALTHY", reason="PERIODIC_COLLECTION_OK")
 
@@ -155,11 +155,8 @@ async def collect_campaign_slot(db: AsyncSession, run: AdsCollectionRun) -> None
 async def collect_granular_slot(db: AsyncSession, run: AdsCollectionRun) -> None:
     campaign, channel, encrypted, today = await _collection_context(db, run)
     date_from = today - timedelta(days=6)
-    snapshot = AdsAnalysisSnapshot(channel_id=channel.id if channel else None, campaign_id=campaign.id, source="PERIODIC_GRANULAR", period_from=date_from, period_to=today, facts_json=json.dumps({"campaign": {"id": campaign.id, "name": campaign.name}, "collection_run_id": run.id}, ensure_ascii=False))
-    db.add(snapshot)
-    await db.flush()
-    result = await collect_granular_yandex_v2(db, token=decrypt_token(encrypted), campaign=campaign, snapshot=snapshot, date_from=date_from, date_to=today, fetched_at=datetime.now(timezone.utc), collection_run_id=run.id, dimensions=("SEARCH_QUERY",) if run.collection_type == "SEARCH_QUERY" else None)
-    run.snapshot_id, run.completed_at = snapshot.id, datetime.now(timezone.utc)
+    result = await collect_granular_yandex_v2(db, token=decrypt_token(encrypted), campaign=campaign, snapshot=None, date_from=date_from, date_to=today, fetched_at=datetime.now(timezone.utc), collection_run_id=run.id, dimensions=("SEARCH_QUERY",) if run.collection_type == "SEARCH_QUERY" else None)
+    run.snapshot_id, run.completed_at = None, datetime.now(timezone.utc)
     run.status = "PARTIAL" if result["errors"] else "COMPLETED"
     run.freshness_caveat = "one or more granular subreports failed" if result["errors"] else "current calendar day may be incomplete or delayed"
     await _health(db, campaign, status="DEGRADED" if result["errors"] else "HEALTHY", reason="PERIODIC_GRANULAR_PARTIAL" if result["errors"] else "PERIODIC_GRANULAR_OK")
@@ -174,12 +171,13 @@ async def collect_entity_configuration(db: AsyncSession, run: AdsCollectionRun) 
         ads_report = await provider.ads([int(campaign.external_id)])
     finally:
         await provider.close()
-    campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state})
+    campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
     for raw in _entity_config_rows(ads_report):
         provider_entity_id = raw.get("Id")
         if provider_entity_id in (None, ""):
             raise ValueError("ENTITY_CONFIG_AD_ID_MISSING")
-        await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(provider_entity_id), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata=raw)
+        ad_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(provider_entity_id), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata={key: raw.get(key) for key in ads_report.requested_fields}, campaign_id=campaign.id)
+        await _upsert_creative(db, campaign=campaign, ad_entity=ad_entity, raw=raw, fetched_at=ads_report.fetched_at or datetime.now(timezone.utc))
     run.status, run.completed_at = "COMPLETED", datetime.now(timezone.utc)
     run.freshness_caveat = "metadata configuration refreshed"
 
@@ -197,8 +195,13 @@ async def collect_one_slot(db: AsyncSession, run: AdsCollectionRun) -> None:
 
 async def process_periodic_collection(session_factory) -> int:
     if not settings.ads_periodic_collection_enabled:
+        if settings.ads_retention_enabled:
+            async with session_factory() as db:
+                await run_retention(db)
         return 0
     async with session_factory() as db:
+        if settings.ads_retention_enabled:
+            await run_retention(db)
         created = await ensure_due_slots(db)
         due = await claim_due_slots(db)
         ids = [run.id for run in due]
