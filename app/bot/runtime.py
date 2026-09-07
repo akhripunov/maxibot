@@ -697,6 +697,37 @@ class MaxBotRuntime:
         except Exception:
             logger.exception("CUSTOM_BOT_TOKEN_SCREEN_RENDER_FAILED")
 
+    async def _owner_custom_bot_token_canary(self, update: MaxUpdate, user_id: str) -> None:
+        """Try the existing callback-message replacement for the configured owner only."""
+        if not await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):
+            return
+        callback_received_at = time.time()
+        text, keyboard, _, media = await self.repo.render(user_id, "custom_bot_token")
+        replacement = self._callback_replacement_body(text, keyboard, media)
+        logger.warning(
+            "CANARY_SCREEN_RENDER_ATTEMPT callback_received_epoch=%.3f answers_request_started_epoch=%.3f",
+            callback_received_at,
+            time.time(),
+        )
+        answers_started = time.monotonic()
+        try:
+            await self.client.answer_callback(update.callback_id, replacement)
+            latency_ms = (time.monotonic() - answers_started) * 1000
+            logger.warning(
+                "CANARY_SCREEN_RENDER_SUCCESS callback_message_latency_ms=%.0f",
+                latency_ms,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CANARY_SCREEN_RENDER_FAILURE error_type=%s",
+                type(exc).__name__,
+            )
+            try:
+                await self.client.answer_callback(update.callback_id)
+            except Exception:
+                logger.warning("CANARY_ACK_FALLBACK_FAILED")
+            await self._render(user_id, "custom_bot_token")
+
     async def _callback(self, update: MaxUpdate):
         user_id = self._event_user_id(update)
         if not user_id or str(user_id) == "0":
@@ -767,6 +798,9 @@ class MaxBotRuntime:
         # Non-navigation callbacks keep the immediate acknowledgement to
         # avoid retries while their action performs longer work.
         if update.callback_id and action == "custom_bot_token":
+            if await self.repo.is_platform_admin(str(user_id)):
+                await self._owner_custom_bot_token_canary(update, str(user_id))
+                return
             # MAX can take ~4s to PUT this exact screen.  Acknowledge the tap
             # immediately, then render the unchanged original token screen.
             if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):

@@ -1,3 +1,5 @@
+import asyncio
+
 from app.bot.runtime import MaxBotRuntime
 from app.integrations.max_client import MaxMessage, MaxUpdate, RealMaxClient
 import pytest
@@ -362,6 +364,142 @@ def test_callback_navigation_uses_clicked_message_replacement_body():
     assert body["text"] == "Мои каналы"
     buttons = body["attachments"][0]["payload"]["buttons"][0]
     assert [button["payload"] for button in buttons] == ["channel:one", "channel:two"]
+
+
+@pytest.mark.asyncio
+async def test_owner_custom_bot_callback_uses_full_original_message_replacement():
+    class Repo:
+        async def is_platform_admin(self, external_id):
+            return external_id == "owner-1"
+
+        async def set_custom_bot_state(self, user_id, state):
+            assert (user_id, state) == ("owner-1", "waiting_custom_bot_token")
+            return True
+
+        async def render(self, user_id, screen, channel_id=None):
+            assert (user_id, screen, channel_id) == ("owner-1", "custom_bot_token", None)
+            return "Original token screen", [[{"text": "Back", "callback_data": "my_bots"}]], "service-1", [
+                {"type": "link", "url": "https://business.max.ru/"}
+            ]
+
+    class Client:
+        def __init__(self):
+            self.answers = []
+
+        async def answer_callback(self, callback_id, message=None, notification=None):
+            self.answers.append((callback_id, message, notification))
+
+        async def edit_message(self, *args, **kwargs):
+            raise AssertionError("owner canary must not use PUT edit path")
+
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    runtime.client = Client()
+    runtime._recent_callback_ids = {}
+    update = MaxUpdate(
+        "message_callback", chat_id="owner-1", user_id="owner-1",
+        callback_id="cb-owner", button_payload="custom_bot_token",
+        message=MaxMessage("service-1", "owner-1", "Owner", "old"),
+    )
+
+    await runtime._callback(update)
+
+    assert len(runtime.client.answers) == 1
+    callback_id, message, notification = runtime.client.answers[0]
+    assert callback_id == "cb-owner"
+    assert notification is None
+    assert message == {
+        "text": "Original token screen",
+        "attachments": [
+            {"type": "link", "url": "https://business.max.ru/"},
+            {"type": "inline_keyboard", "payload": {"buttons": [[
+                {"type": "callback", "text": "Back", "payload": "my_bots"}
+            ]]}}
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_owner_custom_bot_callback_keeps_existing_ack_and_async_render_path():
+    class Repo:
+        async def is_platform_admin(self, external_id):
+            return False
+
+        async def set_custom_bot_state(self, user_id, state):
+            return True
+
+    class Client:
+        def __init__(self):
+            self.answers = []
+
+        async def answer_callback(self, callback_id, message=None, notification=None):
+            self.answers.append((callback_id, message, notification))
+
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    runtime.client = Client()
+    runtime._recent_callback_ids = {}
+    rendered = []
+
+    async def background(user_id):
+        rendered.append(user_id)
+
+    runtime._render_custom_bot_token_background = background
+    update = MaxUpdate(
+        "message_callback", chat_id="user-1", user_id="user-1",
+        callback_id="cb-user", button_payload="custom_bot_token",
+        message=MaxMessage("service-1", "user-1", "User", "old"),
+    )
+
+    await runtime._callback(update)
+    await asyncio.sleep(0)
+
+    assert runtime.client.answers == [("cb-user", None, "Открываю форму подключения…")]
+    assert rendered == ["user-1"]
+
+
+@pytest.mark.asyncio
+async def test_owner_canary_falls_back_to_existing_put_render_on_answers_failure():
+    class Repo:
+        async def is_platform_admin(self, external_id):
+            return True
+
+        async def set_custom_bot_state(self, user_id, state):
+            return True
+
+        async def render(self, user_id, screen, channel_id=None):
+            return "Original token screen", [], "service-1", []
+
+    class Client:
+        def __init__(self):
+            self.answers = []
+
+        async def answer_callback(self, callback_id, message=None, notification=None):
+            self.answers.append((callback_id, message, notification))
+            if message is not None:
+                raise RuntimeError("canary failure")
+
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    runtime.client = Client()
+    runtime._recent_callback_ids = {}
+    rendered = []
+
+    async def render(user_id, screen):
+        rendered.append((user_id, screen))
+
+    runtime._render = render
+    update = MaxUpdate(
+        "message_callback", chat_id="owner-1", user_id="owner-1",
+        callback_id="cb-owner", button_payload="custom_bot_token",
+        message=MaxMessage("service-1", "owner-1", "Owner", "old"),
+    )
+
+    await runtime._callback(update)
+
+    assert runtime.client.answers[0][1] is not None
+    assert runtime.client.answers[1] == ("cb-owner", None, None)
+    assert rendered == [("owner-1", "custom_bot_token")]
 
 
 def test_navigation_resolves_legacy_channel_references_with_owner_scope():
