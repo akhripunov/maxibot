@@ -119,8 +119,47 @@ def ads_only_shared_change(path: str) -> bool:
             "user_added", "max_subscriber", "bot_started", "Metrika",
             "paid_dedupe", "cross_object",
         )
-        ads_markers = ("AdsAccount", "AdsCampaign", "AdsEntity", "AdsCreative", "AdsObservation", "AdsCollectionRun", "AdsAnalysisSnapshot", "AdsAiOutcome", "AdsPromotionCampaignLink", "AdsAction", "AdsExperiment", "evaluation_status", "implementation_confirmed", "implementation_evidence_json", "baseline_metrics_json", "expected_direction", "actual_metrics_json", "reason_json", "problem_json", "root_cause_json", "expected_impact_json", "evaluation_window_days", "promotion_object_type", "promotion_object_id")
+        ads_markers = ("AdsAccount", "AdsCampaign", "AdsEntity", "AdsCreative", "AdsObservation", "AdsCollectionRun", "AdsAnalysisSnapshot", "AdsAiOutcome", "AdsPromotionCampaignLink", "AdsAction", "AdsExperiment", "snapshot_id", "SET NULL", "evaluation_status", "implementation_confirmed", "implementation_evidence_json", "baseline_metrics_json", "expected_direction", "actual_metrics_json", "reason_json", "problem_json", "root_cause_json", "expected_impact_json", "evaluation_window_days", "promotion_object_type", "promotion_object_id")
         return any(marker in text for marker in ads_markers) and not any(marker in text for marker in frozen_markers)
+    if path == "app/core/config.py":
+        text = changed_lines(path)
+        allowed_names = (
+            "ads_observations_retention_days",
+            "ads_operational_retention_days",
+            "ads_data_health_retention_days",
+            "ads_retention_enabled",
+            "ads_retention_batch_size",
+            "ads_retention_interval_minutes",
+            "ads_hourly_retention_days",
+            "ads_daily_retention_days",
+        )
+        allowed_lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == "@property":
+                allowed_lines.append(stripped)
+                continue
+            if stripped in {
+                '"""Backward-compatible name for the canonical observations policy."""',
+                '"""Daily aggregates are long-term; zero means no expiry."""',
+            }:
+                allowed_lines.append(stripped)
+                continue
+            if stripped in {
+                "return 0",
+                "return self.ads_observations_retention_days",
+                "def ads_hourly_retention_days(self) -> int:",
+                "def ads_daily_retention_days(self) -> int:",
+            }:
+                allowed_lines.append(stripped)
+                continue
+            if any(re.match(rf"{re.escape(name)}\b", stripped) for name in allowed_names):
+                allowed_lines.append(stripped)
+                continue
+            return False
+        return bool(allowed_lines) and any(name in text for name in allowed_names)
     if path.startswith("alembic/versions/"):
         text = changed_lines(path)
         frozen_markers = (
