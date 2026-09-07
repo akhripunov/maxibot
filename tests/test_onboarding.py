@@ -60,6 +60,8 @@ def test_continue_bot_connection_uses_atomic_navigation_replacement():
     callback = RUNTIME[callback_start:]
     assert 'asyncio.create_task(self._ack_callback_in_background(update.callback_id))' in callback
     assert 'if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")' in callback
+    assert 'new_message_id = await self.client.send_message(' in callback
+    assert 'asyncio.create_task(\n                        self._delete_service_message_in_background(old_message_id)' in callback
 
 
 def test_admin_command_uses_platform_owner_allowlist():
