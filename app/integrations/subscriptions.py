@@ -3,6 +3,8 @@ from __future__ import annotations
 import calendar
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+
 
 def add_subscription_months(
     current_expires_at: datetime | None,
@@ -62,4 +64,42 @@ def service_entitlement_active(
     return (
         subscription_status(paid_expires_at, now=current) == "активен"
         or free_trial_status(trial_end_at, now=current) == "активен"
+    )
+
+
+def channel_promotion_entitlement_source(
+    paid_expires_at: datetime | None,
+    trial_end_at: datetime | None,
+    trial_channel_id: str | None,
+    requested_channel_id: str | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Return PAID/TRIAL/NONE for one channel's promotion access."""
+    current = now or datetime.now(timezone.utc)
+    if subscription_status(paid_expires_at, now=current) == "активен":
+        return "PAID"
+    if (
+        trial_channel_id
+        and requested_channel_id
+        and str(trial_channel_id) == str(requested_channel_id)
+        and free_trial_status(trial_end_at, now=current) == "активен"
+    ):
+        return "TRIAL"
+    return "NONE"
+
+
+async def channel_promotion_entitlement(db, admin_external_id: str, channel_id: str) -> str:
+    """Canonical owner/channel gate for paid promotion functionality."""
+    from app.db.models import Admin, FreeTrial
+
+    admin = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)))
+    if not admin:
+        return "NONE"
+    trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id))
+    return channel_promotion_entitlement_source(
+        admin.subscription_expires_at,
+        trial.trial_end_at if trial else None,
+        trial.activated_channel_id if trial else None,
+        channel_id,
     )

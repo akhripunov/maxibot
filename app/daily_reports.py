@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from app.db.models import Admin, Channel, DailyChannelReport, TrafficEvent, TrafficMembership
 from app.db.models import TrafficVisit
 from app.traffic.attribution import EXACT
+from app.integrations.subscriptions import channel_promotion_entitlement
 
 
 logger = logging.getLogger(__name__)
@@ -143,7 +144,12 @@ async def send_due_daily_reports(client, session_factory, now: datetime | None =
     delivered = 0
     async with session_factory() as db:
         rows = (await db.execute(select(Channel, Admin).join(Admin).order_by(Channel.title))).all()
-    for channel, admin in rows:
+        eligible_rows = [
+            (channel, admin)
+            for channel, admin in rows
+            if await channel_promotion_entitlement(db, admin.external_id, channel.id) != "NONE"
+        ]
+    for channel, admin in eligible_rows:
         if not channel.daily_reports_enabled:
             continue
         # A channel connected today must first appear in tomorrow's report;

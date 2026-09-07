@@ -37,7 +37,7 @@ from app.ads.memory import set_status
 from app.db.models import AdsAiRun, AdsMemory, AdsRecommendation, AdsV2Outcome
 from app.ads.storage_health import diagnostics as storage_diagnostics, human_size, ui_time
 from app.integrations.robokassa import payment_url
-from app.integrations.subscriptions import subscription_status, free_trial_status
+from app.integrations.subscriptions import subscription_status, free_trial_status, channel_promotion_entitlement as resolve_channel_promotion_entitlement
 
 logger = logging.getLogger(__name__)
 
@@ -1063,6 +1063,14 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         title, detail = labels[screen.split(":", 1)[0]]
         return (f"{title}\n\n🤖 {bot.display_name or bot.username}\n\n{detail}",
                 buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
+    if screen.startswith((
+        "promotion_channel:", "promotion_landing:", "promotion_analytics:",
+        "promotion_yandex:", "promotion_settings:", "promotion_target_prompt:",
+        "ads:", "ads_",
+    )):
+        selected_id = screen.split(":", 1)[1] if ":" in screen else None
+        if selected_id and await resolve_channel_promotion_entitlement(db, admin.external_id, selected_id) == "NONE":
+            return await render_screen(db, admin, f"subscription:{selected_id}", selected_id)
     if screen.startswith("promotion_channel:"):
         screen_parts = screen.split(":")
         selected_id = screen_parts[1]
@@ -2310,6 +2318,10 @@ class MenuRepository:
         async with self.session_factory() as db:
             return bool(await db.scalar(select(Channel.id).join(Admin).where(Channel.id == channel_id, Admin.external_id == external_id)))
 
+    async def channel_promotion_entitlement(self, admin_external_id: str, channel_id: str) -> str:
+        async with self.session_factory() as db:
+            return await resolve_channel_promotion_entitlement(db, admin_external_id, channel_id)
+
     async def free_trial_state(self, admin_external_id: str) -> dict[str, object]:
         """Return service-level trial state and the one-channel quota marker."""
         async with self.session_factory() as db:
@@ -2573,6 +2585,8 @@ class MenuRepository:
         async with self.session_factory() as db:
             channel = await db.scalar(select(Channel).join(Admin).where(Channel.id == channel_id, Admin.external_id == external_id))
             if not channel:
+                return None
+            if await resolve_channel_promotion_entitlement(db, external_id, channel.id) == "NONE":
                 return None
             landing = await db.scalar(select(LandingPage).where(LandingPage.channel_id == channel.id, LandingPage.is_active.is_(True)))
             if landing:
@@ -3505,8 +3519,9 @@ class MenuRepository:
 
     async def set_daily_reports(self, channel_id: str, enabled: bool):
         async with self.session_factory() as db:
-            channel = await db.get(Channel, channel_id)
-            if channel:
+            row = await db.execute(select(Channel, Admin).join(Admin).where(Channel.id == channel_id))
+            channel, admin = row.first() or (None, None)
+            if channel and admin and await resolve_channel_promotion_entitlement(db, admin.external_id, channel.id) != "NONE":
                 channel.daily_reports_enabled = enabled
                 await db.commit()
 

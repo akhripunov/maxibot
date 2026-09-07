@@ -2,7 +2,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.bot.menu import FREE_TRIAL_INFO_TEXT, free_trial_active_text, free_trial_used_text
-from app.integrations.subscriptions import free_trial_status, service_entitlement_active
+from app.integrations.subscriptions import (
+    channel_promotion_entitlement_source,
+    free_trial_status,
+    service_entitlement_active,
+)
 
 
 def test_free_trial_copy_and_buttons_are_exactly_owner_facing():
@@ -38,6 +42,26 @@ def test_trial_scope_is_service_level_and_one_channel_is_only_a_quota_marker():
     assert 'UniqueConstraint("admin_id"' in models or 'unique=True' in models
     assert "uq_free_trials_admin_id" in migration
     assert "ondelete=\"SET NULL\"" in migration
+
+
+def test_channel_promotion_predicate_allows_only_trial_channel_and_preserves_paid_access():
+    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    end = now + timedelta(days=7)
+    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=now) == "TRIAL"
+    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-b", now=now) == "NONE"
+    assert channel_promotion_entitlement_source(end, end, "channel-a", "channel-b", now=now) == "PAID"
+    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=end) == "NONE"
+    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=now) == "TRIAL"
+
+
+def test_second_channel_is_visible_but_paid_only_paths_use_the_canonical_gate():
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    reports = (Path(__file__).parents[1] / "app" / "daily_reports.py").read_text()
+    main = (Path(__file__).parents[1] / "app" / "main.py").read_text()
+    assert 'rows = [[(channel.title, f"promotion_channel:{channel.id}")] for channel in channels]' in menu
+    assert 'resolve_channel_promotion_entitlement(db, admin.external_id, selected_id)' in menu
+    assert 'channel_promotion_entitlement(db, admin.external_id, channel.id)' in reports
+    assert 'channel_promotion_entitlement(db, owner.external_id, channel.id)' in main
 
 
 def test_paid_tariff_screen_keeps_trial_above_the_three_existing_plans():

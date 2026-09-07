@@ -40,7 +40,7 @@ from app.traffic.analytics import traffic_stats_for_channels
 from app.traffic.join_intent import activate_join_intent
 from app.security_tokens import decrypt_token
 from app.integrations.robokassa import valid_result_signature
-from app.integrations.subscriptions import add_subscription_months
+from app.integrations.subscriptions import add_subscription_months, channel_promotion_entitlement
 import html
 import secrets
 from app.ads.codex_worker import claim_next_codex_run, fail_claimed_run, lease_active, worker_enabled, COMPLETED, FAILED, PROCESSING
@@ -2121,6 +2121,9 @@ async def _landing_page(public_id: str, request: Request, db: AsyncSession):
     channel = await db.get(Channel, landing.channel_id)
     if not channel:
         raise HTTPException(404, "channel not found")
+    owner = await db.get(Admin, channel.admin_id)
+    if not owner or await channel_promotion_entitlement(db, owner.external_id, channel.id) == "NONE":
+        raise HTTPException(402, "promotion subscription required")
     params = request.query_params
     token = request.cookies.get("maxibot_traffic_visit")
     visit = await db.scalar(select(TrafficVisit).where(TrafficVisit.visit_token == token, TrafficVisit.landing_page_id == landing.id)) if token else None
@@ -2237,6 +2240,9 @@ async def _channel_preview(public_id: str, request: Request, db: AsyncSession):
     channel = await db.get(Channel, landing.channel_id)
     if not channel:
         raise HTTPException(404, "channel not found")
+    owner = await db.get(Admin, channel.admin_id)
+    if not owner or await channel_promotion_entitlement(db, owner.external_id, channel.id) == "NONE":
+        raise HTTPException(402, "promotion subscription required")
     token = request.cookies.get("maxibot_traffic_visit")
     visit = await db.scalar(select(TrafficVisit).where(
         TrafficVisit.visit_token == token,
@@ -2418,6 +2424,9 @@ async def _traffic_redirect(public_id: str, token: str, db: AsyncSession, *, via
         raise HTTPException(404, "landing visit not found")
     profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == landing.channel_id, TrafficProfile.enabled.is_(True)))
     channel = await db.get(Channel, landing.channel_id)
+    owner = await db.get(Admin, channel.admin_id) if channel else None
+    if not owner or await channel_promotion_entitlement(db, owner.external_id, channel.id) == "NONE":
+        raise HTTPException(402, "promotion subscription required")
     target = profile.target_url if profile else None
     if not target:
         raise HTTPException(503, "closed MAX channel target is not configured")

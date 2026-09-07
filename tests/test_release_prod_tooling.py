@@ -5,6 +5,7 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
+CURRENT_HEAD_MIGRATION = "0073_free_trial_v1"
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -15,7 +16,7 @@ def test_release_entrypoint_is_valid_shell():
 def test_dry_run_is_non_mutating_and_fail_closed():
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     env = os.environ.copy()
-    env["TARGET_MIGRATION"] = "0072_canonical_bot_promotion"
+    env["TARGET_MIGRATION"] = CURRENT_HEAD_MIGRATION
     result = subprocess.run(
         [str(SCRIPT), sha, "--dry-run"],
         cwd=ROOT,
@@ -113,16 +114,16 @@ def _run_release(target_migration=None):
     )
 
 
-def test_release_parser_handles_real_merge_tuple_and_0071_to_0072_path():
+def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     source = SCRIPT.read_text()
     assert "isinstance(value, (tuple, list))" in source
     assert 'down_revision = ("0059_ads_ai_worker_release", "0058_metrica_upload_tracking")' in (
         ROOT / "alembic/versions/0060_merge_ads_foundation_heads.py"
     ).read_text()
-    result = _run_release("0072_canonical_bot_promotion")
+    result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
-    assert "TARGET_MIGRATION=0072_canonical_bot_promotion" in result.stdout
-    assert "TARGET_DOWN_REVISION=0071_bot_paid_dedupe" in result.stdout
+    assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
+    assert "TARGET_DOWN_REVISION=0072_canonical_bot_promotion" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():
@@ -141,7 +142,7 @@ def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():
 
 
 def test_dry_run_does_not_run_database_mutation():
-    result = _run_release("0072_canonical_bot_promotion")
+    result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert "MIGRATION_ALLOWED=NO" in result.stdout
     assert "alembic upgrade" not in result.stdout
