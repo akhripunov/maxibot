@@ -1,7 +1,15 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.bot.menu import FREE_TRIAL_INFO_TEXT, free_trial_active_text, free_trial_used_text
+from app.bot.menu import (
+    FREE_TRIAL_INFO_TEXT,
+    expired_trial_status_text,
+    free_trial_active_text,
+    paid_subscription_status_text,
+    service_subscription_text,
+    trial_subscription_status_text,
+    free_trial_used_text,
+)
 from app.integrations.subscriptions import (
     channel_promotion_entitlement_source,
     free_trial_status,
@@ -70,7 +78,48 @@ def test_paid_tariff_screen_keeps_trial_above_the_three_existing_plans():
     end = source.index('if screen == "free_trial":', start)
     block = source[start:end]
     assert '"🎁 Попробовать бесплатно", "free_trial"' in block
-    assert 'buttons(("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons' in block
+    assert 'status_buttons = [("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons]' in block
+
+
+def test_subscription_status_copy_is_service_level_and_server_side():
+    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    expiry = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+    assert service_subscription_text() == (
+        "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nПодписка не активна.\n\nВыберите период подписки:"
+    )
+    assert trial_subscription_status_text(expiry, now=now) == (
+        "🎁 Пробный период активен\n\nАктивен до: 14.09.2026\nОсталось: 7 дней"
+    )
+    assert paid_subscription_status_text(expiry, now=now) == (
+        "✅ Подписка активна\n\nОплачено до: 14.09.2026\nОсталось: 7 дней"
+    )
+    assert expired_trial_status_text() == (
+        "⏳ Бесплатный период завершён\n\nВыберите тариф, чтобы продолжить пользоваться MAXIBOT."
+    )
+
+
+def test_subscription_status_handles_hours_without_timezone_ambiguity():
+    source = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    assert "math.ceil(seconds / 3600)" in source
+    assert "expiry.astimezone(MOSCOW)" in source
+
+
+def test_existing_channel_subscription_open_lazily_activates_trial_idempotently():
+    source = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    assert 'if screen == "subscription":' in source
+    assert "await self.ensure_existing_channel_free_trial(external_id)" in source
+    assert "with_for_update()" in source[source.index("async def ensure_existing_channel_free_trial"):source.index("async def begin_free_trial")]
+    assert "order_by(Channel.connected_at.asc(), Channel.id.asc())" in source
+
+
+def test_start_free_sets_only_pending_intent_then_uses_canonical_connect_screen():
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    start = source.index('elif action == "free_trial_start":')
+    end = source.index('elif action == "free_trial_connect":', start)
+    block = source[start:end]
+    assert 'await self.repo.begin_free_trial(str(user_id))' in block
+    assert 'await self._render(user_id, "connect_channel")' in block
+    assert "activate_free_trial" not in block
 
 
 def test_start_free_reuses_canonical_channel_connection_without_activating_trial():
@@ -78,6 +127,6 @@ def test_start_free_reuses_canonical_channel_connection_without_activating_trial
     start = source.index('elif action == "free_trial_start":')
     end = source.index('elif action == "free_trial_connect":', start)
     block = source[start:end]
+    assert 'await self.repo.begin_free_trial(str(user_id))' in block
     assert 'await self._render(user_id, "connect_channel")' in block
-    assert "begin_free_trial" not in block
     assert "activate_free_trial" not in block

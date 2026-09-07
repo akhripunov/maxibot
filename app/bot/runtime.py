@@ -889,6 +889,7 @@ class MaxBotRuntime:
         elif action == "free_trial":
             await self._render(user_id, "free_trial")
         elif action == "free_trial_start":
+            await self.repo.begin_free_trial(str(user_id))
             await self._render(user_id, "connect_channel")
         elif action == "free_trial_connect":
             await self.repo.begin_free_trial(str(user_id))

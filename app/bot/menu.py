@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -674,7 +675,42 @@ def subscription_text(channel_title: str) -> str:
 
 
 def service_subscription_text() -> str:
-    return "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nВыберите период подписки:"
+    return "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nПодписка не активна.\n\nВыберите период подписки:"
+
+
+def _remaining_access_text(expires_at: datetime, *, now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+    seconds = max(0, (expiry - current).total_seconds())
+    if seconds < 24 * 60 * 60:
+        return f"Осталось: {max(1, math.ceil(seconds / 3600))} часов"
+    return f"Осталось: {math.ceil(seconds / (24 * 60 * 60))} дней"
+
+
+def trial_subscription_status_text(trial_end_at: datetime, *, now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    expiry = trial_end_at if trial_end_at.tzinfo else trial_end_at.replace(tzinfo=timezone.utc)
+    return (
+        "🎁 Пробный период активен\n\n"
+        f"Активен до: {expiry.astimezone(MOSCOW):%d.%m.%Y}\n"
+        f"{_remaining_access_text(expiry, now=current)}"
+    )
+
+
+def paid_subscription_status_text(subscription_expires_at: datetime, *, now: datetime | None = None) -> str:
+    current = now or datetime.now(timezone.utc)
+    expiry = subscription_expires_at if subscription_expires_at.tzinfo else subscription_expires_at.replace(tzinfo=timezone.utc)
+    return (
+        "✅ Подписка активна\n\n"
+        f"Оплачено до: {expiry.astimezone(MOSCOW):%d.%m.%Y}\n"
+        f"{_remaining_access_text(expiry, now=current)}"
+    )
+
+
+def expired_trial_status_text() -> str:
+    return "⏳ Бесплатный период завершён\n\nВыберите тариф, чтобы продолжить пользоваться MAXIBOT."
 
 
 FREE_TRIAL_INFO_TEXT = (
@@ -971,7 +1007,21 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
     if screen == "subscription":
         plan_buttons = [(label, f"subscription_plan:service:{months}") for label, months in SUBSCRIPTION_PLANS]
-        return service_subscription_text(), buttons(("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons, ("⬅️ Главное меню", "home"))
+        trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id))
+        paid_active = subscription_status(admin.subscription_expires_at) == "активен"
+        if paid_active:
+            status_text = paid_subscription_status_text(admin.subscription_expires_at)
+            status_buttons = plan_buttons
+        elif trial and free_trial_status(trial.trial_end_at) == "активен":
+            status_text = trial_subscription_status_text(trial.trial_end_at)
+            status_buttons = plan_buttons
+        elif trial:
+            status_text = expired_trial_status_text()
+            status_buttons = plan_buttons
+        else:
+            status_text = service_subscription_text()
+            status_buttons = [("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons]
+        return status_text, buttons(*status_buttons, ("⬅️ Главное меню", "home"))
     if screen == "free_trial":
         return FREE_TRIAL_INFO_TEXT, buttons(("🚀 Начать бесплатно", "free_trial_start"), ("⬅️ Назад", "subscription"))
     if screen == "free_trial_start":
@@ -2336,6 +2386,43 @@ class MenuRepository:
                 "trial_end_at": trial.trial_end_at,
             }
 
+    async def ensure_existing_channel_free_trial(self, admin_external_id: str) -> dict[str, object]:
+        """Lazily consume the one trial for an already connected first channel."""
+        async with self.session_factory() as db:
+            admin = await db.scalar(
+                select(Admin).where(Admin.external_id == str(admin_external_id)).with_for_update()
+            )
+            if not admin or subscription_status(admin.subscription_expires_at) == "активен":
+                return {"status": "PAID" if admin and subscription_status(admin.subscription_expires_at) == "активен" else "UNAVAILABLE"}
+            trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id).with_for_update())
+            if trial:
+                status = free_trial_status(trial.trial_end_at)
+                return {
+                    "status": "ACTIVE" if status == "активен" else "EXPIRED",
+                    "activated_channel_id": trial.activated_channel_id,
+                    "trial_end_at": trial.trial_end_at,
+                }
+            channel = await db.scalar(
+                select(Channel)
+                .where(Channel.admin_id == admin.id)
+                .order_by(Channel.connected_at.asc(), Channel.id.asc())
+                .limit(1)
+            )
+            if not channel:
+                return {"status": "AVAILABLE"}
+            started = datetime.now(timezone.utc)
+            trial = FreeTrial(
+                admin_id=admin.id,
+                activated_channel_id=channel.id,
+                status="ACTIVE",
+                trial_start_at=started,
+                trial_end_at=started + timedelta(days=7),
+            )
+            db.add(trial)
+            admin.pending_free_trial = False
+            await db.commit()
+            return {"status": "ACTIVE", "activated_channel_id": channel.id, "trial_end_at": trial.trial_end_at}
+
     async def begin_free_trial(self, admin_external_id: str) -> dict[str, object]:
         """Remember explicit intent until a channel is successfully connected."""
         async with self.session_factory() as db:
@@ -3136,6 +3223,8 @@ class MenuRepository:
         if screen.startswith("promotion_landing:"):
             selected_id = screen.split(":", 1)[1]
             await self.create_landing(external_id, selected_id)
+        if screen == "subscription":
+            await self.ensure_existing_channel_free_trial(external_id)
         async with self.session_factory() as db:
             admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
             if not admin:
