@@ -55,6 +55,7 @@ class MaxBotRuntime:
         self._recent_traffic_routes: dict[str, tuple[float, dict]] = {}
         self._recent_traffic_replays: dict[str, float] = {}
         self._recent_callback_ids: dict[str, float] = {}
+        self._recent_token_prompts: dict[str, float] = {}
         self._message_locks: dict[str, asyncio.Lock] = {}
         self._custom_markers: dict[str, int | None] = {}
         self._custom_clients: dict[str, RealMaxClient] = {}
@@ -696,6 +697,21 @@ class MaxBotRuntime:
         except Exception:
             logger.exception("MAX_CALLBACK_ACK_FAILED callback_id_present=%s", bool(callback_id))
 
+    async def _send_token_prompt_in_background(self, user_id: str) -> None:
+        """Show a fast visible confirmation without the slow link keyboard."""
+        now = time.monotonic()
+        last = self._recent_token_prompts.get(str(user_id), 0.0)
+        if now - last < 5:
+            return
+        self._recent_token_prompts[str(user_id)] = now
+        try:
+            await self.client.send_message(
+                user_id,
+                "✅ Подключение продолжено.\n\nОтправьте токен бота следующим сообщением.",
+            )
+        except Exception:
+            logger.exception("BOT_TOKEN_PROMPT_SEND_FAILED")
+
     async def _callback(self, update: MaxUpdate):
         user_id = self._event_user_id(update)
         if not user_id or str(user_id) == "0":
@@ -988,7 +1004,8 @@ class MaxBotRuntime:
             # because it contains a business-link keyboard.  The current
             # screen already explains the next action, so arm token input
             # immediately and leave the visible panel untouched.
-            await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")
+            if await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token"):
+                asyncio.create_task(self._send_token_prompt_in_background(user_id))
         elif action == "custom_bot_help":
             # Keep token input state active while the owner reads the short help.
             await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")

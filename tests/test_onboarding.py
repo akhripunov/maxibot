@@ -61,6 +61,8 @@ def test_continue_bot_connection_uses_atomic_navigation_replacement():
     assert 'asyncio.create_task(self._ack_callback_in_background(' in callback
     assert 'Готово — отправьте токен следующим сообщением.' in callback
     assert 'await self.repo.set_custom_bot_state(user_id, "waiting_custom_bot_token")' in callback
+    assert 'asyncio.create_task(self._send_token_prompt_in_background(user_id))' in callback
+    assert 'Отправьте токен бота следующим сообщением.' in RUNTIME
     token_block = callback[callback.index('elif action == "custom_bot_token":'):callback.index('elif action == "custom_bot_help":')]
     assert 'await self._render(user_id, "custom_bot_token")' not in token_block
     assert 'await self.client.send_message(' not in token_block
