@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.ads.storage_health import diagnostics as ads_storage_diagnostics
+from app.infra.storage_health import diagnostics as system_storage_diagnostics
 from app.db.models import (
     Admin,
     AdsAiRun,
@@ -681,3 +682,9 @@ async def admin_ads_storage(
         "storage": storage,
         "read_only": True,
     }
+
+
+@router.get("/storage-health")
+async def admin_storage_health(_: str = Depends(require_web_admin)):
+    """Return bounded host storage aggregates collected by the maintenance job."""
+    return system_storage_diagnostics()

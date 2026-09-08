@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly MAXIBOT fail-closed Docker maintenance
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+Unit=maxibot-docker-safe-maintenance.service
+
+[Install]
+WantedBy=timers.target

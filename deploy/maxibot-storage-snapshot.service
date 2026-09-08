@@ -1,0 +1,9 @@
+[Unit]
+Description=MAXIBOT read-only host storage snapshot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/maxibot
+ExecStart=/usr/bin/env python3 /opt/maxibot/scripts/storage_snapshot.py --write

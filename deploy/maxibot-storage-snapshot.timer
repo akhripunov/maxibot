@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly MAXIBOT host storage snapshot
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=maxibot-storage-snapshot.service
+
+[Install]
+WantedBy=timers.target
