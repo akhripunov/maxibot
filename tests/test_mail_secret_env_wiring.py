@@ -6,7 +6,7 @@ ROOT = Path(__file__).parents[1]
 
 def test_api_and_worker_load_main_then_protected_mail_env():
     compose = (ROOT / "docker-compose.vps.yml").read_text()
-    expected = "      - .env\n      - /opt/maxibot/secrets/mail_cloud.env\n"
+    expected = "      - /opt/maxibot/.env\n      - /opt/maxibot/secrets/mail_cloud.env\n"
 
     def service_block(name, next_name):
         return compose.split(f"  {name}:\n", 1)[1].split(f"  {next_name}:\n", 1)[0]

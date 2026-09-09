@@ -5,7 +5,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.ads.facts import build_campaign_facts
 from app.ads.health import data_health, sufficiency
@@ -26,6 +26,8 @@ from app.traffic.analytics import traffic_stats_for_channels
 
 _CAMPAIGN_SCOPE_CACHE: dict[str, tuple[float, set[str]]] = {}
 MOSCOW = ZoneInfo("Europe/Moscow")
+_INACTIVE_CAMPAIGN_STATES = {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
+_PENDING_AI_STATES = {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
 
 
 def _campaign_metadata(raw: dict[str, Any]) -> dict[str, Any]:
@@ -104,7 +106,8 @@ async def campaigns_for_promotion_object(db: AsyncSession, *, object_type: str, 
             AdsPromotionCampaignLink.object_type == object_type,
             predicate,
             AdsPromotionCampaignLink.status == "ACTIVE",
-            AdsCampaign.state != "ARCHIVED",
+            or_(AdsCampaign.state.is_(None), AdsCampaign.state.not_in(_INACTIVE_CAMPAIGN_STATES)),
+            or_(AdsCampaign.status.is_(None), AdsCampaign.status.not_in(_INACTIVE_CAMPAIGN_STATES)),
         )
         .order_by(AdsCampaign.name)
     )).all())
@@ -112,6 +115,29 @@ async def campaigns_for_promotion_object(db: AsyncSession, *, object_type: str, 
 
 async def campaigns_for_bot(db: AsyncSession, bot_promotion_profile_id: str) -> list[AdsCampaign]:
     return await campaigns_for_promotion_object(db, object_type="BOT", object_id=bot_promotion_profile_id)
+
+
+async def _lock_object_and_pending_runs(
+    db: AsyncSession, *, object_type: str, object_id: str,
+) -> list[AdsAiRun]:
+    """Serialize refreshes per object and reuse an already running analysis."""
+    predicate = (AdsPromotionCampaignLink.channel_id == object_id) if object_type == "CHANNEL" else (
+        AdsPromotionCampaignLink.bot_promotion_profile_id == object_id
+    )
+    await db.scalars(
+        select(AdsPromotionCampaignLink.id).where(
+            AdsPromotionCampaignLink.object_type == object_type,
+            predicate,
+            AdsPromotionCampaignLink.status == "ACTIVE",
+        ).order_by(AdsPromotionCampaignLink.id).with_for_update()
+    )
+    scope = (AdsAiRun.channel_id == object_id,) if object_type == "CHANNEL" else (
+        AdsAiRun.promotion_object_type == "BOT", AdsAiRun.promotion_object_id == object_id,
+    )
+    return list((await db.scalars(
+        select(AdsAiRun).where(*scope, AdsAiRun.status.in_(_PENDING_AI_STATES))
+        .order_by(AdsAiRun.created_at.desc())
+    )).all())
 
 def _context(campaign: AdsCampaign | None, facts: dict[str, Any], suff: str, missing: list[str], memories: list[AdsMemory]) -> dict[str, Any]:
     return {"context_version": 2, "CURRENT_CAMPAIGN": {"id": campaign.id, "name": campaign.name, "state": campaign.state} if campaign else None, "OBJECTIVE": facts.get("OBJECTIVE_EVALUATION", {"objective_mode": "NONE"}), "FACTS": facts, "DATA_SUFFICIENCY": suff, "RECENT_HISTORY": [], "RETRIEVED_PRIVATE_MEMORIES": [{"id": x.id, "status": x.status, "statement": x.content, "evidence_ids": json.loads(x.evidence_ids_json)} for x in memories], "MISSING_DATA": missing, "ALLOWED_RECOMMENDATION_TYPES": ["HOLD", "MONITOR", "INVESTIGATE", "TEST", "SCALE_CANDIDATE", "REDUCE_CANDIDATE", "PLACEMENT_REVIEW", "ATTRIBUTION_REVIEW", "CREATIVE_REVIEW", "TARGETING_REVIEW", "OBSERVE", "REVIEW_GOAL", "REVIEW_ATTRIBUTION", "REVIEW_CREATIVE", "REVIEW_TARGETING", "REVIEW_PLACEMENTS", "INSUFFICIENT_DATA"], "SYSTEM_CONSTRAINTS": {"direct_writes": False, "autopilot": False, "global_learning": False, "execution_allowed": False}}
@@ -290,6 +316,10 @@ async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str
     if not can_access_ads(admin_external_id): raise PermissionError("ADS access denied")
     channel = await db.scalar(select(Channel).join(Admin).where(Channel.id == channel_id, Admin.external_id == str(admin_external_id)))
     if not channel: raise PermissionError("channel is not owned")
+    pending = await _lock_object_and_pending_runs(db, object_type="CHANNEL", object_id=channel.id)
+    if pending:
+        return {"campaign_count": len({item.campaign_id for item in pending}), "ai_status": pending[0].status,
+                "ai_run_ids": [item.id for item in pending], "reused": True}
     run = AdsCollectionRun(provider="INTERNAL", channel_id=channel.id, collection_type="MANUAL_AI_SYNC", run_type="MANUAL_AI_SYNC", trigger="MANUAL", scheduled_at=datetime.now(timezone.utc), slot_key=f"manual-ai-sync:{channel.id}:{datetime.now(timezone.utc).isoformat()}"); db.add(run); await db.flush()
     profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel.id)); traffic = await traffic_stats_for_channels(db, [channel.id])
     mapped = await _mapped(db, channel.id)
@@ -319,6 +349,10 @@ async def run_bot_check(db: AsyncSession, *, admin_external_id: str, bot_key: st
     profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == bot_key, BotPromotionProfile.bot_type == "SYSTEM"))
     if not profile:
         raise PermissionError("BOT promotion object is not configured")
+    pending = await _lock_object_and_pending_runs(db, object_type="BOT", object_id=profile.id)
+    if pending:
+        return {"campaign_count": len({item.campaign_id for item in pending}), "ai_status": pending[0].status,
+                "ai_run_ids": [item.id for item in pending], "reused": True}
     campaigns = await campaigns_for_bot(db, profile.id)
     run = AdsCollectionRun(provider="INTERNAL", collection_type="MANUAL_AI_SYNC", run_type="MANUAL_AI_SYNC", trigger="MANUAL", scheduled_at=datetime.now(timezone.utc), slot_key=f"manual-ai-sync:BOT:{profile.id}:{datetime.now(timezone.utc).isoformat()}")
     db.add(run); await db.flush()

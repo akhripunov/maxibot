@@ -33,6 +33,7 @@ from app.traffic.analytics import traffic_stats_for_channels
 from app.traffic.bot_start_observability import dropoff_classification, start_wait_timeout_reached
 from app.traffic.bot_conversion_dedupe import paid_bot_conversion_key
 from app.ads.service import can_access_ads, campaigns_for_channel, latest_view, campaigns_for_promotion_object
+from app.ads.dashboard import build_ads_dashboard
 from app.ads.objectives import active_links, objective_for_link
 from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
@@ -598,6 +599,190 @@ def _owner_short_text(value: object, fallback: str = "—", limit: int = 180) ->
 
 def _owner_confidence(value: object) -> str:
     return {"LOW": "низкая", "MEDIUM": "средняя", "HIGH": "высокая", "INSUFFICIENT": "недостаточно данных"}.get(str(value or ""), "не определена")
+
+
+def _safe_json_object(value: str | None) -> dict:
+    try:
+        parsed = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
+    """Render the same object-level control screen for CHANNEL and BOT."""
+    object_type = state["object"]["type"]
+    objective_name = "Подписчик (userDidSubscribe)" if object_type == "CHANNEL" else "Запуск бота (bot_started)"
+    outcome_label = "Подтверждённых подписчиков" if object_type == "CHANNEL" else "Подтверждённых запусков"
+    currency = state.get("currency") or "RUB"
+    currency_label = "₽" if currency == "RUB" else currency
+    target = state.get("target_cpa")
+    actual = state.get("actual_business_cpa")
+    target_text = f"{target:.0f} {currency_label}" if target is not None else "не задан"
+    actual_text = f"{actual:.0f} {currency_label}" if actual is not None else "пока не рассчитан"
+    stages = ("Анализ", "Рекомендация", "Проверка", "Результат", "Масштабирование")
+    active_index = {"ANALYSIS": 0, "RECOMMENDATION": 1, "CHECK": 2, "RESULT": 3, "SCALE": 4}.get(
+        state.get("current_stage"), 0
+    )
+    stage_lines = "\n".join(
+        f"{'●' if index == active_index else '✓' if index < active_index else '○'} {label}"
+        for index, label in enumerate(stages)
+    )
+    creative = state.get("creative_summary") or {}
+    if not creative.get("active"):
+        creative_text = "нет активных"
+    elif creative.get("attention"):
+        creative_text = f"{creative['active']} активных · {creative['attention']} требует внимания"
+    else:
+        creative_text = f"{creative['active']} активных · всё нормально"
+    root = state.get("primary_root_cause")
+    if not root:
+        root = "Пока недостаточно данных."
+    if state.get("root_cause_status") == "NOT_PROVEN" and state.get("current_recommendation"):
+        root = "Рекламная причина пока не доказана."
+    outcome = state.get("current_outcome")
+    result_line = ""
+    if state.get("current_stage") == "RESULT" and outcome:
+        result_line = "\n\n✅ Изменение помогло" if outcome.evaluation_status == "SUCCESS" else "\n\n❌ Изменение не помогло"
+    elif state.get("current_stage") == "SCALE":
+        result_line = "\n\n🚀 Подход подтверждён."
+    refresh_line = "\nОбновляем..." if state.get("analysis_running") else ""
+    updated = state.get("last_updated_at")
+    updated_text = updated.astimezone(MOSCOW).strftime("%d.%m %H:%M") if updated else "ещё не выполнялось"
+    confirmed = state.get("confirmed_business_outcomes")
+    return (
+        f"🤖 AI Продвижение\n\n{'Канал' if object_type == 'CHANNEL' else 'Бот'}: {title}\n"
+        f"Цель: {objective_name}\n🎯 Target CPA: {target_text}\n"
+        f"Фактический CPA: {actual_text}\n{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}\n\n"
+        f"🎨 Креативы: {creative_text}\n\nСейчас:\n{stage_lines}{refresh_line}\n\n"
+        f"Главная проблема:\n{_owner_short_text(root, 'Пока недостаточно данных.')}\n\n"
+        f"Почему:\n{_owner_short_text(state.get('why_summary'), 'MaxiBot ещё не может доказанно определить главную причину.')}\n\n"
+        f"➡️ Что делать:\n{_owner_short_text(state.get('next_best_action'), 'Продолжать сбор данных.')}"
+        f"{result_line}\n\nData Trust: {state.get('data_trust', 'UNKNOWN')}\nОбновлено: {updated_text}"
+    )
+
+
+def ads_unified_buttons(
+    action_prefix: str, object_id: str, back_action: str, *, objective_id: str | None = None,
+) -> list[list[dict]]:
+    """Canonical navigation; the refresh action reuses the bounded pipeline."""
+    if action_prefix == "ads_bot":
+        routes = {
+            "refresh": "ads_bot_check:system",
+            "goal": f"ads_objective:BOT:{objective_id or object_id}",
+            "campaigns": "ads_bot_campaigns:system",
+            "creatives": "ads_bot_creatives:system",
+            "why": "ads_bot_context:system",
+            "learning": "ads_bot_learning:system",
+            "history": "ads_bot_history:system",
+        }
+    else:
+        routes = {
+            "refresh": f"ads_check:{object_id}",
+            "goal": f"ads_objective:CHANNEL:{object_id}",
+            "campaigns": f"ads_campaigns:{object_id}",
+            "creatives": f"ads_creatives:{object_id}",
+            "why": f"ads_context:{object_id}",
+            "learning": f"ads_learning:{object_id}",
+            "history": f"ads_history:{object_id}",
+        }
+    return buttons(
+        ("↻ Обновить сейчас", routes["refresh"]), ("🎯 Цель", routes["goal"]),
+        ("📊 Кампании", routes["campaigns"]), ("🎨 Креативы", routes["creatives"]),
+        ("🔍 Почему", routes["why"]), ("🧠 Обучение", routes["learning"]),
+        ("🕘 История", routes["history"]), ("⬅️ Назад", back_action),
+    )
+
+
+def format_ads_campaigns_screen(state: dict, *, title: str) -> str:
+    lines = ["📊 Кампании", "", title, ""]
+    for item in state.get("active_campaigns") or []:
+        status = "🟢 Активна" if item.get("active") else "⚪ Неактивна"
+        spend = item.get("spend")
+        clicks = item.get("clicks")
+        lines.extend([
+            f"{item.get('external_id') or item.get('id')} — {status}",
+            f"Провайдер: {item.get('provider', 'UNKNOWN')}",
+            f"Расход: {_ru_number(spend) + ' ₽' if spend is not None else 'пока нет данных'}",
+            f"Клики: {_ru_number(clicks, 0) if clicks is not None else 'пока нет данных'}",
+            f"Состояние: {item.get('state') or 'UNKNOWN'}",
+        ])
+        recommendation = item.get("recommendation")
+        if recommendation:
+            lines.append(f"Рекомендация: {_owner_short_text(recommendation.title)}")
+        lines.append("")
+    if len(lines) == 4:
+        lines.append("Связанных кампаний пока нет.")
+    lines.append("🔒 Только просмотр. Управление Яндекс.Директом отключено.")
+    return "\n".join(lines).rstrip()
+
+
+def format_ads_creatives_screen(state: dict, *, title: str) -> str:
+    lines = ["🎨 Креативы", "", title, ""]
+    for item in state.get("creatives") or []:
+        features = _safe_json_object(item.ai_features_json)
+        attention = bool(features.get("requires_attention") and
+                         (features.get("evidence_ids") or features.get("reason") or features.get("evidence")))
+        label = item.title or item.external_creative_id or item.id
+        lines.append(f"• {label} — {'⚠️ Требует внимания' if attention else '✅ Норма'}")
+        if attention:
+            lines.append(f"  {_owner_short_text(features.get('reason'), 'Есть evidence-backed сигнал.')}")
+    if len(lines) == 4:
+        lines.append("Активных креативов пока нет в сохранённых данных.")
+    lines.extend(["", "Business CPA по креативу показывается только при доказанной атрибуции."])
+    return "\n".join(lines)
+
+
+def format_ads_why_screen(state: dict, *, title: str) -> str:
+    root = state.get("primary_root_cause") or "Рекламная причина пока не доказана."
+    recommendation = state.get("current_recommendation")
+    evidence = []
+    if recommendation:
+        try:
+            parsed = json.loads(recommendation.evidence_ids_json or "[]")
+            evidence = parsed if isinstance(parsed, list) else []
+        except (TypeError, ValueError):
+            evidence = []
+    return (
+        f"🔍 Почему\n\n{title}\n\nГлавная проблема:\n{root}\n\n"
+        f"Почему:\n{_owner_short_text(state.get('why_summary'), 'Доказанных сигналов пока нет.')}\n\n"
+        f"Data Trust: {state.get('data_trust', 'UNKNOWN')}\n"
+        f"Уверенность: {_owner_confidence(recommendation.confidence if recommendation else None)}\n"
+        f"Evidence: {', '.join(str(item) for item in evidence[:8]) if evidence else 'недостаточно'}\n\n"
+        "Provider metrics и подтверждённый бизнес-результат не смешиваются."
+    )
+
+
+def format_ads_learning_screen(state: dict, *, title: str) -> str:
+    groups = {"EXPLORE": "🧪 Исследуем", "PROMISING": "📈 Перспективно", "PROVEN": "🚀 Доказано", "REJECTED": "⛔ Отклонено"}
+    lines = ["🧠 Обучение", "", title, "", f"Состояние: {groups.get(state['learning_state']['status'], state['learning_state']['status'])}"]
+    counts = state.get("memory_evidence_counts") or {}
+    for memory in state.get("memories") or []:
+        group = "PROVEN" if memory.status == "TRUSTED" else "PROMISING"
+        lines.extend(["", f"{groups[group]} · {_owner_short_text(memory.content)}",
+                      f"Уверенность: {_owner_confidence(memory.confidence)} · evidence: {counts.get(memory.id, 0)}",
+                      f"Проверено: {memory.updated_at.astimezone(MOSCOW):%d.%m.%Y}"])
+    if not state.get("memories"):
+        lines.extend(["", "Проверенного обучения пока нет."])
+    lines.extend(["", "Рекомендации и INCONCLUSIVE не считаются проверенным обучением."])
+    return "\n".join(lines)
+
+
+def format_ads_history_screen(state: dict, *, title: str) -> str:
+    lines = ["🕘 История", "", title]
+    for item in state.get("history") or []:
+        created = item.get("created_at")
+        status = item.get("evaluation_status") or "PENDING"
+        implementation = "IMPLEMENTED" if item.get("implementation_status") == "YES" else "НЕ ПОДТВЕРЖДЕНО"
+        lines.extend(["", created.astimezone(MOSCOW).strftime("%d.%m") if created else "—",
+                      _owner_short_text(item.get("title")), implementation, status])
+        delta = item.get("delta") or {}
+        cpa = delta.get("actual_cpa_7d") or {}
+        if cpa.get("before") is not None and cpa.get("after") is not None:
+            lines.append(f"CPA: {_ru_number(cpa['before'])} ₽ → {_ru_number(cpa['after'])} ₽")
+    if not state.get("history"):
+        lines.extend(["", "История появится после первой рекомендации."])
+    return "\n".join(lines)
 
 
 def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: str, summary: str, recommendation: str, confidence: str, health_status: str | None = None, decision_pack: dict | None = None, objective: dict | None = None) -> str:
@@ -1374,6 +1559,25 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         _, object_type, object_id = screen.split(":", 2)
         back = f"ads_objective:{object_type}:{object_id}"
         return ("🎯 Введите целевую стоимость в рублях одним сообщением.\n\nНапример: 20", buttons(("⬅️ Назад", back)))
+    if screen.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:")):
+        if not screen.endswith(":system") or not is_maxibot_owner(admin) or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        profile = await db.scalar(select(BotPromotionProfile).where(
+            BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"
+        ))
+        if not profile:
+            return await render_screen(db, admin, "promotion")
+        state = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
+        title = f"🤖 {profile.display_name or profile.bot_key}"
+        prefix = screen.split(":", 1)[0]
+        formatter = {
+            "ads_bot_campaigns": format_ads_campaigns_screen,
+            "ads_bot_creatives": format_ads_creatives_screen,
+            "ads_bot_context": format_ads_why_screen,
+            "ads_bot_learning": format_ads_learning_screen,
+            "ads_bot_history": format_ads_history_screen,
+        }[prefix]
+        return formatter(state, title=title), buttons(("⬅️ AI Продвижение", "ads_bot:system"))
     if screen.startswith("ads_bot:"):
         from app.ads.service import latest_bot_view
         bot_key = screen.split(":", 1)[1]
@@ -1382,6 +1586,11 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"))
         if not profile:
             return await render_screen(db, admin, "promotion")
+        dashboard = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
+        return (
+            format_ads_unified_dashboard(dashboard, title=profile.display_name or profile.bot_key),
+            ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id),
+        )
         view = await latest_bot_view(db, profile.id)
         health = view["health"]; ai = view["ai"]; rec = view["recommendation"]
         facts = view["facts"] or {}; campaign = facts.get("campaign") or {}; decision_pack = facts.get("DIRECTOLOGIST") or {}
@@ -1409,6 +1618,11 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
         if not channel or not can_access_ads(admin.external_id):
             return await render_screen(db, admin, "promotion")
+        dashboard = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
+        return (
+            format_ads_unified_dashboard(dashboard, title=channel.title),
+            ads_unified_buttons("ads", channel.id, f"promotion_channel:{channel.id}"),
+        )
         view = await latest_view(db, channel.id)
         health = view["health"]; ai = view["ai"]; rec = view["recommendation"]
         # Dashboard readiness must reflect the existing secure OAuth
@@ -1461,6 +1675,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
         if not channel or not can_access_ads(admin.external_id):
             return await render_screen(db, admin, "promotion")
+        state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
+        return format_ads_campaigns_screen(state, title="Канал: " + channel.title), buttons(("⬅️ AI Продвижение", f"ads:{channel.id}"))
         campaigns = await campaigns_for_channel(db, channel.id)
         view = await latest_view(db, channel.id)
         fact_values = (view["facts"] or {}).get("facts") or {}
@@ -1478,6 +1694,22 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             rows.append(("Следующие ➡️", f"ads_campaigns:{channel.id}:{offset + page_size}"))
         rows.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
         return (f"🎯 Кампания\n\n📢 {channel.title}\n\n{metrics_text}\n\nВыберите кампанию: {offset + 1}–{min(offset + page_size, len(campaigns))} из {len(campaigns)}.\n\n🔒 Только просмотр: данные рекламы не изменяются.", buttons(*rows))
+    if screen.startswith(("ads_creatives:", "ads_learning:")):
+        selected_id = screen.split(":", 1)[1]
+        channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
+        if not channel or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
+        formatter = format_ads_creatives_screen if screen.startswith("ads_creatives:") else format_ads_learning_screen
+        return formatter(state, title="Канал: " + channel.title), buttons(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+    if screen.startswith(("ads_context:", "ads_history:")):
+        selected_id = screen.split(":", 1)[1]
+        channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
+        if not channel or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
+        formatter = format_ads_why_screen if screen.startswith("ads_context:") else format_ads_history_screen
+        return formatter(state, title="Канал: " + channel.title), buttons(("⬅️ AI Продвижение", f"ads:{channel.id}"))
     if screen.startswith("ads_context:") or screen.startswith("ads_history:") or screen.startswith("ads_recommendations:") or (screen.startswith("ads_memory:") and not screen.startswith("ads_memory_detail:")) or screen.startswith("ads_health:"):
         selected_id = screen.split(":", 1)[1]
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))

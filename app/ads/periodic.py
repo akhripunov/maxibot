@@ -11,7 +11,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import exists, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2, enrich_periodic_ad_media
@@ -222,7 +222,106 @@ async def process_periodic_collection(session_factory) -> int:
                 run.error_code = type(exc).__name__
                 run.next_retry_at = datetime.now(timezone.utc) + timedelta(minutes=min(60, 5 * run.attempts)) if run.status == "RETRYABLE_FAILED" else None
                 await db.commit()
+    await trigger_continuous_analysis(session_factory)
     return processed
+
+
+def analysis_due(
+    *, last_analysis_at: datetime | None, latest_data_at: datetime | None,
+    latest_outcome_at: datetime | None, objective_updated_at: datetime | None,
+    now: datetime, cadence_minutes: int,
+) -> bool:
+    """Bound automatic analysis to the initial cycle or a meaningful change."""
+    if last_analysis_at is None:
+        return True
+    if latest_outcome_at and latest_outcome_at > last_analysis_at:
+        return True
+    if objective_updated_at and objective_updated_at > last_analysis_at:
+        return True
+    cadence_elapsed = (now - last_analysis_at).total_seconds() >= max(1, cadence_minutes) * 60
+    return bool(cadence_elapsed and (latest_data_at is None or latest_data_at > last_analysis_at))
+
+
+def _object_link_predicate(object_type: str, object_id: str):
+    return (AdsPromotionCampaignLink.channel_id == object_id) if object_type == "CHANNEL" else (
+        AdsPromotionCampaignLink.bot_promotion_profile_id == object_id
+    )
+
+
+async def trigger_continuous_analysis(session_factory, *, now: datetime | None = None) -> int:
+    """Use the existing analysis service once for every due promotion object."""
+    if not settings.ads_periodic_collection_enabled or not settings.ads_background_analysis_enabled:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    from app.ads.service import run_bot_check, run_check
+    from app.db.models import AdsAiOutcome, AdsAiRun, AdsRecommendation
+
+    async with session_factory() as db:
+        links = list((await db.scalars(select(AdsPromotionCampaignLink).where(
+            AdsPromotionCampaignLink.status == "ACTIVE"
+        ))).all())
+        objects = sorted({
+            (link.object_type, link.channel_id or link.bot_promotion_profile_id)
+            for link in links if link.object_type in {"CHANNEL", "BOT"}
+            and (link.channel_id or link.bot_promotion_profile_id)
+        })
+
+    triggered = 0
+    for object_type, object_id in objects:
+        async with session_factory() as db:
+            predicate = _object_link_predicate(object_type, object_id)
+            ai_scope = (AdsAiRun.channel_id == object_id,) if object_type == "CHANNEL" else (
+                AdsAiRun.promotion_object_type == "BOT", AdsAiRun.promotion_object_id == object_id,
+            )
+            latest = await db.scalar(select(AdsAiRun).where(*ai_scope)
+                                     .order_by(AdsAiRun.created_at.desc()).limit(1))
+            pending = await db.scalar(select(AdsAiRun.id).where(
+                *ai_scope, AdsAiRun.status.in_(("WAITING_FOR_CODEX", "CODEX_PROCESSING"))
+            ).limit(1))
+            if pending:
+                continue
+            latest_data = await db.scalar(select(func.max(AdsCollectionRun.completed_at)).join(
+                AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCollectionRun.campaign_id
+            ).where(
+                AdsPromotionCampaignLink.object_type == object_type, predicate,
+                AdsPromotionCampaignLink.status == "ACTIVE", AdsCollectionRun.status == "COMPLETED",
+            ))
+            latest_outcome = await db.scalar(select(func.max(AdsAiOutcome.completed_at))
+                .join(AdsRecommendation, AdsRecommendation.id == AdsAiOutcome.recommendation_id)
+                .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
+                .where(*ai_scope, AdsAiOutcome.evaluation_status.in_(("SUCCESS", "FAIL"))))
+            objective_updated_at = await db.scalar(select(func.max(AdsPromotionCampaignLink.objective_updated_at)).where(
+                AdsPromotionCampaignLink.object_type == object_type, predicate,
+                AdsPromotionCampaignLink.status == "ACTIVE",
+            ))
+            if not analysis_due(
+                last_analysis_at=latest.created_at if latest else None,
+                latest_data_at=latest_data,
+                latest_outcome_at=latest_outcome,
+                objective_updated_at=objective_updated_at,
+                now=now,
+                cadence_minutes=settings.ads_analysis_cadence_minutes,
+            ):
+                continue
+            try:
+                if object_type == "CHANNEL":
+                    external_id = await db.scalar(select(Admin.external_id).join(
+                        Channel, Channel.admin_id == Admin.id
+                    ).where(Channel.id == object_id))
+                    if not external_id:
+                        continue
+                    result = await run_check(db, admin_external_id=str(external_id), channel_id=object_id)
+                else:
+                    profile = await db.get(BotPromotionProfile, object_id)
+                    owner_id = (settings.maxibot_owner_user_id or "").strip()
+                    if not profile or not owner_id:
+                        continue
+                    result = await run_bot_check(db, admin_external_id=owner_id, bot_key=profile.bot_key)
+                if not result.get("reused"):
+                    triggered += 1
+            except Exception:
+                logger.exception("ADS_CONTINUOUS_ANALYSIS_FAILED object_type=%s object_id=%s", object_type, object_id)
+    return triggered
 
 
 async def collection_health(db: AsyncSession, *, now: datetime | None = None) -> dict[str, object]:

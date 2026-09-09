@@ -278,3 +278,47 @@ runtime, or deployment blocker requires escalation. QA uses the risk-based
 policy; QA artifact ingest is non-blocking for otherwise-green product QA,
 while product and frozen-path failures remain fail-closed. Advertising
 campaign control is `OWNER_ONLY`.
+
+## OWNER intent и защита от формальных блокировок
+
+- Явное поручение OWNER реализовать изменение считается разрешением на
+  минимально необходимые изменения файлов, которых это поручение неизбежно
+  касается, включая frozen path. От OWNER не требуется повторять специальную
+  формулу `OWNER_APPROVAL_FOR_FROZEN_CHANGE = YES`.
+- Такое разрешение не включает deploy, изменение рекламных кампаний или
+  расширение scope. Frozen regression и остальные release gates сохраняются.
+- После изменения `HEAD`, ветки, worktree или восстановления canonical
+  baseline все прежние repository/environment blockers считаются устаревшими
+  до повторной проверки. Нельзя повторять старый blocker без свежего
+  воспроизведения на текущем состоянии.
+- Новый прямой запрос OWNER заменяет старый незавершённый goal, если запросы
+  относятся к разным задачам. Старый goal не должен запускать повторные
+  остановки или автоматические продолжения.
+- Writable OWNER worktree разрешено использовать для утверждённой реализации.
+  Невозможность создать дополнительный isolated worktree не является
+  blocker, если текущий worktree writable и можно сохранить чужие изменения.
+- При обнаружении нескольких Git-состояний сначала фиксируется один current
+  source of truth. Старые ветки можно использовать только как read-only
+  reference; найденный код переносится выборочно и проверяется на current
+  source of truth.
+- Архитектор завершает всю уже разрешённую обратимую работу до запроса нового
+  решения OWNER. Routine preflight, тесты, исправление ошибок реализации и
+  подготовка candidate не требуют отдельного подтверждения.
+
+## AI Promotion continuous control screen
+
+- `AI Продвижение` — единый object-level экран для CHANNEL или BOT поверх
+  canonical ADS Data Layer и Closed-Loop state.
+- Все ACTIVE `ads_promotion_campaign_links` объекта анализируются
+  автоматически; OWNER не запускает проверку отдельно для каждой кампании.
+- Suspended/disabled campaigns сохраняются в истории, но не участвуют в
+  current recommendation. Campaign isolation обязательна.
+- Главный экран показывает одну доказанную primary root cause и одно next best
+  action. При недостаточных данных причина не придумывается.
+- Stage `Анализ → Рекомендация → Проверка → Результат → Масштабирование`
+  вычисляется из canonical Closed-Loop state, а не хранится как отдельный UI
+  статус.
+- Provider proxy не является подтверждённым business outcome. CHANNEL использует
+  `max_subscriber`, BOT использует `bot_started`; `UNKNOWN != ZERO`.
+- Continuous analysis использует существующий collector/poller/worker,
+  configurable cadence и dedupe текущих AI runs. Direct остаётся read-only.

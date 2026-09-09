@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     ads_collection_entity_sync_interval_minutes: int = Field(default=1440, validation_alias="ADS_COLLECTION_ENTITY_SYNC_INTERVAL_MINUTES")
     ads_collection_max_slots_per_cycle: int = Field(default=2, validation_alias="ADS_COLLECTION_MAX_SLOTS_PER_CYCLE")
     ads_collection_outcome_tolerance_minutes: int = Field(default=120, validation_alias="ADS_COLLECTION_OUTCOME_TOLERANCE_MINUTES")
+    ads_analysis_cadence_minutes: int = Field(default=360, ge=1, validation_alias="ADS_ANALYSIS_CADENCE_MINUTES")
     ads_periodic_collection_canary_campaigns: str = Field(default="", validation_alias="ADS_PERIODIC_COLLECTION_CANARY_CAMPAIGNS")
     ads_observations_retention_days: int = Field(default=60, validation_alias="ADS_OBSERVATIONS_RETENTION_DAYS")
     ads_operational_retention_days: int = Field(default=90, validation_alias="ADS_OPERATIONAL_RETENTION_DAYS")

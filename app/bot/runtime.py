@@ -812,7 +812,8 @@ class MaxBotRuntime:
                 asyncio.create_task(self._render_custom_bot_token_background(user_id))
             return
         if update.callback_id:
-            await self.client.answer_callback(update.callback_id)
+            notification = "Обновляем…" if action.startswith(("ads_check:", "ads_bot_check:")) else None
+            await self.client.answer_callback(update.callback_id, notification=notification)
         # Old MAX message copies can contain channel/landing IDs that were
         # replaced during earlier menu repairs. Recover to the current list
         # instead of rendering a dead "Канал не найден" screen.
@@ -1012,9 +1013,9 @@ class MaxBotRuntime:
                     await db.commit()
                 await self._render(user_id, f"ads_objective:{object_type}:{object_id}")
                 return
-        elif action.startswith(("ads_bot_campaigns:", "ads_bot_recommendations:", "ads_bot_context:", "ads_bot_history:")):
+        elif action.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_recommendations:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:")):
             if can_access_ads(str(user_id)) and action.endswith(":system"):
-                await self._render(user_id, "ads_bot:system")
+                await self._render(user_id, action)
                 return
         elif action.startswith("ads_status:"):
             selected_id = action.split(":", 1)[1]
@@ -1027,7 +1028,7 @@ class MaxBotRuntime:
             # "function unavailable" screen.
             logger.info("MAX stale campaign callback ignored")
             return
-        elif action.startswith("ads_campaigns:") or action.startswith(("ads_recommendations:", "ads_memory:", "ads_context:", "ads_history:", "ads_health:")):
+        elif action.startswith("ads_campaigns:") or action.startswith(("ads_creatives:", "ads_recommendations:", "ads_memory:", "ads_context:", "ads_learning:", "ads_history:", "ads_health:")):
             selected_id = action.split(":", 1)[1].split(":", 1)[0]
             ads_allowed = can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, selected_id)
             logger.warning(

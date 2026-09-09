@@ -27,17 +27,12 @@ def test_bot_ai_snapshot_and_memory_are_bounded_and_separate():
     assert "if not proven_outcome" in memory
 
 
-def test_system_bot_ai_promotion_has_no_dead_primary_buttons():
+def test_system_bot_ai_promotion_uses_unified_primary_controls_and_keeps_refresh_route():
     menu = (ROOT / "app/bot/menu.py").read_text()
     runtime = (ROOT / "app/bot/runtime.py").read_text()
-    for action in (
-        '"🔄 Проверить рекламу", "ads_bot_check:system"',
-        '"🎯 Кампания", "ads_bot_campaigns:system"',
-        '"💡 Рекомендации", "ads_bot_recommendations:system"',
-        '"🔎 Почему AI так решил", "ads_bot_context:system"',
-        '"🕘 История рекомендаций", "ads_bot_history:system"',
-    ):
-        assert action in menu
+    assert 'ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id)' in menu
+    for label in ("↻ Обновить сейчас", "📊 Кампании", "🎨 Креативы", "🔍 Почему", "🧠 Обучение", "🕘 История"):
+        assert label in menu
     assert 'action.startswith("ads_bot_check:")' in runtime
     assert 'action.startswith(("ads_bot_campaigns:"' in runtime
 

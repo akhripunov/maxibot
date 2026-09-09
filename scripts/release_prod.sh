@@ -52,6 +52,7 @@ sha = sys.argv[1]
 files = subprocess.check_output(
     ["git", "ls-tree", "-r", "--name-only", sha, "alembic/versions"], text=True
 ).splitlines()
+files = [name for name in files if name.endswith(".py") and "/__pycache__/" not in name]
 revisions = {}
 for name in files:
     try:
