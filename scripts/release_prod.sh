@@ -153,7 +153,16 @@ CURRENT_PRODUCTION_DB_HEAD=$(remote "docker exec maxibot-vps-db-1 psql -U maxibo
 [[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
 say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"
 say CURRENT_PRODUCTION_DB_HEAD "$CURRENT_PRODUCTION_DB_HEAD"
-[[ "$TARGET_DOWN" == "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "candidate migration baseline $TARGET_DOWN is incompatible with current production DB head $CURRENT_PRODUCTION_DB_HEAD"
+if [[ "$TARGET_MIGRATION" == "$CURRENT_PRODUCTION_DB_HEAD" ]]; then
+  # A code-only candidate may legitimately be released after its schema head
+  # has already been applied by production.  Alembic upgrade to the same head
+  # is idempotent; only a divergent or unknown head remains fail-closed.
+  say MIGRATION_ALREADY_AT_TARGET YES
+elif [[ "$TARGET_DOWN" == "$CURRENT_PRODUCTION_DB_HEAD" ]]; then
+  say MIGRATION_ALREADY_AT_TARGET NO
+else
+  die "candidate migration baseline $TARGET_DOWN is incompatible with current production DB head $CURRENT_PRODUCTION_DB_HEAD"
+fi
 say PRODUCTION_BASELINE_COMPATIBILITY PASS
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -176,10 +185,10 @@ sha = sys.argv[2]
 s = p.read_text()
 s = s.replace("env_file: .env", "env_file: /opt/maxibot/.env")
 s = s.replace("      - .env\n", "      - /opt/maxibot/.env\n")
-s = s.replace("maxibot-vps-api:20260813-landing1", f"maxibot-vps-api:{sha}")
+s = re.sub(r"maxibot-vps-api:[^\"\\s]+", f"maxibot-vps-api:{sha}", s)
 s = s.replace('MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_ID: "{sha}"')
 s = s.replace('MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_MARKER: "{sha}"')
-s = s.replace('MAXIBOT_COMMIT_SHA: "${MAXIBOT_COMMIT_SHA:-UNKNOWN}"', f'MAXIBOT_COMMIT_SHA: "{sha}"')
+s = re.sub(r'MAXIBOT_COMMIT_SHA: "[^"]+"', f'MAXIBOT_COMMIT_SHA: "{sha}"', s)
 p.write_text(s)
 PY
 cat > "$WORK/release-manifest.json" <<EOF
