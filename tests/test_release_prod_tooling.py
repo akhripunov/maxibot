@@ -110,6 +110,14 @@ def test_release_context_excludes_appledouble_and_keeps_alembic_preflight():
     assert "alembic heads" in source
 
 
+def test_release_context_rewrites_the_current_image_and_commit_marker():
+    source = SCRIPT.read_text()
+    compose_rewriter = source[source.index('python3 - "$WORK/docker-compose.vps.yml"'):source.index('cat > "$WORK/release-manifest.json"')]
+    assert "import re" in compose_rewriter
+    assert 're.sub(r"maxibot-vps-api:' in compose_rewriter
+    assert "MAXIBOT_COMMIT_SHA" in compose_rewriter
+
+
 def test_release_tooling_has_width_bridge_and_backup_gate():
     bridge = (ROOT / "alembic/versions/0075a_alembic_version_width.py").read_text()
     source = SCRIPT.read_text()

@@ -179,6 +179,7 @@ fi
 # Compose has one secret source; no symlinks or secret copies are created.
 python3 - "$WORK/docker-compose.vps.yml" "$TARGET_SHA" <<'PY'
 from pathlib import Path
+import re
 import sys
 p = Path(sys.argv[1])
 sha = sys.argv[2]
