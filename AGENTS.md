@@ -203,6 +203,25 @@ mobile landing
 - `Ads Codex Worker` — отдельный bounded runtime-контур рекламной аналитики,
   не общий development orchestrator.
 
+## Default execution profile and token economy
+
+- `ARCHITECT SOL` ведёт один основной контекст: принимает owner intent,
+  формирует единое ТЗ, выбирает кратчайший безопасный маршрут, проверяет
+  candidate и владеет final technical verdict.
+- `DEV LUNA` (`gpt-5.6-luna`) — default primary implementer для bounded
+  backend, bot, API, UI и test-задач. Он получает одно полное ТЗ с scope,
+  acceptance criteria, разрешёнными путями и проверками, а возвращает commit
+  и проверяемый handoff.
+- По умолчанию одна задача получает одного implementer. Нельзя создавать
+  дополнительные роли или новые чаты только для повторной передачи того же ТЗ:
+  это не повышает качество и расходует контекст.
+- Более сильная модель или отдельный specialist подключается только при
+  архитектурном решении, реальном blocker, security/production risk,
+  независимом QA gate или доказанной недостаточности primary implementer.
+- Цепочка по умолчанию: `OWNER → ARCHITECT SOL → DEV LUNA → ARCHITECT SOL
+  review → exact GitHub SHA → exact VPS SHA`. QA/SYSADMIN добавляются только
+  по risk-based policy и release gates.
+
 ## Актуальный DEV ↔ QA routing override
 
 Для release closeout workflow сохраняется узкий direct handoff: DEV имеет
