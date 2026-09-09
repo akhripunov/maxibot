@@ -136,12 +136,24 @@ PRODUCTION_SSH_USER=root
 PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"
 SSH=(ssh -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes "$PRODUCTION_TARGET")
 SCP=(scp -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes)
+remote() { "${SSH[@]}" "$@"; }
 say RELEASE_SSH_USER "$PRODUCTION_SSH_USER"
 say CANONICAL_TARGET "$PRODUCTION_TARGET"
 if ! "${SSH[@]}" true; then
   die "SSH preflight failed for $PRODUCTION_TARGET"
 fi
 say SSH_PREFLIGHT PASS
+# Resolve the live production provenance before creating the remote release
+# context.  A candidate is compatible only when its migration parent is the
+# database head currently running in production.
+CURRENT_PRODUCTION_SHA=$(remote "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"commit_sha\"])'")
+CURRENT_PRODUCTION_DB_HEAD=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
+[[ "$CURRENT_PRODUCTION_SHA" =~ ^[0-9a-f]{40}$ ]] || die "current production SHA is unavailable"
+[[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
+say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"
+say CURRENT_PRODUCTION_DB_HEAD "$CURRENT_PRODUCTION_DB_HEAD"
+[[ "$TARGET_DOWN" == "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "candidate migration baseline $TARGET_DOWN is incompatible with current production DB head $CURRENT_PRODUCTION_DB_HEAD"
+say PRODUCTION_BASELINE_COMPATIBILITY PASS
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 git archive --format=tar "$TARGET_SHA" | tar -x -C "$WORK"
@@ -162,6 +174,7 @@ p = Path(sys.argv[1])
 sha = sys.argv[2]
 s = p.read_text()
 s = s.replace("env_file: .env", "env_file: /opt/maxibot/.env")
+s = s.replace("      - .env\n", "      - /opt/maxibot/.env\n")
 s = s.replace("maxibot-vps-api:20260813-landing1", f"maxibot-vps-api:{sha}")
 s = s.replace('MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_ID: "{sha}"')
 s = s.replace('MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_MARKER: "{sha}"')
@@ -175,7 +188,6 @@ ARCHIVE="$WORK/../maxibot-release-$TARGET_SHA.tar"
 tar --exclude='._*' --exclude='.DS_Store' --exclude='__MACOSX' -cf "$ARCHIVE" -C "$WORK" .
 REMOTE_TMP="/tmp/maxibot-release-$TARGET_SHA.tar"
 "${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"
-remote() { "${SSH[@]}" "$@"; }
 
 remote "set -eu; test -r $PRODUCTION_ROOT/.env; mkdir -p $PRODUCTION_ROOT/releases/$TARGET_SHA; tar -xf $REMOTE_TMP -C $PRODUCTION_ROOT/releases/$TARGET_SHA; find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -exec rm -rf {} +; if find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -print -quit | grep -q .; then echo 'AppleDouble or macOS metadata remains in remote release context' >&2; exit 1; fi"
 remote "rm -f $REMOTE_TMP"

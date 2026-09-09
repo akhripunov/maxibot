@@ -7,7 +7,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models import BotConversion, BotTrafficVisit
 from app.traffic.analytics import traffic_stats_for_channels
+from sqlalchemy import func, select
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 WINDOW_DAYS = {"1d": 1, "3d": 3, "7d": 7, "30d": 30}
@@ -48,4 +50,47 @@ async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: 
             },
         }
     result["campaign_specific"] = {"supported": False, "value": None, "reason": "reliable campaign-scoped visit and membership population is unavailable"}
+    return result
+
+
+async def build_bot_metrics(db: AsyncSession, *, bot_id: str, end_date: date, windows: tuple[str, ...] = ("1d", "3d", "7d", "30d")) -> dict[str, Any]:
+    """Return the same bounded outcome envelope for a BOT promotion object."""
+    result: dict[str, Any] = {}
+    for window in windows:
+        start, end = window_bounds(end_date=end_date, window=window)
+        visits = int(await db.scalar(select(func.count(BotTrafficVisit.id)).where(
+            BotTrafficVisit.bot_id == bot_id,
+            BotTrafficVisit.created_at >= start,
+            BotTrafficVisit.created_at < end,
+        )) or 0)
+        started = int(await db.scalar(select(func.count(BotConversion.id)).join(
+            BotTrafficVisit, BotTrafficVisit.id == BotConversion.bot_visit_id
+        ).where(
+            BotConversion.bot_id == bot_id,
+            BotConversion.internal_event == "bot_started",
+            BotConversion.created_at >= start,
+            BotConversion.created_at < end,
+        )) or 0)
+        result[window] = {
+            "visits": visits,
+            "qualified_outcomes": started,
+            "qualified_memberships": started,
+            "membership_rate": started / visits if visits else None,
+            "scope": "BOT",
+            "campaign_specific": False,
+            "campaign_scope": None,
+            "attribution_level": "BOT_STARTED",
+            "provenance": {
+                "numerator": "BotConversion.bot_started",
+                "denominator": "BotTrafficVisit landing visits",
+                "window": window,
+                "date_from": start.isoformat(),
+                "date_to_exclusive": end.isoformat(),
+                "timezone": "Europe/Moscow",
+                "bot_scope": bot_id,
+                "campaign_scope": None,
+                "calculated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+    result["campaign_specific"] = {"supported": False, "value": None, "reason": "reliable campaign-scoped bot visit population is unavailable"}
     return result

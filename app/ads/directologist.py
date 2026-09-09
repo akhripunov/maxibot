@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import (
     AdsCampaign, AdsDailyAggregate, AdsPromotionCampaignLink, BotConversion,
+    BotPromotionProfile,
     BotTrafficVisit, TrafficMembership, TrafficVisit,
 )
 
@@ -151,8 +152,10 @@ async def confirmed_outcome_summary(
     object_type = link.object_type if link else "UNKNOWN"
     rows: list[dict[str, Any]] = []
     if object_type == "BOT":
+        profile = await db.get(BotPromotionProfile, link.bot_promotion_profile_id) if link and link.bot_promotion_profile_id else None
         conversions = list((await db.scalars(select(BotConversion).join(BotTrafficVisit, BotTrafficVisit.id == BotConversion.bot_visit_id).where(
             BotConversion.internal_event == "bot_started",
+            BotTrafficVisit.bot_id == (profile.bot_key if profile else "__missing_bot__"),
             BotConversion.created_at >= window_start,
             BotConversion.created_at < window_end,
         ))).all())

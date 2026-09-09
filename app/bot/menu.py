@@ -32,11 +32,12 @@ from app.traffic.join_intent import consume_single_active_join_intent
 from app.traffic.analytics import traffic_stats_for_channels
 from app.traffic.bot_start_observability import dropoff_classification, start_wait_timeout_reached
 from app.traffic.bot_conversion_dedupe import paid_bot_conversion_key
-from app.ads.service import can_access_ads, campaigns_for_channel, latest_view
+from app.ads.service import can_access_ads, campaigns_for_channel, latest_view, campaigns_for_promotion_object
+from app.ads.objectives import active_links, objective_for_link
 from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation
-from app.ads.storage_health import diagnostics as storage_diagnostics, human_size, ui_time
+from app.ads.storage_health import TABLES, diagnostics as storage_diagnostics, human_size, ui_time
 from app.integrations.robokassa import payment_url
 from app.integrations.subscriptions import subscription_status, free_trial_status, channel_promotion_entitlement as resolve_channel_promotion_entitlement
 
@@ -599,7 +600,7 @@ def _owner_confidence(value: object) -> str:
     return {"LOW": "низкая", "MEDIUM": "средняя", "HIGH": "высокая", "INSUFFICIENT": "недостаточно данных"}.get(str(value or ""), "не определена")
 
 
-def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: str, summary: str, recommendation: str, confidence: str, health_status: str | None = None, decision_pack: dict | None = None) -> str:
+def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: str, summary: str, recommendation: str, confidence: str, health_status: str | None = None, decision_pack: dict | None = None, objective: dict | None = None) -> str:
     checked = checked_at.astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M") if checked_at else "ещё не выполнялась"
     status = {
         "WAITING_FOR_CODEX": "Проверка ожидает анализа",
@@ -613,6 +614,18 @@ def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: s
     outcome_label = {"CHANNEL": "подписчик", "BOT": "запуск бота"}.get(pack.get("object_type"), "подтверждённый результат")
     outcome_value = outcomes.get("attributed_outcomes")
     outcome_line = f"\nПодтверждённые результаты ({outcome_label}): {outcome_value if outcome_value is not None else 'UNKNOWN'}" if pack else ""
+    objective = objective or {}
+    if objective.get("objective_mode") == "TARGET_CPA":
+        target = objective.get("target_cpa")
+        actual = objective.get("actual_cpa")
+        state_label = {"ON_TARGET": "🟢 Цель выполняется", "OFF_TARGET": "🔴 Цель не выполняется", "INSUFFICIENT_DATA": "⚪ Пока недостаточно данных"}.get(objective.get("objective_state"), "⚪ Пока недостаточно данных")
+        objective_block = f"\n\n🎯 Цель: ≤ {target:g} {objective.get('currency', 'RUB')}\n"
+        objective_block += f"Сейчас: {actual:.2f} {objective.get('currency', 'RUB')}\n" if actual is not None else "Сейчас: UNKNOWN\n"
+        objective_block += state_label
+        if objective.get("absolute_gap") is not None:
+            objective_block += f"\nРазрыв: {objective['absolute_gap']:+.2f} {objective.get('currency', 'RUB')}"
+    else:
+        objective_block = ""
     return (
         "🤖 AI Продвижение\n\n"
         f"Кампания: {campaign_name or 'не выбрана'}\n"
@@ -620,7 +633,7 @@ def format_ads_owner_main(*, campaign_name: str | None, checked_at, ai_status: s
         f"Статус: {status}\n\n"
         f"Главный вывод:\n{_owner_short_text(summary, 'Данных для вывода пока нет.')}\n\n"
         f"Почему сейчас:\n{_owner_short_text(recommendation, 'Новых сигналов пока нет.')}\n\n"
-        f"Уверенность: {_owner_confidence(confidence)}{outcome_line}"
+        f"Уверенность: {_owner_confidence(confidence)}{outcome_line}{objective_block}"
         f"{warning}\n\n"
         "🔒 AI анализирует и советует, но ничего автоматически не меняет."
     )
@@ -810,6 +823,7 @@ class BotPromotionTarget:
     landing_url: str | None
     yandex_action: str
     analytics_action: str
+    ai_action: str
 
 
 async def _bot_promotion_target(db: AsyncSession, admin: Admin, bot_key: str) -> BotPromotionTarget | None:
@@ -825,7 +839,7 @@ async def _bot_promotion_target(db: AsyncSession, admin: Admin, bot_key: str) ->
             return BotPromotionTarget(
                 key="system", title="MAXIBOT", yandex_value=None, counter_id=None,
                 landing_url=None, yandex_action="promotion_maxibot_yandex",
-                analytics_action="promotion_maxibot_analytics",
+                analytics_action="promotion_maxibot_analytics", ai_action="ads_bot:system",
             )
         connected = await system_connection_status(db=db)
         return BotPromotionTarget(
@@ -836,6 +850,7 @@ async def _bot_promotion_target(db: AsyncSession, admin: Admin, bot_key: str) ->
             landing_url=profile.landing_url,
             yandex_action="promotion_maxibot_yandex",
             analytics_action="promotion_maxibot_analytics",
+            ai_action="ads_bot:system",
         )
 
     bot = await db.scalar(select(BotConnection).where(
@@ -865,6 +880,7 @@ async def _bot_promotion_target(db: AsyncSession, admin: Admin, bot_key: str) ->
         landing_url=profile.landing_url if profile else None,
         yandex_action=f"promotion_bot_yandex:{bot.id}",
         analytics_action=f"promotion_bot_analytics:{bot.id}",
+        ai_action=f"ads_bot:{bot.id}",
     )
 
 
@@ -878,6 +894,7 @@ def render_bot_promotion(target: BotPromotionTarget) -> tuple[str, list[list[dic
         buttons(
             ("🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ❌", target.yandex_action),
             ("📊 Аналитика", target.analytics_action),
+            ("🤖 AI Продвижение", target.ai_action),
             ("⬅️ Назад", "promotion"),
         ),
     )
@@ -983,13 +1000,15 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return "💾 Хранилище ADS\n\n⚠️ Данные хранилища временно недоступны.", buttons(("⬅️ Назад", "owner_admin"))
         periodic = storage["periodic"]
         status = {"NORMAL": "🟢 Норма", "WARNING": "🟡 Внимание", "CRITICAL": "🔴 Критично", "UNKNOWN": "⚠️ Недоступно"}.get(storage["status"], "⚠️ Недоступно")
-        table_lines = {
-            "ads_observations": "наблюдения", "ads_entities": "сущности",
-            "ads_report_runs": "отчёты", "ads_ai_outcomes": "outcomes",
-            "ads_collection_runs": "collection runs", "ads_daily_aggregates": "дневные агрегаты",
-            "ads_creatives": "креативы", "ads_analysis_snapshots": "AI snapshots",
-        }
-        rows = "\n".join(f"• {label}: {human_size(storage['tables'][table]['total'])}" for table, label in table_lines.items())
+        table_rows = []
+        for table in storage["table_details"].values():
+            latest = ui_time(table["latest"]) if table.get("latest") else "—"
+            table_rows.append(
+                f"• {table['name']}: {human_size(table['size'])}; "
+                f"строк {table['row_count']}; latest {latest}; "
+                f"retention {table['retention_class']}; {table['status']}"
+            )
+        rows = "\n".join(table_rows)
         last = ui_time(periodic.get("last_successful_collection"))
         next_due = ui_time(periodic.get("next_due_collection"))
         return (
@@ -1015,7 +1034,55 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             f"Пропущено строк: {storage['retention'].get('skipped_rows', 0)}\n"
             f"Защищённых строк: {storage['retention'].get('skipped_rows', 0)}\n"
             f"Архивация данных: не используется, действует bounded retention"
-        ), buttons(("⬅️ Назад", "owner_admin"))
+        ), buttons(
+            ("📊 Все 16 таблиц", "ads_storage_tables"),
+            ("🎨 Креативы", "ads_storage_creatives"),
+            ("📡 Сбор данных", "ads_storage_collection"),
+            ("🧹 Retention", "ads_storage_retention"),
+            ("⚠️ Ошибки", "ads_storage_errors"),
+            ("⬅️ Назад", "owner_admin"),
+        )
+    if screen.startswith("ads_storage_"):
+        if not is_maxibot_owner(admin):
+            return "⛔ Раздел доступен только владельцу MAXIBOT.", buttons(("⬅️ Главное меню", "home"))
+        try:
+            storage = await storage_diagnostics(db)
+        except Exception:
+            return "💾 Хранилище ADS\n\n⚠️ Данные хранилища временно недоступны.", buttons(("⬅️ Назад", "ads_storage"))
+        if screen == "ads_storage_tables":
+            groups = {"CORE": TABLES[:5], "METRICS": TABLES[5:9], "SERVICE": TABLES[9:10], "AI": TABLES[10:]}
+            text = "📊 ADS · 16/16 таблиц\n\n" + "\n".join(
+                f"{group}: " + ", ".join(storage["table_details"][name]["name"] for name in names)
+                for group, names in groups.items()
+            )
+        elif screen == "ads_storage_creatives":
+            creative = storage.get("creatives", {})
+            mail = "настроено" if creative.get("mail_configured") else "не настроено; оригиналы не загружаются"
+            text = ("🎨 Креативы\n\n"
+                    f"Записей: {creative.get('records', 0)}\nУникальных SHA-256: {creative.get('unique_hashes', 0)}\n"
+                    f"STORED: {creative.get('media_stored', 0)} · отсутствуют: {creative.get('media_missing', 0)} · FAILED: {creative.get('upload_failed', 0)}\n"
+                    f"Размер: {human_size(creative.get('media_bytes', 0))}\nMail.ru Cloud: {mail}\n\n"
+                    "Проверка storage выполняется только по bounded диагностике.")
+        elif screen == "ads_storage_collection":
+            periodic = storage["periodic"]
+            text = ("📡 Сбор данных\n\n"
+                    f"Статус: {'включён' if periodic.get('enabled') else 'выключен'}\n"
+                    f"Кампаний: {periodic.get('eligible_campaigns', 0)}\n"
+                    f"Последний успешный сбор: {ui_time(periodic.get('last_successful_collection'))}\n"
+                    f"Следующий сбор: {ui_time(periodic.get('next_due_collection'))}\n"
+                    f"Ошибок: {periodic.get('failed_runs', 0)}")
+        elif screen == "ads_storage_retention":
+            retention = storage["retention"]
+            text = ("🧹 Retention\n\n"
+                    f"Наблюдения: {retention['observations_days']} дней\n"
+                    f"Операционные записи: {retention['operational_days']} дней\n"
+                    "Дневные агрегаты и AI history: долгосрочно\n"
+                    f"Последний запуск: {ui_time(retention.get('last_run'))}")
+        else:
+            periodic = storage["periodic"]
+            reason = "Нет критичных ошибок" if not periodic.get("failed_runs") else "Есть ошибки collection run; см. статус последнего запуска"
+            text = f"⚠️ Ошибки ADS\n\n{reason}\nОшибок: {periodic.get('failed_runs', 0)}\nПовторных попыток: {periodic.get('retry_backlog', 0)}"
+        return text, buttons(("⬅️ Хранилище ADS", "ads_storage"), ("⬅️ Администратор", "owner_admin"))
     if screen == "onboarding":
         return (
             "🤖 MAXIBOT\n\n"
@@ -1265,6 +1332,78 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             [[{"text": "💳 Перейти к оплате", "type": "link", "url": url}],
              [{"text": "⬅️ Назад", "callback_data": f"subscription:{channel.id}" if channel else "subscription"}]],
         )
+    if screen.startswith("ads_objective:"):
+        parts = screen.split(":", 2)
+        object_type, object_id = parts[1], parts[2] if len(parts) > 2 else ""
+        if not can_access_ads(admin.external_id) or object_type not in {"CHANNEL", "BOT"}:
+            return await render_screen(db, admin, "promotion")
+        if object_type == "CHANNEL":
+            channel = await db.scalar(select(Channel).where(Channel.id == object_id, Channel.admin_id == admin.id))
+            if not channel:
+                return await render_screen(db, admin, "promotion")
+            back = f"ads:{channel.id}"
+            title = "📢 " + channel.title
+        else:
+            profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.id == object_id, BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"))
+            if not profile or not is_maxibot_owner(admin):
+                return await render_screen(db, admin, "promotion")
+            back = "ads_bot:system"
+            title = "🤖 MAXIBOT"
+        campaigns = await campaigns_for_promotion_object(db, object_type=object_type, object_id=object_id)
+        lines = ["🎯 Цель продвижения", "", title, "", f"Результат: {'Подписчик в канал' if object_type == 'CHANNEL' else 'Запуск бота'}"]
+        links = await active_links(db, object_type=object_type, object_id=object_id)
+        links_by_campaign = {link.campaign_id: link for link in links}
+        if not campaigns:
+            lines += ["", "Активных кампаний пока нет."]
+        for campaign in campaigns:
+            link = links_by_campaign.get(campaign.id)
+            if link and link.objective_status == "ACTIVE" and link.target_cpa is not None:
+                lines.append(f"\nКампания: {campaign.name}\nЦелевая стоимость: {float(link.target_cpa):g} {link.currency or 'RUB'}")
+            else:
+                lines.append(f"\nКампания: {campaign.name}\nЦель: не задана")
+        lines += ["", "Цель применяется только к выбранным активным кампаниям."]
+        controls = []
+        if len(campaigns) > 1:
+            controls.append(("🎯 Для всех активных кампаний", f"ads_objective_edit:{object_type}:{object_id}:all"))
+            controls.extend((f"✏️ {campaign.name[:42]}", f"ads_objective_edit:{object_type}:{object_id}:{campaign.id}") for campaign in campaigns)
+        else:
+            controls.append(("✏️ Изменить цель", f"ads_objective_edit:{object_type}:{object_id}:all"))
+        controls.extend([("🚫 Отключить цель", f"ads_objective_disable:{object_type}:{object_id}"), ("⬅️ Назад", back)])
+        return ("\n".join(lines), buttons(*controls))
+    if screen.startswith("ads_objective_input:"):
+        _, object_type, object_id = screen.split(":", 2)
+        back = f"ads_objective:{object_type}:{object_id}"
+        return ("🎯 Введите целевую стоимость в рублях одним сообщением.\n\nНапример: 20", buttons(("⬅️ Назад", back)))
+    if screen.startswith("ads_bot:"):
+        from app.ads.service import latest_bot_view
+        bot_key = screen.split(":", 1)[1]
+        if bot_key != "system" or not is_maxibot_owner(admin) or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"))
+        if not profile:
+            return await render_screen(db, admin, "promotion")
+        view = await latest_bot_view(db, profile.id)
+        health = view["health"]; ai = view["ai"]; rec = view["recommendation"]
+        facts = view["facts"] or {}; campaign = facts.get("campaign") or {}; decision_pack = facts.get("DIRECTOLOGIST") or {}
+        status_map = {"WAITING_FOR_CODEX": "⏳ Ожидает Codex Worker", "CODEX_PROCESSING": "⚙️ Codex анализирует рекламу", "CODEX_COMPLETED": "✅ Завершён", "CODEX_FAILED": "🔴 Не завершён"}
+        ai_status = status_map.get(ai.status, "AI-анализ ещё не выполнялся.") if ai else "AI-анализ ещё не выполнялся."
+        result = json.loads(ai.validated_output_json) if ai and ai.status == "CODEX_COMPLETED" and ai.validated_output_json else {}
+        body = format_ads_owner_main(
+            campaign_name=campaign.get("name"), checked_at=view["checked_at"], ai_status=ai.status if ai else "",
+            summary=(result.get("summary") if result else None) or (rec.title if rec else "—"),
+            recommendation=((result.get("recommendation") or {}).get("reason") if result else None) or (rec.rationale if rec else "—"),
+            confidence=(result.get("confidence") if result else None) or (rec.confidence if rec else "—"),
+            health_status=health.get("status"), decision_pack=decision_pack, objective=facts.get("OBJECTIVE_EVALUATION"),
+        )
+        return (body, buttons(
+            ("🔄 Проверить рекламу", "ads_bot_check:system"),
+            ("🎯 Цель", f"ads_objective:BOT:{profile.id}"),
+            ("🎯 Кампания", "ads_bot_campaigns:system"),
+            ("💡 Рекомендации", "ads_bot_recommendations:system"),
+            ("🔎 Почему AI так решил", "ads_bot_context:system"),
+            ("🕘 История рекомендаций", "ads_bot_history:system"),
+            ("⬅️ Назад", "promotion_maxibot"),
+        ))
     if screen.startswith("ads:"):
         selected_id = screen.split(":", 1)[1]
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
@@ -1301,10 +1440,11 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             recommendation=owner_reason,
             confidence=owner_confidence,
             health_status=health.get("status"),
-            decision_pack=decision_pack,
+            decision_pack=decision_pack, objective=facts.get("OBJECTIVE_EVALUATION"),
         )
         return (body, buttons(
             ("🔄 Проверить рекламу", f"ads_check:{channel.id}"),
+            ("🎯 Цель", f"ads_objective:CHANNEL:{channel.id}"),
             ("🎯 Кампания", f"ads_campaigns:{channel.id}"),
             ("💡 Рекомендации", f"ads_recommendations:{channel.id}"),
             ("🔎 Почему AI так решил", f"ads_context:{channel.id}"),

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.periodic import collection_health
 from app.core.config import settings
-from app.db.models import AdsCollectionRun, AdsDailyAggregate, AdsObservation, AdsReportRun
+from app.db.models import AdsCollectionRun, AdsCreative, AdsDailyAggregate, AdsObservation, AdsReportRun
 
 TABLES = (
     "ads_accounts", "ads_campaigns", "ads_promotion_campaign_links",
@@ -20,6 +20,24 @@ TABLES = (
     "ads_analysis_snapshots", "ads_ai_runs", "ads_recommendations",
     "ads_ai_outcomes", "ads_memories", "ads_memory_evidence", "ads_data_health",
 )
+TABLE_LATEST_COLUMNS = {
+    "ads_accounts": "updated_at",
+    "ads_campaigns": "last_seen_at",
+    "ads_promotion_campaign_links": "updated_at",
+    "ads_entities": "last_seen_at",
+    "ads_creatives": "updated_at",
+    "ads_observations": "created_at",
+    "ads_daily_aggregates": "created_at",
+    "ads_collection_runs": "completed_at",
+    "ads_report_runs": "fetched_at",
+    "ads_analysis_snapshots": "created_at",
+    "ads_ai_runs": "created_at",
+    "ads_recommendations": "created_at",
+    "ads_ai_outcomes": "completed_at",
+    "ads_memories": "updated_at",
+    "ads_memory_evidence": "created_at",
+    "ads_data_health": "checked_at",
+}
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
@@ -59,10 +77,24 @@ async def diagnostics(db: AsyncSession) -> dict:
     """Collect bounded, sanitized diagnostics; callers should fail open."""
     db_size = int(await db.scalar(text("select pg_database_size(current_database())")) or 0)
     sizes: dict[str, dict[str, int]] = {}
+    table_details: dict[str, dict[str, object]] = {}
     for table in TABLES:
         relation = int(await db.scalar(text("select pg_relation_size(:table)"), {"table": table}) or 0)
         total = int(await db.scalar(text("select pg_total_relation_size(:table)"), {"table": table}) or 0)
         sizes[table] = {"data": relation, "indexes": max(0, total - relation), "total": total}
+        row_count = int(await db.scalar(text(f'select count(*) from "{table}"')) or 0)
+        latest_column = TABLE_LATEST_COLUMNS[table]
+        latest = await db.scalar(text(f'select max("{latest_column}") from "{table}"'))
+        if latest is not None and hasattr(latest, "isoformat"):
+            latest = latest.isoformat()
+        table_details[table] = {
+            "name": table,
+            "size": total,
+            "row_count": row_count,
+            "latest": latest,
+            "retention_class": _retention_class(table),
+            "status": "EMPTY" if row_count == 0 else "ACTIVE",
+        }
     disk = shutil.disk_usage("/")
     free_percent = (disk.free / disk.total * 100.0) if disk.total else None
     periodic = await collection_health(db)
@@ -72,10 +104,24 @@ async def diagnostics(db: AsyncSession) -> dict:
     oldest_report = await db.scalar(select(func.min(AdsReportRun.fetched_at)))
     retention_run = await db.scalar(select(AdsCollectionRun).where(AdsCollectionRun.run_type == "RETENTION").order_by(AdsCollectionRun.completed_at.desc()).limit(1))
     retention_summary = json.loads(retention_run.summary_json or "{}") if retention_run and retention_run.summary_json else {}
+    creative_summary = {
+        "records": int(await db.scalar(select(func.count(AdsCreative.id))) or 0),
+        "unique_hashes": int(await db.scalar(select(func.count(func.distinct(AdsCreative.content_hash)))) or 0),
+        "media_stored": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.media_storage_state == "STORED")) or 0),
+        "media_missing": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.media_storage_state.in_(["SOURCE_UNAVAILABLE", "AVAILABLE_NOT_STORED"]))) or 0),
+        "upload_failed": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.media_storage_state == "FAILED")) or 0),
+        "media_bytes": int(await db.scalar(select(func.coalesce(func.sum(AdsCreative.file_size), 0))) or 0),
+        "images": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.creative_type.ilike("%IMAGE%"))) or 0),
+        "videos": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.creative_type.ilike("%VIDEO%"))) or 0),
+        "mail_configured": bool(settings.mail_cloud_enabled and settings.mail_cloud_webdav_url and settings.mail_cloud_login and settings.mail_cloud_app_password),
+        "storage_enabled": bool(settings.mail_cloud_enabled),
+        "last_successful_upload": None,
+        "last_error": None,
+    }
     ai_history_tables = {name: sizes[name] for name in ("ads_analysis_snapshots", "ads_ai_runs", "ads_recommendations", "ads_ai_outcomes", "ads_memories", "ads_memory_evidence")}
     ai_history_size = sum(item["total"] for item in ai_history_tables.values())
     return {
-        "database": {"total": db_size}, "tables": sizes,
+        "database": {"total": db_size}, "tables": sizes, "table_details": table_details,
         "ads_total": sum(item["total"] for item in sizes.values()),
         "disk": {"total": disk.total, "used": disk.used, "free": disk.free, "free_percent": free_percent},
         "periodic": periodic,
@@ -85,7 +131,16 @@ async def diagnostics(db: AsyncSession) -> dict:
         "downsampling": {"eligible": None, "protected": None, "dry_run": True},
         "oldest": {"ads_observation": oldest_observation.isoformat() if oldest_observation else None, "daily_aggregate": oldest_daily.isoformat() if oldest_daily else None, "collection_run": oldest_collection.isoformat() if oldest_collection else None, "report_run": oldest_report.isoformat() if oldest_report else None},
         "ai_history_size": ai_history_size,
-        "growth_basis": "UNKNOWN: no persisted storage-size samples",
+        "creatives": creative_summary,
+        "growth_basis": "Пока недостаточно истории для расчёта роста",
         "status": storage_status(free_percent=free_percent, stale=int(periodic.get("stale_campaigns", 0)), retry_backlog=int(periodic.get("retry_backlog", 0))),
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _retention_class(table: str) -> str:
+    if table in {"ads_observations"}:
+        return f"{settings.ads_observations_retention_days}d"
+    if table in {"ads_collection_runs", "ads_report_runs", "ads_data_health"}:
+        return f"{settings.ads_operational_retention_days}d"
+    return "LONG_TERM"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -10,9 +11,101 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.providers.yandex import GRANULAR_REPORTS, YandexAdsProvider
+from app.ads.creative_storage import store_media_if_available
+from app.ads.creative_storage import MailCloudWebDav, media_key
+from app.ads.yandex_creative_media import archive_resolved_media, extract_media_references, resolve_media
 from app.db.models import AdsAnalysisSnapshot, AdsCampaign, AdsCreative, AdsDailyAggregate, AdsEntity, AdsObservation, AdsReportRun
 
 WINDOWS = {"1d": 1, "3d": 3, "7d": 7}
+
+
+def _media_identity(raw: dict[str, Any]) -> dict[str, Any]:
+    refs = extract_media_references(raw)
+    return {
+        "ad_image_hash": refs.get("ad_image_hash"),
+        "ad_image_hashes": refs.get("ad_image_hashes") or [],
+        "provider_creative_id": refs.get("provider_creative_id"),
+        "video_extension": refs.get("video_extension"),
+        "media_kind": refs.get("media_kind"),
+    }
+
+
+def _stored_media_matches(creative: AdsCreative | None, raw: dict[str, Any]) -> bool:
+    if not creative or creative.media_storage_state != "STORED" or not creative.storage_key:
+        return False
+    try:
+        metadata = json.loads(creative.provider_metadata_json or "{}")
+    except (TypeError, ValueError):
+        return False
+    previous = metadata.get("media_identity") or {}
+    current = _media_identity(raw)
+    return bool(previous) and previous == current
+
+
+def _retry_allowed(creative: AdsCreative | None, *, now: datetime) -> tuple[bool, int]:
+    if not creative or creative.media_storage_state != "FAILED":
+        return True, 0
+    try:
+        metadata = json.loads(creative.provider_metadata_json or "{}")
+        retry = metadata.get("media_retry") or {}
+        attempts = int(retry.get("attempts") or 0)
+        retry_after = datetime.fromisoformat(retry["retry_after"]) if retry.get("retry_after") else None
+    except (TypeError, ValueError, KeyError):
+        return True, 0
+    return attempts < 3 and (retry_after is None or retry_after <= now), attempts
+
+
+async def enrich_periodic_ad_media(db: AsyncSession, *, campaign: AdsCampaign, raw: dict[str, Any], provider_client: Any, fetched_at: datetime) -> None:
+    """Reuse the canonical resolver for periodic entity collection.
+
+    Existing stored media is skipped by provider identity; missing/failed media
+    is resolved in the same bounded path used by the normal ADS collector.
+    """
+    external_id = str(raw.get("Id") or "")
+    if not external_id or not any(_media_identity(raw).get(key) for key in ("ad_image_hash", "ad_image_hashes", "provider_creative_id", "video_extension")):
+        return
+    current_identity = _media_identity(raw)
+    creative = await db.scalar(select(AdsCreative).where(AdsCreative.campaign_id == campaign.id, AdsCreative.external_creative_id == external_id))
+    retry_allowed, retry_attempts = _retry_allowed(creative, now=fetched_at)
+    if not retry_allowed:
+        return
+    if creative and creative.media_storage_state == "STORED" and creative.storage_key:
+        try:
+            metadata = json.loads(creative.provider_metadata_json or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        identity_matches = _stored_media_matches(creative, raw)
+        if not identity_matches and not metadata.get("media_identity"):
+            identity_matches = creative.image_ref == current_identity.get("ad_image_hash") or creative.video_ref == current_identity.get("provider_creative_id")
+        if identity_matches and "/sha256/" in creative.storage_key:
+            match = re.search(r"/([0-9a-f]{64})\.([A-Za-z0-9_-]+)$", creative.storage_key)
+            if match:
+                digest, extension = match.groups()
+                new_key = media_key(digest, extension, mime_type=creative.mime_type)
+                storage = MailCloudWebDav()
+                try:
+                    migrated = await storage.copy_legacy_verified(creative.storage_key, new_key, expected_hash=digest, expected_size=int(creative.file_size or 0), content_type=creative.mime_type or "application/octet-stream")
+                    raw["_media_archive"] = {"state": "STORED", "storage_key": migrated.key, "file_size": migrated.size, "content_hash": migrated.content_hash}
+                    raw["_media_retrieval"] = {**current_identity, "provider": "YANDEX_DIRECT", "result": "MIGRATED", "media_source_type": "ORIGINAL"}
+                except Exception as exc:
+                    raw["_storage_migration_error"] = type(exc).__name__
+                finally:
+                    await storage.close()
+                if raw.get("_media_archive", {}).get("state") == "STORED":
+                    return
+        if identity_matches:
+            return
+    try:
+        raw["_media_retrieval"] = await resolve_media(provider_client, raw)
+        raw["_media_archive"] = await archive_resolved_media(raw["_media_retrieval"])
+        if raw["_media_archive"].get("state") == "FAILED":
+            raw["_media_retry"] = {"attempts": retry_attempts + 1, "retry_after": (fetched_at + timedelta(minutes=15 * (retry_attempts + 1))).isoformat()}
+        else:
+            raw["_media_retry"] = {"attempts": 0, "retry_after": None}
+    except Exception as exc:
+        raw["_media_retrieval"] = {"provider": "YANDEX_DIRECT", "provider_ad_id": raw.get("Id"), "result": "FAILED", "error": type(exc).__name__}
+        raw["_media_archive"] = {"state": "FAILED", "storage_key": None, "file_size": None, "error": type(exc).__name__}
+        raw["_media_retry"] = {"attempts": retry_attempts + 1, "retry_after": (fetched_at + timedelta(minutes=15 * (retry_attempts + 1))).isoformat()}
 
 
 async def _upsert_daily_aggregate(db: AsyncSession, *, campaign_id: str, entity_id: str | None, dimension_type: str, dimension_value: str | None, aggregate_date: date, values: dict[str, float], source_ids: list[str], source_from: datetime | None, source_to: datetime | None, source_kind: str = "PERIODIC") -> str:
@@ -63,8 +156,44 @@ async def _upsert_creative(db: AsyncSession, *, campaign: AdsCampaign, ad_entity
         "cta": text_ad.get("Callout") or text_ad.get("ButtonText"),
         "image_ref": text_ad.get("ImageHash") or text_ad.get("Image"),
         "video_ref": text_ad.get("VideoId") or text_ad.get("Video"),
+        "source_type": "PROVIDER_IMPORTED",
+        "storage_provider": "MAIL_RU_WEBDAV",
+        "media_storage_state": "SOURCE_UNAVAILABLE" if (text_ad.get("ImageHash") or text_ad.get("Image") or text_ad.get("VideoId") or text_ad.get("Video")) else "AVAILABLE_NOT_STORED",
+        "ai_features_json": "{}",
+        "last_seen_at": fetched_at,
+        "provider_state": raw.get("State") or raw.get("Status"),
     }
-    content_hash = hashlib.sha256(json.dumps(values, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    retrieval = raw.get("_media_retrieval") if isinstance(raw.get("_media_retrieval"), dict) else None
+    archive = raw.get("_media_archive") if isinstance(raw.get("_media_archive"), dict) else None
+    if retrieval:
+        values["image_ref"] = retrieval.get("ad_image_hash") or values["image_ref"]
+        values["video_ref"] = retrieval.get("provider_creative_id") or values["video_ref"]
+        values["media_storage_state"] = (archive or {}).get("state") or (
+            "SOURCE_UNAVAILABLE" if retrieval.get("result") == "UNAVAILABLE" else "FAILED" if retrieval.get("result") == "FAILED" else "AVAILABLE_NOT_STORED"
+        )
+    media_bytes = raw.get("media_bytes") if isinstance(raw.get("media_bytes"), bytes) else None
+    if media_bytes:
+        media_result = await store_media_if_available(
+            media_bytes,
+            mime_type=raw.get("mime_type") or "application/octet-stream",
+            extension=str(raw.get("media_extension") or "bin"),
+        )
+        values.update({
+            "media_storage_state": media_result["state"],
+            "storage_key": media_result.get("storage_key"),
+            "file_size": media_result.get("file_size"),
+        })
+    if archive:
+        values.update({"storage_key": archive.get("storage_key"), "file_size": archive.get("file_size"), "media_storage_state": archive.get("state")})
+        if archive.get("content_hash"):
+            values["image_ref"] = values.get("image_ref") or archive.get("content_hash")
+        if raw.get("_media_retrieval", {}).get("mime_type"):
+            values["mime_type"] = raw["_media_retrieval"]["mime_type"]
+    content_hash = hashlib.sha256(json.dumps(
+        {key: values[key] for key in ("title", "title2", "body", "href", "display_url", "creative_type", "cta", "image_ref", "video_ref")},
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode()).hexdigest()
     external_id = str(raw.get("Id") or "") or None
     creative_query = select(AdsCreative).where(AdsCreative.campaign_id == campaign.id)
     if external_id:
@@ -73,7 +202,13 @@ async def _upsert_creative(db: AsyncSession, *, campaign: AdsCampaign, ad_entity
         creative_query = creative_query.where(AdsCreative.content_hash == content_hash, AdsCreative.external_creative_id.is_(None))
     creative = await db.scalar(creative_query)
     if not creative:
-        creative = AdsCreative(campaign_id=campaign.id, ad_entity_id=ad_entity.id, external_creative_id=external_id, provider_metadata_json=json.dumps({key: raw.get(key) for key in ("Id", "CampaignId", "Type", "Subtype", "State", "Status", "StatusClarification")}, ensure_ascii=False), content_hash=content_hash, metadata_updated_at=fetched_at, created_at=fetched_at, updated_at=fetched_at, **values)
+        metadata = {key: raw.get(key) for key in ("Id", "CampaignId", "Type", "Subtype", "State", "Status", "StatusClarification")}
+        if retrieval:
+            metadata["media_provenance"] = {key: retrieval.get(key) for key in ("provider", "provider_ad_id", "provider_creative_id", "ad_image_hash", "video_extension", "provider_media_reference", "media_source_type", "result", "original_retrievable", "preview_retrievable", "error")}
+            metadata["media_identity"] = _media_identity(raw)
+            if raw.get("_media_retry"):
+                metadata["media_retry"] = raw["_media_retry"]
+        creative = AdsCreative(campaign_id=campaign.id, ad_entity_id=ad_entity.id, external_creative_id=external_id, provider_metadata_json=json.dumps(metadata, ensure_ascii=False), content_hash=content_hash, metadata_updated_at=fetched_at, created_at=fetched_at, updated_at=fetched_at, **values)
         db.add(creative)
     elif creative.content_hash != content_hash:
         for key, value in values.items():
@@ -82,6 +217,25 @@ async def _upsert_creative(db: AsyncSession, *, campaign: AdsCampaign, ad_entity
         creative.content_hash = content_hash
         creative.metadata_updated_at = fetched_at
         creative.updated_at = fetched_at
+        if retrieval:
+            metadata = json.loads(creative.provider_metadata_json or "{}")
+            metadata["media_provenance"] = {key: retrieval.get(key) for key in ("provider", "provider_ad_id", "provider_creative_id", "ad_image_hash", "video_extension", "provider_media_reference", "media_source_type", "result", "original_retrievable", "preview_retrievable", "error")}
+            metadata["media_identity"] = _media_identity(raw)
+            creative.provider_metadata_json = json.dumps(metadata, ensure_ascii=False)
+    else:
+        creative.last_seen_at = fetched_at
+        creative.provider_state = values["provider_state"]
+        if retrieval or archive:
+            for key in ("storage_key", "file_size", "media_storage_state", "mime_type"):
+                if key in values and values[key] is not None:
+                    setattr(creative, key, values[key])
+            metadata = json.loads(creative.provider_metadata_json or "{}")
+            if retrieval:
+                metadata["media_provenance"] = {key: retrieval.get(key) for key in ("provider", "provider_ad_id", "provider_creative_id", "ad_image_hash", "video_extension", "provider_media_reference", "media_source_type", "result", "original_retrievable", "preview_retrievable", "error")}
+                metadata["media_identity"] = _media_identity(raw)
+            if raw.get("_media_retry"):
+                metadata["media_retry"] = raw["_media_retry"]
+            creative.provider_metadata_json = json.dumps(metadata, ensure_ascii=False)
     await db.flush()
     return creative
 
@@ -129,6 +283,14 @@ async def collect_yandex_v2(db: AsyncSession, *, token: str, campaign: AdsCampai
         db.add(ads_report_run)
         await db.flush()
         for raw in ads_report.rows:
+            media_refs = extract_media_references(raw)
+            if any(media_refs.get(key) for key in ("AdImageHash", "CreativeId", "VideoExtension", "ThumbnailUrl", "PreviewUrl", "OriginalUrl")):
+                try:
+                    raw["_media_retrieval"] = await resolve_media(provider.client, raw)
+                    raw["_media_archive"] = await archive_resolved_media(raw["_media_retrieval"])
+                except Exception as exc:
+                    raw["_media_retrieval"] = {"provider": "YANDEX_DIRECT", "provider_ad_id": raw.get("Id"), "result": "FAILED", "error": type(exc).__name__}
+                    raw["_media_archive"] = {"state": "FAILED", "storage_key": None, "file_size": None}
             ad_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(raw.get("Id")), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata={key: raw.get(key) for key in ads_report.requested_fields}, campaign_id=campaign.id)
             await _upsert_creative(db, campaign=campaign, ad_entity=ad_entity, raw=raw, fetched_at=ads_report.fetched_at or fetched_at)
         available_ads = len(ads_report.rows)

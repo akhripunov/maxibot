@@ -131,7 +131,6 @@
       await loadOverview(epoch);
       if (!isCurrentAuthTransition(epoch)) return;
       await loadQA(epoch).catch(() => {});
-      await loadStorage(epoch).catch(() => {});
       renderAuthState({enrolled: true, authenticated: true});
       return;
     }
@@ -206,33 +205,6 @@
     }
   }
 
-  const storageSize = value => value === null || value === undefined ? 'UNKNOWN' : `${(Number(value) / 1024 / 1024).toFixed(1)} MB`;
-  function renderStorage(data = {}) {
-    const status = String(data.status || 'UNKNOWN').toUpperCase();
-    const statusNode = document.querySelector('#storage-status');
-    if (!statusNode) return;
-    statusNode.textContent = status;
-    statusNode.className = `state-pill ${status === 'OK' ? 'ready' : 'unknown'}`;
-    const disk = data.disk || {};
-    const values = [
-      `${storageSize(disk.used)} / ${storageSize(disk.total)}`,
-      storageSize(data.containerd), storageSize(data.releases), storageSize(data.postgres),
-      storageSize(data.ads), storageSize(data.logs), storageSize(data.backups), storageSize(data.growth_7d),
-    ];
-    document.querySelectorAll('#storage-metrics strong').forEach((node, index) => { node.textContent = values[index] || 'UNKNOWN'; });
-    document.querySelector('#storage-reason').textContent = data.reason || 'Рост и размеры получены из последнего host snapshot.';
-  }
-  async function loadStorage(epoch = null) {
-    try {
-      const data = await getJson('/storage-health');
-      if (epoch !== null && !isCurrentAuthTransition(epoch)) return;
-      renderStorage(data);
-    } catch (error) {
-      if (epoch === null || isCurrentAuthTransition(epoch)) renderStorage();
-      throw error;
-    }
-  }
-
   async function loadOverview(epoch = null) {
     try {
       const [overview, week, today, usage, health] = await Promise.all([
@@ -267,7 +239,6 @@
       pill.textContent = health.api?.status === 'ready' && health.database?.status === 'ready' ? 'READY' : 'UNKNOWN';
       pill.className = `state-pill ${pill.textContent === 'READY' ? 'ready' : 'unknown'}`;
       lastUpdated.textContent = `Обновлено ${new Date().toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'})}`;
-      await loadStorage(epoch).catch(() => {});
     } catch (error) {
       if (epoch === null || isCurrentAuthTransition(epoch)) resetLockedView();
       throw error;
@@ -316,7 +287,7 @@
     try { renderJourney(await getJson(`/journey?${params}`)); } catch (error) { if (!String(error.message).startsWith('AUTH_')) { document.querySelector('#journey-normalized').innerHTML = `<div class="journey-empty">Ошибка загрузки данных: ${journeyText(error.message)}</div>`; document.querySelector('#journey-objects').innerHTML = '<div class="journey-empty">Данные не загружены</div>'; } }
   }
 
-  if (globalThis.__MAXIBOT_ADMIN_TEST__) Object.assign(globalThis.__MAXIBOT_ADMIN_TEST__, {resetLockedView, renderAuthState, renderQA, renderStorage, loadStorage, loadQA, checkAuth, loadOverview, logout, passkeyLogin});
+  if (globalThis.__MAXIBOT_ADMIN_TEST__) Object.assign(globalThis.__MAXIBOT_ADMIN_TEST__, {resetLockedView, renderAuthState, renderQA, loadQA, checkAuth, loadOverview, logout, passkeyLogin});
 
   document.querySelectorAll('.side-link').forEach(link => link.addEventListener('click', () => {
     document.querySelectorAll('.side-link').forEach(item => item.classList.toggle('active', item === link));

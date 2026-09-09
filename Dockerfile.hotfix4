@@ -1,3 +1,0 @@
-FROM maxibot-vps-api:20260816-finalfix
-COPY app/main.py /app/app/main.py
-COPY app/traffic/deep_link.py /app/app/traffic/deep_link.py

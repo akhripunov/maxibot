@@ -19,7 +19,8 @@ from app.core.config import settings
 from app.daily_reports import send_due_daily_reports
 from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMaxClient, MaxApiError
 from app.security_tokens import decrypt_token, encrypt_token
-from app.ads.service import can_access_ads, run_check, toggle_campaign_link
+from app.ads.service import can_access_ads, run_bot_check, run_check, toggle_campaign_link
+from app.ads.objectives import set_objective, disable_objective
 from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
 from app.integrations.robokassa import amount_for_months, configured as robokassa_configured
 
@@ -63,6 +64,7 @@ class MaxBotRuntime:
         self._ads_ai_event_task: asyncio.Task | None = None
         self._ads_ai_seen_events: set[tuple[str, str]] = set()
         self._broadcast_drafts: dict[str, str] = {}
+        self._ads_objective_pending: dict[str, tuple[str, str, str | None]] = {}
 
     async def stop(self):
         self._stop.set()
@@ -202,18 +204,29 @@ class MaxBotRuntime:
             if not run or run.status != status or not run.ui_admin_external_id or not run.ui_message_id:
                 logger.info("ADS_AI_UI_UPDATE_SKIPPED run_id=%s reason=missing_origin_or_state", run_id)
                 return
-            channel = await db.scalar(
-                select(Channel).join(Admin, Channel.admin_id == Admin.id).where(
-                    Channel.id == run.channel_id,
-                    Admin.external_id == run.ui_admin_external_id,
+            if run.promotion_object_type == "BOT":
+                if run.promotion_object_id != "system-maxibot":
+                    logger.warning("ADS_AI_UI_UPDATE_SKIPPED run_id=%s reason=unknown_bot_object", run_id)
+                    return
+                text, keyboard, _, media = await self.repo.render(
+                    run.ui_admin_external_id, "ads_bot:system"
                 )
-            )
-            if not channel:
-                logger.warning("ADS_AI_UI_UPDATE_SKIPPED run_id=%s reason=missing_channel", run_id)
+            elif run.promotion_object_type != "CHANNEL" or not run.channel_id:
+                logger.warning("ADS_AI_UI_UPDATE_SKIPPED run_id=%s reason=unknown_promotion_object", run_id)
                 return
-            text, keyboard, _, media = await self.repo.render(
-                run.ui_admin_external_id, f"ads:{run.channel_id}", run.channel_id
-            )
+            else:
+                channel = await db.scalar(
+                    select(Channel).join(Admin, Channel.admin_id == Admin.id).where(
+                        Channel.id == run.channel_id,
+                        Admin.external_id == run.ui_admin_external_id,
+                    )
+                )
+                if not channel:
+                    logger.warning("ADS_AI_UI_UPDATE_SKIPPED run_id=%s reason=missing_channel", run_id)
+                    return
+                text, keyboard, _, media = await self.repo.render(
+                    run.ui_admin_external_id, f"ads:{run.channel_id}", run.channel_id
+                )
         try:
             await self.client.edit_message(
                 run.ui_admin_external_id,
@@ -957,6 +970,51 @@ class MaxBotRuntime:
                     except Exception:
                         logger.exception("ADS_MANUAL_CHECK_FAILED channel_id=%s", selected_id)
                 await self._render(user_id, f"ads:{selected_id}", selected_id)
+                return
+        elif action.startswith("ads_bot_check:"):
+            bot_key = action.split(":", 1)[1]
+            if can_access_ads(str(user_id)) and bot_key == "system":
+                async with self.session_factory() as db:
+                    try:
+                        origin_message_id = update.message.external_message_id if update.message else None
+                        await run_bot_check(db, admin_external_id=str(user_id), bot_key="maxibot", ui_message_id=origin_message_id)
+                    except Exception:
+                        logger.exception("ADS_MANUAL_BOT_CHECK_FAILED bot_key=%s", bot_key)
+                await self._render(user_id, f"ads_bot:{bot_key}")
+                return
+        elif action.startswith("ads_objective:"):
+            _, object_type, object_id = action.split(":", 2)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                if object_type == "CHANNEL" and not await self.repo.channel_owned(user_id, object_id):
+                    return
+                await self._render(user_id, action)
+                return
+        elif action.startswith("ads_bot:"):
+            bot_key = action.split(":", 1)[1]
+            if can_access_ads(str(user_id)) and bot_key == "system":
+                await self._render(user_id, action)
+                return
+        elif action.startswith("ads_objective_edit:"):
+            _, object_type, object_id, campaign_scope = action.split(":", 3)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                if object_type == "CHANNEL" and not await self.repo.channel_owned(user_id, object_id):
+                    return
+                self._ads_objective_pending[str(user_id)] = (object_type, object_id, None if campaign_scope == "all" else campaign_scope)
+                await self._render(user_id, f"ads_objective_input:{object_type}:{object_id}")
+                return
+        elif action.startswith("ads_objective_disable:"):
+            _, object_type, object_id = action.split(":", 2)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                if object_type == "CHANNEL" and not await self.repo.channel_owned(user_id, object_id):
+                    return
+                async with self.session_factory() as db:
+                    await disable_objective(db, object_type=object_type, object_id=object_id)
+                    await db.commit()
+                await self._render(user_id, f"ads_objective:{object_type}:{object_id}")
+                return
+        elif action.startswith(("ads_bot_campaigns:", "ads_bot_recommendations:", "ads_bot_context:", "ads_bot_history:")):
+            if can_access_ads(str(user_id)) and action.endswith(":system"):
+                await self._render(user_id, "ads_bot:system")
                 return
         elif action.startswith("ads_status:"):
             selected_id = action.split(":", 1)[1]
@@ -1904,6 +1962,18 @@ class MaxBotRuntime:
             return
         admin_id = actor_id if await self.repo.is_admin(actor_id) else None
         if admin_id and message.text:
+            objective_pending = self._ads_objective_pending.pop(str(admin_id), None)
+            if objective_pending:
+                object_type, object_id, campaign_id = objective_pending
+                try:
+                    async with self.session_factory() as db:
+                        await set_objective(db, object_type=object_type, object_id=object_id, target_cpa=message.text.strip(), currency="RUB", campaign_id=campaign_id)
+                        await db.commit()
+                    await self._render(admin_id, f"ads_objective:{object_type}:{object_id}")
+                except ValueError:
+                    self._ads_objective_pending[str(admin_id)] = objective_pending
+                    await self._render(admin_id, f"ads_objective_input:{object_type}:{object_id}")
+                return
             custom_state, pending_bot_id = await self.repo.custom_bot_state(admin_id)
             if (custom_state or "").startswith("broadcast:") and message.text:
                 bot_id = custom_state.split(":", 1)[1]

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2
+from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2, enrich_periodic_ad_media
 from app.ads.storage_governance import run_retention
 from app.core.config import settings
 from app.db.models import (
@@ -169,15 +169,16 @@ async def collect_entity_configuration(db: AsyncSession, run: AdsCollectionRun) 
     try:
         campaigns = await provider.campaigns([int(campaign.external_id)])
         ads_report = await provider.ads([int(campaign.external_id)])
+        campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
+        for raw in _entity_config_rows(ads_report):
+            provider_entity_id = raw.get("Id")
+            if provider_entity_id in (None, ""):
+                raise ValueError("ENTITY_CONFIG_AD_ID_MISSING")
+            await enrich_periodic_ad_media(db, campaign=campaign, raw=raw, provider_client=provider.client, fetched_at=ads_report.fetched_at or datetime.now(timezone.utc))
+            ad_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(provider_entity_id), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata={key: raw.get(key) for key in ads_report.requested_fields}, campaign_id=campaign.id)
+            await _upsert_creative(db, campaign=campaign, ad_entity=ad_entity, raw=raw, fetched_at=ads_report.fetched_at or datetime.now(timezone.utc))
     finally:
         await provider.close()
-    campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
-    for raw in _entity_config_rows(ads_report):
-        provider_entity_id = raw.get("Id")
-        if provider_entity_id in (None, ""):
-            raise ValueError("ENTITY_CONFIG_AD_ID_MISSING")
-        ad_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(provider_entity_id), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata={key: raw.get(key) for key in ads_report.requested_fields}, campaign_id=campaign.id)
-        await _upsert_creative(db, campaign=campaign, ad_entity=ad_entity, raw=raw, fetched_at=ads_report.fetched_at or datetime.now(timezone.utc))
     run.status, run.completed_at = "COMPLETED", datetime.now(timezone.utc)
     run.freshness_caveat = "metadata configuration refreshed"
 

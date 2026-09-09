@@ -27,6 +27,15 @@ def test_ai_result_flow_publishes_after_commit_and_updates_saved_origin():
     assert "self.client.send_message(run.ui_admin_external_id" not in runtime
 
 
+def test_ai_result_ui_routes_bot_without_fake_channel_id_and_keeps_channel_route():
+    runtime = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    assert 'run.promotion_object_type == "BOT"' in runtime
+    assert 'run.promotion_object_id != "system-maxibot"' in runtime
+    assert 'run.ui_admin_external_id, "ads_bot:system"' in runtime
+    assert 'run.promotion_object_type != "CHANNEL" or not run.channel_id' in runtime
+    assert 'run.ui_admin_external_id, f"ads:{run.channel_id}", run.channel_id' in runtime
+
+
 def test_unified_ads_result_renderer_formats_numbers_time_confidence_and_shadow_mode():
     body = format_ads_result(
         headline="🟢 Анализ завершён",

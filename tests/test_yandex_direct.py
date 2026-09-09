@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -91,3 +93,27 @@ async def test_campaign_report_json_error_with_http_200_is_not_empty_success():
     with pytest.raises(YandexDirectAPIError):
         await client.get_campaign_report(713798021, date_from="2026-08-29", date_to="2026-08-29")
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_ads_requests_text_ad_image_hash_field():
+    requests = []
+
+    async def handler(request: httpx.Request):
+        requests.append(request)
+        return httpx.Response(200, json={"result": {"Ads": [{"Id": 1, "Type": "TEXT_AD", "TextAd": {"AdImageHash": "image-hash"}}]}})
+
+    client = YandexDirectClient("opaque", "https://direct.test", "v5")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(base_url="https://direct.test/v5", transport=httpx.MockTransport(handler))
+    ads = await client.get_ads([713798021])
+    await client.close()
+
+    assert ads[0]["TextAd"]["AdImageHash"] == "image-hash"
+    payload = json.loads(requests[0].content)
+    assert "AdImageHash" in payload["params"]["TextAdFieldNames"]
+    assert payload["params"]["ResponsiveAdFieldNames"] == ["AdImages"]
+    assert "Href" not in payload["params"]["MobileAppAdFieldNames"]
+    assert payload["params"]["MobileAppImageAdFieldNames"] == ["AdImageHash"]
+    assert "CpcVideoAdFieldNames" not in payload["params"]
+    assert "Update" not in str(payload)

@@ -5,7 +5,7 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
-CURRENT_HEAD_MIGRATION = "0077_ads_storage_lifecycle_v1"
+CURRENT_HEAD_MIGRATION = "0081_ads_bot_ai_support_v1"
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -146,7 +146,7 @@ def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0076_ads_directologist_decision_engine_v1" in result.stdout
+    assert "TARGET_DOWN_REVISION=0080_creative_storage_intelligence_v1" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():

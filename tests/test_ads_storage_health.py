@@ -45,6 +45,15 @@ def test_storage_labels_are_russian_and_zero_states_are_explicit():
     assert "Ошибки: {periodic.get('failed_runs', 0)}" in detail
 
 
+def test_storage_screen_renders_all_canonical_tables_with_bounded_metadata():
+    from pathlib import Path
+    source = Path("app/bot/menu.py").read_text()
+    detail = source[source.index('if screen == "ads_storage":'):source.index('if screen == "about":')]
+    assert 'storage["table_details"]' in detail
+    for label in ("строк", "latest", "retention", "status"):
+        assert label in detail
+
+
 def test_human_size_is_user_facing():
     assert human_size(824633720) == "786.4 МБ"
     assert human_size(23622320128) == "22.0 ГБ"

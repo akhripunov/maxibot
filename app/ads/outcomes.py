@@ -24,6 +24,57 @@ def outcome_metrics_sufficient(facts: dict | None) -> bool:
     return all(values.get(key) is not None for key in OUTCOME_METRICS)
 
 
+def _json_object(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = __import__("json").loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def evaluate_success_criteria(*, expected_impact: dict | None, delta: dict | None) -> bool | None:
+    spec = expected_impact if isinstance(expected_impact, dict) else {}
+    metric = spec.get("metric") or spec.get("metric_name")
+    direction = str(spec.get("direction") or spec.get("expected_direction") or "").lower()
+    threshold = spec.get("threshold", spec.get("min_relative_change"))
+    if not metric or direction not in {"increase", "decrease", "maintain"}:
+        return None
+    try:
+        threshold = abs(float(threshold))
+        values = (delta or {}).get(metric) or {}
+        before, after = values.get("before"), values.get("after")
+        if before is None or after is None:
+            return None
+        before, after = float(before), float(after)
+        if before == 0:
+            return None
+        relative_change = (after - before) / abs(before)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if direction == "increase":
+        return relative_change >= threshold
+    if direction == "decrease":
+        return relative_change <= -threshold
+    return abs(relative_change) <= threshold
+
+
+async def record_implementation_evidence(db: AsyncSession, outcome: AdsAiOutcome, evidence: list[dict] | dict, *, confirmed: str = "YES", execution_status: str = "IMPLEMENTED") -> None:
+    rows = evidence if isinstance(evidence, list) else [evidence]
+    if not rows or any(not isinstance(row, dict) or not row for row in rows):
+        raise ValueError("IMPLEMENTATION_EVIDENCE_REQUIRED")
+    if confirmed not in {"YES", "NO", "UNKNOWN"}:
+        raise ValueError("IMPLEMENTATION_CONFIRMATION_INVALID")
+    import json
+    outcome.implementation_confirmed = confirmed
+    outcome.implementation_evidence_json = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    outcome.execution_status = execution_status
+    outcome.evaluation_status = "READY" if confirmed == "YES" else "INCONCLUSIVE"
+    outcome.error_code = None
+    await db.commit()
+
+
 async def ensure_outcome_checkpoints(
     db: AsyncSession,
     recommendation: AdsRecommendation,
@@ -53,6 +104,7 @@ async def ensure_outcome_checkpoints(
             baseline_snapshot_id=baseline_snapshot_id,
             evaluation_status="PENDING",
             implementation_confirmed="UNKNOWN",
+            expected_impact_json=recommendation.expected_impact_json,
         ))
         created += 1
     if created:
@@ -99,16 +151,31 @@ async def mark_outcome_retryable(db: AsyncSession, outcome: AdsAiOutcome, error_
 async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, followup_snapshot_id: str, delta: dict) -> None:
     import json
     outcome.status = "COMPLETED"
+    recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
+    expected_impact = _json_object(outcome.expected_impact_json) or _json_object(recommendation.expected_impact_json if recommendation else None)
+    criteria = evaluate_success_criteria(expected_impact=expected_impact, delta=delta)
+    outcome.expected_impact_json = json.dumps(expected_impact, ensure_ascii=False) if expected_impact else outcome.expected_impact_json
+    outcome.expected_direction = str(expected_impact.get("direction") or expected_impact.get("expected_direction")) if expected_impact else outcome.expected_direction
     outcome.evaluation_status = classify_outcome(
         implementation_confirmed=outcome.implementation_confirmed,
         valid_window=True,
         sufficient_data=outcome_metrics_sufficient(delta),
-        success_criteria_met=None,
+        success_criteria_met=criteria,
     )
     outcome.followup_snapshot_id = followup_snapshot_id
     outcome.observed_delta_json = json.dumps(delta, ensure_ascii=False)
     outcome.actual_metrics_json = json.dumps(delta, ensure_ascii=False)
     outcome.confidence = "LOW" if outcome.evaluation_status == "INCONCLUSIVE" else outcome.confidence
-    outcome.reason_json = json.dumps({"reason": "Наблюдение после рекомендации не доказывает причинность; implementation evidence отсутствует."}, ensure_ascii=False)
+    outcome.reason_json = json.dumps({"reason": "Критерий проверен по явно заданной гипотезе рекомендации." if criteria is not None else "Недостаточно implementation evidence или явного критерия успеха для детерминированной оценки.", "success_criteria_met": criteria}, ensure_ascii=False)
     outcome.completed_at = datetime.now(timezone.utc)
+    if outcome.evaluation_status in {"SUCCESS", "FAIL"} and recommendation and recommendation.ai_run_id:
+        ai = await db.get(AdsAiRun, recommendation.ai_run_id)
+        try:
+            validated = json.loads(ai.validated_output_json or "{}") if ai else {}
+            context = json.loads(ai.safe_context_json or "{}") if ai else {}
+            from app.ads.llm import evidence_registry
+            from app.ads.memory import create_candidates
+            await create_candidates(db, channel_id=recommendation.channel_id, campaign_id=ai.campaign_id if ai else None, ai_run_id=ai.id if ai else recommendation.ai_run_id, snapshot_id=followup_snapshot_id, candidates=validated.get("memory_candidates") or [], known_evidence=evidence_registry(context), proven_outcome=True, object_type=recommendation.promotion_object_type or "CHANNEL", object_id=recommendation.promotion_object_id or recommendation.channel_id)
+        except (TypeError, ValueError, KeyError):
+            pass
     await db.commit()

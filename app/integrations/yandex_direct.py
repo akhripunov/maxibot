@@ -80,6 +80,20 @@ class YandexDirectClient:
             raise YandexDirectAPIError(str(details.get("Description") or details.get("error_code") or details))
         return list(data.get("result", {}).get("Campaigns") or data.get("result", {}).get("Ads") or [])
 
+    async def _request_result(self, resource: str, *, selection: dict[str, Any], fields: Iterable[str], result_keys: tuple[str, ...]) -> list[dict[str, Any]]:
+        payload = {"method": "get", "params": {"SelectionCriteria": selection, "FieldNames": list(fields)}}
+        response = await self._client.post(f"/{resource}", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("error"):
+            details = data["error"] if isinstance(data["error"], dict) else {"error": data["error"]}
+            raise YandexDirectAPIError(str(details.get("Description") or details.get("error_code") or details))
+        result = data.get("result", {})
+        for key in result_keys:
+            if isinstance(result.get(key), list):
+                return list(result[key])
+        return []
+
     async def get_campaigns(self, campaign_ids: Iterable[int] | None = None) -> list[dict[str, Any]]:
         selection = {"Ids": [int(value) for value in campaign_ids]} if campaign_ids else {}
         return await self._request(
@@ -103,10 +117,30 @@ class YandexDirectClient:
                 "ads",
                 selection={"CampaignIds": ids[start:start + 10]},
                 fields=("Id", "CampaignId", "Type", "Subtype", "State", "Status", "StatusClarification"),
-                extra_params={"TextAdFieldNames": ["Title", "Title2", "Text", "Href", "DisplayUrlPath"]},
+                extra_params={"TextAdFieldNames": ["Title", "Title2", "Text", "Href", "DisplayUrlPath", "AdImageHash", "AdImageModeration", "VideoExtension"], "TextImageAdFieldNames": ["Title", "Text", "Href", "AdImageHash"], "MobileAppAdFieldNames": ["Title", "Text", "AdImageHash", "AdImageModeration", "VideoExtension"], "MobileAppImageAdFieldNames": ["AdImageHash"], "DynamicTextAdFieldNames": ["AdImageHash"], "ResponsiveAdFieldNames": ["AdImages"]},
             ))
         batches = await asyncio.gather(*requests) if requests else []
         return [ad for batch in batches for ad in batch]
+
+    async def get_ad_images(self, image_hashes: Iterable[str]) -> list[dict[str, Any]]:
+        hashes = [str(value) for value in image_hashes if value]
+        if not hashes:
+            return []
+        return await self._request_result(
+            "adimages", selection={"AdImageHashes": hashes},
+            fields=("AdImageHash", "OriginalUrl", "PreviewUrl", "Name", "Type", "Subtype"),
+            result_keys=("AdImages",),
+        )
+
+    async def get_creatives(self, creative_ids: Iterable[int | str]) -> list[dict[str, Any]]:
+        ids = [int(value) for value in creative_ids if str(value).isdigit()]
+        if not ids:
+            return []
+        return await self._request_result(
+            "creatives", selection={"Ids": ids},
+            fields=("Id", "Type", "Name", "OriginalUrl", "PreviewUrl", "ThumbnailUrl", "VideoExtension"),
+            result_keys=("Creatives",),
+        )
 
     async def get_campaign_report(
         self,

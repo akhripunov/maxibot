@@ -763,6 +763,13 @@ class AdsPromotionCampaignLink(Base):
     bot_promotion_profile_id: Mapped[Optional[str]] = mapped_column(ForeignKey("bot_promotion_profiles.id", ondelete="CASCADE"), index=True)
     campaign_id: Mapped[str] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(24), default="ACTIVE", nullable=False, index=True)
+    # MaxiBot owner objective.  This is deliberately scoped to the object ↔
+    # campaign link; AdsCampaign.target_cpa remains provider metadata.
+    objective_type: Mapped[Optional[str]] = mapped_column(String(32))
+    target_cpa: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    currency: Mapped[Optional[str]] = mapped_column(String(8))
+    objective_status: Mapped[Optional[str]] = mapped_column(String(16))
+    objective_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (
@@ -780,6 +787,8 @@ class AdsAnalysisSnapshot(Base):
     __tablename__ = "ads_analysis_snapshots"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16), index=True)
+    promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="SET NULL"), index=True)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     period_from: Mapped[Optional[date]] = mapped_column(Date)
@@ -803,6 +812,18 @@ class AdsCreative(Base):
     display_url: Mapped[Optional[str]] = mapped_column(String(2048))
     image_ref: Mapped[Optional[str]] = mapped_column(String(2048))
     video_ref: Mapped[Optional[str]] = mapped_column(String(2048))
+    source_type: Mapped[Optional[str]] = mapped_column(String(32), index=True)
+    storage_provider: Mapped[Optional[str]] = mapped_column(String(32))
+    storage_key: Mapped[Optional[str]] = mapped_column(String(1024), index=True)
+    media_storage_state: Mapped[Optional[str]] = mapped_column(String(32), index=True)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(128))
+    file_size: Mapped[Optional[int]] = mapped_column(BigInteger)
+    width: Mapped[Optional[int]] = mapped_column(Integer)
+    height: Mapped[Optional[int]] = mapped_column(Integer)
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    ai_features_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    provider_state: Mapped[Optional[str]] = mapped_column(String(64))
     provider_metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     metadata_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -950,7 +971,9 @@ class AdsAiOutcome(Base):
 class AdsAiRun(Base):
     __tablename__ = "ads_ai_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16), index=True)
+    promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     status: Mapped[str] = mapped_column(String(24), default="NOT_RUN", nullable=False, index=True)
     provider: Mapped[Optional[str]] = mapped_column(String(64))
     model: Mapped[Optional[str]] = mapped_column(String(128))
@@ -983,7 +1006,7 @@ class AdsAiRun(Base):
 class AdsRecommendation(Base):
     __tablename__ = "ads_recommendations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     ai_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_ai_runs.id", ondelete="SET NULL"), index=True)
     status: Mapped[str] = mapped_column(String(24), default="OPEN", nullable=False, index=True)
     priority: Mapped[str] = mapped_column(String(16), default="MEDIUM", nullable=False)
@@ -1009,6 +1032,8 @@ class AdsMemory(Base):
     __tablename__ = "ads_memories"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16), index=True)
+    promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     scope: Mapped[str] = mapped_column(String(24), default="PRIVATE", nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="CANDIDATE", nullable=False, index=True)
     kind: Mapped[str] = mapped_column(String(64), default="OBSERVATION", nullable=False)
@@ -1037,7 +1062,9 @@ class AdsMemoryEvidence(Base):
 class AdsDataHealth(Base):
     __tablename__ = "ads_data_health"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
-    channel_id: Mapped[str] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
+    promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16), index=True)
+    promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     reasons_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)

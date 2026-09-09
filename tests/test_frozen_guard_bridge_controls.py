@@ -125,3 +125,38 @@ def test_0076_extra_change_blocks(tmp_path):
     }, {
         "alembic/versions/0076_ads_directologist_decision_engine_v1.py": old,
     }) != 0
+
+
+OBJECTIVE_0079 = '''"""Objective V1."""
+from alembic import op
+import sqlalchemy as sa
+revision = "0079_ads_objective_target_cpa_v1"
+down_revision = "0078_ads_bot_ai_support_v1"
+branch_labels = None
+depends_on = None
+def upgrade() -> None:
+    op.add_column("ads_promotion_campaign_links", sa.Column("objective_type", sa.String(length=32), nullable=True))
+    op.add_column("ads_promotion_campaign_links", sa.Column("target_cpa", sa.Numeric(20, 6), nullable=True))
+    op.add_column("ads_promotion_campaign_links", sa.Column("currency", sa.String(length=8), nullable=True))
+    op.add_column("ads_promotion_campaign_links", sa.Column("objective_status", sa.String(length=16), nullable=True))
+    op.add_column("ads_promotion_campaign_links", sa.Column("objective_updated_at", sa.DateTime(timezone=True), nullable=True))
+def downgrade() -> None:
+    op.drop_column("ads_promotion_campaign_links", "objective_updated_at")
+    op.drop_column("ads_promotion_campaign_links", "objective_status")
+    op.drop_column("ads_promotion_campaign_links", "currency")
+    op.drop_column("ads_promotion_campaign_links", "target_cpa")
+    op.drop_column("ads_promotion_campaign_links", "objective_type")
+'''
+
+
+def test_objective_0079_ads_only_migration_passes(tmp_path):
+    assert _case(tmp_path, {"alembic/versions/0079_ads_objective_target_cpa_v1.py": OBJECTIVE_0079}) == 0
+
+
+def test_objective_0079_extra_table_blocks(tmp_path):
+    assert _case(tmp_path, {
+        "alembic/versions/0079_ads_objective_target_cpa_v1.py": OBJECTIVE_0079.replace(
+            'op.add_column("ads_promotion_campaign_links", sa.Column("objective_type", sa.String(length=32), nullable=True))',
+            'op.add_column("ads_promotion_campaign_links", sa.Column("objective_type", sa.String(length=32), nullable=True))\n    op.add_column("traffic_visits", sa.Column("bad", sa.String(length=8), nullable=True))',
+        ),
+    }) != 0

@@ -120,7 +120,23 @@ def ads_only_shared_change(path: str) -> bool:
             "paid_dedupe", "cross_object",
         )
         ads_markers = ("AdsAccount", "AdsCampaign", "AdsEntity", "AdsCreative", "AdsObservation", "AdsCollectionRun", "AdsAnalysisSnapshot", "AdsAiOutcome", "AdsPromotionCampaignLink", "AdsAction", "AdsExperiment", "snapshot_id", "SET NULL", "evaluation_status", "implementation_confirmed", "implementation_evidence_json", "baseline_metrics_json", "expected_direction", "actual_metrics_json", "reason_json", "problem_json", "root_cause_json", "expected_impact_json", "evaluation_window_days", "promotion_object_type", "promotion_object_id")
-        return any(marker in text for marker in ads_markers) and not any(marker in text for marker in frozen_markers)
+        creative_lines = {
+            'source_type: Mapped[Optional[str]] = mapped_column(String(32), index=True)',
+            'storage_provider: Mapped[Optional[str]] = mapped_column(String(32))',
+            'storage_key: Mapped[Optional[str]] = mapped_column(String(1024), index=True)',
+            'media_storage_state: Mapped[Optional[str]] = mapped_column(String(32), index=True)',
+            'mime_type: Mapped[Optional[str]] = mapped_column(String(128))',
+            'file_size: Mapped[Optional[int]] = mapped_column(BigInteger)',
+            'width: Mapped[Optional[int]] = mapped_column(Integer)',
+            'height: Mapped[Optional[int]] = mapped_column(Integer)',
+            'duration_seconds: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))',
+            'ai_features_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)',
+            'last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)',
+            'provider_state: Mapped[Optional[str]] = mapped_column(String(64))',
+        }
+        changed_lines_set = {line.strip() for line in text.splitlines() if line.strip()}
+        creative_only = bool(changed_lines_set) and changed_lines_set <= creative_lines
+        return (any(marker in text for marker in ads_markers) or creative_only) and not any(marker in text for marker in frozen_markers)
     if path == "app/core/config.py":
         text = changed_lines(path)
         allowed_names = (
@@ -132,6 +148,15 @@ def ads_only_shared_change(path: str) -> bool:
             "ads_retention_interval_minutes",
             "ads_hourly_retention_days",
             "ads_daily_retention_days",
+            "mail_cloud_enabled",
+            "mail_cloud_webdav_url",
+            "mail_cloud_login",
+            "mail_cloud_app_password",
+            "mail_cloud_creative_root",
+            "mail_cloud_max_media_bytes",
+            "mail_cloud_timeout_seconds",
+            "mail_cloud_retry_attempts",
+            "mail_cloud_retry_backoff_seconds",
         )
         allowed_lines = []
         for line in text.splitlines():
@@ -202,8 +227,75 @@ def ads_only_shared_change(path: str) -> bool:
                 'down_revision = "0075_ads_canonical_v2"',
                 'down_revision = "0075a_alembic_version_width"',
             ]
+        if path == "alembic/versions/0079_ads_objective_target_cpa_v1.py":
+            # Exact, fail-closed exception for the Objective V1 migration.
+            # Do not turn this into a filename/prefix allowlist: every
+            # operation and every typed column must match the approved
+            # promotion-link-only schema delta.
+            normalized = re.sub(r"\s+", " ", text).strip()
+            expected_adds = (
+                'op.add_column("ads_promotion_campaign_links", sa.Column("objective_type", sa.String(length=32), nullable=True))',
+                'op.add_column("ads_promotion_campaign_links", sa.Column("target_cpa", sa.Numeric(20, 6), nullable=True))',
+                'op.add_column("ads_promotion_campaign_links", sa.Column("currency", sa.String(length=8), nullable=True))',
+                'op.add_column("ads_promotion_campaign_links", sa.Column("objective_status", sa.String(length=16), nullable=True))',
+                'op.add_column("ads_promotion_campaign_links", sa.Column("objective_updated_at", sa.DateTime(timezone=True), nullable=True))',
+            )
+            expected_drops = (
+                'op.drop_column("ads_promotion_campaign_links", "objective_updated_at")',
+                'op.drop_column("ads_promotion_campaign_links", "objective_status")',
+                'op.drop_column("ads_promotion_campaign_links", "currency")',
+                'op.drop_column("ads_promotion_campaign_links", "target_cpa")',
+                'op.drop_column("ads_promotion_campaign_links", "objective_type")',
+            )
+            operations = re.findall(r"op\.([a-z_]+)\(", text)
+            table_names = set(re.findall(r'"(ads_[a-z0-9_]+)"', text.lower()))
+            explicit_downgrade = all(item in normalized for item in expected_drops)
+            loop_downgrade = 'for name in ("objective_updated_at", "objective_status", "currency", "target_cpa", "objective_type")' in normalized and 'op.drop_column("ads_promotion_campaign_links", name)' in normalized
+            return (
+                'revision = "0079_ads_objective_target_cpa_v1"' in text
+                and 'down_revision = "0078_ads_bot_ai_support_v1"' in text
+                and set(operations) <= {"add_column", "drop_column"}
+                and operations.count("add_column") == 5
+                and (operations.count("drop_column") == 5 and explicit_downgrade or operations.count("drop_column") == 1 and loop_downgrade)
+                and table_names == {"ads_promotion_campaign_links"}
+                and all(item in normalized for item in expected_adds)
+                and (explicit_downgrade or loop_downgrade)
+                and not any(marker in text.lower() for marker in frozen_markers)
+            )
+        if path == "alembic/versions/0080_creative_storage_intelligence_v1.py":
+            normalized = re.sub(r"\s+", " ", text).strip()
+            allowed_adds = {
+                'op.add_column("ads_creatives", sa.Column("source_type", sa.String(length=32), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("storage_provider", sa.String(length=32), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("storage_key", sa.String(length=1024), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("media_storage_state", sa.String(length=32), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("mime_type", sa.String(length=128), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("file_size", sa.BigInteger(), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("width", sa.Integer(), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("height", sa.Integer(), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("duration_seconds", sa.Numeric(20, 6), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("ai_features_json", sa.Text(), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True))',
+                'op.add_column("ads_creatives", sa.Column("provider_state", sa.String(length=64), nullable=True))',
+            }
+            operations = re.findall(r"op\.([a-z_]+)\(", text)
+            table_names = set(re.findall(r'"(ads_[a-z0-9_]+)"', text.lower()))
+            return (
+                'revision = "0080_creative_storage_intelligence_v1"' in text
+                and 'down_revision = "0079_ads_objective_target_cpa_v1"' in text
+                and table_names == {"ads_creatives"}
+                and all(item in normalized for item in allowed_adds)
+                and operations.count("add_column") == 12
+                and operations.count("create_index") == 4
+                and operations.count("drop_index") == 1
+                and operations.count("drop_column") == 1
+                and 'for name in ("ix_ads_creatives_last_seen_at", "ix_ads_creatives_media_storage_state", "ix_ads_creatives_storage_key", "ix_ads_creatives_source_type")' in normalized
+                and 'for name in ("provider_state", "last_seen_at", "ai_features_json", "duration_seconds", "height", "width", "file_size", "mime_type", "media_storage_state", "storage_key", "storage_provider", "source_type")' in normalized
+                and 'op.execute("UPDATE ads_creatives SET ai_features_json = \'{}\' WHERE ai_features_json IS NULL")' in normalized
+                and not any(marker in text.lower() for marker in frozen_markers)
+            )
         table_names = set(re.findall(r'"(ads_[a-z0-9_]+)"', text.lower()))
-        allowed_tables = {"ads_recommendations", "ads_ai_outcomes", "ads_observations", "ads_collection_runs", "ads_report_runs"}
+        allowed_tables = {"ads_analysis_snapshots", "ads_ai_runs", "ads_recommendations", "ads_ai_outcomes", "ads_memories", "ads_memory_evidence", "ads_data_health", "ads_observations", "ads_collection_runs", "ads_report_runs"}
         return bool(table_names) and table_names <= allowed_tables and not any(marker in text.lower() for marker in frozen_markers)
     return False
 

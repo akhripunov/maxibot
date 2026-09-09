@@ -10,6 +10,7 @@ from app.ads.outcomes import (
     ensure_outcome_checkpoints,
     outcome_metrics_sufficient,
     classify_outcome,
+    evaluate_success_criteria,
 )
 from app.db.models import AdsRecommendation, AdsV2Outcome
 
@@ -133,3 +134,16 @@ def test_outcome_horizon_due_offsets_are_fixed():
 def test_context_has_separate_history_sections():
     assert "PREVIOUS_RECOMMENDATIONS" in SYSTEM_PROMPT
     assert "MEASURED_OUTCOMES" in SYSTEM_PROMPT
+
+
+def test_explicit_success_criteria_are_deterministic_and_conservative():
+    spec = {"metric": "cpa_7d", "direction": "decrease", "threshold": 0.10}
+    assert evaluate_success_criteria(expected_impact=spec, delta={"cpa_7d": {"before": 100, "after": 85}}) is True
+    assert evaluate_success_criteria(expected_impact=spec, delta={"cpa_7d": {"before": 100, "after": 95}}) is False
+    assert evaluate_success_criteria(expected_impact=spec, delta={"cpa_7d": {"before": 0, "after": 0}}) is None
+    assert evaluate_success_criteria(expected_impact={}, delta={"cpa_7d": {"before": 100, "after": 50}}) is None
+
+
+def test_recommendation_only_and_insufficient_data_cannot_be_verified():
+    assert classify_outcome(implementation_confirmed="UNKNOWN", valid_window=True, sufficient_data=True, success_criteria_met=True) == "INCONCLUSIVE"
+    assert classify_outcome(implementation_confirmed="YES", valid_window=True, sufficient_data=False, success_criteria_met=True) == "INCONCLUSIVE"

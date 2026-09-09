@@ -1,19 +1,12 @@
 name: maxibot-vps
 
-x-maxibot-logging: &maxibot-logging
-  driver: json-file
-  options:
-    max-size: "50m"
-    max-file: "5"
-
 services:
   api:
-    image: maxibot-vps-api:20260813-landing1
+    image: maxibot-vps-api:9b3a0f6ce14d8503cf581a50b954d467caeb53a5
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    logging: *maxibot-logging
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     expose:
       - "8000"
@@ -23,15 +16,17 @@ services:
       timeout: 5s
       retries: 6
       start_period: 20s
-    env_file: .env
+    env_file:
+      - /opt/maxibot/.env
+      - /opt/maxibot/secrets/mail_cloud.env
     environment:
       MAX_RUN_POLLING: "false"
       MAX_UPDATES_MODE: "polling"
       TRAFFIC_BOT_ATTRIBUTION_ENABLED: "true"
       MAX_JOIN_REQUEST_SIGNAL: "true"
-      MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"
-      MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"
-      MAXIBOT_COMMIT_SHA: "${MAXIBOT_COMMIT_SHA:-UNKNOWN}"
+      MAXIBOT_RELEASE_ID: "9b3a0f6ce14d8503cf581a50b954d467caeb53a5"
+      MAXIBOT_RELEASE_MARKER: "9b3a0f6ce14d8503cf581a50b954d467caeb53a5"
+      MAXIBOT_COMMIT_SHA: "9b3a0f6ce14d8503cf581a50b954d467caeb53a5"
       ADS_AI_CONTEXT_MAX_BYTES: "75000"
       ADS_AI_EVIDENCE_MAX_ENTRIES: "120"
       ADS_AI_MAX_PLACEMENT_FACTS: "30"
@@ -42,7 +37,6 @@ services:
       ADS_COLLECTION_RAW_DEBUG_ENABLED: "false"
     volumes:
       - maxibot_uploads:/app/uploads
-      - /opt/maxibot/storage:/var/lib/maxibot/storage:ro
     depends_on:
       db:
         condition: service_healthy
@@ -57,16 +51,17 @@ services:
       - maxibot_internal
 
   worker:
-    image: maxibot-vps-api:20260813-landing1
+    image: maxibot-vps-api:9b3a0f6ce14d8503cf581a50b954d467caeb53a5
     restart: unless-stopped
-    logging: *maxibot-logging
     command: ["python", "-m", "app.poller"]
-    env_file: .env
+    env_file:
+      - /opt/maxibot/.env
+      - /opt/maxibot/secrets/mail_cloud.env
     environment:
       MAX_RUN_POLLING: "true"
-      MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"
-      MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"
-      MAXIBOT_COMMIT_SHA: "${MAXIBOT_COMMIT_SHA:-UNKNOWN}"
+      MAXIBOT_RELEASE_ID: "9b3a0f6ce14d8503cf581a50b954d467caeb53a5"
+      MAXIBOT_RELEASE_MARKER: "9b3a0f6ce14d8503cf581a50b954d467caeb53a5"
+      MAXIBOT_COMMIT_SHA: "9b3a0f6ce14d8503cf581a50b954d467caeb53a5"
       ADS_AI_CONTEXT_MAX_BYTES: "75000"
       ADS_AI_EVIDENCE_MAX_ENTRIES: "120"
       ADS_AI_MAX_PLACEMENT_FACTS: "30"
@@ -91,7 +86,6 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
-    logging: *maxibot-logging
     environment:
       POSTGRES_DB: maxibot
       POSTGRES_USER: maxibot
@@ -116,7 +110,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    logging: *maxibot-logging
     # No host port is published; only containers on maxibot_internal can
     # reach Redis. Protected mode would also reject that private Docker traffic.
     command: ["redis-server", "--appendonly", "yes", "--protected-mode", "no"]
@@ -135,8 +128,7 @@ services:
   https:
     image: caddy:2.10-alpine
     restart: unless-stopped
-    logging: *maxibot-logging
-    env_file: .env
+    env_file: /opt/maxibot/.env
     ports:
       - "80:80"
       - "443:443"

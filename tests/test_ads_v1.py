@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timezone
 
 from app.ads.facts import build_campaign_facts
 from app.ads.health import data_health, sufficiency
@@ -21,7 +22,7 @@ def test_ads_v1_is_hidden_behind_server_side_gate_and_positioned_after_direct():
 
 
 def test_fact_engine_keeps_unknown_distinct_from_zero_and_calculates_metrics():
-    facts = build_campaign_facts([{"Date": "2026-09-02", "Impressions": "100", "Clicks": "10", "Cost": "50", "Conversions": "2"}], campaign_start="2026-09-01", traffic={"visits": 10, "to_channel": 7, "new_members": 3, "EXACT": 1, "HIGH": 1})
+    facts = build_campaign_facts([{"Date": "2026-09-02", "Impressions": "100", "Clicks": "10", "Cost": "50", "Conversions": "2"}], campaign_start="2026-09-01", traffic={"visits": 10, "to_channel": 7, "new_members": 3, "EXACT": 1, "HIGH": 1}, now=datetime(2026, 9, 3, tzinfo=timezone.utc))
     assert facts.ctr_7d == 0.1
     assert facts.actual_cpa_7d == 25
     assert facts.impressions_change_3d_vs_previous_3d is None
