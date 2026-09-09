@@ -137,10 +137,6 @@ landing получает yclid/UTM
 
 - Production MAX updates читает только выделенный VPS `worker`.
 - Единственный production host для polling: `135.106.166.46`.
-- Legacy VPS `37.252.10.67` не должен запускать
-  `maxibot-vps-worker-1`; контейнер обязан оставаться остановленным с
-  restart policy `no`. После любого deploy проверять оба VPS, а не только
-  локальный Docker и новый production host.
 - VPS `api` и локальный `docker-compose` обязаны иметь
   `MAX_RUN_POLLING=false`; единственный VPS worker явно имеет `true`.
 - Нельзя запускать локальный MAXIBOT с production MAX token и polling.

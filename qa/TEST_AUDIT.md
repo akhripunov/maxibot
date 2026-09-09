@@ -55,8 +55,7 @@ included by the full `tests`/`tests/regression` commands. Sanitized owner
 evidence then verified the external MAX join/member flow and Android handoff;
 an isolated local production-like candidate deploy and rollback also passed.
 The iPhone MAX/Safari cases remain manual evidence-backed cases and were not
-replayed by this QA session. Legacy VPS verification remains operationally
-separate and must not be inferred from local staging.
+replayed by this QA session.
 
 Manual evidence, source-level assertions and local rollback are recorded
 separately; none is substituted for a different environment or live production

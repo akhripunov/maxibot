@@ -80,8 +80,7 @@ Mac
     local codex exec
 ```
 
-Legacy VPS `37.252.10.67` must not run the production MAX worker. The local
-compose API must not poll a production MAX account.
+The local compose API must not poll a production MAX account.
 
 Safety invariants:
 
@@ -317,11 +316,10 @@ from the local checkout. For every deploy verify:
 3. API `MAX_RUN_POLLING=false`;
 4. worker `MAX_RUN_POLLING=true`;
 5. exactly one production MAX poller;
-6. legacy VPS worker stopped with restart policy `no`;
-7. `/health/live` and `/health/ready`;
-8. runtime release markers;
-9. no migration or unapproved data/write action;
-10. Mac launchd installed script and environment when worker code changed.
+6. `/health/live` and `/health/ready`;
+7. runtime release markers;
+8. no migration or unapproved data/write action;
+9. Mac launchd installed script and environment when worker code changed.
 
 Common failure modes:
 
@@ -424,11 +422,10 @@ Dangerous areas:
 28. UI-only changes normally need no migration.
 29. Do not create AI runs without explicit approval.
 30. Keep Direct/VK writes and `ads_actions` at zero for shadow work.
-31. Check the legacy VPS after every production deploy.
-32. Health 200 does not prove polling or E2E.
-33. New release must have API/worker parity.
-34. No secrets, raw contexts, cookies or PII in logs/handoffs.
-35. Unit tests are necessary but do not establish production PASS alone.
+31. Health 200 does not prove polling or E2E.
+32. New release must have API/worker parity.
+33. No secrets, raw contexts, cookies or PII in logs/handoffs.
+34. Unit tests are necessary but do not establish production PASS alone.
 
 ## New Dev bootstrap
 
