@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.periodic import collection_health
 from app.core.config import settings
-from app.db.models import AdsCollectionRun, AdsCreative, AdsDailyAggregate, AdsObservation, AdsReportRun
+from app.db.models import AdsCollectionRun, AdsDailyAggregate, AdsObservation, AdsReportRun
 
 TABLES = (
     "ads_accounts", "ads_campaigns", "ads_promotion_campaign_links",
@@ -104,20 +104,6 @@ async def diagnostics(db: AsyncSession) -> dict:
     oldest_report = await db.scalar(select(func.min(AdsReportRun.fetched_at)))
     retention_run = await db.scalar(select(AdsCollectionRun).where(AdsCollectionRun.run_type == "RETENTION").order_by(AdsCollectionRun.completed_at.desc()).limit(1))
     retention_summary = json.loads(retention_run.summary_json or "{}") if retention_run and retention_run.summary_json else {}
-    creative_summary = {
-        "records": int(await db.scalar(select(func.count(AdsCreative.id))) or 0),
-        "unique_hashes": int(await db.scalar(select(func.count(func.distinct(AdsCreative.content_hash)))) or 0),
-        "media_stored": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.media_storage_state == "STORED")) or 0),
-        "media_missing": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.media_storage_state.in_(["SOURCE_UNAVAILABLE", "AVAILABLE_NOT_STORED"]))) or 0),
-        "upload_failed": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.media_storage_state == "FAILED")) or 0),
-        "media_bytes": int(await db.scalar(select(func.coalesce(func.sum(AdsCreative.file_size), 0))) or 0),
-        "images": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.creative_type.ilike("%IMAGE%"))) or 0),
-        "videos": int(await db.scalar(select(func.count(AdsCreative.id)).where(AdsCreative.creative_type.ilike("%VIDEO%"))) or 0),
-        "mail_configured": bool(settings.mail_cloud_enabled and settings.mail_cloud_webdav_url and settings.mail_cloud_login and settings.mail_cloud_app_password),
-        "storage_enabled": bool(settings.mail_cloud_enabled),
-        "last_successful_upload": None,
-        "last_error": None,
-    }
     ai_history_tables = {name: sizes[name] for name in ("ads_analysis_snapshots", "ads_ai_runs", "ads_recommendations", "ads_ai_outcomes", "ads_memories", "ads_memory_evidence")}
     ai_history_size = sum(item["total"] for item in ai_history_tables.values())
     return {
@@ -131,8 +117,7 @@ async def diagnostics(db: AsyncSession) -> dict:
         "downsampling": {"eligible": None, "protected": None, "dry_run": True},
         "oldest": {"ads_observation": oldest_observation.isoformat() if oldest_observation else None, "daily_aggregate": oldest_daily.isoformat() if oldest_daily else None, "collection_run": oldest_collection.isoformat() if oldest_collection else None, "report_run": oldest_report.isoformat() if oldest_report else None},
         "ai_history_size": ai_history_size,
-        "creatives": creative_summary,
-        "growth_basis": "Пока недостаточно истории для расчёта роста",
+        "growth_basis": "UNKNOWN: no persisted storage-size samples",
         "status": storage_status(free_percent=free_percent, stale=int(periodic.get("stale_campaigns", 0)), retry_backlog=int(periodic.get("retry_backlog", 0))),
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }

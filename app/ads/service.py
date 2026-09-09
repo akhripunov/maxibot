@@ -16,7 +16,6 @@ from app.ads.outcomes import ensure_outcome_checkpoints
 from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v2
 from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_bot_metrics, build_maxibot_metrics
-from app.ads.objectives import evaluate_objective, objective_for_link
 from app.core.config import settings
 from app.db.models import Admin, AdsAccount, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCollectionRun, AdsDataHealth, AdsMemory, AdsObservation, AdsPromotionCampaignLink, AdsRecommendation, AdsAiOutcome, BotPromotionProfile, Channel, LandingPage, TrafficProfile
 from app.integrations.yandex_direct import YandexDirectClient
@@ -114,7 +113,7 @@ async def campaigns_for_bot(db: AsyncSession, bot_promotion_profile_id: str) -> 
     return await campaigns_for_promotion_object(db, object_type="BOT", object_id=bot_promotion_profile_id)
 
 def _context(campaign: AdsCampaign | None, facts: dict[str, Any], suff: str, missing: list[str], memories: list[AdsMemory]) -> dict[str, Any]:
-    return {"context_version": 2, "CURRENT_CAMPAIGN": {"id": campaign.id, "name": campaign.name, "state": campaign.state} if campaign else None, "OBJECTIVE": facts.get("OBJECTIVE_EVALUATION", {"objective_mode": "NONE"}), "FACTS": facts, "DATA_SUFFICIENCY": suff, "RECENT_HISTORY": [], "RETRIEVED_PRIVATE_MEMORIES": [{"id": x.id, "status": x.status, "statement": x.content, "evidence_ids": json.loads(x.evidence_ids_json)} for x in memories], "MISSING_DATA": missing, "ALLOWED_RECOMMENDATION_TYPES": ["HOLD", "MONITOR", "INVESTIGATE", "TEST", "SCALE_CANDIDATE", "REDUCE_CANDIDATE", "PLACEMENT_REVIEW", "ATTRIBUTION_REVIEW", "CREATIVE_REVIEW", "TARGETING_REVIEW", "OBSERVE", "REVIEW_GOAL", "REVIEW_ATTRIBUTION", "REVIEW_CREATIVE", "REVIEW_TARGETING", "REVIEW_PLACEMENTS", "INSUFFICIENT_DATA"], "SYSTEM_CONSTRAINTS": {"direct_writes": False, "autopilot": False, "global_learning": False, "execution_allowed": False}}
+    return {"context_version": 2, "CURRENT_CAMPAIGN": {"id": campaign.id, "name": campaign.name, "state": campaign.state} if campaign else None, "FACTS": facts, "DATA_SUFFICIENCY": suff, "RECENT_HISTORY": [], "RETRIEVED_PRIVATE_MEMORIES": [{"id": x.id, "status": x.status, "statement": x.content, "evidence_ids": json.loads(x.evidence_ids_json)} for x in memories], "MISSING_DATA": missing, "ALLOWED_RECOMMENDATION_TYPES": ["HOLD", "MONITOR", "INVESTIGATE", "TEST", "SCALE_CANDIDATE", "REDUCE_CANDIDATE", "PLACEMENT_REVIEW", "ATTRIBUTION_REVIEW", "CREATIVE_REVIEW", "TARGETING_REVIEW", "OBSERVE", "REVIEW_GOAL", "REVIEW_ATTRIBUTION", "REVIEW_CREATIVE", "REVIEW_TARGETING", "REVIEW_PLACEMENTS", "INSUFFICIENT_DATA"], "SYSTEM_CONSTRAINTS": {"direct_writes": False, "autopilot": False, "global_learning": False, "execution_allowed": False}}
 
 
 async def _closed_loop_context(db: AsyncSession, *, object_type: str, object_id: str, campaign_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -169,8 +168,22 @@ async def _closed_loop_context(db: AsyncSession, *, object_type: str, object_id:
             reason = json.loads(item.reason_json or "{}").get("reason")
         except (TypeError, ValueError):
             pass
-        verified.append({"outcome_id": item.id, "horizon": item.horizon, "evaluation_status": item.evaluation_status, "implementation_confirmed": item.implementation_confirmed, "reason": reason})
-    return {"PREVIOUS_RECOMMENDATIONS": previous, "MEASURED_OUTCOMES": measured, "LEARNING_STATE": {"status": "AVAILABLE" if verified else "PENDING", "verified_outcomes": verified, "promotion_policy": "verified SUCCESS/FAIL only; no learning from INCONCLUSIVE"}}
+        verified.append({
+            "outcome_id": item.id,
+            "horizon": item.horizon,
+            "evaluation_status": item.evaluation_status,
+            "implementation_confirmed": item.implementation_confirmed,
+            "reason": reason,
+        })
+    return {
+        "PREVIOUS_RECOMMENDATIONS": previous,
+        "MEASURED_OUTCOMES": measured,
+        "LEARNING_STATE": {
+            "status": "AVAILABLE" if verified else "PENDING",
+            "verified_outcomes": verified,
+            "promotion_policy": "verified SUCCESS/FAIL only; no learning from INCONCLUSIVE",
+        },
+    }
 
 async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channel: Channel | None, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime, object_type: str = "CHANNEL", object_id: str | None = None, bot_id: str | None = None) -> AdsAiRun:
     channel_id = channel.id if channel else None
@@ -183,7 +196,6 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
         measured_outcomes=closed_loop["MEASURED_OUTCOMES"],
     )
     maxibot_metrics = await (build_maxibot_metrics(db, channel_id=channel.id, end_date=report_date_to) if channel else build_bot_metrics(db, bot_id=bot_id or object_id, end_date=report_date_to))
-    objective_at_analysis = await objective_for_link(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id)
     aligned = {**traffic, "visits": maxibot_metrics["7d"]["visits"], "EXACT": 0, "HIGH": 0, "new_members": 0}
     aligned["EXACT"] = int(maxibot_metrics["7d"]["qualified_memberships"])
     fact_set = campaign_fact_set_from_v2(dataset, campaign_start=json.loads(campaign.raw_json or "{}").get("StartDate"), traffic=aligned)
@@ -200,15 +212,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     # does not repeat the same trend object a second time.
     context_dataset = json.loads(json.dumps(dataset, ensure_ascii=False))
     context_dataset.pop("trends", None)
-    objective_evaluation = evaluate_objective(
-        objective_at_analysis,
-        cost=fact_context.get("cost_7d"),
-        confirmed_outcomes=maxibot_metrics["7d"].get("qualified_memberships", maxibot_metrics["7d"].get("qualified_outcomes", 0)),
-        # The current ADS/traffic alignment is explicitly not campaign-scoped.
-        # Never turn object-level outcomes into paid CPA without that proof.
-        attribution_coverage=1.0 if maxibot_metrics.get("campaign_specific", {}).get("supported") else 0.0,
-    )
-    facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "OBJECTIVE_AT_ANALYSIS_TIME": objective_at_analysis, "OBJECTIVE_EVALUATION": objective_evaluation, "TRENDS": dataset.get("trends", {}), "DIRECTOLOGIST": dataset.get("DIRECTOLOGIST"), "V2_ANALYSIS": context_dataset, "QUALITY_DECISION_SNAPSHOT": dataset.get("QUALITY_DECISION_SNAPSHOT")}
+    facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "TRENDS": dataset.get("trends", {}), "DIRECTOLOGIST": dataset.get("DIRECTOLOGIST"), "V2_ANALYSIS": context_dataset, "QUALITY_DECISION_SNAPSHOT": dataset.get("QUALITY_DECISION_SNAPSHOT")}
     facts.update(closed_loop)
     membership_rate = fact_set.maxibot_qualified_membership_rate
     facts["confidence_axes"] = {
@@ -278,7 +282,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                 verdict = policy(valid, suff)
                 ai.status, ai.validated_output_json, ai.policy_result_json = "COMPLETED", json.dumps(valid, ensure_ascii=False), json.dumps(verdict)
                 rec = valid["recommendation"]
-                recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps({**verdict, "objective": objective_evaluation}, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id)
+                recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(verdict), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"]}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id)
                 db.add(recommendation); await db.flush(); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
                 await create_candidates(db, channel_id=channel_id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids, object_type=object_type, object_id=object_id)
         except Exception as exc:

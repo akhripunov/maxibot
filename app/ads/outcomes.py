@@ -35,6 +35,12 @@ def _json_object(value: str | None) -> dict:
 
 
 def evaluate_success_criteria(*, expected_impact: dict | None, delta: dict | None) -> bool | None:
+    """Evaluate an explicit recommendation hypothesis against observed delta.
+
+    The evaluator is deliberately conservative: without an explicit metric,
+    direction, and threshold it cannot turn an observation into SUCCESS/FAIL.
+    ``delta`` stores each metric as ``{"before": ..., "after": ...}``.
+    """
     spec = expected_impact if isinstance(expected_impact, dict) else {}
     metric = spec.get("metric") or spec.get("metric_name")
     direction = str(spec.get("direction") or spec.get("expected_direction") or "").lower()
@@ -60,7 +66,19 @@ def evaluate_success_criteria(*, expected_impact: dict | None, delta: dict | Non
     return abs(relative_change) <= threshold
 
 
-async def record_implementation_evidence(db: AsyncSession, outcome: AdsAiOutcome, evidence: list[dict] | dict, *, confirmed: str = "YES", execution_status: str = "IMPLEMENTED") -> None:
+async def record_implementation_evidence(
+    db: AsyncSession,
+    outcome: AdsAiOutcome,
+    evidence: list[dict] | dict,
+    *,
+    confirmed: str = "YES",
+    execution_status: str = "IMPLEMENTED",
+) -> None:
+    """Record the canonical, auditable implementation checkpoint.
+
+    This is an evidence write only. It never executes or mutates an ad
+    campaign, and it intentionally requires non-empty structured evidence.
+    """
     rows = evidence if isinstance(evidence, list) else [evidence]
     if not rows or any(not isinstance(row, dict) or not row for row in rows):
         raise ValueError("IMPLEMENTATION_EVIDENCE_REQUIRED")
@@ -166,16 +184,34 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
     outcome.observed_delta_json = json.dumps(delta, ensure_ascii=False)
     outcome.actual_metrics_json = json.dumps(delta, ensure_ascii=False)
     outcome.confidence = "LOW" if outcome.evaluation_status == "INCONCLUSIVE" else outcome.confidence
-    outcome.reason_json = json.dumps({"reason": "Критерий проверен по явно заданной гипотезе рекомендации." if criteria is not None else "Недостаточно implementation evidence или явного критерия успеха для детерминированной оценки.", "success_criteria_met": criteria}, ensure_ascii=False)
+    outcome.reason_json = json.dumps({
+        "reason": "Критерий проверен по явно заданной гипотезе рекомендации." if criteria is not None else "Недостаточно implementation evidence или явного критерия успеха для детерминированной оценки.",
+        "success_criteria_met": criteria,
+    }, ensure_ascii=False)
     outcome.completed_at = datetime.now(timezone.utc)
     if outcome.evaluation_status in {"SUCCESS", "FAIL"} and recommendation and recommendation.ai_run_id:
         ai = await db.get(AdsAiRun, recommendation.ai_run_id)
         try:
             validated = json.loads(ai.validated_output_json or "{}") if ai else {}
             context = json.loads(ai.safe_context_json or "{}") if ai else {}
+            candidates = validated.get("memory_candidates") or []
             from app.ads.llm import evidence_registry
+            known_evidence = evidence_registry(context)
             from app.ads.memory import create_candidates
-            await create_candidates(db, channel_id=recommendation.channel_id, campaign_id=ai.campaign_id if ai else None, ai_run_id=ai.id if ai else recommendation.ai_run_id, snapshot_id=followup_snapshot_id, candidates=validated.get("memory_candidates") or [], known_evidence=evidence_registry(context), proven_outcome=True, object_type=recommendation.promotion_object_type or "CHANNEL", object_id=recommendation.promotion_object_id or recommendation.channel_id)
+            await create_candidates(
+                db,
+                channel_id=recommendation.channel_id,
+                campaign_id=ai.campaign_id if ai else None,
+                ai_run_id=ai.id if ai else recommendation.ai_run_id,
+                snapshot_id=followup_snapshot_id,
+                candidates=candidates,
+                known_evidence=known_evidence,
+                proven_outcome=True,
+                object_type=recommendation.promotion_object_type or "CHANNEL",
+                object_id=recommendation.promotion_object_id or recommendation.channel_id,
+            )
         except (TypeError, ValueError, KeyError):
+            # Outcome status is still durable; malformed historical AI payloads
+            # must not make collection retry forever.
             pass
     await db.commit()

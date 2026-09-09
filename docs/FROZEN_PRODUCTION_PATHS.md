@@ -34,6 +34,32 @@ fail-closed pre-review guard:
 change, and vice versa. `FAST_PATH_WHEN_UNCHANGED = YES`: untouched frozen
 paths do not require ceremonial role work or duplicate regression runs.
 
+## CHANNEL approval contract
+
+The frozen CHANNEL path remains:
+
+```text
+Direct → landing → TrafficVisit(channel_id) → token → startapp
+→ MAX Mini App → verified MAX user → MaxIdentityLink → channel
+→ join request → MANUAL APPROVE → official user_added
+→ attribution → max_subscriber → Metrika → Direct
+```
+
+`CHANNEL_AUTOAPPROVE_STATUS = DEFERRED`. Manual owner approval is the canonical
+production behavior. The only proven programmatic approval mechanism uses an
+authenticated human MAX Web/user session; a normal MAX Bot API token is not
+proven sufficient, and current onboarding does not provide that session.
+
+MaxiBot must not require a customer to authorize a personal MAX account merely
+to enable channel auto-approve. Login, SMS/QR, session or cookie upload,
+userbot authorization, and storage of a customer's human session are forbidden
+for this purpose. Historical internal-WebSocket evidence may remain in research,
+but must not be promoted into customer production behavior.
+
+Auto-approve may be reconsidered only after an official or otherwise technically
+proven no-extra-auth bot/admin or partner mechanism is validated for arbitrary
+customer channels. Competitor claims alone are insufficient.
+
 Required regression contracts remain listed in the manifest. No runtime source,
 landing flow, attribution semantics, migration, or deployment behavior is
 changed by this governance artifact.

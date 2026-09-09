@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2, enrich_periodic_ad_media
+from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2
 from app.ads.storage_governance import run_retention
 from app.core.config import settings
 from app.db.models import (
@@ -169,16 +169,15 @@ async def collect_entity_configuration(db: AsyncSession, run: AdsCollectionRun) 
     try:
         campaigns = await provider.campaigns([int(campaign.external_id)])
         ads_report = await provider.ads([int(campaign.external_id)])
-        campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
-        for raw in _entity_config_rows(ads_report):
-            provider_entity_id = raw.get("Id")
-            if provider_entity_id in (None, ""):
-                raise ValueError("ENTITY_CONFIG_AD_ID_MISSING")
-            await enrich_periodic_ad_media(db, campaign=campaign, raw=raw, provider_client=provider.client, fetched_at=ads_report.fetched_at or datetime.now(timezone.utc))
-            ad_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(provider_entity_id), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata={key: raw.get(key) for key in ads_report.requested_fields}, campaign_id=campaign.id)
-            await _upsert_creative(db, campaign=campaign, ad_entity=ad_entity, raw=raw, fetched_at=ads_report.fetched_at or datetime.now(timezone.utc))
     finally:
         await provider.close()
+    campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
+    for raw in _entity_config_rows(ads_report):
+        provider_entity_id = raw.get("Id")
+        if provider_entity_id in (None, ""):
+            raise ValueError("ENTITY_CONFIG_AD_ID_MISSING")
+        ad_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(provider_entity_id), parent_id=campaign_entity.id, display_name=None, status=raw.get("Status"), metadata={key: raw.get(key) for key in ads_report.requested_fields}, campaign_id=campaign.id)
+        await _upsert_creative(db, campaign=campaign, ad_entity=ad_entity, raw=raw, fetched_at=ads_report.fetched_at or datetime.now(timezone.utc))
     run.status, run.completed_at = "COMPLETED", datetime.now(timezone.utc)
     run.freshness_caveat = "metadata configuration refreshed"
 
@@ -222,7 +221,59 @@ async def process_periodic_collection(session_factory) -> int:
                 run.error_code = type(exc).__name__
                 run.next_retry_at = datetime.now(timezone.utc) + timedelta(minutes=min(60, 5 * run.attempts)) if run.status == "RETRYABLE_FAILED" else None
                 await db.commit()
+    await trigger_continuous_analysis(session_factory)
     return processed
+
+
+def analysis_due(*, last_analysis_at: datetime | None, latest_data_at: datetime | None, latest_outcome_at: datetime | None, objective_updated_at: datetime | None, now: datetime, cadence_minutes: int) -> bool:
+    """Bound analysis triggers to meaningful state changes and one cadence."""
+    if last_analysis_at is None:
+        return True
+    if latest_outcome_at and latest_outcome_at > last_analysis_at:
+        return True
+    if objective_updated_at and objective_updated_at > last_analysis_at:
+        return True
+    if latest_data_at and latest_data_at > last_analysis_at:
+        return (now - last_analysis_at).total_seconds() >= max(1, cadence_minutes) * 60
+    return (now - last_analysis_at).total_seconds() >= max(1, cadence_minutes) * 60
+
+
+async def trigger_continuous_analysis(session_factory, *, now: datetime | None = None) -> int:
+    """Kick the existing bounded service once per due promotion object."""
+    if not settings.ads_periodic_collection_enabled:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    from app.ads.service import run_bot_check, run_check
+    from app.db.models import AdsAiOutcome, AdsAiRun, AdsRecommendation, BotPromotionProfile
+    async with session_factory() as db:
+        links = list((await db.scalars(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.status == "ACTIVE"))).all())
+        objects = {(link.object_type, link.channel_id or link.bot_promotion_profile_id) for link in links if link.channel_id or link.bot_promotion_profile_id}
+    triggered = 0
+    for object_type, object_id in sorted(objects):
+        async with session_factory() as db:
+            run_query = select(AdsAiRun).where(
+                AdsAiRun.channel_id == object_id if object_type == "CHANNEL" else AdsAiRun.promotion_object_type == object_type,
+                *(tuple() if object_type == "CHANNEL" else (AdsAiRun.promotion_object_id == object_id,)),
+            ).order_by(AdsAiRun.created_at.desc())
+            latest = await db.scalar(run_query)
+            pending = latest and latest.status in {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
+            latest_data = await db.scalar(select(AdsCollectionRun.completed_at).join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCollectionRun.campaign_id).where(AdsPromotionCampaignLink.status == "ACTIVE", AdsPromotionCampaignLink.object_type == object_type, (AdsPromotionCampaignLink.channel_id == object_id if object_type == "CHANNEL" else AdsPromotionCampaignLink.bot_promotion_profile_id == object_id), AdsCollectionRun.status == "COMPLETED").order_by(AdsCollectionRun.completed_at.desc()).limit(1))
+            latest_outcome = await db.scalar(select(AdsAiOutcome.completed_at).join(AdsRecommendation, AdsRecommendation.id == AdsAiOutcome.recommendation_id).join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id).where(AdsAiRun.promotion_object_type == object_type, AdsAiRun.promotion_object_id == object_id, AdsAiOutcome.evaluation_status.in_(("SUCCESS", "FAIL"))).order_by(AdsAiOutcome.completed_at.desc()).limit(1)) if object_type == "BOT" else await db.scalar(select(AdsAiOutcome.completed_at).join(AdsRecommendation, AdsRecommendation.id == AdsAiOutcome.recommendation_id).join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id).where(AdsAiRun.channel_id == object_id, AdsAiOutcome.evaluation_status.in_(("SUCCESS", "FAIL"))).order_by(AdsAiOutcome.completed_at.desc()).limit(1))
+            if pending or not analysis_due(last_analysis_at=latest.created_at if latest else None, latest_data_at=latest_data, latest_outcome_at=latest_outcome, objective_updated_at=None, now=now, cadence_minutes=settings.ads_analysis_cadence_minutes):
+                continue
+            try:
+                if object_type == "CHANNEL":
+                    external_id = await db.scalar(select(Admin.external_id).join(Channel, Channel.admin_id == Admin.id).where(Channel.id == object_id))
+                    if external_id:
+                        await run_check(db, admin_external_id=str(external_id), channel_id=object_id)
+                else:
+                    profile = await db.get(BotPromotionProfile, object_id)
+                    if profile:
+                        await run_bot_check(db, admin_external_id=str(settings.maxibot_owner_user_id), bot_key=profile.bot_key)
+                triggered += 1
+            except Exception:
+                logger.exception("ADS_CONTINUOUS_ANALYSIS_FAILED object_type=%s object_id=%s", object_type, object_id)
+    return triggered
 
 
 async def collection_health(db: AsyncSession, *, now: datetime | None = None) -> dict[str, object]:

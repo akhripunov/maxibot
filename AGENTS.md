@@ -23,6 +23,30 @@
 утверждает ограничения и выдаёт dev единое ТЗ. Архитектор не считает задачу
 готовой по наличию кода — требуется проверяемый handoff.
 
+## Правило интерпретации Architect Sol → Architect Codex
+
+Architect Sol определяет WHAT: product intent, business/system semantics,
+invariants, acceptance criteria, forbidden changes и required evidence.
+Architect Codex обязан до реализации сверить каждую задачу Sol с реальным
+репозиторием, runtime, миграциями, конфигурацией и существующими абстракциями.
+
+Architect Codex может менять HOW: точные файлы, модули, services/classes,
+декомпозицию, порядок реализации, миграции, specialist assignment и deployment
+mechanics. Но он не может молча менять WHAT: product behavior, business или
+attribution semantics, conversion definitions, security invariants,
+OWNER-only rules и frozen production-path behavior.
+
+Упомянутые Sol имена файлов, модулей или классов не являются обязательными
+targets, если Sol явно не отметил их как exact required targets. Нельзя создавать
+новую абстракцию только ради соответствия формулировке, если существующая
+абстракция репозитория уже реализует требуемую семантику.
+
+Если реальный репозиторий требует изменения WHAT или конфликтует с product/system
+semantics задачи, необходимо вернуть `ARCHITECTURE_BLOCKER` с evidence репозитория,
+точным конфликтом и безопасными альтернативами. Нельзя угадывать или молча
+переинтерпретировать требования. `UNKNOWN`, `UNVERIFIED` и `NOT_RUN` не равны
+`PASS`.
+
 ## Dev
 
 Dev изучает текущий код, реализует утверждённое ТЗ, не меняет согласованную
@@ -87,6 +111,30 @@ landing получает yclid/UTM
 канала ручное одобрение владельцем остаётся обязательным, пока отдельно не
 доказан production auto-approve.
 
+## Политика автоматического одобрения CHANNEL
+
+`CHANNEL_AUTOAPPROVE = DEFERRED`.
+`NO_EXTRA_CLIENT_MAX_AUTH_FOR_AUTOAPPROVE = YES`.
+
+Текущий доказанный программный механизм одобрения channel join request требует
+аутентифицированной пользовательской MAX Web-сессии, связанной с человеческим
+аккаунтом. Обычный MAX Bot API token не признан достаточным, а onboarding MaxiBot
+не предоставляет такую сессию.
+
+MaxiBot не должен требовать от клиента отдельную авторизацию личного MAX-аккаунта
+для включения auto-approve. Запрещены login/SMS/QR, передача или загрузка
+user-session/cookie, userbot authorization и хранение человеческой MAX-сессии для
+этой цели. Внутренний MAX WebSocket остаётся исследовательским evidence и не
+может быть превращён в customer production auto-approve.
+
+`CHANNEL_AUTOAPPROVE_REQUIRING_EXTRA_CLIENT_AUTH = FORBIDDEN`.
+`AUTOAPPROVE_IMPLEMENTATION = BLOCKED_BY_PRODUCT_POLICY`.
+Ручное одобрение владельцем остаётся каноническим production-поведением.
+Будущая реализация может быть пересмотрена только после доказательства
+официального no-extra-auth bot/admin или partner API для произвольных клиентских
+каналов. При отсутствии такого доказательства ARCHITECT CODEX обязан fail-close:
+`PRODUCT_POLICY_BLOCKER = CHANNEL_AUTOAPPROVE_REQUIRES_UNAPPROVED_EXTRA_CLIENT_AUTH`.
+
 Пользователь на landing ничего не нажимает. Любая кнопка на landing,
 требующая действия для перехода, считается нарушением утверждённого UX.
 
@@ -116,6 +164,46 @@ landing получает yclid/UTM
 
 ## Production deployment invariants
 
+## Action classes and approval friction policy
+
+The following action classes govern execution scope:
+
+- `CLASS_0_READ_ONLY`: repository/runtime inspection, reports, logs, and
+  read-only production queries. No OWNER confirmation is required.
+- `CLASS_1_DEVELOPMENT_ISOLATED_QA`: approved-scope source edits, tests, Git
+  commits/exact-SHA creation, frozen-path guard execution, and disposable
+  local/QA infrastructure or databases. ARCHITECT CODEX may perform these
+  automatically after the task scope is accepted. They MUST NOT touch
+  production data.
+- `CLASS_2_NORMAL_PRODUCTION_RELEASE`: normal low-risk releases under the
+  existing FAST_PATH and risk-based QA policy.
+- `CLASS_3_HIGH_RISK_PRODUCTION_CHANGE`: attribution, paid conversion,
+  payments, security, destructive/data-transforming migrations, or frozen
+  BOT/CHANNEL behavior. It requires one OWNER approval at the final immutable
+  SHA release boundary, after implementation, QA, migration validation, and
+  guard evidence are complete.
+- `CLASS_4_PAID_ADVERTISING_ACTION`: campaign, budget, bid, strategy,
+  targeting, creative, or live-goal changes. These always require separate
+  direct OWNER instruction for the exact advertising action.
+
+Within an accepted task scope, do not request repeated OWNER confirmations for
+CLASS 1 commit creation, exact-SHA QA, frozen guard execution, disposable QA
+PostgreSQL/Docker, migrations, or processor tests. Frozen-path guard execution
+itself is preauthorized; changing frozen behavior still requires the applicable
+final OWNER approval. If a SHA changes after CLASS 3 approval, obtain approval
+for the new SHA. Before reporting `BLOCKED`, classify the blocker as
+`PRODUCT_DECISION`, `PRODUCTION_PERMISSION`, `PAID_AD_PERMISSION`,
+`ENVIRONMENT_LIMITATION`, `REAL_TEST_FAILURE`, or `EXTERNAL_DEPENDENCY`.
+
+- `NEXT_ARCHITECTURE_TASK = MAXIBOT_INTO_GENERIC_BOT_DOMAIN`: record only;
+  do not implement as part of unrelated tasks. The target model keeps CHANNELS
+  and BOTS separate, makes MaxiBot one generic BOT entity, and converges all
+  BOT promotion UI/template and attribution/conversion semantics without
+  changing the current MaxiBot landing/handoff/start/conversion flow. The
+  future BOT promotion UI template must be a single source of truth for MaxiBot
+  and customer bots, with the canonical buttons «Яндекс.Директ», «Аналитика»,
+  and «Назад»; button changes apply to all BOT entities automatically.
+
 - Release owner: `ARCHITECT CODEX`. Advertising campaign control is
   `OWNER_ONLY`; deploy tooling must not start, pause, resume, or mutate Direct,
   VK, budget, bids, strategy, targeting, or creatives.
@@ -128,19 +216,37 @@ landing получает yclid/UTM
   is inspected and matches the canonical VPS.
 - Do not improvise `docker build/save/load` deployment flows. Use the
   repository's canonical Compose/runbook and rollback snapshot.
-- The deployment sequence is: exact-SHA QA GO → SYSADMIN preflight and
-  rollback snapshot → canonical amd64 build and platform/source guard → image
-  replacement → SYSADMIN postdeploy health/polling/error/parity checks →
-  channel regression → ARCHITECT CODEX final verdict.
+- `SYSADMIN_MANDATORY_RELEASE_GATE = NO`.
+- `SYSADMIN_DEFAULT_PARTICIPATION = NO`: SYSADMIN is optional and read-only by
+  default. It participates only for an actual infrastructure/runtime anomaly,
+  host/container/network/storage/platform topology change, an explicit OWNER
+  request for an independent infrastructure audit, or when ARCHITECT CODEX
+  determines infrastructure diagnosis is materially required. A production
+  deploy alone does not invoke SYSADMIN.
+- Normal deployment is allowed only after `RELEASE_READY = YES`, with exact-SHA
+  QA GO where applicable, a passing frozen-path guard where applicable,
+  canonical amd64/platform parity, rollback readiness, and API/worker health,
+  polling, and parity checks. If an infrastructure anomaly appears, STOP and
+  route read-only diagnosis to SYSADMIN.
+- `SYSADMIN_DEFAULT_MODE = READ_ONLY`.
+- `SYSADMIN_SAFE_DOCKER_MAINTENANCE = ALLOWED` is the narrow exception for the
+  repository's fail-closed Docker maintenance scripts on the local Mac and
+  production VPS `135.106.166.46`. It permits only explicitly enumerated
+  cleanup of dangling images, unused builder cache, unreferenced old images,
+  and eligible stopped non-production containers. It never permits volume,
+  database, upload, backup, secret, source, active-container, active-image,
+  protected-rollback, deployment, application-config, or advertising changes.
+  Unknown ownership or unresolved current/rollback image state is skipped and
+  reported as `MAINTENANCE_BLOCKER`; `docker system prune -a --volumes` is
+  forbidden. Scheduled runs must use the repository scripts in dry-run mode
+  for review and execute mode only after their guards pass.
 
 ## Эксплуатационное правило: MAX updates читаются в одном месте
 
 - Production MAX updates читает только выделенный VPS `worker`.
 - Единственный production host для polling: `135.106.166.46`.
-- Legacy VPS `37.252.10.67` не должен запускать
-  `maxibot-vps-worker-1`; контейнер обязан оставаться остановленным с
-  restart policy `no`. После любого deploy проверять оба VPS, а не только
-  локальный Docker и новый production host.
+- `LEGACY_VPS_RETIRED`: старый VPS выведен из эксплуатации и не участвует
+  в проверках, polling или deployment. Проверять только production host.
 - VPS `api` и локальный `docker-compose` обязаны иметь
   `MAX_RUN_POLLING=false`; единственный VPS worker явно имеет `true`.
 - Нельзя запускать локальный MAXIBOT с production MAX token и polling.
@@ -202,7 +308,7 @@ mobile landing
   техническое решение и после handoff проводит integration review.
 - `DEV` отвечает за backend/bot/DB/API/workers, `WEBDEV` — за сайт и frontend,
   `ДИРЕКТОЛОГ` — consultative по Direct/Metrika/attribution, `QA` — независимый
-  release gate, `SYSADMIN` — инфраструктурный pre/post-deploy gate.
+  release gate, `SYSADMIN` — optional read-only infrastructure validator.
   Specialist roles не принимают финальные архитектурные решения.
 - `Ads Codex Worker` — отдельный bounded runtime-контур рекламной аналитики,
   не общий development orchestrator.
@@ -223,12 +329,15 @@ ARCHITECT SOL → DEV → QA → DEV
 ```
 
 При `QA = NO_GO` QA возвращает findings напрямую DEV; DEV исправляет только
-указанные проблемы и повторно передаёт тот же workflow в QA. При `QA = GO`:
+указанные проблемы и повторно передаёт тот же workflow в QA. При `QA = GO` и отсутствии фактического infra blocker:
 
 ```text
-QA → DEV → SYSADMIN predeploy → DEV deploy → SYSADMIN postdeploy
-  → DEV final report → ARCHITECT SOL / OWNER
+QA → DEV canonical deploy/checks → DEV final report → ARCHITECT SOL / OWNER
 ```
+
+SYSADMIN добавляется только при условиях, перечисленных в
+`SYSADMIN_MANDATORY_RELEASE_GATE = NO`; его отсутствие само по себе не
+блокирует релиз.
 
 DEV не должен требовать `ARCHITECT CODEX` для routine QA handoff, получения QA
 verdict или release orchestration. Новый QA chat автоматически не создаётся;
@@ -278,3 +387,97 @@ runtime, or deployment blocker requires escalation. QA uses the risk-based
 policy; QA artifact ingest is non-blocking for otherwise-green product QA,
 while product and frozen-path failures remain fail-closed. Advertising
 campaign control is `OWNER_ONLY`.
+
+## Durable Release Flow V2 contract
+
+- Before creating any release candidate, obtain and persist the current
+  production baseline: `CURRENT_PRODUCTION_SHA`,
+  `CURRENT_PRODUCTION_DB_HEAD`, current API image/runtime SHA, current worker
+  image/runtime SHA, API/worker polling state, and current production
+  Compose/runtime state. A candidate must never be built from an assumed or
+  stale baseline.
+- A candidate with schema changes must extend `CURRENT_PRODUCTION_DB_HEAD`.
+  Prove the migration rehearsal before release approval:
+  `CURRENT_PRODUCTION_DB_HEAD → candidate target migration`, rollback to the
+  current production head, re-upgrade, and one canonical Alembic head. Never
+  downgrade, rewrite, stamp, or force production migration history.
+- `CANDIDATE_READY = YES` means the immutable product candidate passed product
+  tests, relevant E2E, schema, and frozen-path gates. `RELEASE_READY = YES`
+  additionally requires a freshly read production baseline, migration
+  compatibility rehearsal, Docker build, effective Compose rendering, exact
+  API/worker image propagation, validated backup and rollback path, production
+  access preflight, worker-sync feasibility, and no known release blocker.
+  OWNER must not be asked to deploy before `RELEASE_READY = YES`.
+- Before any production migration or runtime switch, render the effective
+  production Compose configuration and prove that the expected candidate SHA
+  is the image SHA for both API and worker. Any mismatch is a fail-closed stop
+  before migration or apply.
+- One OWNER deploy approval is bound to one exact immutable product candidate.
+  After `OWNER: «Выпускай»`, infrastructure, session, SSH, Docker, network, or
+  worker-sync blockers use `RESUME SAME RELEASE` while the product candidate
+  SHA is unchanged. Reuse completed valid stages idempotently and preserve the
+  exact candidate, migration target, image identity, backup, rollback metadata,
+  and validation state. Do not request a second approval for the same SHA.
+- If product code, migration, immutable candidate SHA, or release contents
+  materially change, this is a new candidate: repeat validation, obtain
+  `RELEASE_READY = YES`, and obtain new OWNER approval. Approval never silently
+  transfers to a different SHA.
+- Any `UNKNOWN`, `NOT_RUN`, or `UNVERIFIED` mandatory invariant is not PASS.
+  Release completion requires `PRODUCTION_SHA`, `API_READY_SHA`, and
+  `WORKER_RUNTIME_SHA` to equal the approved candidate SHA, plus
+  `API_PARITY = PASS`, `WORKER_PARITY = PASS`,
+  `CODEX_ADS_WORKER_SYNC = PASS`, `MAC_PARITY = PASS`,
+  `PRODUCTION_SMOKE = PASS`, and `ROLLBACK_READY = YES`.
+  Only then may `RELEASE_COMPLETE = YES` be reported.
+- Release tooling does not grant permission for Yandex Direct writes:
+  `DIRECT_CHANGED = NO` by default. Campaign, budget, bid, strategy,
+  targeting, creative, and placement changes require separate explicit OWNER
+  authorization.
+- Frozen-path guard remains mandatory. Approval for one shared or frozen
+  dependency is scoped only to that exact dependency and never authorizes
+  unrelated BOT, CHANNEL, or other frozen-path changes.
+- The canonical OWNER UX is:
+  `ARCHITECT CODEX: RELEASE_READY = YES` → `OWNER: «Выпускай»` →
+  automatic release/resume until `RELEASE_COMPLETE = YES` or an exact external
+  blocker that cannot be resolved automatically. OWNER should not manually
+  shuttle SHAs, image tags, migration, SSH, rollback, or worker-sync commands
+  unless automated execution is genuinely impossible because of an external
+  environment restriction.
+
+## Canonical production release tooling
+
+- `PRODUCTION_RELEASE_ENTRYPOINT = scripts/release_prod.sh` is the only
+  canonical production release entrypoint.
+- `PRODUCTION_RELEASE_BYPASS = FORBIDDEN` unless OWNER explicitly authorizes
+  release-tooling work.
+- `MIGRATION_BEFORE_RUNTIME_SWITCH_READY = FORBIDDEN`.
+- `AD_HOC_ENV_WIRING_DURING_PRODUCT_RELEASE = FORBIDDEN`.
+- `AD_HOC_RELEASE_SYMLINKS = FORBIDDEN`.
+- The sole production secret source is `/opt/maxibot/.env`; release archives
+  must not contain secret copies.
+- High-risk releases require `scripts/release_prod.sh <FULL_SHA> --dry-run`
+  before `--apply`.
+- The release gate must prove exact SHA provenance, immutable release layout,
+  canonical `linux/amd64` image, Compose resolution, rollback metadata, and
+  runtime-switch readiness before it permits a production migration.
+
+## AI Promotion continuous object control
+
+- `AI Promotion` is one continuous object-level control screen for each
+  CHANNEL or BOT, not separate primary screens for checking, recommendations,
+  results, or scaling. Its stage is derived from the canonical Closed-Loop
+  state.
+- The screen shows one evidence-backed primary root cause and one next best
+  action. Provider metrics remain proxy signals; `max_subscriber` is CHANNEL
+  business truth and `bot_started` is BOT business truth. `UNKNOWN` is never
+  rendered as zero, and business CPA is not computable without confirmed
+  outcomes.
+- Continuous analysis considers all ACTIVE linked campaigns for the selected
+  object while preserving campaign isolation. Suspended or disabled campaigns
+  remain historical but cannot drive a new current recommendation.
+- Automatic analysis reuses the existing collection, snapshot, outcome,
+  worker, and memory pipeline. Triggers are bounded by cadence and must reuse
+  pending runs; they must not start an AI run on every collector tick.
+- Verified learning contains only conclusive Closed-Loop SUCCESS/FAIL evidence;
+  recommendations and INCONCLUSIVE outcomes never become verified memory.
+  Direct remains read-only and the main screen stays advisory.

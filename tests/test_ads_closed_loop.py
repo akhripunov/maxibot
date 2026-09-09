@@ -145,5 +145,15 @@ def test_explicit_success_criteria_are_deterministic_and_conservative():
 
 
 def test_recommendation_only_and_insufficient_data_cannot_be_verified():
-    assert classify_outcome(implementation_confirmed="UNKNOWN", valid_window=True, sufficient_data=True, success_criteria_met=True) == "INCONCLUSIVE"
-    assert classify_outcome(implementation_confirmed="YES", valid_window=True, sufficient_data=False, success_criteria_met=True) == "INCONCLUSIVE"
+    assert classify_outcome(
+        implementation_confirmed="UNKNOWN",
+        valid_window=True,
+        sufficient_data=True,
+        success_criteria_met=True,
+    ) == "INCONCLUSIVE"
+    assert classify_outcome(
+        implementation_confirmed="YES",
+        valid_window=True,
+        sufficient_data=False,
+        success_criteria_met=True,
+    ) == "INCONCLUSIVE"

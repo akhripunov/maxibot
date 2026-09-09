@@ -24,3 +24,17 @@ def test_public_site_does_not_change_tracking_host_or_routes():
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")
     assert '@app.get("/mini"' in main
     assert '@app.get("/go/{public_id}"' in main
+
+
+def test_public_site_has_mobile_layout_layer_without_replacing_reference_images():
+    page = (ROOT / "app/static/public_site.html").read_text(encoding="utf-8")
+    mobile = (ROOT / "app/static/public_site_mobile.css").read_text(encoding="utf-8")
+    assert '/static/public_site_mobile.css' in page
+    assert '@media (max-width: 700px)' in mobile
+    assert 'position: sticky' in mobile
+    assert 'min-height: 40px' in mobile
+    assert '.reference-section img' in mobile
+    assert 'reference-hero.png' in page
+    assert 'reference-how-it-works.png' in page
+    assert 'reference-pricing.png' in page
+    assert 'reference-try-free.png' in page

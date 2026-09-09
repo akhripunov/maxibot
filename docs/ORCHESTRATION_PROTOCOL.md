@@ -64,6 +64,45 @@ Before any substantial task, ARCHITECT CODEX records:
 If Git or another required fact cannot be verified, record `UNVERIFIED` or
 `BLOCKED`; never convert missing evidence into PASS.
 
+## Action classes and one-confirmation rule
+
+Execution uses four action classes:
+
+| Class | Scope | OWNER confirmation |
+|---|---|---|
+| `CLASS_0_READ_ONLY` | inspection, reports, logs, read-only production queries | not required |
+| `CLASS_1_DEVELOPMENT_ISOLATED_QA` | approved-scope edits, commits, exact SHA, tests, frozen guard, disposable QA DB/Docker and migrations | not required after scope acceptance |
+| `CLASS_2_NORMAL_PRODUCTION_RELEASE` | ordinary low-risk release under FAST_PATH and risk-based QA | existing release policy |
+| `CLASS_3_HIGH_RISK_PRODUCTION_CHANGE` | attribution, paid conversions, payments, security, destructive migrations, frozen BOT/CHANNEL behavior | once, at final immutable SHA |
+| `CLASS_4_PAID_ADVERTISING_ACTION` | campaign, budget, bid, strategy, targeting, creative, or live-goal changes | separate direct OWNER instruction |
+
+ARCHITECT CODEX may automatically perform CLASS 0 and CLASS 1 actions required
+by an accepted task. Disposable QA PostgreSQL/Docker may receive test writes,
+run upgrade/downgrade/re-upgrade, and be destroyed afterward; production data
+and production databases remain out of scope. Frozen-path guard execution is
+also preauthorized, but frozen behavior changes still require final OWNER
+approval.
+
+For CLASS 3, the normal flow is:
+
+```text
+implementation → exact commit → QA/migration evidence → frozen guard
+→ READY_FOR_OWNER_APPROVAL → one OWNER approval → production deploy
+```
+
+Do not request separate confirmations for commit, QA, disposable migration
+tests, or guard execution within the accepted scope. If the immutable SHA
+changes after approval, approval for the new SHA is required. Any blocker must
+be classified as `PRODUCT_DECISION`, `PRODUCTION_PERMISSION`,
+`PAID_AD_PERMISSION`, `ENVIRONMENT_LIMITATION`, `REAL_TEST_FAILURE`, or
+`EXTERNAL_DEPENDENCY`.
+
+The next separate architecture backlog item is
+`MAXIBOT_INTO_GENERIC_BOT_DOMAIN`: CHANNELS remain separate, BOTS remain
+separate, MaxiBot becomes one generic BOT entity, and the common BOT promotion
+template applies to MaxiBot and customer bots. This refactor is not part of
+current runtime or paid-conversion tasks.
+
 For this workspace the verified canonical roots are:
 
 - `CANONICAL_PROJECT_ROOT=/Users/akhripuniov/Downloads/Codex/MAXIBOT`
@@ -96,23 +135,31 @@ explicit Architect decision and recorded reason.
 
 ## Deployment handoff
 
-Executable release flow is fixed:
+Executable release flow is conditional:
 
 ```text
 ARCHITECT CODEX exact SHA
   → independent QA GO
-  → SYSADMIN predeploy snapshot/platform/source guard
   → canonical linux/amd64 build
-  → SYSADMIN replacement
-  → SYSADMIN postdeploy health/polling/errors/parity
+  → rollback readiness and platform/source guard
+  → DEV canonical replacement
+  → DEV health/polling/errors/parity checks
   → CHANNEL regression
   → ARCHITECT CODEX final verdict
 ```
 
-SYSADMIN may block or roll back a release but cannot approve architecture,
-replace QA, own release decisions, or operate advertising campaigns. A failed
-platform/source guard blocks replacement before any production container is
-recreated.
+`SYSADMIN_MANDATORY_RELEASE_GATE = NO` and
+`SYSADMIN_DEFAULT_PARTICIPATION = NO`. SYSADMIN is optional and read-only,
+and participates only for an actual infrastructure/runtime anomaly, topology
+change, explicit OWNER-requested independent infrastructure audit, or when
+ARCHITECT CODEX determines infrastructure diagnosis is materially required.
+A production deploy alone does not invoke SYSADMIN. If an infrastructure
+anomaly appears, deployment stops and read-only diagnosis is routed to SYSADMIN.
+
+SYSADMIN may block or roll back a release when participating, but cannot approve
+architecture, replace QA, own release decisions, or operate advertising
+campaigns. A failed platform/source guard blocks replacement before any
+production container is recreated.
 
 Do not invoke every role automatically. Specialist roles submit proposals and
 structured handoffs; ARCHITECT CODEX accepts, modifies, or rejects them.
@@ -197,12 +244,13 @@ ARCHITECT SOL → DEV → QA → DEV
 ```
 
 `QA = NO_GO` returns findings directly to DEV; DEV fixes only the reported
-issue and resubmits to QA. After `QA = GO`, the gated sequence is:
+issue and resubmits to QA. After `QA = GO`, the normal sequence is:
 
 ```text
-QA → DEV → SYSADMIN predeploy → DEV deploy → SYSADMIN postdeploy
-  → DEV final report → ARCHITECT SOL / OWNER
+QA → DEV canonical deploy/checks → DEV final report → ARCHITECT SOL / OWNER
 ```
+
+Add SYSADMIN only when the conditional infrastructure criteria above apply.
 
 DEV may route a routine candidate directly to QA and receive its verdict, while
 keeping ARCHITECT CODEX informed. QA remains independent and returns only `GO`
@@ -307,6 +355,20 @@ exists, applicable release records must include `MASTER_TASK_ID`, `PRE_TASK_SHA`
 `CANDIDATE_SHA`, and `DIFF_REVIEW`. Until a confirmed baseline commit exists,
 these values remain `UNVERIFIED`; an untracked workspace must not be reported as
 a verified Git diff.
+
+## Canonical production release entrypoint
+
+Production releases use [`scripts/release_prod.sh`](../scripts/release_prod.sh)
+and its dry-run first. The entrypoint owns exact-SHA provenance, immutable
+release preparation, absolute `/opt/maxibot/.env` handling, image/platform
+parity, migration gating, runtime switching, health checks, and rollback
+metadata. Do not reconstruct Compose, env, migration, symlink, or rollback
+commands during an application release.
+
+`MIGRATION_BEFORE_RUNTIME_SWITCH_READY = FORBIDDEN`. A migration is allowed
+only after the target image, release directory, env, Compose resolution,
+rollback metadata, and runtime switch path pass. Database rollback is not
+automatic and requires separate data-loss evidence.
 
 ## Orchestration self-test
 

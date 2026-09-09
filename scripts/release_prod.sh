@@ -8,6 +8,8 @@ usage() {
 usage: scripts/release_prod.sh FULL_SHA [--dry-run|--apply]
 
 --apply requires OWNER_APPROVED=1, PRODUCTION_HOST and PRODUCTION_SSH_KEY.
+--apply also requires CANDIDATE_READY=YES, RELEASE_READY=YES, and
+RELEASE_APPROVED_SHA equal to the exact target SHA.
 Production secrets are read only from /opt/maxibot/.env.
 TARGET_MIGRATION must name the intended target revision explicitly; the script
 never guesses a branch, even when the source currently has one head.
@@ -118,12 +120,20 @@ if [[ "$MODE" == DRY_RUN ]]; then
   say RUNTIME_SWITCH_READY NOT_EXECUTED
   say ROLLBACK_READY METADATA_REQUIRED
   say MIGRATION_ALLOWED NO
+  say CANDIDATE_READY "${CANDIDATE_READY:-UNKNOWN}"
+  say RELEASE_READY "${RELEASE_READY:-UNKNOWN}"
   say SAFE_TO_RELEASE NO
   say DRY_RUN_RESULT PASS
   exit 0
 fi
 
 [[ "${OWNER_APPROVED:-0}" == 1 ]] || die "--apply requires OWNER_APPROVED=1"
+[[ "${CANDIDATE_READY:-}" == YES ]] || die "--apply requires CANDIDATE_READY=YES"
+[[ "${RELEASE_READY:-}" == YES ]] || die "--apply requires RELEASE_READY=YES"
+[[ "${RELEASE_APPROVED_SHA:-}" == "$TARGET_SHA" ]] || die "RELEASE_APPROVED_SHA must equal target SHA"
+if [[ -n "${RESUME_RELEASE_SHA:-}" && "${RESUME_RELEASE_SHA}" != "$TARGET_SHA" ]]; then
+  die "RESUME_RELEASE_SHA must equal target SHA"
+fi
 CANONICAL_PRODUCTION_HOST=135.106.166.46
 PRODUCTION_HOST=${PRODUCTION_HOST:-${MAXIBOT_PRODUCTION_HOST:-$CANONICAL_PRODUCTION_HOST}}
 PRODUCTION_SSH_KEY=${PRODUCTION_SSH_KEY:-${MAXIBOT_PRODUCTION_SSH_KEY:-}}
@@ -143,16 +153,17 @@ if ! "${SSH[@]}" true; then
   die "SSH preflight failed for $PRODUCTION_TARGET"
 fi
 say SSH_PREFLIGHT PASS
-# Resolve the live production provenance before creating the remote release
-# context.  A candidate is compatible only when its migration parent is the
-# database head currently running in production.
+# Read and record live production provenance before creating any release
+# context. A candidate is compatible only with the current DB head.
 CURRENT_PRODUCTION_SHA=$(remote "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"commit_sha\"])'")
 CURRENT_PRODUCTION_DB_HEAD=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
 [[ "$CURRENT_PRODUCTION_SHA" =~ ^[0-9a-f]{40}$ ]] || die "current production SHA is unavailable"
 [[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
 say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"
 say CURRENT_PRODUCTION_DB_HEAD "$CURRENT_PRODUCTION_DB_HEAD"
-[[ "$TARGET_DOWN" == "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "candidate migration baseline $TARGET_DOWN is incompatible with current production DB head $CURRENT_PRODUCTION_DB_HEAD"
+if [[ "$CURRENT_PRODUCTION_DB_HEAD" != "$TARGET_DOWN" && "$CURRENT_PRODUCTION_DB_HEAD" != "$TARGET_MIGRATION" ]]; then
+  die "candidate migration baseline $TARGET_DOWN is incompatible with current production DB head $CURRENT_PRODUCTION_DB_HEAD"
+fi
 say PRODUCTION_BASELINE_COMPATIBILITY PASS
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -169,17 +180,29 @@ fi
 # Compose has one secret source; no symlinks or secret copies are created.
 python3 - "$WORK/docker-compose.vps.yml" "$TARGET_SHA" <<'PY'
 from pathlib import Path
+import re
 import sys
 p = Path(sys.argv[1])
 sha = sys.argv[2]
 s = p.read_text()
 s = s.replace("env_file: .env", "env_file: /opt/maxibot/.env")
-s = s.replace("      - .env\n", "      - /opt/maxibot/.env\n")
-s = s.replace("maxibot-vps-api:20260813-landing1", f"maxibot-vps-api:{sha}")
-s = s.replace('MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_ID: "{sha}"')
-s = s.replace('MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_MARKER: "{sha}"')
-s = s.replace('MAXIBOT_COMMIT_SHA: "${MAXIBOT_COMMIT_SHA:-UNKNOWN}"', f'MAXIBOT_COMMIT_SHA: "{sha}"')
+s, image_count = re.subn(r'(?m)^(\s*image:\s*maxibot-vps-api:)[^\s]+$', rf'\g<1>{sha}', s)
+if image_count != 2:
+    raise SystemExit(f"expected exactly two API/worker image references, found {image_count}")
+s = re.sub(r'(?m)^(\s*MAXIBOT_RELEASE_ID:\s*)"[^"]*"$', rf'\g<1>"{sha}"', s)
+s = re.sub(r'(?m)^(\s*MAXIBOT_RELEASE_MARKER:\s*)"[^"]*"$', rf'\g<1>"{sha}"', s)
+s = re.sub(r'(?m)^(\s*MAXIBOT_COMMIT_SHA:\s*)"[^"]*"$', rf'\g<1>"{sha}"', s)
 p.write_text(s)
+PY
+python3 - "$WORK/docker-compose.vps.yml" "$TARGET_SHA" <<'PY'
+from pathlib import Path
+import re
+import sys
+s = Path(sys.argv[1]).read_text()
+sha = sys.argv[2]
+images = re.findall(r"(?m)^\s*image:\s*(maxibot-vps-api:[^\s]+)$", s)
+if images != [f"maxibot-vps-api:{sha}", f"maxibot-vps-api:{sha}"]:
+    raise SystemExit(f"rendered API/worker image parity failed: {images}")
 PY
 cat > "$WORK/release-manifest.json" <<EOF
 {"release_id":"$TARGET_SHA","target_sha":"$TARGET_SHA","target_migration":"$TARGET_MIGRATION","down_revision":"$TARGET_DOWN","env_file":"/opt/maxibot/.env","image":"maxibot-vps-api:$TARGET_SHA","platform":"linux/amd64"}
@@ -191,6 +214,8 @@ REMOTE_TMP="/tmp/maxibot-release-$TARGET_SHA.tar"
 
 remote "set -eu; test -r $PRODUCTION_ROOT/.env; mkdir -p $PRODUCTION_ROOT/releases/$TARGET_SHA; tar -xf $REMOTE_TMP -C $PRODUCTION_ROOT/releases/$TARGET_SHA; find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -exec rm -rf {} +; if find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -print -quit | grep -q .; then echo 'AppleDouble or macOS metadata remains in remote release context' >&2; exit 1; fi"
 remote "rm -f $REMOTE_TMP"
+remote "set -eu; printf 'TARGET_SHA=%s\\nTARGET_MIGRATION=%s\\nSTATE=READY_TO_APPLY\\n' '$TARGET_SHA' '$TARGET_MIGRATION' > '$PRODUCTION_ROOT/releases/$TARGET_SHA/release-state.env'; test \"\$(sed -n 's/^TARGET_SHA=//p' '$PRODUCTION_ROOT/releases/$TARGET_SHA/release-state.env')\" = '$TARGET_SHA'"
+say RESUME_SAME_RELEASE PASS
 remote "set -eu; cd $PRODUCTION_ROOT; docker build --platform linux/amd64 --label org.opencontainers.image.revision=$TARGET_SHA --label org.maxibot.release.sha=$TARGET_SHA -t maxibot-vps-api:$TARGET_SHA releases/$TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64"
 PREVIOUS_CONFIG=$(remote "docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'")
 PREVIOUS_SHA=$(remote "docker inspect maxibot-vps-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p' | head -1")
@@ -228,6 +253,9 @@ say ROLLBACK_READY YES
 # This is the migration safety gate. No DB write or runtime switch precedes it.
 remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose -p maxibot-vps -f docker-compose.vps.yml config --quiet; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx api; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx worker"
 remote "set -eu; test \"\$(docker info --format '{{.Architecture}}')\" = x86_64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64"
+REMOTE_IMAGES=$(remote "cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose -p maxibot-vps -f docker-compose.vps.yml config --images")
+[[ "$(printf '%s\n' "$REMOTE_IMAGES" | grep -cFx "maxibot-vps-api:$TARGET_SHA")" == 2 ]] || die "rendered API/worker image parity failed before migration"
+say IMAGE_REFERENCE_GATE PASS
 remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic heads | grep -q '^$TARGET_MIGRATION'"
 say MIGRATION_ALLOWED YES
 

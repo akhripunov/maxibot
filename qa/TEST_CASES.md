@@ -55,6 +55,8 @@ This registry is layered over the preserved pre-existing suite listed in `qa/EXI
 | TC-YANDEX-004 | Direct API errors are explicit and read-only | integrations/yandex-direct | HIGH | REGRESSION | AUTOMATED | Mock Direct API responses | Fetch campaign and handle HTTP/body errors | Read failures are surfaced and no error is treated as empty success | tests/test_yandex_direct.py | 2026-08-28 | ACTIVE |
 | TC-OAUTH-003 | OAuth recovery retry is exact and count-guarded | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Exact recovery batch fixtures | Attempt a bounded recovery retry | Only the approved exact row can retry; duplicate/bulk retry is blocked | tests/test_oauth_recovery_exact_batch.py | 2026-08-28 | ACTIVE |
 | TC-ADS-001 | AI user-facing result removes external URL previews | ads/ai-ui | HIGH | REGRESSION | AUTOMATED | AI result with Dzen/arbitrary URL text | Render the AI result card | External URL/Markdown preview syntax is absent from user-facing text while provenance and buttons remain intact | tests/test_ads_ai_external_link_preview.py | 2026-09-03 | ACTIVE |
+| TC-ADS-002 | Closed-loop outcome classification is deterministic and memory-gated | ads/closed-loop | CRITICAL | REGRESSION | AUTOMATED | Recommendation hypothesis and measured delta fixtures | Evaluate SUCCESS/FAIL/INCONCLUSIVE and memory eligibility | Explicit criteria produce deterministic result; recommendation-only, insufficient data, or missing criteria never become verified memory | tests/test_ads_closed_loop.py, tests/test_ads_bot_ai_support.py | 2026-09-09 | ACTIVE |
+| TC-ADS-003 | Closed-loop service path persists implementation, outcome and next-run memory context | ads/closed-loop | CRITICAL | E2E | SEMI_AUTOMATED | Isolated PostgreSQL staging, provider fixtures, two consecutive runs | Create recommendation, record implementation evidence, collect outcome, run next cycle | Run N has durable implementation/outcome/evidence; only SUCCESS/FAIL memory is eligible and run N+1 receives scoped verified memory; no duplicate rows on repeat | Required service-path E2E harness — not present | — | ACTIVE |
 | TC-BOT-009 | Promotion menu keeps approved navigation contract | bot/menu | HIGH | REGRESSION | AUTOMATED | Menu source and channel | Open promotion channel menu | Expected short Yandex, landing, analytics, settings and back items are present; MAX target check is not exposed | tests/regression/test_promotion_menu_contract.py | — | ACTIVE |
 | TC-BOT-010 | Promotion summaries render safe channel and Yandex state | bot/menu | HIGH | REGRESSION | AUTOMATED | Promotion summary fixtures | Render connected and unconnected summaries | Missing values use safe placeholders and no secrets/internal flags leak | tests/test_promotion_channel_summary.py, tests/test_promotion_yandex_summary.py | — | ACTIVE |
 | TC-OAUTH-001 | Yandex OAuth state and token exchange are safe | integrations/yandex | HIGH | REGRESSION | AUTOMATED | Mock OAuth transport | Create state and exchange code | State is validated; secret is not exposed | tests/test_yandex_oauth.py | — | ACTIVE |
@@ -65,7 +67,7 @@ This registry is layered over the preserved pre-existing suite listed in `qa/EXI
 
 ## Critical regression set
 
-`TC-BOOT-001`, `TC-DB-001`, `TC-DB-002`, `TC-DB-003`, `TC-MAX-001`, `TC-MAX-004`, `TC-MAX-005`, `TC-MAX-007`, `TC-TRAFFIC-001`, `TC-TRAFFIC-002`, `TC-TRAFFIC-003`, `TC-TRAFFIC-004`, `TC-TRAFFIC-005`, `TC-TRAFFIC-006`, `TC-TRAFFIC-008`, `TC-TRAFFIC-009`, `TC-TRAFFIC-010`, `TC-TRAFFIC-013`, `TC-TRAFFIC-014`, `TC-TRAFFIC-015`, `TC-TRAFFIC-016`, `TC-TRAFFIC-019`, `TC-HEALTH-001`, `TC-HEALTH-002`, `TC-OPS-001`, `TC-EXT-001`, `TC-EXT-002`.
+`TC-BOOT-001`, `TC-DB-001`, `TC-DB-002`, `TC-DB-003`, `TC-MAX-001`, `TC-MAX-004`, `TC-MAX-005`, `TC-MAX-007`, `TC-TRAFFIC-001`, `TC-TRAFFIC-002`, `TC-TRAFFIC-003`, `TC-TRAFFIC-004`, `TC-TRAFFIC-005`, `TC-TRAFFIC-006`, `TC-TRAFFIC-008`, `TC-TRAFFIC-009`, `TC-TRAFFIC-010`, `TC-TRAFFIC-013`, `TC-TRAFFIC-014`, `TC-TRAFFIC-015`, `TC-TRAFFIC-016`, `TC-TRAFFIC-019`, `TC-HEALTH-001`, `TC-HEALTH-002`, `TC-OPS-001`, `TC-ADS-002`, `TC-ADS-003`, `TC-EXT-001`, `TC-EXT-002`.
 
 ## Current verification status
 
@@ -122,6 +124,8 @@ Statuses below reflect the latest audit evidence, not the existence of implement
 | TC-YANDEX-004 | VERIFIED_WORKING | Automated Direct API error/read-only regressions |
 | TC-OAUTH-003 | VERIFIED_WORKING | Automated exact recovery guard regression |
 | TC-ADS-001 | VERIFIED_WORKING | Targeted AI external-link sanitizer and UI preservation tests |
+| TC-ADS-002 | VERIFIED_WORKING | Targeted closed-loop unit tests: deterministic criteria and conservative classification |
+| TC-ADS-003 | UNKNOWN | No isolated two-run service-path E2E harness exists; code-level tests do not prove durable PostgreSQL run N → run N+1 memory behavior |
 | TC-OAUTH-001 | VERIFIED_WORKING | Automated mocked OAuth regression |
 | TC-OAUTH-002 | VERIFIED_WORKING | Automated Yandex callback scoping regression |
 | TC-UI-001 | WORKING_UNTESTED | Static mini app route checked; signed MAX auth flow not run |
