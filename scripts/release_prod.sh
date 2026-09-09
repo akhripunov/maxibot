@@ -186,9 +186,9 @@ sha = sys.argv[2]
 s = p.read_text()
 s = s.replace("env_file: .env", "env_file: /opt/maxibot/.env")
 s = s.replace("      - .env\n", "      - /opt/maxibot/.env\n")
-s = re.sub(r"maxibot-vps-api:[^\"\\s]+", f"maxibot-vps-api:{sha}", s)
-s = s.replace('MAXIBOT_RELEASE_ID: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_ID: "{sha}"')
-s = s.replace('MAXIBOT_RELEASE_MARKER: "ads-attribution-alignment-20260903"', f'MAXIBOT_RELEASE_MARKER: "{sha}"')
+s = re.sub(r"maxibot-vps-api:[^\s\"]+", f"maxibot-vps-api:{sha}", s)
+s = re.sub(r'MAXIBOT_RELEASE_ID: "[^"]+"', f'MAXIBOT_RELEASE_ID: "{sha}"', s)
+s = re.sub(r'MAXIBOT_RELEASE_MARKER: "[^"]+"', f'MAXIBOT_RELEASE_MARKER: "{sha}"', s)
 s = re.sub(r'MAXIBOT_COMMIT_SHA: "[^"]+"', f'MAXIBOT_COMMIT_SHA: "{sha}"', s)
 p.write_text(s)
 PY
