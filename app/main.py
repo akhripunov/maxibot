@@ -1479,6 +1479,8 @@ async def traffic_attributions(
             # to upload an offline conversion.
             "conversion_eligible": membership.attribution_status == "EXACT",
             "conversion_status": conversion.status if conversion else None,
+            "metrica_upload_status": conversion.metrica_upload_status if conversion else None,
+            "metrica_upload_checked_at": conversion.metrica_upload_checked_at.isoformat() if conversion and conversion.metrica_upload_checked_at else None,
         })
     scoped_channels = select(Channel.id).where(Channel.admin_id == admin.id)
     metric_specs = {

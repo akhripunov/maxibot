@@ -200,9 +200,19 @@ async def _send_exact_conversion(db: AsyncSession, conversion: OfflineConversion
         )
         if result.status == "sent":
             uploading = (result.response or {}).get("uploading") or {}
+            upload_id = uploading.get("id")
+            if upload_id is None:
+                # Without the asynchronous upload id the worker cannot
+                # verify PROCESSED vs LINKAGE_FAILURE. Keep the row retryable
+                # instead of presenting an unverifiable upload as success.
+                conversion.status = "pending"
+                conversion.last_error = "metrica_upload_id_missing"
+                conversion.attempts = int(conversion.attempts or 0) + 1
+                await db.commit()
+                return "pending"
             conversion.status = "uploaded"
-            conversion.metrica_upload_id = str(uploading.get("id")) if uploading.get("id") is not None else None
-            conversion.metrica_upload_status = str(uploading.get("status")) if uploading.get("status") else None
+            conversion.metrica_upload_id = str(upload_id)
+            conversion.metrica_upload_status = str(uploading.get("status") or "UPLOADED").upper()
             conversion.metrica_upload_checked_at = datetime.now(timezone.utc)
             conversion.attempts = int(conversion.attempts or 0) + 1
             conversion.last_error = None

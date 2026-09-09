@@ -65,7 +65,7 @@ CHANNEL_STAGES = (
     ("revalidation", "Повторная проверка channel_id + MaxIdentityLink", "DERIVED", "exact attributed membership"),
     ("restore", "Восстановление TrafficVisit / yclid", "EXACT", "attributed_visit_id / EXACT attribution"),
     ("subscriber", "max_subscriber", "EXACT", "TrafficMembership exact conversion"),
-    ("metrika", "Metrika", "EXACT", "OfflineConversion accepted/uploaded"),
+    ("metrika", "Metrika", "EXACT", "OfflineConversion processed by Yandex"),
     ("direct_out", "Direct", "UNKNOWN", "внешняя reporting evidence с задержкой"),
 )
 BOT_STAGES = (
@@ -98,7 +98,11 @@ def _journey_period(days: int) -> tuple[datetime, datetime]:
 def _successful_metrika(row: OfflineConversion | BotConversion) -> bool:
     if isinstance(row, BotConversion):
         return row.status == "sent" and row.last_result == "ACCEPTED"
-    return bool(row.sent_at or row.status in {"sent", "uploaded"} or row.metrica_upload_status in {"processed", "success"})
+    # Yandex returns UPLOADED before asynchronous matching.  It is not a
+    # delivered business conversion yet: the terminal success state is
+    # PROCESSED.  Treating UPLOADED as success made the owner dashboard show a
+    # false green result while Metrica still displayed "not linked".
+    return bool(row.sent_at and row.status == "sent" and str(row.metrica_upload_status or "").upper() in {"PROCESSED", "SUCCESS"})
 
 
 def _status(*, visits: int, failures: int, warnings: int) -> str:
