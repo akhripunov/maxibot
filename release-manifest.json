@@ -1,0 +1,1 @@
+{"release_id":"9b3a0f6ce14d8503cf581a50b954d467caeb53a5","target_sha":"9b3a0f6ce14d8503cf581a50b954d467caeb53a5","target_migration":"0081_ads_bot_ai_support_v1","down_revision":"0080_creative_storage_intelligence_v1","env_file":"/opt/maxibot/.env","image":"maxibot-vps-api:9b3a0f6ce14d8503cf581a50b954d467caeb53a5","platform":"linux/amd64"}

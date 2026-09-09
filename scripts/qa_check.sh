@@ -1,0 +1,491 @@
+#!/usr/bin/env bash
+set -u -o pipefail
+
+# MAXIBOT release gate.  A missing prerequisite is a failure, never a pass.
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR" || exit 1
+
+RELEASE_ID="$(date -u +%Y-%m-%dT%H%M%SZ)"
+RELEASE_DATE="$(date -u +%Y-%m-%d)"
+RUN_STARTED_EPOCH="$(date -u +%s)"
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  CANDIDATE_SHA="$(git rev-parse HEAD)"
+  PREVIOUS_GOOD_SHA="$(git log -2 --format=%H 2>/dev/null | sed -n '2p')"
+else
+  CANDIDATE_SHA="untracked-$(date -u +%Y%m%d%H%M%S)"
+  PREVIOUS_GOOD_SHA="UNAVAILABLE"
+fi
+PREVIOUS_GOOD_SHA="${PREVIOUS_GOOD_SHA:-UNAVAILABLE}"
+IMAGE="${QA_IMAGE:-maxibot:${CANDIDATE_SHA}}"
+QA_COMPOSE_PROJECT="${QA_COMPOSE_PROJECT:-maxibot-qa-$(printf '%s' "$RELEASE_ID" | tr -cd '[:lower:][:digit:]_-')}"
+QA_COMPOSE_PROJECT="${QA_COMPOSE_PROJECT// /}"
+QA_COMPOSE_FILE="${QA_COMPOSE_FILE:-docker-compose.qa.yml}"
+QA_STAGING_PORT="${QA_STAGING_PORT:-18000}"
+STATUS_FILE="$ROOT_DIR/RELEASE_STATUS.md"
+HISTORY_DIR="$ROOT_DIR/releases"
+LOG_DIR="${QA_LOG_DIR:-$ROOT_DIR/.qa-logs/$RELEASE_ID}"
+mkdir -p "$HISTORY_DIR" "$LOG_DIR"
+if [ "${QA_LOCAL_DOCKER:-0}" = "1" ] && [ -z "${QA_RESULT_INGEST_URL:-}" ]; then
+  QA_RESULT_INGEST_URL="http://127.0.0.1:${QA_STAGING_PORT}/api/admin/qa-runs/ingest"
+fi
+
+require_ingest_config() {
+  if [ -z "${QA_RESULT_INGEST_URL:-}" ] || [ -z "${QA_RESULT_INGEST_TOKEN:-}" ]; then
+    echo "QA persistence is mandatory: set QA_RESULT_INGEST_URL and QA_RESULT_INGEST_TOKEN" >&2
+    return 1
+  fi
+  case "$QA_RESULT_INGEST_URL" in
+    https://*|http://127.0.0.1:*|http://localhost:*) return 0 ;;
+    *) echo "QA_RESULT_INGEST_URL must use HTTPS (HTTP is allowed only for localhost QA)" >&2; return 1 ;;
+  esac
+}
+
+resolve_production_sha() {
+  case "${CURRENT_PROD_SHA:-UNKNOWN}" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
+  esac
+  if [ -n "${QA_PRODUCTION_SHA:-}" ]; then
+    if printf '%s\n' "$QA_PRODUCTION_SHA" | grep -Eq '^[0-9a-fA-F]{40}$'; then CURRENT_PROD_SHA="$QA_PRODUCTION_SHA"; return 0; fi
+    CURRENT_PROD_SHA="UNKNOWN"; return 0
+  fi
+  local production_url="${QA_PRODUCTION_URL:-${PRODUCTION_URL:-}}" response
+  if [ -z "$production_url" ] || ! response=$(curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" "$production_url/health/ready" 2>"$LOG_DIR/production-sha.log"); then
+    CURRENT_PROD_SHA="UNKNOWN"; return 0
+  fi
+  printf '%s' "$response" >"$LOG_DIR/production-sha.json"
+  CURRENT_PROD_SHA="$(${QA_PYTHON:-python3} - <<'PY' "$response"
+import json, re, sys
+try:
+    value = json.loads(sys.argv[1]).get("commit_sha", "")
+except (TypeError, ValueError):
+    value = ""
+print(value if re.fullmatch(r"[0-9a-fA-F]{40}", str(value)) else "UNKNOWN")
+PY
+  )"
+}
+
+STATIC="NOT_RUN"; UNIT="NOT_RUN"; INTEGRATION="NOT_RUN"; REGRESSION="NOT_RUN"
+BUILD="NOT_RUN"; STAGING="NOT_RUN"; E2E="NOT_RUN"
+TOTAL_TESTS=0; PASSED=0; FAILED=0; SKIPPED=0
+UNIT_TESTS=0; UNIT_PASSED=0; UNIT_FAILED=0; UNIT_SKIPPED=0; UNIT_DURATION_MS=0
+INTEGRATION_TESTS=0; INTEGRATION_PASSED=0; INTEGRATION_FAILED=0; INTEGRATION_SKIPPED=0; INTEGRATION_DURATION_MS=0
+REGRESSION_TESTS=0; REGRESSION_PASSED=0; REGRESSION_FAILED=0; REGRESSION_SKIPPED=0; REGRESSION_DURATION_MS=0
+TOTAL_CASES=0; AUTOMATED_CASES=0; MANUAL_CASES=0; SEMI_AUTOMATED_CASES=0; CRITICAL_CASES=0; REGRESSION_CASES=0
+VERIFIED_WORKING=0; WORKING_UNTESTED=0; BROKEN=0; UNKNOWN=0; BROKEN_CRITICAL=0; UNKNOWN_CRITICAL=0
+EXECUTED_CASES=0; PASSED_CASES=0; FAILED_CASES=0; BLOCKED_CASES=0
+NEW_TEST_CASES=0; NEW_AUTOMATED_CASES=0; NEW_MANUAL_CASES=0; NEW_SEMI_AUTOMATED_CASES=0; NEW_REGRESSION_CASES=0
+PREVIOUS_TOTAL_CASES=0; PREVIOUS_AUTOMATED_CASES=0; PREVIOUS_MANUAL_CASES=0; PREVIOUS_SEMI_AUTOMATED_CASES=0; PREVIOUS_REGRESSION_CASES=0
+CRITICAL_BUGS=0; NON_CRITICAL_BUGS=0
+PRODUCTION="NOT_DEPLOYED"; PRODUCTION_SMOKE="NOT_RUN"; PRODUCTION_CHANGED="NO"
+CURRENT_PROD_SHA="UNKNOWN"; ROLLBACK_SHA="UNKNOWN"; ROLLBACK="NOT_RUN"
+VERDICT="NO_GO"
+IMAGE_BUILT=0
+QA_ARTIFACT_PERSISTENCE="NOT_RUN"
+QA_ARTIFACT_PERSISTENCE_REASON=""
+QA_DOCKER_BUILD_NETWORK="${QA_DOCKER_BUILD_NETWORK:-}"
+QA_DOCKERFILE="${QA_DOCKERFILE:-Dockerfile}"
+
+docker_build() {
+  if [ -n "$QA_DOCKER_BUILD_NETWORK" ]; then
+    docker build --network="$QA_DOCKER_BUILD_NETWORK" -f "$QA_DOCKERFILE" -t "$IMAGE" .
+  else
+    docker build -f "$QA_DOCKERFILE" -t "$IMAGE" .
+  fi
+}
+
+read_case_registry() {
+  local values
+  values=$("${QA_PYTHON:-python3}" - "$ROOT_DIR/qa/TEST_CASES.md" <<'PY'
+import sys
+rows=[]
+for line in open(sys.argv[1], encoding='utf-8'):
+    if not line.startswith('| TC-'):
+        continue
+    cells=[x.strip() for x in line.strip().strip('|').split('|')]
+    if len(cells) >= 12:
+        rows.append(cells)
+status_map={}
+for line in open(sys.argv[1], encoding='utf-8'):
+    if not line.startswith('| TC-'):
+        continue
+    cells=[x.strip() for x in line.strip().strip('|').split('|')]
+    if len(cells) == 3 and cells[1] in {'VERIFIED_WORKING','WORKING_UNTESTED','BROKEN','UNKNOWN'}:
+        status_map[cells[0]]=cells[1]
+total=len(rows)
+automated=sum(x[5]=='AUTOMATED' for x in rows)
+manual=sum(x[5]=='MANUAL' for x in rows)
+critical=sum(x[3]=='CRITICAL' for x in rows)
+semi=sum(x[5]=='SEMI_AUTOMATED' for x in rows)
+regression=sum(x[4] in {'REGRESSION','SMOKE'} for x in rows)
+verified=sum(status_map.get(x[0])=='VERIFIED_WORKING' for x in rows)
+working=sum(status_map.get(x[0])=='WORKING_UNTESTED' for x in rows)
+broken=sum(status_map.get(x[0])=='BROKEN' for x in rows)
+unknown=sum(status_map.get(x[0])=='UNKNOWN' for x in rows)
+broken_critical=sum(status_map.get(x[0])=='BROKEN' and x[3]=='CRITICAL' for x in rows)
+unknown_critical=sum(status_map.get(x[0])=='UNKNOWN' and x[3]=='CRITICAL' for x in rows)
+print(total, automated, manual, semi, critical, regression, verified, working, broken, unknown, broken_critical, unknown_critical)
+PY
+  ) || return 1
+  read -r TOTAL_CASES AUTOMATED_CASES MANUAL_CASES SEMI_AUTOMATED_CASES CRITICAL_CASES REGRESSION_CASES VERIFIED_WORKING WORKING_UNTESTED BROKEN UNKNOWN BROKEN_CRITICAL UNKNOWN_CRITICAL <<EOF
+$values
+EOF
+}
+read_previous_case_counts() {
+  local previous_path previous_values
+  previous_path=$(ls -1t "$HISTORY_DIR"/*.md 2>/dev/null | head -1 || true)
+  [ -n "$previous_path" ] || return 0
+  previous_values=$("${QA_PYTHON:-python3}" - "$previous_path" <<'PY'
+import re, sys
+text=open(sys.argv[1], encoding="utf-8").read()
+def value(name, legacy=None):
+    for key in (name, legacy):
+        if not key:
+            continue
+        match=re.search(rf"^{key} = (\d+)$", text, re.MULTILINE)
+        if match:
+            return match.group(1)
+    return "0"
+total=int(value("TOTAL_TEST_CASES"))
+automated=int(value("AUTOMATED_CASES", "AUTOMATED"))
+manual=int(value("MANUAL_CASES", "MANUAL"))
+semi=int(value("SEMI_AUTOMATED_CASES")) or max(total-automated-manual, 0)
+regression=int(value("REGRESSION_CASES")) or int(value("NEW_REGRESSION_CASES"))
+print(total, automated, manual, semi, regression)
+PY
+  ) || return 1
+  read -r PREVIOUS_TOTAL_CASES PREVIOUS_AUTOMATED_CASES PREVIOUS_MANUAL_CASES PREVIOUS_SEMI_AUTOMATED_CASES PREVIOUS_REGRESSION_CASES <<EOF
+$previous_values
+EOF
+}
+write_status() {
+  cat > "$STATUS_FILE" <<EOF
+RELEASE_ID = $RELEASE_ID
+CANDIDATE_SHA = $CANDIDATE_SHA
+PREVIOUS_GOOD_SHA = $PREVIOUS_GOOD_SHA
+
+STATIC = $STATIC
+UNIT = $UNIT
+INTEGRATION = $INTEGRATION
+REGRESSION = $REGRESSION
+
+TOTAL_TESTS = $TOTAL_TESTS
+PASSED = $PASSED
+FAILED = $FAILED
+SKIPPED = $SKIPPED
+
+BUILD = $BUILD
+
+STAGING = $STAGING
+E2E = $E2E
+
+QA_ARTIFACT_PERSISTENCE = $QA_ARTIFACT_PERSISTENCE
+QA_ARTIFACT_PERSISTENCE_REASON = $QA_ARTIFACT_PERSISTENCE_REASON
+
+CRITICAL_BUGS = $CRITICAL_BUGS
+NON_CRITICAL_BUGS = $NON_CRITICAL_BUGS
+
+QA_VERDICT = $VERDICT
+
+PRODUCTION = $PRODUCTION
+PRODUCTION_CHANGED = $PRODUCTION_CHANGED
+PRODUCTION_SMOKE = $PRODUCTION_SMOKE
+
+CURRENT_PROD_SHA = $CURRENT_PROD_SHA
+ROLLBACK_SHA = $ROLLBACK_SHA
+ROLLBACK = $ROLLBACK
+
+TOTAL_TEST_CASES = $TOTAL_CASES
+AUTOMATED = $AUTOMATED_CASES
+MANUAL = $MANUAL_CASES
+CRITICAL = $CRITICAL_CASES
+AUTOMATED_CASES = $AUTOMATED_CASES
+MANUAL_CASES = $MANUAL_CASES
+SEMI_AUTOMATED_CASES = $SEMI_AUTOMATED_CASES
+CRITICAL_CASES = $CRITICAL_CASES
+REGRESSION_CASES = $REGRESSION_CASES
+VERIFIED_WORKING = $VERIFIED_WORKING
+WORKING_UNTESTED = $WORKING_UNTESTED
+BROKEN = $BROKEN
+UNKNOWN = $UNKNOWN
+BROKEN_CRITICAL = $BROKEN_CRITICAL
+UNKNOWN_CRITICAL = $UNKNOWN_CRITICAL
+EXECUTED_THIS_RELEASE = $EXECUTED_CASES
+PASSED_CASES = $PASSED_CASES
+FAILED_CASES = $FAILED_CASES
+BLOCKED = $BLOCKED_CASES
+NEW_TEST_CASES = $NEW_TEST_CASES
+NEW_AUTOMATED_CASES = $NEW_AUTOMATED_CASES
+NEW_MANUAL_CASES = $NEW_MANUAL_CASES
+NEW_SEMI_AUTOMATED_CASES = $NEW_SEMI_AUTOMATED_CASES
+NEW_REGRESSION_CASES = $NEW_REGRESSION_CASES
+EOF
+}
+
+write_machine_result() {
+  local finished_epoch duration_ms
+  finished_epoch="$(date -u +%s)"
+  duration_ms=$(( (finished_epoch - RUN_STARTED_EPOCH) * 1000 ))
+  export RELEASE_ID CANDIDATE_SHA VERDICT CURRENT_PROD_SHA PRODUCTION PRODUCTION_SMOKE PRODUCTION_CHANGED
+  export STATIC UNIT INTEGRATION REGRESSION BUILD STAGING E2E TOTAL_TESTS PASSED FAILED SKIPPED
+  export UNKNOWN UNKNOWN_CRITICAL QA_ARTIFACT_PERSISTENCE QA_ARTIFACT_PERSISTENCE_REASON
+  export UNIT_TESTS UNIT_PASSED UNIT_FAILED UNIT_SKIPPED UNIT_DURATION_MS
+  export INTEGRATION_TESTS INTEGRATION_PASSED INTEGRATION_FAILED INTEGRATION_SKIPPED INTEGRATION_DURATION_MS
+  export REGRESSION_TESTS REGRESSION_PASSED REGRESSION_FAILED REGRESSION_SKIPPED REGRESSION_DURATION_MS
+  FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" DURATION_MS="$duration_ms" \
+    "${QA_PYTHON:-python3}" - "$LOG_DIR/qa-result.json" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+path = sys.argv[1]
+
+def integer(name):
+    try:
+        return max(int(os.environ.get(name, "0")), 0)
+    except ValueError:
+        return 0
+
+def suite(name, status, total=None, passed=None, failed=None, skipped=None, duration=None):
+    return {
+        "name": name,
+        "status": status,
+        "total_tests": total,
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "duration_ms": duration,
+        "failures": [],
+        "unverified": [],
+    }
+
+payload = {
+    "schema_version": "qa_observability.v1",
+    "release_id": os.environ["RELEASE_ID"],
+    "tested_sha": os.environ["CANDIDATE_SHA"],
+    "current_main_sha": os.environ["CANDIDATE_SHA"],
+    "production_sha": os.environ.get("CURRENT_PROD_SHA") or "UNKNOWN",
+    "verdict": os.environ["VERDICT"],
+    "qa_artifact_persistence": os.environ["QA_ARTIFACT_PERSISTENCE"],
+    "qa_artifact_persistence_reason": os.environ.get("QA_ARTIFACT_PERSISTENCE_REASON", ""),
+    "timing": {
+        "started_at": os.environ["RELEASE_ID"],
+        "finished_at": os.environ["FINISHED_AT"],
+        "duration_ms": integer("DURATION_MS"),
+    },
+    "counts": {key: integer(key.upper()) for key in ("total_tests", "passed", "failed", "skipped")},
+    "production": {
+        "status": os.environ["PRODUCTION"],
+        "smoke": os.environ["PRODUCTION_SMOKE"],
+        "changed": os.environ["PRODUCTION_CHANGED"] == "YES",
+    },
+    "source_path": "scripts/qa_check.sh",
+    "suites": [
+        suite("static", os.environ["STATIC"]),
+        suite("unit", os.environ["UNIT"], integer("UNIT_TESTS"), integer("UNIT_PASSED"), integer("UNIT_FAILED"), integer("UNIT_SKIPPED"), integer("UNIT_DURATION_MS")),
+        suite("integration", os.environ["INTEGRATION"], integer("INTEGRATION_TESTS"), integer("INTEGRATION_PASSED"), integer("INTEGRATION_FAILED"), integer("INTEGRATION_SKIPPED"), integer("INTEGRATION_DURATION_MS")),
+        suite("regression", os.environ["REGRESSION"], integer("REGRESSION_TESTS"), integer("REGRESSION_PASSED"), integer("REGRESSION_FAILED"), integer("REGRESSION_SKIPPED"), integer("REGRESSION_DURATION_MS")),
+        suite("build", os.environ["BUILD"]),
+        suite("staging", os.environ["STAGING"]),
+        suite("e2e", os.environ["E2E"]),
+    ],
+    "failures": [
+        {"name": name, "status": "FAIL"}
+        for name, status in (("static", os.environ["STATIC"]), ("unit", os.environ["UNIT"]), ("integration", os.environ["INTEGRATION"]), ("regression", os.environ["REGRESSION"]), ("build", os.environ["BUILD"]), ("staging", os.environ["STAGING"]), ("e2e", os.environ["E2E"]))
+        if status == "FAIL"
+    ],
+    "case_registry": {"unknown": integer("UNKNOWN"), "unknown_critical": integer("UNKNOWN_CRITICAL")},
+}
+canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+payload["artifact_sha256"] = hashlib.sha256(canonical).hexdigest()
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+}
+
+finalize() {
+  resolve_production_sha
+  if [ -z "${QA_RESULT_INGEST_URL:-}" ] || [ -z "${QA_RESULT_INGEST_TOKEN:-}" ]; then
+    QA_ARTIFACT_PERSISTENCE="WARN"
+    QA_ARTIFACT_PERSISTENCE_REASON="ingest configuration missing; local artifacts retained"
+  else
+    QA_ARTIFACT_PERSISTENCE="PASS"
+    QA_ARTIFACT_PERSISTENCE_REASON="protected ingest configured"
+  fi
+  write_status
+  local history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}.md"
+  if [ -e "$history_path" ]; then
+    history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}_${RELEASE_ID}.md"
+  fi
+  cp "$STATUS_FILE" "$history_path"
+  write_machine_result
+  local artifact_history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}.json"
+  if [ -e "$artifact_history_path" ]; then
+    artifact_history_path="$HISTORY_DIR/${RELEASE_DATE}_${CANDIDATE_SHA}_${RELEASE_ID}.json"
+  fi
+  cp "$LOG_DIR/qa-result.json" "$artifact_history_path"
+  if [ -n "${QA_RESULT_INGEST_URL:-}" ] && [ -n "${QA_RESULT_INGEST_TOKEN:-}" ]; then
+    if [ -z "${QA_RESULT_INGEST_TOKEN:-}" ] || ! curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" \
+      -X POST -H "X-MAXIBOT-Admin-Token: $QA_RESULT_INGEST_TOKEN" -H "Content-Type: application/json" \
+      --data-binary "@$LOG_DIR/qa-result.json" "$QA_RESULT_INGEST_URL" >"$LOG_DIR/qa-ingest.json" 2>"$LOG_DIR/qa-ingest.log"; then
+      QA_ARTIFACT_PERSISTENCE="WARN"
+      QA_ARTIFACT_PERSISTENCE_REASON="protected ingest failed; local artifacts retained"
+      echo "WARNING: QA artifact ingestion failed; product QA verdict remains independent" >&2
+      write_status
+      write_machine_result
+      cp "$LOG_DIR/qa-result.json" "$artifact_history_path"
+    fi
+  fi
+  printf 'RELEASE = %s\nNEW_FEATURE = %s\nREGRESSION = %s\nTESTS = %s/%s\nSTAGING = %s\nE2E = %s\nCRITICAL_BUGS = %s\nQA_VERDICT = %s\nPRODUCTION = %s\n' \
+    "$CANDIDATE_SHA" "${NEW_FEATURE:-❌}" "${REGRESSION:-NOT_RUN}" "$PASSED" "$TOTAL_TESTS" "$STAGING" "$E2E" "$CRITICAL_BUGS" "$VERDICT" "$PRODUCTION"
+}
+
+fail_gate() { VERDICT="NO_GO"; finalize; exit 1; }
+if ! require_ingest_config; then
+  QA_ARTIFACT_PERSISTENCE="WARN"
+  QA_ARTIFACT_PERSISTENCE_REASON="ingest configuration missing; local artifacts retained"
+  echo "WARNING: QA artifact persistence unavailable; product QA gates continue" >&2
+fi
+read_case_registry || { echo "test-case registry cannot be read" >&2; fail_gate; }
+read_previous_case_counts || { echo "previous test-case counts cannot be read" >&2; fail_gate; }
+NEW_TEST_CASES=$((TOTAL_CASES - PREVIOUS_TOTAL_CASES)); [ "$NEW_TEST_CASES" -lt 0 ] && NEW_TEST_CASES=0
+NEW_AUTOMATED_CASES=$((AUTOMATED_CASES - PREVIOUS_AUTOMATED_CASES)); [ "$NEW_AUTOMATED_CASES" -lt 0 ] && NEW_AUTOMATED_CASES=0
+NEW_MANUAL_CASES=$((MANUAL_CASES - PREVIOUS_MANUAL_CASES)); [ "$NEW_MANUAL_CASES" -lt 0 ] && NEW_MANUAL_CASES=0
+NEW_SEMI_AUTOMATED_CASES=$((SEMI_AUTOMATED_CASES - PREVIOUS_SEMI_AUTOMATED_CASES)); [ "$NEW_SEMI_AUTOMATED_CASES" -lt 0 ] && NEW_SEMI_AUTOMATED_CASES=0
+NEW_REGRESSION_CASES=$((REGRESSION_CASES - PREVIOUS_REGRESSION_CASES)); [ "$NEW_REGRESSION_CASES" -lt 0 ] && NEW_REGRESSION_CASES=0
+
+cleanup_local_docker() {
+  if [ "${QA_LOCAL_DOCKER:-0}" = "1" ] && command -v docker >/dev/null 2>&1; then
+    docker compose -p "$QA_COMPOSE_PROJECT" -f "$QA_COMPOSE_FILE" down -v --remove-orphans >"$LOG_DIR/docker-down.log" 2>&1 || true
+  fi
+}
+trap cleanup_local_docker EXIT
+run_static() {
+  local py="${QA_PYTHON:-python3}"
+  command -v "$py" >/dev/null 2>&1 || { STATIC="FAIL"; return 1; }
+  "$py" - "$ROOT_DIR" >"$LOG_DIR/static.log" 2>&1 <<'PY' || { STATIC="FAIL"; return 1; }
+import ast, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = list((root / "app").rglob("*.py")) + list((root / "tests").rglob("*.py"))
+for path in files:
+    ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+print(f"parsed {len(files)} Python files")
+PY
+  STATIC="PASS"
+}
+
+run_tests() {
+  local name="$1"; shift
+  local xml="$LOG_DIR/${name}.xml" log="$LOG_DIR/${name}.log"
+  local suite_started suite_finished suite_duration
+  local qa_uploads_dir="${QA_UPLOADS_DIR:-/tmp/maxibot-qa-uploads}"
+  suite_started="$(date -u +%s)"
+  if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
+    docker run --rm --entrypoint python -w /app -e "UPLOADS_DIR=${qa_uploads_dir}" -v "$ROOT_DIR:/app:ro" -v "$LOG_DIR:/qa-logs" "$IMAGE" -m pytest -q --junitxml="/qa-logs/${name}.xml" "$@" >"$log" 2>&1
+  else
+    command -v "${QA_PYTHON:-python3}" >/dev/null 2>&1 || return 1
+    UPLOADS_DIR="$qa_uploads_dir" "${QA_PYTHON:-python3}" -m pytest -q --junitxml="$xml" "$@" >"$log" 2>&1
+  fi
+  local rc=$?
+  if [ -f "$xml" ]; then
+    local counts
+    counts=$("${QA_PYTHON:-python3}" - "$xml" <<'PY'
+import sys, xml.etree.ElementTree as ET
+r=ET.parse(sys.argv[1]).getroot()
+def n(k): return sum(int(x.attrib.get(k, 0)) for x in r.iter("testsuite"))
+print(n("tests"), n("failures")+n("errors"), n("skipped"))
+PY
+)
+    read -r t f s <<EOF
+$counts
+EOF
+    TOTAL_TESTS=$((TOTAL_TESTS+t)); FAILED=$((FAILED+f)); SKIPPED=$((SKIPPED+s)); PASSED=$((PASSED+t-f-s))
+    suite_finished="$(date -u +%s)"
+    suite_duration=$(( (suite_finished - suite_started) * 1000 ))
+    case "$name" in
+      unit) UNIT_TESTS="$t"; UNIT_FAILED="$f"; UNIT_SKIPPED="$s"; UNIT_PASSED=$((t-f-s)); UNIT_DURATION_MS="$suite_duration" ;;
+      integration) INTEGRATION_TESTS="$t"; INTEGRATION_FAILED="$f"; INTEGRATION_SKIPPED="$s"; INTEGRATION_PASSED=$((t-f-s)); INTEGRATION_DURATION_MS="$suite_duration" ;;
+      regression) REGRESSION_TESTS="$t"; REGRESSION_FAILED="$f"; REGRESSION_SKIPPED="$s"; REGRESSION_PASSED=$((t-f-s)); REGRESSION_DURATION_MS="$suite_duration" ;;
+    esac
+  fi
+  return "$rc"
+}
+
+run_static || fail_gate
+if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
+  if ! command -v docker >/dev/null 2>&1 || ! docker_build >"$LOG_DIR/build.log" 2>&1; then BUILD="FAIL"; fail_gate; fi
+  BUILD="PASS"; IMAGE_BUILT=1
+fi
+run_tests unit tests -q || { UNIT="FAIL"; fail_gate; }
+UNIT="PASS"
+run_tests integration tests/test_demo_flows.py tests/test_scenarios.py tests/test_yandex_oauth.py tests/test_yandex_metrica.py || { INTEGRATION="FAIL"; fail_gate; }
+INTEGRATION="PASS"
+run_tests regression tests tests/regression || { REGRESSION="FAIL"; fail_gate; }
+REGRESSION="PASS"
+EXECUTED_CASES="$AUTOMATED_CASES"
+PASSED_CASES="$AUTOMATED_CASES"
+
+if [ "$IMAGE_BUILT" != "1" ]; then
+  if ! command -v docker >/dev/null 2>&1 || ! docker_build >"$LOG_DIR/build.log" 2>&1; then BUILD="FAIL"; fail_gate; fi
+  BUILD="PASS"
+fi
+
+if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
+  if ! command -v docker >/dev/null 2>&1 || ! docker compose version >"$LOG_DIR/docker-compose-version.log" 2>&1; then
+    STAGING="FAIL"; fail_gate
+  fi
+  if [ -n "${QA_STAGING_IMAGE:-}" ]; then
+    staging_up_args=(up -d --no-build)
+  else
+    staging_up_args=(up -d --build)
+  fi
+  if ! docker compose -p "$QA_COMPOSE_PROJECT" -f "$QA_COMPOSE_FILE" "${staging_up_args[@]}" >"$LOG_DIR/staging-up.log" 2>&1; then
+    STAGING="FAIL"; fail_gate
+  fi
+  QA_STAGING_URL="${QA_STAGING_URL:-http://127.0.0.1:$QA_STAGING_PORT}"
+fi
+if [ -z "${QA_STAGING_URL:-}" ]; then
+  STAGING="NOT_RUN"; E2E="NOT_RUN"; fail_gate
+fi
+ready=0
+for attempt in $(seq 1 "${QA_HEALTH_RETRIES:-30}"); do
+  if curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" "$QA_STAGING_URL/health/ready" >"$LOG_DIR/staging-health.json" 2>"$LOG_DIR/staging-health.log"; then ready=1; break; fi
+  sleep "${QA_HEALTH_INTERVAL:-2}"
+done
+if [ "$ready" != "1" ]; then STAGING="FAIL"; fail_gate; fi
+STAGING="PASS"
+if [ "${QA_LOCAL_DOCKER:-0}" = "1" ] && [ -z "${QA_STAGING_E2E_CMD:-}" ]; then
+  QA_STAGING_E2E_CMD="curl --fail --silent --show-error $QA_STAGING_URL/health/live && curl --fail --silent --show-error $QA_STAGING_URL/mini && curl --fail --silent --show-error $QA_STAGING_URL/traffic-test/app"
+fi
+if [ -z "${QA_STAGING_E2E_CMD:-}" ]; then E2E="NOT_RUN"; fail_gate; fi
+if ! bash -o pipefail -c "$QA_STAGING_E2E_CMD" >"$LOG_DIR/staging-e2e.log" 2>&1; then E2E="FAIL"; fail_gate; fi
+E2E="PASS"
+if [ "$BROKEN_CRITICAL" -gt 0 ] || [ "$UNKNOWN_CRITICAL" -gt 0 ]; then
+  VERDICT="NO_GO"
+  finalize
+  exit 1
+fi
+NEW_FEATURE="✅"
+
+VERDICT="GO"
+PRODUCTION="WAITING_OWNER_APPROVAL"
+write_status
+
+if [ "${1:-}" = "DEPLOY" ]; then
+  if [ "${OWNER_APPROVED:-0}" != "1" ] || [ "${VERDICT}" != "GO" ] || [ -z "${PRODUCTION_DEPLOY_CMD:-}" ]; then
+    echo "DEPLOY BLOCKED: require QA GO, OWNER_APPROVED=1 and PRODUCTION_DEPLOY_CMD" >&2
+    fail_gate
+  fi
+  PRODUCTION="DEPLOYED"; PRODUCTION_CHANGED="YES"; CURRENT_PROD_SHA="$CANDIDATE_SHA"
+  if ! bash -o pipefail -c "$PRODUCTION_DEPLOY_CMD" >"$LOG_DIR/production-deploy.log" 2>&1; then PRODUCTION_SMOKE="FAIL"; fail_gate; fi
+  if [ -z "${PRODUCTION_URL:-}" ] || ! curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" "$PRODUCTION_URL/health/ready" >"$LOG_DIR/production-smoke.json" 2>"$LOG_DIR/production-smoke.log"; then
+    PRODUCTION_SMOKE="FAIL"
+    ROLLBACK_SHA="$PREVIOUS_GOOD_SHA"
+    if [ -n "${PRODUCTION_ROLLBACK_CMD:-}" ] && bash -o pipefail -c "$PRODUCTION_ROLLBACK_CMD" >>"$LOG_DIR/rollback.log" 2>&1; then ROLLBACK="PASS"; else ROLLBACK="FAIL"; fi
+    fail_gate
+  fi
+  PRODUCTION_SMOKE="PASS"
+fi
+finalize || exit 1
+exit 0

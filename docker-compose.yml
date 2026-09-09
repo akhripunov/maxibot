@@ -1,0 +1,39 @@
+services:
+  api:
+    build: .
+    command: sh -c "until alembic upgrade head; do sleep 2; done; python -m app.seed; uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    env_file: .env
+    # Local API must never poll a production MAX account. Polling belongs only
+    # to the dedicated VPS worker in docker-compose.vps.yml.
+    environment:
+      MAX_RUN_POLLING: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes: [".:/app"]
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: maxibot
+      POSTGRES_USER: maxibot
+      POSTGRES_PASSWORD: maxibot
+    ports: ["5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U maxibot -d maxibot"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+volumes:
+  postgres_data:

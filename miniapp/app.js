@@ -1,0 +1,113 @@
+const $ = (s) => document.querySelector(s);
+let all = [], channel = '', status = 'all', current = null;
+
+function getInitData() {
+  const bridgeData = window.WebApp?.initData;
+  if (typeof bridgeData === 'string' && bridgeData) return new URLSearchParams(bridgeData).get('WebAppData') || bridgeData;
+  const fragment = new URLSearchParams(location.hash.slice(1));
+  return fragment.get('WebAppData') || new URLSearchParams(location.search).get('WebAppData') || '';
+}
+const initData = getInitData();
+const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+const avatar = (url, fallback, className = '') => url ? `<img class="${className}" src="${encodeURI(url)}" alt="">` : fallback;
+const api = (url, options = {}) => fetch(url, {...options, headers: {'X-MAX-Init-Data': initData, ...(options.headers || {})}});
+const time = value => new Date(value).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
+let ownerChannels = [], ownerBots = [];
+
+function ownerInstructions(state) {
+  return '';
+}
+
+function renderOwnerState(state) {
+  ownerChannels = state.channels || [];
+  ownerBots = state.bots || [];
+  const content = $('#owner-content');
+  const projects = [
+    ...ownerChannels.map(item => ({...item, projectType: 'channel', meta: 'Канал подключён', fallback: '📢'})),
+    ...ownerBots.map(item => ({...item, projectType: 'bot', meta: 'Бот подключён', fallback: '🤖'})),
+  ];
+  if (!projects.length) {
+    content.innerHTML = '<div class="owner-empty">Каналов и ботов пока нет.<br><span>Откройте MAXIBOT в чате и подключите первый канал или бота.</span></div>';
+    return;
+  }
+  const cards = projects.map(item => `<button class="owner-channel" data-owner-project="${escapeHtml(item.projectType)}:${escapeHtml(item.id)}" data-owner-channel="${item.projectType === 'channel' ? escapeHtml(item.id) : ''}"><span class="owner-channel-avatar">${avatar(item.avatar_url, item.fallback)}</span><span class="owner-channel-info"><span class="owner-channel-title">${escapeHtml(item.title)}</span><span class="owner-channel-meta">${item.meta}</span></span><span class="owner-chevron" aria-hidden="true">›</span></button>`).join('');
+  content.innerHTML = `<div class="owner-list">${cards}</div>`;
+  document.querySelectorAll('[data-owner-project]').forEach(button => button.onclick = () => {
+    const [projectType, projectId] = button.dataset.ownerProject.split(':', 2);
+    openOwnerAnalytics(projectType, projectId);
+  });
+}
+
+async function openOwnerHome() {
+  const response = await api('/api/miniapp/owner-state');
+  if (!response.ok) {
+    $('#owner-content').innerHTML = response.status === 403
+      ? '<div class="owner-error">У этого MAX-пользователя нет доступа к каналам.</div>'
+      : '<div class="owner-error">Не удалось загрузить каналы. Закройте Mini App и откройте его снова кнопкой «Открыть».</div>';
+    return;
+  }
+  renderOwnerState(await response.json());
+}
+
+async function openOwnerAnalytics(projectType, projectId) {
+  const response = await api(`/api/miniapp/analytics/${encodeURIComponent(projectType)}/${encodeURIComponent(projectId)}`);
+  if (!response.ok) {
+    $('#owner-content').innerHTML = '<div class="owner-error">Не удалось загрузить аналитику проекта.</div><button class="owner-back" onclick="closeOwnerCrm()">← Назад</button>';
+    return;
+  }
+  const result = await response.json();
+  const stats = result.stats || {};
+  $('#owner-content').innerHTML = `<section class="owner-analytics"><h2>📊 Аналитика</h2><h3>${escapeHtml(result.project_type === 'bot' ? '🤖 ' : '📢 ')}${escapeHtml(result.title)}</h3><p>👀 Посещений лендинга: ${stats.visits || 0}</p><p>📢 Перешли в MAX: ${stats.to_channel || 0}</p><p>👥 Всего новых участников: ${stats.new_members || 0}</p><p>↩️ Отписок: ${stats.unsubscribed || 0}</p><p>MAX signals:<br>MAX_OPEN_LIKELY: ${stats.max_open_likely || 0}<br>MAX_OPEN_CONFIRMED: ${stats.max_open_confirmed || 0}<br>JOIN_REQUEST: ${stats.join_events || 0}</p><p>Атрибуция:<br>EXACT: ${stats.EXACT || 0}<br>HIGH: ${stats.HIGH || 0}<br>MEDIUM: ${stats.MEDIUM || 0}<br>AMBIGUOUS: ${stats.AMBIGUOUS || 0}<br>UNATTRIBUTED: ${stats.UNATTRIBUTED || 0}</p><p class="owner-note">В Яндекс отправляются только EXACT/HIGH; отправка по умолчанию в dry-run.</p></section><button class="owner-back" onclick="closeOwnerCrm()">← Назад</button>`;
+}
+
+async function openOwnerChannel(channelId) {
+  channel = channelId;
+  $('main').classList.remove('owner-home-mode');
+  $('#owner-home').hidden = true;
+  await loadChannels();
+  document.querySelectorAll('.filter').forEach(item => item.classList.toggle('active', item.dataset.channel === channelId));
+  await load();
+}
+
+function closeOwnerCrm() {
+  $('#owner-home').hidden = false;
+  $('main').classList.add('owner-home-mode');
+  openOwnerHome();
+}
+
+async function loadChannels() {
+  const response = await api('/api/channels'); if (!response.ok) return showApiError(response);
+  const xs = await response.json(); const totalUnread = xs.reduce((sum, x) => sum + (x.unread || 0), 0);
+  if (totalUnread) $('#channels .filter.active').insertAdjacentHTML('beforeend', `<span class="channel-badge">${totalUnread}</span>`);
+  $('#channels').insertAdjacentHTML('beforeend', xs.map(x => `<button class="filter" data-channel="${x.id}"><span class="channel-avatar">${avatar(x.avatar_url, '📕')}</span>${x.unread ? `<span class="channel-badge">${x.unread}</span>` : ''}<span>${escapeHtml(x.title)}</span></button>`).join(''));
+  document.querySelectorAll('.filter').forEach(button => button.onclick = () => { channel = button.dataset.channel; document.querySelectorAll('.filter').forEach(item => item.classList.remove('active')); button.classList.add('active'); load(); });
+}
+async function load() {
+  const url = new URL('/api/dialogs', location); if (channel) url.searchParams.set('channel_id', channel); url.searchParams.set('status', status); url.searchParams.set('q', $('#search').value);
+  const response = await api(url); if (!response.ok) return showApiError(response); all = await response.json(); render();
+}
+function showApiError(response) { $('#dialogs').innerHTML = response.status === 403 ? '<div class="empty">У этого MAX-пользователя нет доступа к CRM.</div>' : '<div class="empty">Не удалось подтвердить авторизацию MAX. Закройте CRM и откройте её снова кнопкой «Старт».</div>'; }
+function render() {
+  if (!all.length) { $('#dialogs').innerHTML = '<div class="empty">Нет диалогов</div>'; return; }
+  $('#dialogs').innerHTML = all.map(item => `<article class="dialog" data-id="${item.id}"><div class="avatar">${avatar(item.avatar_url, '●')}</div><div class="dialog-main"><b>${escapeHtml(item.user_name)}${item.unread ? `<span class="badge">${item.unread}</span>` : ''}</b><div class="last">${escapeHtml(item.last_message)}</div><div class="source">${avatar(item.channel_avatar_url, '', 'source-avatar')}${escapeHtml(item.source)}</div></div><div class="time">${time(item.last_message_at)}</div></article>`).join('');
+  document.querySelectorAll('.dialog').forEach(item => item.onclick = () => openDialog(item.dataset.id));
+}
+async function openDialog(id) {
+  const response = await api('/api/dialogs/' + id); if (!response.ok) return showApiError(response); current = await response.json();
+  $('#dialogs').hidden = true; $('#channels').hidden = true; $('.search').hidden = true; $('nav').hidden = true; $('#conversation').hidden = false; $('main').classList.add('conversation-open');
+  $('#dialog-title').textContent = current.user_name; $('#dialog-source').textContent = current.source; $('#dialog-avatar').innerHTML = avatar(current.avatar_url, '●'); $('#block').classList.toggle('is-blocked', current.blocked); renderMessages(true);
+}
+function renderMessages(scrollToBottom = false) {
+  const messages = $('#messages'); messages.innerHTML = current.messages.map(message => `<div class="bubble ${message.direction === 'out' ? 'out' : ''}">${message.image_url ? `<img class="message-image" src="${encodeURI(message.image_url)}" alt="Фото">` : ''}<div>${escapeHtml(message.text).replace(/\n/g, '<br>')}</div><small>${time(message.created_at)}</small></div>`).join('');
+  if (scrollToBottom) requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+}
+function closeDialog() { $('#conversation').hidden = true; $('#dialogs').hidden = false; $('#channels').hidden = false; $('.search').hidden = false; $('nav').hidden = false; $('main').classList.remove('conversation-open'); load(); }
+$('#back').onclick = closeDialog; $('#search').oninput = load; $('#theme').onclick = () => document.body.classList.toggle('light');
+document.querySelectorAll('.tab').forEach(button => button.onclick = () => { status = button.dataset.status; document.querySelectorAll('.tab').forEach(item => item.classList.remove('active')); button.classList.add('active'); load(); });
+$('#reply').onsubmit = async event => { event.preventDefault(); const input = event.currentTarget.querySelector('input'); const text = input.value.trim(); if (!text) return; const submit = event.currentTarget.querySelector('.send'); submit.disabled = true; try { const response = await api('/api/dialogs/' + current.id + '/messages', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})}); if (!response.ok) return; current.messages.push({...await response.json(), created_at: new Date().toISOString()}); input.value = ''; renderMessages(true); } finally { submit.disabled = false; input.focus(); } };
+$('#block').onclick = async () => { const action = current.blocked ? 'unblock' : 'block'; const response = await api('/api/dialogs/' + current.id + '/' + action, {method:'POST'}); if (response.ok) { current.blocked = !current.blocked; $('#block').classList.toggle('is-blocked', current.blocked); } };
+$('#pin').onclick = event => event.currentTarget.classList.toggle('is-active');
+$('#tag').onclick = event => event.currentTarget.classList.toggle('is-active');
+$('.attach').onclick = () => $('#image-input').click();
+$('#image-input').onchange = async event => { const file = event.target.files?.[0]; if (!file || !current) return; const attach = $('.attach'); attach.disabled = true; try { const response = await api('/api/dialogs/' + current.id + '/image', {method:'POST', headers:{'Content-Type': file.type, 'X-Upload-Filename': encodeURIComponent(file.name)}, body:file}); if (!response.ok) return; current.messages.push(await response.json()); renderMessages(true); } finally { event.target.value = ''; attach.disabled = false; } };
+openOwnerHome();

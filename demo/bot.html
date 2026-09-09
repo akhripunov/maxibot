@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MAXIBOT — демонстрация бота</title>
+  <link rel="stylesheet" href="/demo/bot.css">
+</head>
+<body>
+  <div class="demo-shell">
+    <aside class="demo-controls" aria-label="Инструмент демонстрации">
+      <b>Демонстрация экранов</b>
+      <button data-screen="home">Главное меню</button>
+      <button data-screen="channels-empty">Мои каналы — пусто</button>
+      <button data-screen="channels">Мои каналы</button>
+      <button data-screen="channel">Управление каналом</button>
+      <button data-screen="public">Переход по ссылке</button>
+      <button data-screen="settings">Настройки сообщений</button>
+      <button data-screen="choose-template">Выбор сообщения</button>
+      <button data-screen="bot-connect">Подключение бота</button>
+    </aside>
+
+    <section class="max-window" aria-label="Имитация чата MAX">
+      <header class="max-top">
+        <div class="profile-mark">M</div>
+        <div class="profile-name"><strong>MAXIBOT</strong><small>бот</small></div>
+        <div class="top-actions"><span>⌕</span><span>⋮</span></div>
+      </header>
+      <div id="screen" class="chat-scroll"></div>
+      <footer class="max-composer"><span>Сообщение</span><span class="send-arrow">›</span></footer>
+      <nav class="max-nav"><span>Сообщение</span><span class="nav-active">Чаты</span><span>Звонки</span><span>Контакты</span><span>Настройки</span></nav>
+    </section>
+  </div>
+  <script src="/demo/bot.js"></script>
+</body>
+</html>

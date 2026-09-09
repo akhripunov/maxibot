@@ -1,0 +1,12 @@
+.env
+.env.*
+ROBOKASSA_PRODUCTION.env
+.git
+.gitignore
+__pycache__
+*.py[cod]
+*.pyo
+.DS_Store
+._*
+App Design
+screenshots

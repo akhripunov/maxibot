@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "diagnosis_code", "summary", "confidence", "data_sufficiency", "evidence", "recommendation", "do_not_change", "missing_data", "memory_candidates"],
+  "properties": {
+    "status": {"enum": ["OK", "NO_ACTION_NEEDED", "INSUFFICIENT_DATA"]},
+    "diagnosis_code": {"type": "string"},
+    "summary": {"type": "string"},
+    "confidence": {"enum": ["LOW", "MEDIUM", "HIGH"]},
+    "data_sufficiency": {"enum": ["SUFFICIENT", "PARTIAL", "INSUFFICIENT"]},
+    "evidence": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["evidence_id", "statement"], "properties": {"evidence_id": {"type": "string"}, "statement": {"type": "string"}}}},
+    "recommendation": {"type": "object", "additionalProperties": false, "required": ["action_code", "current_value", "suggested_value", "reason"], "properties": {"action_code": {"type": "string"}, "current_value": {"type": ["string", "number", "boolean", "null"]}, "suggested_value": {"type": ["string", "number", "boolean", "null"]}, "reason": {"type": "string"}}},
+    "do_not_change": {"type": "array", "items": {"type": "string"}},
+    "missing_data": {"type": "array", "items": {"type": "string"}},
+    "memory_candidates": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["statement", "source_evidence_ids"], "properties": {"statement": {"type": "string"}, "source_evidence_ids": {"type": "array", "items": {"type": "string"}}}}}
+  }
+}

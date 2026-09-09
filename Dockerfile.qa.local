@@ -1,0 +1,6 @@
+# Offline/local QA fallback only. Production images do not use this file.
+FROM maxibot-api:latest
+
+WORKDIR /app
+RUN pip install --no-cache-dir "Pillow>=10"
+COPY . .

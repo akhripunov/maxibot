@@ -1,0 +1,21 @@
+api.maxibot.pro, go.maxibot.pro {
+    reverse_proxy api:8000
+}
+
+# Owner console. Authentication is WebAuthn in the application; Caddy only
+# terminates TLS, adds the private server-to-server hop token, and hardens the
+# response headers.
+admin.maxibot.pro {
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+    }
+    reverse_proxy api:8000 {
+        header_up X-MAXIBOT-Admin-Token {$WEB_ADMIN_INTERNAL_TOKEN}
+    }
+}
+
+maxibot.pro, www.maxibot.pro {
+    reverse_proxy api:8000
+}

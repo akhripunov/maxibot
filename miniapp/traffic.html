@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Переход в MAX</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;background:#fff;font-family:system-ui,-apple-system,sans-serif}
+    main{display:grid;box-sizing:border-box;min-height:100%;place-items:center;text-align:center;padding:32px;color:#687386;visibility:hidden}
+    main.visible{visibility:visible}
+    .spinner{width:32px;height:32px;margin:0 auto 18px;border:3px solid #dbe7f7;border-top-color:#1677ff;border-radius:50%;animation:spin .8s linear infinite}
+    #fallback{display:none;margin-top:20px;padding:13px 22px;border-radius:14px;background:#1677ff;color:#fff;text-decoration:none;font-weight:700}
+    main.delayed #fallback{display:inline-block}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<main>
+  <div>
+  <div class="spinner"></div>
+    <p id="status">Открываем MAX…</p>
+    <a id="fallback" href="#">Продолжить</a>
+  </div>
+</main>
+<script src="https://st.max.ru/js/max-web-app.js"></script>
+<script>
+const statusEl = document.querySelector('#status');
+const mainEl = document.querySelector('main');
+const fallbackEl = document.querySelector('#fallback');
+const webApp = window.WebApp;
+const initData = webApp?.initData || '';
+const startParam = webApp?.initDataUnsafe?.start_param || webApp?.initDataUnsafe?.startapp || '';
+const api = (path, options = {}) => fetch(path, { ...options, headers: {'X-MAX-Init-Data': initData, ...(options.headers || {})} });
+
+function miniTelemetry(eventType, extra = {}) {
+  // Diagnostics are best-effort and must never delay resolve or navigation.
+  try {
+    const payload = {
+      event_type: eventType,
+      start_param: startParam || undefined,
+      visibility: document.visibilityState,
+      client_timestamp: new Date().toISOString(),
+      raw_signals: {visibility: document.visibilityState},
+      ...extra,
+    };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 1000);
+    fetch('/api/traffic/miniapp-telemetry', {
+      method: 'POST', keepalive: true,
+      headers: {'Content-Type': 'application/json', ...(initData ? {'X-MAX-Init-Data': initData} : {})},
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    }).catch(() => {}).finally(() => clearTimeout(timeoutId));
+  } catch (_) {}
+}
+
+miniTelemetry('MINIAPP_JS_STARTED');
+if (webApp) miniTelemetry('MAX_WEBAPP_OBJECT_AVAILABLE');
+if (initData) miniTelemetry('INIT_DATA_PRESENT');
+if (startParam) miniTelemetry('START_PARAM_PRESENT');
+window.addEventListener('error', (event) => miniTelemetry('CLIENT_ERROR', {
+  error_class: 'window_error', short_message: String(event?.message || 'client error'), stage: 'miniapp',
+}), {passive: true});
+window.addEventListener('unhandledrejection', (event) => miniTelemetry('CLIENT_ERROR', {
+  error_class: 'unhandled_rejection', short_message: String(event?.reason?.message || event?.reason || 'rejection'), stage: 'miniapp',
+}), {passive: true});
+
+function miniappSignal(eventType) {
+  // Telemetry must not wait for, alter, or break the channel handoff.
+  try {
+    api('/api/traffic/miniapp-event', {
+      method: 'POST',
+      keepalive: true,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({event_type: eventType, visibility: document.visibilityState})
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+document.addEventListener('visibilitychange', () => {
+  miniappSignal(document.visibilityState === 'hidden' ? 'MINIAPP_PAGE_HIDDEN' : 'MINIAPP_PAGE_RESTORED');
+}, {passive: true});
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) miniappSignal('MINIAPP_PAGE_RESTORED');
+}, {passive: true});
+
+// Successful traffic resolves normally leave the Mini App before this fires.
+// Keep the bridge screen visually silent during that fast path; reveal status
+// only when the MAX handoff is genuinely taking longer.
+const slowTimer = setTimeout(() => mainEl.classList.add('visible'), 1600);
+const fallbackTimer = setTimeout(() => {
+  mainEl.classList.add('visible', 'delayed');
+  miniappSignal('MINIAPP_FALLBACK_SHOWN');
+}, 3200);
+fallbackEl.addEventListener('click', () => miniappSignal('MINIAPP_FALLBACK_CLICKED'), {passive: true});
+
+function openViaAnchor(targetUrl) {
+  const link = document.createElement('a');
+  link.href = targetUrl;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function openChannel(targetUrl) {
+  fallbackEl.href = targetUrl;
+  miniappSignal('MINIAPP_CHANNEL_HANDOFF_STARTED');
+  const platform = webApp?.platform || '';
+  // MAX on iPhone may expose the Mini App platform as `web`, while its
+  // bridge openMaxLink call still does not open channel invite links.  The
+  // normal anchor handoff below is the path verified by the real iPhone
+  // production smoke.
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  if (platform === 'android') {
+    window.location.replace(targetUrl);
+    return;
+  }
+
+  if (!isAppleMobile && typeof webApp?.openMaxLink === 'function') {
+    webApp.openMaxLink(targetUrl);
+    return;
+  }
+
+  // On iOS this opens the native channel/request sheet. It is also the
+  // last-resort fallback for non-MAX contexts without the bridge.
+  openViaAnchor(targetUrl);
+}
+
+function openBot(targetUrl) {
+  miniTelemetry('BOT_HANDOFF_STARTED');
+  const platform = webApp?.platform || '';
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  if (platform === 'android') {
+    window.location.replace(targetUrl);
+    return;
+  }
+
+  if (!isAppleMobile && typeof webApp?.openMaxLink === 'function') {
+    webApp.openMaxLink(targetUrl);
+    return;
+  }
+
+  // BOT keeps the Mini App open while iOS opens the verified target through
+  // the same top-level anchor mechanism as the frozen CHANNEL handoff.
+  openViaAnchor(targetUrl);
+}
+
+function reportMaxOpened(counterId) {
+  // This is a diagnostic Metrika goal, not the subscription conversion.
+  // The server has already verified MAX initData and the tracking token
+  // before this response is returned.
+  if (!counterId) return;
+  try {
+    window.ym = window.ym || function() {
+      (window.ym.a = window.ym.a || []).push(arguments);
+    };
+    window.ym.l = window.ym.l || Date.now();
+    if (!document.querySelector('script[data-maxibot-metrika]')) {
+      const script = document.createElement('script');
+      script.async = true;
+      script.dataset.maxibotMetrika = 'true';
+      script.src = 'https://mc.yandex.ru/metrika/tag.js';
+      document.head.appendChild(script);
+    }
+    window.ym(counterId, 'init', {clickmap: true, trackLinks: true, accurateTrackBounce: true});
+    window.ym(counterId, 'reachGoal', 'userDidOpenMax');
+  } catch (_) {}
+}
+
+async function resolveChannel() {
+  if (!initData) {
+    miniTelemetry('CLIENT_ERROR', {error_class: 'init_data_missing', short_message: 'MAX initData missing', stage: 'resolve'});
+    throw new Error('MAX initData не найден');
+  }
+  miniTelemetry('CHANNEL_OPEN_REQUESTED', {stage: 'resolve'});
+  const response = await api('/api/traffic/resolve', {method: 'POST'});
+  if (!response.ok) {
+    miniTelemetry('CHANNEL_OPEN_FAILED', {error_class: 'resolve_http', short_message: 'resolve request failed', stage: 'resolve'});
+    throw new Error('Не удалось открыть MAX-канал');
+  }
+  const data = await response.json();
+  reportMaxOpened(data.metrica_counter_id);
+  if (data.destination_type === 'BOT') {
+    clearTimeout(slowTimer);
+    clearTimeout(fallbackTimer);
+    openBot(data.target_url);
+    return;
+  }
+  openChannel(data.target_url);
+}
+resolveChannel().catch(error => {
+  miniTelemetry('CHANNEL_OPEN_FAILED', {error_class: 'resolve_exception', short_message: error?.message || 'resolve exception', stage: 'resolve'});
+  clearTimeout(slowTimer);
+  clearTimeout(fallbackTimer);
+  mainEl.classList.add('visible', 'delayed');
+  statusEl.textContent = error.message;
+  statusEl.className = 'error';
+});
+</script>
+</body>
+</html>
