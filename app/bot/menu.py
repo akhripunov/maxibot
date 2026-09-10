@@ -24,7 +24,7 @@ from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, norm
 from app.core.config import settings
 from app.traffic.deep_link import valid_max_target
 from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, system_connection_status
-from app.integrations.yandex_metrica import channel_setup_status, YandexMetricaClient
+from app.integrations.yandex_metrica import channel_setup_status, ensure_channel_goals_for_existing_counter, YandexMetricaClient
 from app.security_tokens import decrypt_token
 from app.traffic.metrica_sender import send_user_subscribed, send_user_unsubscribed
 from app.integrations.max_connection import PRIMARY, BOT_CONNECTION
@@ -1546,6 +1546,15 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         ))
         yandex = await connection_status(admin.external_id, channel.id, db=db)
         metrica = await channel_setup_status(admin.external_id, channel.id)
+        if metrica.get("counter_id") and yandex:
+            try:
+                encrypted = await get_encrypted_token(admin.external_id, channel.id, db=db)
+                if encrypted:
+                    await ensure_channel_goals_for_existing_counter(
+                        admin.external_id, channel.id, encrypted, int(metrica["counter_id"])
+                    )
+            except Exception:
+                logger.info("METRICA_GOAL_BACKFILL_DEFERRED channel_id=%s", channel.id)
         yandex_value = metrica.get("owner_login") or ("Подключён" if yandex else None)
         counter_id = (profile.yandex_counter_id if profile else None) or metrica.get("counter_id")
         yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ❌"

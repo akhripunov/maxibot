@@ -167,6 +167,37 @@ async def ensure_channel_setup(admin_external_id: str, channel_id: str, encrypte
         await client.close()
 
 
+async def ensure_channel_goals_for_existing_counter(
+    admin_external_id: str, channel_id: str, encrypted_token: str, counter_id: int,
+) -> dict[str, int | str]:
+    """Backfill goals on one already-configured counter without counter mutation."""
+    if not admin_external_id or not channel_id or not counter_id:
+        raise ValueError("existing counter identity required")
+    client = YandexMetricaClient(decrypt_token(encrypted_token), settings.yandex_metrica_api_url)
+    try:
+        goals = await client.list_goals(int(counter_id))
+        ids: dict[str, int | str] = {"counter_id": int(counter_id)}
+        for key, goal_name in (
+            ("to_channel_goal_id", "toChannel"),
+            ("user_open_max_goal_id", "userDidOpenMax"),
+            ("user_subscribe_goal_id", "userDidSubscribe"),
+            ("user_unsubscribe_goal_id", "userDidUnsubscribe"),
+        ):
+            goal = next((row for row in goals if row.get("name") == goal_name), None)
+            ids[key] = int(goal["id"]) if goal else await client.create_action_goal(int(counter_id), goal_name)
+        redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        try:
+            await redis.hset(
+                f"yandex:metrica:{admin_external_id}:{channel_id}",
+                mapping={**ids, "admin_external_id": admin_external_id, "channel_id": channel_id},
+            )
+        finally:
+            await redis.aclose()
+        return ids
+    finally:
+        await client.close()
+
+
 async def ensure_system_setup(encrypted_token: str) -> dict[str, int | str]:
     client = YandexMetricaClient(decrypt_token(encrypted_token), settings.yandex_metrica_api_url)
     try:

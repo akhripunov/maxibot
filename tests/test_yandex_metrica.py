@@ -35,6 +35,20 @@ async def test_metrica_counter_and_goals_are_mockable_and_idempotent():
     assert all("opaque" not in str(call) for call in calls)
 
 
+def test_existing_counter_goal_backfill_is_explicit_and_does_not_create_counter():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app/integrations/yandex_metrica.py").read_text()
+    start = source.index("async def ensure_channel_goals_for_existing_counter")
+    end = source.index("async def ensure_system_setup", start)
+    helper = source[start:end]
+    assert "counter_id: int" in helper
+    assert "list_goals" in helper
+    assert "create_action_goal" in helper
+    assert "create_counter" not in helper
+    assert '"userDidUnsubscribe"' in helper
+
+
 @pytest.mark.asyncio
 async def test_create_counter_sends_domain_without_scheme():
     def handler(request: httpx.Request):
