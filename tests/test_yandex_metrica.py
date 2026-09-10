@@ -21,6 +21,7 @@ async def test_metrica_counter_and_goals_are_mockable_and_idempotent():
                 {"id": 201, "name": "toChannel"},
                 {"id": 202, "name": "userDidOpenMax"},
                 {"id": 203, "name": "userDidSubscribe"},
+                {"id": 204, "name": "userDidUnsubscribe"},
             ]})
         raise AssertionError("duplicate create call")
 
@@ -29,7 +30,7 @@ async def test_metrica_counter_and_goals_are_mockable_and_idempotent():
     client._client = httpx.AsyncClient(base_url="https://metrics.test", transport=httpx.MockTransport(handler))
     assert (await client.list_counters())[0]["id"] == 101
     goals = await client.list_goals(101)
-    assert {goal["name"] for goal in goals} == {"toChannel", "userDidOpenMax", "userDidSubscribe"}
+    assert {goal["name"] for goal in goals} == {"toChannel", "userDidOpenMax", "userDidSubscribe", "userDidUnsubscribe"}
     await client.close()
     assert all("opaque" not in str(call) for call in calls)
 

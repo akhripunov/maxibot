@@ -149,6 +149,7 @@ async def ensure_channel_setup(admin_external_id: str, channel_id: str, encrypte
             ("to_channel_goal_id", "toChannel"),
             ("user_open_max_goal_id", "userDidOpenMax"),
             ("user_subscribe_goal_id", "userDidSubscribe"),
+            ("user_unsubscribe_goal_id", "userDidUnsubscribe"),
         ):
             goal = next((row for row in goals if row.get("name") == goal_name), None)
             ids[key] = int(goal["id"]) if goal else await client.create_action_goal(counter_id, goal_name)
@@ -206,6 +207,7 @@ async def channel_setup_status(admin_external_id: str, channel_id: str) -> dict[
                 "to_channel_goal_id",
                 "user_open_max_goal_id",
                 "user_subscribe_goal_id",
+                "user_unsubscribe_goal_id",
                 "owner_login",
             }
         }

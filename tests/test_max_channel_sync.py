@@ -56,6 +56,22 @@ def test_user_added_exact_identity_is_idempotent_for_conversion_queue():
     assert 'OfflineConversion.membership_id == membership.id' in source
 
 
+def test_official_exact_removal_queues_dedicated_unsubscribe_goal_once():
+    source = Path("app/bot/menu.py").read_text()
+    assert 'event_type.lower() in {"user_removed", "member_removed", "unsubscribed"}' in source
+    assert 'membership.attribution_status == EXACT' in source
+    assert 'OfflineConversion.goal == "userDidUnsubscribe"' in source
+    assert 'target="YANDEX", goal="userDidUnsubscribe"' in source
+    assert 'send_user_unsubscribed if conversion.goal == "userDidUnsubscribe"' in source
+
+
+def test_unsubscribe_goal_migration_extends_queue_idempotency_key():
+    migration = Path("alembic/versions/0084_offline_conversion_goal_unique_v1.py").read_text()
+    assert "down_revision = \"0083_subscription_entitlements_v1\"" in migration
+    assert "uq_offline_conversion_visit_membership_target_goal" in migration
+    assert '["visit_id", "membership_id", "target", "goal"]' in migration
+
+
 def test_existing_user_added_can_be_reconciled_without_replaying_event():
     source = Path("app/bot/menu.py").read_text()
     assert 'async def ensure_exact_user_added_attribution' in source

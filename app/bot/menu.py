@@ -26,7 +26,7 @@ from app.traffic.deep_link import valid_max_target
 from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, system_connection_status
 from app.integrations.yandex_metrica import channel_setup_status, YandexMetricaClient
 from app.security_tokens import decrypt_token
-from app.traffic.metrica_sender import send_user_subscribed
+from app.traffic.metrica_sender import send_user_subscribed, send_user_unsubscribed
 from app.integrations.max_connection import PRIMARY, BOT_CONNECTION
 from app.traffic.join_intent import consume_single_active_join_intent
 from app.traffic.analytics import traffic_stats_for_channels
@@ -188,7 +188,8 @@ async def _send_exact_conversion(db: AsyncSession, conversion: OfflineConversion
             return "blocked"
         counter_id = int(counter_value)
         client = YandexMetricaClient(decrypt_token(encrypted_token))
-        result = await send_user_subscribed(
+        sender = send_user_unsubscribed if conversion.goal == "userDidUnsubscribe" else send_user_subscribed
+        result = await sender(
             client,
             counter_id=counter_id,
             yclid=visit.yclid,
@@ -3529,6 +3530,7 @@ class MenuRepository:
             if event_type.lower() in {"user_removed", "member_removed", "unsubscribed"}:
                 membership.current_member = False
                 membership.left_at = event_time
+                queued_unsubscribe = None
                 if membership.attributed_visit_id:
                     exact_visit = await db.get(TrafficVisit, membership.attributed_visit_id)
                     subscription = await db.scalar(select(TrafficSubscription).where(
@@ -3538,7 +3540,33 @@ class MenuRepository:
                     if subscription:
                         subscription.status = "lost"
                         subscription.lost_at = event_time
-                    exact_visit.converted_at = exact_visit.converted_at or event_time
+                    if (
+                        membership.attribution_status == EXACT
+                        and exact_visit
+                        and exact_visit.yclid
+                        and exact_visit.metrica_client_id
+                    ):
+                        exists_outbox = await db.scalar(select(OfflineConversion.id).where(
+                            OfflineConversion.visit_id == exact_visit.id,
+                            OfflineConversion.membership_id == membership.id,
+                            OfflineConversion.target == "YANDEX",
+                            OfflineConversion.goal == "userDidUnsubscribe",
+                        ))
+                        if not exists_outbox:
+                            queued_unsubscribe = OfflineConversion(
+                                visit_id=exact_visit.id, membership_id=membership.id,
+                                target="YANDEX", goal="userDidUnsubscribe",
+                                identifier_type="yclid", identifier_value=exact_visit.yclid,
+                                conversion_datetime=event_time,
+                                status="dry_run" if settings.yandex_conversion_dry_run else "pending",
+                            )
+                            db.add(queued_unsubscribe)
+                    if exact_visit:
+                        exact_visit.converted_at = exact_visit.converted_at or event_time
+                await db.commit()
+                if queued_unsubscribe:
+                    await _send_exact_conversion(db, queued_unsubscribe, membership, channel)
+                return True
             else:
                 membership.current_member = True
                 membership.joined_at = membership.joined_at or event_time
@@ -3586,6 +3614,7 @@ class MenuRepository:
                                 OfflineConversion.visit_id == visit.id,
                                 OfflineConversion.membership_id == membership.id,
                                 OfflineConversion.target == "YANDEX",
+                                OfflineConversion.goal == "userDidSubscribe",
                             ))
                             if not exists_outbox:
                                 queued_conversion = OfflineConversion(
@@ -3676,6 +3705,7 @@ class MenuRepository:
                                 OfflineConversion.visit_id == visit.id,
                                 OfflineConversion.membership_id == membership.id,
                                 OfflineConversion.target == "YANDEX",
+                                OfflineConversion.goal == "userDidSubscribe",
                             ))
                             if not exists_outbox:
                                 db.add(OfflineConversion(
@@ -3744,6 +3774,7 @@ class MenuRepository:
                 OfflineConversion.visit_id == visit.id,
                 OfflineConversion.membership_id == membership.id,
                 OfflineConversion.target == "YANDEX",
+                OfflineConversion.goal == "userDidSubscribe",
             ))
             if not exists_outbox:
                 db.add(OfflineConversion(

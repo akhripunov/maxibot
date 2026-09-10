@@ -543,7 +543,7 @@ class OfflineConversion(Base):
     metrica_upload_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     metrica_upload_status: Mapped[Optional[str]] = mapped_column(String(32), index=True)
     metrica_upload_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("visit_id", "membership_id", "target"),)
+    __table_args__ = (UniqueConstraint("visit_id", "membership_id", "target", "goal", name="uq_offline_conversion_visit_membership_target_goal"),)
 class BlockedUser(Base):
     __tablename__="blocked_users"
     id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid)
