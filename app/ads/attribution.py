@@ -76,7 +76,7 @@ async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: 
                     matched += int(campaign_matches(visit.utm_campaign, campaign.external_id))
                 else:
                     unknown += 1
-            if not unknown:
+            if matched:
                 campaign_specific = {
                     "supported": True,
                     "value": matched,

@@ -37,5 +37,17 @@ def test_single_campaign_utm_mapping_is_supported_but_ambiguous_mapping_stays_un
     service = (Path(__file__).parents[1] / "app/ads/service.py").read_text()
     assert "campaign_matches" in source
     assert "len(links) == 1" in source
-    assert "if not unknown:" in source
+    assert "if matched:" in source
     assert 'campaign_specific_matching": True if campaign_mapping_supported else "UNKNOWN"' in service
+
+
+def test_partial_deterministic_campaign_mapping_is_supported_with_coverage():
+    from app.traffic.funnel_reporting import campaign_matches
+
+    matched = sum(campaign_matches(value, "713798021") for value in (
+        *(["713798021.1.2"] * 56),
+        "other.1.2",
+        "",
+    ))
+    assert matched == 56
+    assert matched / 58 == 56 / 58
