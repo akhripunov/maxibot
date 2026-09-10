@@ -29,12 +29,18 @@ class FunnelObservation:
 
 
 def campaign_matches(value: str | None, requested_campaign: str | None) -> bool:
-    """Match the exact campaign or its MAXIBOT-generated suffix form."""
+    """Match exact IDs and MAXIBOT UTM component/suffix forms."""
     if not requested_campaign:
         return True
     candidate = (value or "").strip()
     requested = requested_campaign.strip()
-    return bool(requested and (candidate == requested or candidate.startswith(f"{requested}.")))
+    if not requested:
+        return False
+    return bool(
+        candidate == requested
+        or candidate.startswith(f"{requested}.")
+        or requested in candidate.split(".")
+    )
 
 
 def deepest_stage(stages: Iterable[str]) -> str:

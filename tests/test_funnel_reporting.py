@@ -1,4 +1,9 @@
-from app.traffic.funnel_reporting import FunnelObservation, canonical_paid_click_report
+from app.traffic.funnel_reporting import FunnelObservation, canonical_paid_click_report, campaign_matches
+
+
+def test_campaign_matches_real_yandex_utm_component_format():
+    assert campaign_matches("msk365_rsya_msk_click_test1.713798021.5791778274", "713798021")
+    assert not campaign_matches("msk365_rsya_msk_click_test1.713798021.5791778274", "713798022")
 
 
 def test_report_distinguishes_unique_yclid_from_raw_requests_and_revisits():
