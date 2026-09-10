@@ -956,8 +956,10 @@ class MaxBotRuntime:
             tariff = action.split(":", 1)[1]
             if tariff in {"start", "pro"}:
                 await self._render(user_id, action)
+                return
         elif action == "subscription_ai":
             await self._render(user_id, action)
+            return
         elif action == "subscription_ai_pay":
             if not robokassa_configured():
                 await self._render(user_id, "subscription_ai")

@@ -420,6 +420,15 @@ def test_readonly_ads_navigation_returns_after_rendering_full_channel_screen():
     assert "await self._render(user_id, action, selected_id)\n                return" in section
 
 
+def test_subscription_management_navigation_returns_after_rendering_plan_screen():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    tariff_section = source[source.index('elif action.startswith("subscription_tariff:")'):source.index('elif action == "subscription_ai_pay":')]
+    assert 'await self._render(user_id, action)\n                return' in tariff_section
+    assert 'await self._render(user_id, action)\n            return' in tariff_section
+
+
 def test_message_settings_does_not_send_an_unuploaded_image_url():
     from pathlib import Path
 
