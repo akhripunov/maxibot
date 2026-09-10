@@ -100,6 +100,128 @@ async def test_admin_command_non_admin_gets_explicit_denial():
     ]
 
 
+@pytest.mark.asyncio
+async def test_objective_input_saves_confirms_and_returns_to_objective_screen(monkeypatch):
+    class Repo:
+        async def is_admin(self, user_id):
+            return user_id == "admin-1"
+
+    class DB:
+        async def commit(self):
+            self.committed = True
+
+    class SessionFactory:
+        def __init__(self):
+            self.db = DB()
+
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return self.db
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Client:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, target, text, *args, **kwargs):
+            self.sent.append((target, text))
+            return "confirmation-message"
+
+    class Link:
+        target_cpa = 25
+
+    calls = []
+
+    async def fake_set_objective(db, **kwargs):
+        calls.append(kwargs)
+        return [Link()]
+
+    monkeypatch.setattr("app.bot.runtime.set_objective", fake_set_objective)
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    runtime.client = Client()
+    runtime.session_factory = SessionFactory()
+    runtime._ads_objective_pending = {"admin-1": ("CHANNEL", "channel-1", "campaign-1")}
+    rendered = []
+
+    async def render(target, screen, *args, **kwargs):
+        rendered.append((target, screen))
+
+    runtime._render = render
+    update = MaxUpdate(
+        "message_created", user_id="admin-1",
+        message=MaxMessage("m-goal", "admin-1", "Admin", "25"),
+    )
+
+    await runtime._message(update)
+
+    assert calls[0]["object_type"] == "CHANNEL"
+    assert calls[0]["object_id"] == "channel-1"
+    assert calls[0]["campaign_id"] == "campaign-1"
+    assert runtime.client.sent == [("admin-1", "✅ Цель установлена: 25 ₽")]
+    assert rendered == [("admin-1", "ads_objective:CHANNEL:channel-1")]
+    assert runtime._ads_objective_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_invalid_objective_input_keeps_pending_state(monkeypatch):
+    class Repo:
+        async def is_admin(self, user_id):
+            return True
+
+    class DB:
+        async def commit(self):
+            raise AssertionError("invalid input must not commit")
+
+    class SessionFactory:
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return DB()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class Client:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, target, text, *args, **kwargs):
+            self.sent.append((target, text))
+
+    async def fake_set_objective(db, **kwargs):
+        raise ValueError("TARGET_CPA_INVALID")
+
+    monkeypatch.setattr("app.bot.runtime.set_objective", fake_set_objective)
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    runtime.client = Client()
+    runtime.session_factory = SessionFactory()
+    pending = ("BOT", "bot-1", None)
+    runtime._ads_objective_pending = {"admin-1": pending}
+    rendered = []
+
+    async def render(target, screen, *args, **kwargs):
+        rendered.append((target, screen))
+
+    runtime._render = render
+    update = MaxUpdate(
+        "message_created", user_id="admin-1",
+        message=MaxMessage("m-invalid", "admin-1", "Admin", "not-a-number"),
+    )
+
+    await runtime._message(update)
+
+    assert runtime._ads_objective_pending == {"admin-1": pending}
+    assert rendered == [("admin-1", "ads_objective_input:BOT:bot-1")]
+    assert runtime.client.sent == []
+
+
 def test_real_message_link_recovers_forwarded_source_channel():
     client = RealMaxClient(token="unit-token", base_url="https://platform-api2.max.ru")
     update = client._parse_update({
