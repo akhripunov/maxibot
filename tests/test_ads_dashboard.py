@@ -42,6 +42,8 @@ def test_unified_screen_has_single_action_and_read_only_navigation():
     text = format_ads_unified_dashboard(state, title="Test bot")
     assert "Фактический CPA: пока не рассчитан" in text
     assert "Главная проблема:" in text and "Пока недостаточно данных" in text
+    assert "Обновлено: ещё не выполнялось" in text
+    assert "Data Trust" not in text
     labels = [button["text"] for row in ads_unified_buttons("ads_bot", "system", "back") for button in row]
     assert "↻ Обновить сейчас" in labels and "🎨 Креативы" in labels
     assert "Проверить рекламу" not in labels and "Рекомендации" not in labels
@@ -104,3 +106,23 @@ def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     assert "🎨 Креатив A" in format_ads_why_screen(state, title="Москва 365")
     assert "INCONCLUSIVE не считаются проверенным обучением" in format_ads_learning_screen(state, title="Москва 365")
     assert "История появится" in format_ads_history_screen(state, title="Москва 365")
+
+
+def test_why_screen_explains_degraded_data_without_internal_enum():
+    state = _state("RECOMMENDATION", root="Рекламная причина пока не доказана.")
+    state["data_trust"] = "DEGRADED"
+    state["data_trust_reasons"] = {"checks": {"ATTRIBUTION": "DEGRADED"}}
+    text = format_ads_why_screen(state, title="Москва 365")
+    assert "О качестве данных:" in text
+    assert "Часть результатов пока нельзя надёжно связать" in text
+    assert "Поэтому рекомендация предварительная." in text
+    assert "Data Trust" not in text
+
+
+def test_why_screen_uses_safe_generic_for_unknown_data():
+    state = _state("ANALYSIS")
+    state["data_trust"] = "UNKNOWN"
+    state["data_trust_reasons"] = {}
+    text = format_ads_why_screen(state, title="Москва 365")
+    assert "Часть данных пока нельзя надёжно сопоставить" in text
+    assert "UNKNOWN" not in text

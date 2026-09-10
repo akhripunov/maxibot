@@ -619,6 +619,31 @@ def _safe_json_object(value: str | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _data_trust_explanation(state: dict) -> str | None:
+    """Explain only actionable data-quality limits in client language."""
+    status = str(state.get("data_trust") or "UNKNOWN").upper()
+    if status == "HEALTHY":
+        return None
+    reasons = state.get("data_trust_reasons") or {}
+    checks = reasons.get("checks") if isinstance(reasons, dict) else {}
+    checks = checks if isinstance(checks, dict) else {}
+    explanations = (
+        ("ATTRIBUTION", "Часть результатов пока нельзя надёжно связать с конкретной рекламной кампанией."),
+        ("UNMATCHED_ATTRIBUTION", "Часть переходов пока нельзя надёжно связать с конкретной рекламной кампанией."),
+        ("CAMPAIGN_MAPPING", "Рекламные данные пока нельзя надёжно сопоставить с нужной кампанией."),
+        ("SNAPSHOT_FRESHNESS", "Рекламные данные обновляются с задержкой, поэтому последние показатели могут быть неполными."),
+        ("DIRECT_SYNC", "Данные рекламной системы ещё не синхронизированы полностью."),
+        ("AI_PROVIDER", "Автоматический анализ временно недоступен, поэтому новая рекомендация ещё не подтверждена."),
+        ("MEMORY_DATABASE", "История прошлых проверок временно недоступна для сравнения."),
+    )
+    for key, message in explanations:
+        if str(checks.get(key) or "").upper() in {"DEGRADED", "UNHEALTHY", "UNKNOWN"}:
+            return f"{message} Поэтому рекомендация предварительная."
+    if status in {"DEGRADED", "UNHEALTHY", "UNKNOWN"}:
+        return "Часть данных пока нельзя надёжно сопоставить с рекламной кампанией. Поэтому рекомендация предварительная."
+    return None
+
+
 def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
     """Render the same object-level control screen for CHANNEL and BOT."""
     object_type = state["object"]["type"]
@@ -668,7 +693,7 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
         f"Главная проблема:\n{_owner_short_text(root, 'Пока недостаточно данных.')}\n\n"
         f"Почему:\n{_owner_short_text(state.get('why_summary'), 'MaxiBot ещё не может доказанно определить главную причину.')}\n\n"
         f"➡️ Что делать:\n{_owner_short_text(state.get('next_best_action'), 'Продолжать сбор данных.')}"
-        f"{result_line}\n\nData Trust: {state.get('data_trust', 'UNKNOWN')}\nОбновлено: {updated_text}"
+        f"{result_line}\n\nОбновлено: {updated_text}"
     )
 
 
@@ -753,13 +778,15 @@ def format_ads_why_screen(state: dict, *, title: str) -> str:
             evidence = parsed if isinstance(parsed, list) else []
         except (TypeError, ValueError):
             evidence = []
+    trust_explanation = _data_trust_explanation(state)
+    trust_block = f"\n\nО качестве данных:\n{trust_explanation}" if trust_explanation else ""
     return (
         f"🔍 Почему\n\n{title}\n\nГлавная проблема:\n{root}\n\n"
         f"Почему:\n{_owner_short_text(state.get('why_summary'), 'Доказанных сигналов пока нет.')}\n\n"
-        f"Data Trust: {state.get('data_trust', 'UNKNOWN')}\n"
         f"Уверенность: {_owner_confidence(recommendation.confidence if recommendation else None)}\n"
         f"Evidence: {', '.join(str(item) for item in evidence[:8]) if evidence else 'недостаточно'}\n\n"
         "Provider metrics и подтверждённый бизнес-результат не смешиваются."
+        f"{trust_block}"
     )
 
 
