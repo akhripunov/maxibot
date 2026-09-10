@@ -145,3 +145,11 @@ def test_dashboard_replaces_stale_recommendation_rationale_after_mapping_fix():
     source = (Path(__file__).parents[1] / "app/ads/dashboard.py").read_text()
     assert "stale_markers" in source
     assert "Подтверждённые подписчики сопоставлены с кампанией по UTM" in source
+
+
+def test_dashboard_recomputes_mapping_from_one_active_link_even_if_provider_state_is_filtered():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app/ads/dashboard.py").read_text()
+    assert "active_link_campaign_ids" in source
+    assert "len(active_link_campaign_ids) == 1" in source

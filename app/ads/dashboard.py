@@ -182,7 +182,11 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         confirmed = window.get("qualified_outcomes")
     confirmed = int(confirmed) if confirmed is not None else None
     campaign_mapping = metrics.get("campaign_specific") if isinstance(metrics, dict) else None
-    if object_type == "CHANNEL" and len(active_campaigns) == 1:
+    # Mapping scope is determined by active promotion links, not provider
+    # delivery state. A linked campaign may have a transient/unknown provider
+    # state while its deterministic UTM attribution remains valid.
+    active_link_campaign_ids = [campaign_id for campaign_id in campaign_ids if campaign_id in active_link_ids]
+    if object_type == "CHANNEL" and len(active_link_campaign_ids) == 1 and active_link_campaign_ids[0] in campaign_by_id:
         # Recompute this small deterministic flag from canonical visits so an
         # older persisted snapshot cannot keep showing stale unavailable copy.
         from app.ads.attribution import build_maxibot_metrics
