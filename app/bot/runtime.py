@@ -1081,6 +1081,7 @@ class MaxBotRuntime:
             )
             if ads_allowed:
                 await self._render(user_id, action, selected_id)
+                return
             elif action.split(":", 1)[0] in {"ads_creatives", "ads_context", "ads_learning", "ads_history"}:
                 # A visible dashboard can outlive a channel record/id refresh.
                 # Resolve the current owned channel before falling through to

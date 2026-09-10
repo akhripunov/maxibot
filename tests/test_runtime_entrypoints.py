@@ -289,6 +289,14 @@ def test_navigation_callback_returns_the_rendered_screen_to_active_max_client():
     assert "MAX_SETTINGS_PANEL_CREATED" in section
 
 
+def test_readonly_ads_navigation_returns_after_rendering_full_channel_screen():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    section = source[source.index('elif action.startswith("ads_campaigns:")'):source.index('elif action.startswith("ads_memory_detail:")')]
+    assert "await self._render(user_id, action, selected_id)\n                return" in section
+
+
 def test_message_settings_does_not_send_an_unuploaded_image_url():
     from pathlib import Path
 
