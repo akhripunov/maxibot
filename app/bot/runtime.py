@@ -792,6 +792,7 @@ class MaxBotRuntime:
             "ads_creatives": r"^ads_creatives:[0-9a-f-]{20,}$",
             "ads_learning": r"^ads_learning:[0-9a-f-]{20,}$",
             "ads_history": r"^ads_history:[0-9a-f-]{20,}$",
+            "ads_context": r"^ads_context:[0-9a-f-]{20,}$",
         }
         malformed_prefix = next((prefix for prefix in malformed_readonly_ads if action == prefix or action.startswith(prefix + ":")), None)
         if malformed_prefix and not re.match(malformed_readonly_ads[malformed_prefix], action):
