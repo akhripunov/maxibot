@@ -30,6 +30,8 @@ class Admin(Base):
     support_input_mode: Mapped[bool]=mapped_column(Boolean, default=False, nullable=False)
     support_input_ticket_id: Mapped[Optional[str]]=mapped_column(String(36))
     subscription_expires_at: Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True), index=True)
+    subscription_tariff: Mapped[str] = mapped_column(String(16), default="free", server_default="free", nullable=False)
+    ai_promotion_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
     pending_free_trial: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     custom_bot_state: Mapped[Optional[str]]=mapped_column(String(32))
     pending_custom_bot_id: Mapped[Optional[str]]=mapped_column(String(36))
@@ -151,6 +153,7 @@ class SubscriptionOrder(Base):
     # Service tier for new orders; NULL keeps historical Robokassa orders
     # compatible and is treated as Start by the payment callback.
     tariff: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    order_kind: Mapped[str] = mapped_column(String(24), default="service", server_default="service", nullable=False)
     amount: Mapped[Numeric] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

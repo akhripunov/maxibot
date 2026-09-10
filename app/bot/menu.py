@@ -954,7 +954,7 @@ def service_subscription_text() -> str:
 
 def subscription_management_text(admin: Admin) -> str:
     active = subscription_status(admin.subscription_expires_at) == "активен"
-    tariff = "Start" if active else "Бесплатный"
+    tariff = (admin.subscription_tariff or "start").title() if active else "Бесплатный"
     paid_until = (
         admin.subscription_expires_at.astimezone(MOSCOW).strftime("%d.%m.%Y")
         if active and admin.subscription_expires_at else "бессрочно"
@@ -1374,6 +1374,14 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             ("🤖 AI Продвижение", "subscription_ai"),
             ("⬅️ Назад", "home"),
         )
+    if screen.startswith("subscription_limit:"):
+        kind = screen.split(":", 1)[1]
+        resource = "каналов" if kind == "channel" else "ботов"
+        return (
+            f"🔒 Лимит тарифа\n\nВы достигли лимита подключённых {resource}.\n"
+            "Выберите более высокий тариф, чтобы подключить ещё.",
+            buttons(("💳 Управление подпиской", "subscription"), ("⬅️ Назад", "home")),
+        )
     if screen.startswith("subscription_tariff:"):
         tariff = screen.split(":", 1)[1].lower()
         if tariff not in TARIFFS:
@@ -1384,12 +1392,17 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         ]
         return tariff_text(tariff), buttons(*plan_buttons, ("⬅️ Назад", "subscription"))
     if screen == "subscription_ai":
+        ai_active = subscription_status(admin.ai_promotion_expires_at) == "активен"
+        ai_status = (
+            f"AI Продвижение: активно\nОплачено до: {admin.ai_promotion_expires_at.astimezone(MOSCOW):%d.%m.%Y}"
+            if ai_active and admin.ai_promotion_expires_at else "AI Продвижение: не подключено"
+        )
         return (
             "🤖 AI Продвижение\n\n"
             "Анализирует продвижение, помогает оценивать цену подписчика, "
             "кампании и креативы и готовит рекомендации.\n\n"
             "Реклама автоматически не изменяется.\n\n"
-            "Стоимость: 1 ₽ в месяц.",
+            f"Стоимость: 1 ₽ в месяц.\n\n{ai_status}",
             buttons(("🤖 Подключить AI Продвижение — 1 ₽ в месяц", "subscription_ai_pay"), ("⬅️ Назад", "subscription")),
         )
     if screen == "free_trial":
@@ -2655,6 +2668,22 @@ class MenuRepository:
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
+    @staticmethod
+    def _subscription_limits(admin: Admin) -> tuple[int, int]:
+        return {"free": (1, 0), "start": (3, 1), "pro": (10, 3)}.get((admin.subscription_tariff or "free").lower(), (1, 0))
+
+    async def _check_quota(self, db, admin: Admin, *, bots: bool = False) -> None:
+        channels = await db.scalar(select(func.count(Channel.id)).where(Channel.admin_id == admin.id)) or 0
+        bot_count = await db.scalar(select(func.count(BotConnection.id)).where(
+            BotConnection.owner_admin_id == admin.id,
+            BotConnection.status != "DISABLED",
+        )) or 0
+        max_channels, max_bots = self._subscription_limits(admin)
+        if not bots and channels >= max_channels:
+            raise ValueError("SUBSCRIPTION_CHANNEL_LIMIT")
+        if bots and bot_count >= max_bots:
+            raise ValueError("SUBSCRIPTION_BOT_LIMIT")
+
     async def get_admin(self, external_id: str) -> Admin:
         async with self.session_factory() as db:
             admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
@@ -2691,6 +2720,7 @@ class MenuRepository:
                 existing.updated_at = datetime.now(timezone.utc)
                 bot = existing
             else:
+                await self._check_quota(db, admin, bots=True)
                 bot = BotConnection(owner_admin_id=admin.id, owner_max_user_id=external_id,
                     max_bot_id=str(profile.get("user_id") or profile.get("id") or profile.get("bot_id") or "unknown"),
                     username=str(profile.get("username") or profile.get("name") or "bot"),
@@ -4271,6 +4301,7 @@ class MenuRepository:
                     ))
                     await db.commit()
                 return channel.id
+            await self._check_quota(db, admin)
             registry = await db.scalar(select(ChannelSlugRegistry).where(
                 ChannelSlugRegistry.max_channel_external_id == external_id
             ))

@@ -363,11 +363,19 @@ async def robokassa_result(request: Request, db: AsyncSession = Depends(get_sess
         admin = await db.get(Admin, order.admin_id)
         if admin is None:
             raise HTTPException(status_code=404, detail="admin not found")
-        admin.subscription_expires_at = add_subscription_months(
-            admin.subscription_expires_at,
-            order.months,
-            now=order.paid_at,
-        )
+        if order.order_kind == "ai_promotion":
+            admin.ai_promotion_expires_at = add_subscription_months(
+                admin.ai_promotion_expires_at,
+                order.months,
+                now=order.paid_at,
+            )
+        else:
+            admin.subscription_expires_at = add_subscription_months(
+                admin.subscription_expires_at,
+                order.months,
+                now=order.paid_at,
+            )
+            admin.subscription_tariff = (order.tariff or "start").lower()
         await db.commit()
     return Response(content=f"OK{invoice_id}", media_type="text/plain")
 

@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+from decimal import Decimal
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from sqlalchemy import select
@@ -957,6 +958,23 @@ class MaxBotRuntime:
                 await self._render(user_id, action)
         elif action == "subscription_ai":
             await self._render(user_id, action)
+        elif action == "subscription_ai_pay":
+            if not robokassa_configured():
+                await self._render(user_id, "subscription_ai")
+                return
+            async with self.session_factory() as db:
+                admin = await db.scalar(select(Admin).where(Admin.external_id == str(user_id)))
+                if not admin:
+                    return
+                order = SubscriptionOrder(
+                    invoice_id=int(time.time() * 1000), admin_id=admin.id,
+                    channel_id=None, months=1, amount=Decimal("1.00"),
+                    tariff=None, order_kind="ai_promotion", status="pending",
+                )
+                db.add(order)
+                await db.commit()
+                order_id = order.id
+            await self._render(user_id, f"subscription_payment:{order_id}")
         elif action.startswith("free_trial_activate:"):
             selected_id = action.split(":", 1)[1]
             if await self.repo.channel_owned(user_id, selected_id):
@@ -2110,6 +2128,12 @@ class MaxBotRuntime:
                         else:
                             await self._render(admin_id, "custom_bot_activation_error")
                     return
+                except ValueError as exc:
+                    if str(exc) == "SUBSCRIPTION_BOT_LIMIT":
+                        await self.repo.set_custom_bot_state(admin_id, custom_state, pending_bot_id)
+                        await self._render(admin_id, "subscription_limit:bot")
+                        return
+                    raise
                 except Exception:
                     logger.warning("CUSTOM_BOT_TOKEN_REJECTED admin_id=%s", admin_id)
                     await self.repo.set_custom_bot_state(admin_id, custom_state, pending_bot_id)
@@ -2172,7 +2196,13 @@ class MaxBotRuntime:
         if forwarded_channel_id and admin_id:
             data = await self.client.validate_forwarded_post(message)
             data["external_id"] = forwarded_channel_id
-            channel_id = await self.repo.create_channel(admin_id, data)
+            try:
+                channel_id = await self.repo.create_channel(admin_id, data)
+            except ValueError as exc:
+                if str(exc) == "SUBSCRIPTION_CHANNEL_LIMIT":
+                    await self._render(admin_id, "subscription_limit:channel")
+                    return
+                raise
             await self.repo.activate_pending_free_trial(str(admin_id), str(channel_id))
             # A forwarded post is already the newest MAX message.  Recreate
             # the service panel so the add confirmation is also newest and
