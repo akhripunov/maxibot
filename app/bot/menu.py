@@ -39,7 +39,7 @@ from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation
 from app.ads.storage_health import TABLES, diagnostics as storage_diagnostics, human_size, ui_time
-from app.integrations.robokassa import payment_url
+from app.integrations.robokassa import payment_url, amount_for_months, TARIFFS, DISCOUNTS
 from app.integrations.subscriptions import subscription_status, free_trial_status, channel_promotion_entitlement as resolve_channel_promotion_entitlement
 
 logger = logging.getLogger(__name__)
@@ -952,6 +952,31 @@ def service_subscription_text() -> str:
     return "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nПодписка не активна.\n\nВыберите период подписки:"
 
 
+def subscription_management_text(admin: Admin) -> str:
+    active = subscription_status(admin.subscription_expires_at) == "активен"
+    tariff = "Start" if active else "Бесплатный"
+    paid_until = (
+        admin.subscription_expires_at.astimezone(MOSCOW).strftime("%d.%m.%Y")
+        if active and admin.subscription_expires_at else "бессрочно"
+    )
+    return (
+        "💳 Управление подпиской\n\n"
+        f"Текущий тариф: {tariff}\n"
+        f"Оплачено до: {paid_until}\n"
+        "Ежедневные отчёты: ✅ Активно"
+    )
+
+
+def tariff_text(tariff: str) -> str:
+    data = TARIFFS[tariff]
+    monthly = data["monthly"]
+    return (
+        f"💳 Тариф {tariff.title()}\n\n"
+        f"Каналы: до {data['channels']}\nБоты: до {data['bots']}\n"
+        f"Цена: {monthly:g} ₽/мес.\n\nВыберите период оплаты:"
+    )
+
+
 def _remaining_access_text(expires_at: datetime, *, now: datetime | None = None) -> str:
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -1343,22 +1368,30 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
     if screen == "promotion_connect":
         return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
     if screen == "subscription":
-        plan_buttons = [(label, f"subscription_plan:service:{months}") for label, months in SUBSCRIPTION_PLANS]
-        trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id))
-        paid_active = subscription_status(admin.subscription_expires_at) == "активен"
-        if paid_active:
-            status_text = paid_subscription_status_text(admin.subscription_expires_at)
-            status_buttons = plan_buttons
-        elif trial and free_trial_status(trial.trial_end_at) == "активен":
-            status_text = trial_subscription_status_text(trial.trial_end_at)
-            status_buttons = plan_buttons
-        elif trial:
-            status_text = expired_trial_status_text()
-            status_buttons = plan_buttons
-        else:
-            status_text = service_subscription_text()
-            status_buttons = [("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons]
-        return status_text, buttons(*status_buttons, ("⬅️ Главное меню", "home"))
+        return subscription_management_text(admin), buttons(
+            ("Тариф Start", "subscription_tariff:start"),
+            ("Тариф Pro", "subscription_tariff:pro"),
+            ("🤖 AI Продвижение", "subscription_ai"),
+            ("⬅️ Назад", "home"),
+        )
+    if screen.startswith("subscription_tariff:"):
+        tariff = screen.split(":", 1)[1].lower()
+        if tariff not in TARIFFS:
+            return await render_screen(db, admin, "subscription")
+        plan_buttons = [
+            (f"{months} мес. — {amount_for_months(months, tariff):g} ₽", f"subscription_plan:service:{tariff}:{months}")
+            for months in (1, 3, 6)
+        ]
+        return tariff_text(tariff), buttons(*plan_buttons, ("⬅️ Назад", "subscription"))
+    if screen == "subscription_ai":
+        return (
+            "🤖 AI Продвижение\n\n"
+            "Анализирует продвижение, помогает оценивать цену подписчика, "
+            "кампании и креативы и готовит рекомендации.\n\n"
+            "Реклама автоматически не изменяется.\n\n"
+            "Стоимость: 1 ₽ в месяц.",
+            buttons(("🤖 Подключить AI Продвижение — 1 ₽ в месяц", "subscription_ai_pay"), ("⬅️ Назад", "subscription")),
+        )
     if screen == "free_trial":
         return FREE_TRIAL_INFO_TEXT, buttons(("🚀 Начать бесплатно", "free_trial_start"), ("⬅️ Назад", "subscription"))
     if screen == "free_trial_start":

@@ -951,6 +951,12 @@ class MaxBotRuntime:
         elif action == "free_trial_connect":
             await self.repo.begin_free_trial(str(user_id))
             await self._render(user_id, "connect_channel")
+        elif action.startswith("subscription_tariff:"):
+            tariff = action.split(":", 1)[1]
+            if tariff in {"start", "pro"}:
+                await self._render(user_id, action)
+        elif action == "subscription_ai":
+            await self._render(user_id, action)
         elif action.startswith("free_trial_activate:"):
             selected_id = action.split(":", 1)[1]
             if await self.repo.channel_owned(user_id, selected_id):
@@ -965,12 +971,15 @@ class MaxBotRuntime:
             if await self.repo.channel_owned(user_id, selected_id):
                 await self._render(user_id, action, selected_id)
         elif action.startswith("subscription_plan:"):
-            selected_id, months_text = action.split(":", 2)[1:]
+            parts = action.split(":")
+            selected_id = parts[1]
+            tariff = parts[2] if len(parts) == 4 else "start"
+            months_text = parts[3] if len(parts) == 4 else parts[2]
             service_subscription = selected_id == "service"
             if service_subscription or await self.repo.channel_owned(user_id, selected_id):
                 try:
                     months = int(months_text)
-                    amount = amount_for_months(months)
+                    amount = amount_for_months(months, tariff)
                 except (TypeError, ValueError):
                     return
                 if not robokassa_configured():
@@ -992,6 +1001,7 @@ class MaxBotRuntime:
                         channel_id=channel.id if channel else None,
                         months=months,
                         amount=amount,
+                        tariff=tariff if service_subscription else None,
                         status="pending",
                     )
                     db.add(order)

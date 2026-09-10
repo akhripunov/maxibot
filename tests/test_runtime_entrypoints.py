@@ -392,10 +392,11 @@ def test_service_subscription_order_has_no_channel_dependency():
     menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
     runtime = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
     model = (Path(__file__).parents[1] / "app" / "db" / "models.py").read_text()
-    assert 'f"subscription_plan:service:{months}"' in menu
+    assert 'f"subscription_plan:service:{tariff}:{months}"' in menu
     assert 'service_subscription = selected_id == "service"' in runtime
     assert 'channel_id=channel.id if channel else None' in runtime
     assert 'Mapped[Optional[str]]' in model
+    assert 'tariff=tariff if service_subscription else None' in runtime
 
 
 def test_navigation_callback_returns_the_rendered_screen_to_active_max_client():

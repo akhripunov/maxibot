@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from app.integrations.subscriptions import add_subscription_months, subscription_status
+from app.integrations.robokassa import amount_for_months
 
 
 def test_subscription_starts_now_and_uses_calendar_months():
@@ -19,3 +20,12 @@ def test_subscription_status_is_explicit():
     assert subscription_status(None, now=now) == "не активирован"
     assert subscription_status(datetime(2026, 5, 11, 12, tzinfo=timezone.utc), now=now) == "активен"
     assert subscription_status(datetime(2026, 5, 9, 12, tzinfo=timezone.utc), now=now) == "истёк"
+
+
+def test_start_and_pro_tariff_prices_use_existing_period_discounts():
+    assert amount_for_months(1, "start") == 1900
+    assert amount_for_months(3, "start") == 5130
+    assert amount_for_months(6, "start") == 7980
+    assert amount_for_months(1, "pro") == 4900
+    assert amount_for_months(3, "pro") == 13230
+    assert amount_for_months(6, "pro") == 20580

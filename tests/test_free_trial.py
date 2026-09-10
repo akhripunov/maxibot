@@ -77,8 +77,9 @@ def test_paid_tariff_screen_keeps_trial_above_the_three_existing_plans():
     start = source.index('if screen == "subscription":')
     end = source.index('if screen == "free_trial":', start)
     block = source[start:end]
-    assert '"🎁 Попробовать бесплатно", "free_trial"' in block
-    assert 'status_buttons = [("🎁 Попробовать бесплатно", "free_trial"), *plan_buttons]' in block
+    assert '"Тариф Start", "subscription_tariff:start"' in block
+    assert '"Тариф Pro", "subscription_tariff:pro"' in block
+    assert '"🤖 AI Продвижение", "subscription_ai"' in block
 
 
 def test_subscription_status_copy_is_service_level_and_server_side():

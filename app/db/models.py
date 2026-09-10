@@ -148,6 +148,9 @@ class SubscriptionOrder(Base):
     admin_id: Mapped[str] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), index=True)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True, nullable=True)
     months: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Service tier for new orders; NULL keeps historical Robokassa orders
+    # compatible and is treated as Start by the payment callback.
+    tariff: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     amount: Mapped[Numeric] = mapped_column(Numeric(10, 2), nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

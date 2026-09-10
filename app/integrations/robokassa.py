@@ -14,6 +14,12 @@ PLANS: dict[int, Decimal] = {
     6: Decimal("7980.00"),
 }
 
+TARIFFS: dict[str, dict[str, object]] = {
+    "start": {"monthly": Decimal("1900.00"), "channels": 3, "bots": 1},
+    "pro": {"monthly": Decimal("4900.00"), "channels": 10, "bots": 3},
+}
+DISCOUNTS = {1: Decimal("0"), 3: Decimal("0.10"), 6: Decimal("0.30")}
+
 
 def configured() -> bool:
     password1 = settings.robokassa_test_password1 if settings.robokassa_test_mode else settings.robokassa_password1
@@ -21,7 +27,13 @@ def configured() -> bool:
     return bool(settings.robokassa_merchant_login and password1 and password2)
 
 
-def amount_for_months(months: int) -> Decimal:
+def amount_for_months(months: int, tariff: str = "start") -> Decimal:
+    if tariff.lower() in TARIFFS:
+        try:
+            monthly = TARIFFS[tariff.lower()]["monthly"]
+            return (monthly * months * (Decimal("1") - DISCOUNTS[months])).quantize(Decimal("0.01"))
+        except KeyError as exc:
+            raise ValueError("unsupported subscription period") from exc
     try:
         return PLANS[months]
     except KeyError as exc:
