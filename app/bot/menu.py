@@ -952,7 +952,15 @@ def service_subscription_text() -> str:
     return "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nПодписка не активна.\n\nВыберите период подписки:"
 
 
-def subscription_management_text(admin: Admin) -> str:
+def subscription_quota(admin: Admin) -> tuple[int, int]:
+    active = subscription_status(admin.subscription_expires_at) == "активен"
+    tariff = (admin.subscription_tariff or "start").lower() if active else "free"
+    if active and tariff == "free":
+        tariff = "start"
+    return {"free": (1, 0), "start": (3, 1), "pro": (10, 3)}.get(tariff, (1, 0))
+
+
+def subscription_management_text(admin: Admin, *, channel_count: int = 0, bot_count: int = 0) -> str:
     active = subscription_status(admin.subscription_expires_at) == "активен"
     tariff = (admin.subscription_tariff or "start").lower() if active else "free"
     if active and tariff == "free":
@@ -967,6 +975,8 @@ def subscription_management_text(admin: Admin) -> str:
         "💳 Управление подпиской\n\n"
         f"Текущий тариф: {tariff}\n"
         f"Оплачено до: {paid_until}\n"
+        f"Подключено каналов: {channel_count}/{subscription_quota(admin)[0]}\n"
+        f"Подключено ботов: {bot_count}/{subscription_quota(admin)[1]}\n"
         "Ежедневные отчёты: ✅ Активно"
     )
 
@@ -1372,7 +1382,12 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
     if screen == "promotion_connect":
         return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
     if screen == "subscription":
-        return subscription_management_text(admin), buttons(
+        channel_count = await db.scalar(select(func.count(Channel.id)).where(Channel.admin_id == admin.id)) or 0
+        bot_count = await db.scalar(select(func.count(BotConnection.id)).where(
+            BotConnection.owner_admin_id == admin.id,
+            BotConnection.status != "DISABLED",
+        )) or 0
+        return subscription_management_text(admin, channel_count=channel_count, bot_count=bot_count), buttons(
             ("Тариф Start", "subscription_tariff:start"),
             ("Тариф Pro", "subscription_tariff:pro"),
             ("🤖 AI Продвижение", "subscription_ai"),
@@ -2679,11 +2694,7 @@ class MenuRepository:
 
     @staticmethod
     def _subscription_limits(admin: Admin) -> tuple[int, int]:
-        active = subscription_status(admin.subscription_expires_at) == "активен"
-        tariff = (admin.subscription_tariff or "start").lower() if active else "free"
-        if active and tariff == "free":
-            tariff = "start"
-        return {"free": (1, 0), "start": (3, 1), "pro": (10, 3)}.get(tariff, (1, 0))
+        return subscription_quota(admin)
 
     async def _check_quota(self, db, admin: Admin, *, bots: bool = False) -> None:
         channels = await db.scalar(select(func.count(Channel.id)).where(Channel.admin_id == admin.id)) or 0

@@ -69,3 +69,17 @@ def test_expired_paid_tariff_falls_back_to_free_quotas():
         subscription_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     assert MenuRepository._subscription_limits(expired_pro) == (1, 0)
+
+
+def test_subscription_management_shows_real_resource_counts_and_effective_limits():
+    from types import SimpleNamespace
+    from app.bot.menu import subscription_management_text
+
+    admin = SimpleNamespace(
+        subscription_tariff="pro",
+        subscription_expires_at=datetime(2026, 12, 1, tzinfo=timezone.utc),
+    )
+    text = subscription_management_text(admin, channel_count=4, bot_count=2)
+    assert "Подключено каналов: 4/10" in text
+    assert "Подключено ботов: 2/3" in text
+    assert "Ежедневные отчёты: ✅ Активно" in text
