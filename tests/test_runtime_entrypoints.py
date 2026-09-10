@@ -378,11 +378,11 @@ def test_service_subscription_is_in_home_and_not_channel_menu():
     menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
     home = menu[menu.index('return menu_text(len(channels)'):menu.index('if screen == "ads_storage"')]
     assert '("📚 Мои каналы", "promotion")' in home
-    assert '("💳 Оформить подписку", "subscription")' in home
-    assert home.index('("📚 Мои каналы", "promotion")') < home.index('("💳 Оформить подписку", "subscription")') < home.index('("ℹ️ О сервисе", "about")')
+    assert '("💳 Моя подписка", "subscription")' in home
+    assert home.index('("📚 Мои каналы", "promotion")') < home.index('("💳 Моя подписка", "subscription")') < home.index('("ℹ️ О сервисе", "about")')
 
     channel = menu[menu.index('if screen.startswith("promotion_channel:")'):menu.index('if screen.startswith("promotion_landing:")')]
-    assert '"💳 Оформить подписку"' not in channel
+    assert '"💳 Моя подписка"' not in channel
     assert '"🗑 Удалить канал"' in channel
 
 

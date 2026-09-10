@@ -1249,7 +1249,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return menu_text(len(channels), connected_bots), buttons(
             ("📢 Подключить канал", "connect_channel"),
             ("📚 Мои каналы", "promotion"),
-            ("💳 Оформить подписку", "subscription"),
+            ("💳 Моя подписка", "subscription"),
             ("ℹ️ О сервисе", "about"),
         )
     if screen == "ads_storage":
