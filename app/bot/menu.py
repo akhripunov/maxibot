@@ -1572,25 +1572,26 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             back = "ads_bot:system"
             title = "🤖 MAXIBOT"
         campaigns = await campaigns_for_promotion_object(db, object_type=object_type, object_id=object_id)
-        lines = ["🎯 Цель продвижения", "", title, "", f"Результат: {'Подписчик в канал' if object_type == 'CHANNEL' else 'Запуск бота'}"]
-        links = await active_links(db, object_type=object_type, object_id=object_id)
-        links_by_campaign = {link.campaign_id: link for link in links}
-        if not campaigns:
-            lines += ["", "Активных кампаний пока нет."]
-        for campaign in campaigns:
-            link = links_by_campaign.get(campaign.id)
-            if link and link.objective_status == "ACTIVE" and link.target_cpa is not None:
-                lines.append(f"\nКампания: {campaign.name}\nЦелевая стоимость: {float(link.target_cpa):g} {link.currency or 'RUB'}")
-            else:
-                lines.append(f"\nКампания: {campaign.name}\nЦель: не задана")
-        lines += ["", "Цель применяется только к выбранным активным кампаниям."]
+        if object_type == "CHANNEL":
+            title = "📣 Канал: " + channel.title
+        else:
+            title = "🤖 Бот: MAXIBOT"
+        lines = [
+            "🎯 Цель продвижения",
+            "",
+            title,
+            "",
+            "Цель помогает AI сравнивать фактическую стоимость",
+            "подписчика с вашим ориентиром и готовить более точные",
+            "рекомендации по продвижению.",
+        ]
         controls = []
         if len(campaigns) > 1:
-            controls.append(("🎯 Для всех активных кампаний", f"ads_objective_edit:{object_type}:{object_id}:all"))
-            controls.extend((f"✏️ {campaign.name[:42]}", f"ads_objective_edit:{object_type}:{object_id}:{campaign.id}") for campaign in campaigns)
+            controls.append(("🎯 Установить цель для всех активных кампаний", f"ads_objective_edit:{object_type}:{object_id}:all"))
+            controls.extend((f"🎯 Установить цель: {campaign.name[:34]}", f"ads_objective_edit:{object_type}:{object_id}:{campaign.id}") for campaign in campaigns)
         else:
-            controls.append(("✏️ Изменить цель", f"ads_objective_edit:{object_type}:{object_id}:all"))
-        controls.extend([("🚫 Отключить цель", f"ads_objective_disable:{object_type}:{object_id}"), ("⬅️ Назад", back)])
+            controls.append(("🎯 Установить цель", f"ads_objective_edit:{object_type}:{object_id}:all"))
+        controls.append(("⬅️ Назад", back))
         return ("\n".join(lines), buttons(*controls))
     if screen.startswith("ads_objective_input:"):
         _, object_type, object_id = screen.split(":", 2)

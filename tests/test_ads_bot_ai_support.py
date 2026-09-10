@@ -37,6 +37,21 @@ def test_system_bot_ai_promotion_uses_unified_primary_controls_and_keeps_refresh
     assert 'action.startswith(("ads_bot_campaigns:"' in runtime
 
 
+def test_objective_screen_uses_client_copy_and_only_install_back_controls():
+    menu = (ROOT / "app/bot/menu.py").read_text()
+    assert '"🎯 Цель продвижения"' in menu
+    assert '"📣 Канал: " + channel.title' in menu
+    assert '"Цель помогает AI сравнивать фактическую стоимость"' in menu
+    assert '"подписчика с вашим ориентиром и готовить более точные"' in menu
+    assert '"рекомендации по продвижению."' in menu
+    assert '("🎯 Установить цель", f"ads_objective_edit:{object_type}:{object_id}:all")' in menu
+    assert '("⬅️ Назад", back)' in menu
+    assert '"✏️ Изменить цель"' not in menu
+    assert '"🚫 Отключить цель"' not in menu
+    assert '"Результат: ' not in menu
+    assert '"Цель применяется только к выбранным активным кампаниям."' not in menu
+
+
 def test_bot_ai_migration_is_existing_table_only():
     migration = (ROOT / "alembic/versions/0078_ads_bot_ai_support_v1.py").read_text()
     assert "create_table" not in migration

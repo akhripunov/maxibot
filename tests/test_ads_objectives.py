@@ -67,5 +67,7 @@ def test_ui_exposes_goal_without_provider_or_object_internals():
     menu = Path("app/bot/menu.py").read_text()
     assert '"🎯 Цель"' in menu
     assert "objective_for_link" in menu
-    assert "Подписчик в канал" in menu
-    assert "Запуск бота" in menu
+    assert '"🎯 Цель продвижения"' in menu
+    assert '"Цель помогает AI сравнивать фактическую стоимость"' in menu
+    assert '"🎯 Установить цель"' in menu
+    assert '"🚫 Отключить цель"' not in menu
