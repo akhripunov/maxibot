@@ -1391,7 +1391,12 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if tariff not in TARIFFS:
             return await render_screen(db, admin, "subscription")
         plan_buttons = [
-            (f"{months} мес. — {amount_for_months(months, tariff):g} ₽", f"subscription_plan:service:{tariff}:{months}")
+            (
+                f"{months} мес. — {amount_for_months(months, tariff):g} ₽"
+                f" (−{int(DISCOUNTS[months] * 100)}%)" if DISCOUNTS[months] else
+                f"{months} мес. — {amount_for_months(months, tariff):g} ₽",
+                f"subscription_plan:service:{tariff}:{months}",
+            )
             for months in (1, 3, 6)
         ]
         return tariff_text(tariff), buttons(*plan_buttons, ("⬅️ Назад", "subscription"))

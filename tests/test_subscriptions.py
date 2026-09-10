@@ -31,6 +31,13 @@ def test_start_and_pro_tariff_prices_use_existing_period_discounts():
     assert amount_for_months(6, "pro") == 20580
 
 
+def test_tariff_period_buttons_show_their_discount():
+    from pathlib import Path
+
+    menu = Path("app/bot/menu.py").read_text()
+    assert 'f" (−{int(DISCOUNTS[months] * 100)}%)"' in menu
+
+
 def test_subscription_entitlement_migration_backfills_historical_paid_users_and_ai_order_kind():
     from pathlib import Path
 
