@@ -954,7 +954,11 @@ def service_subscription_text() -> str:
 
 def subscription_management_text(admin: Admin) -> str:
     active = subscription_status(admin.subscription_expires_at) == "активен"
-    tariff = (admin.subscription_tariff or "start").title() if active else "Бесплатный"
+    tariff = (admin.subscription_tariff or "start").lower() if active else "free"
+    if active and tariff == "free":
+        # Historical paid users predate the tariff field and map safely to Start.
+        tariff = "start"
+    tariff = tariff.title() if active else "Бесплатный"
     paid_until = (
         admin.subscription_expires_at.astimezone(MOSCOW).strftime("%d.%m.%Y")
         if active and admin.subscription_expires_at else "бессрочно"

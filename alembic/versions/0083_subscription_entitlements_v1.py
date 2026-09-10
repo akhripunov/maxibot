@@ -13,6 +13,7 @@ def upgrade():
     op.add_column("admins", sa.Column("subscription_tariff", sa.String(length=16), nullable=False, server_default="free"))
     op.add_column("admins", sa.Column("ai_promotion_expires_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("subscription_orders", sa.Column("order_kind", sa.String(length=24), nullable=False, server_default="service"))
+    op.execute("UPDATE admins SET subscription_tariff = 'start' WHERE subscription_expires_at IS NOT NULL AND subscription_expires_at > CURRENT_TIMESTAMP")
 
 
 def downgrade():
