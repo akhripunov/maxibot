@@ -1081,6 +1081,28 @@ class MaxBotRuntime:
             )
             if ads_allowed:
                 await self._render(user_id, action, selected_id)
+            elif action.split(":", 1)[0] in {"ads_creatives", "ads_context", "ads_learning", "ads_history"}:
+                # A visible dashboard can outlive a channel record/id refresh.
+                # Resolve the current owned channel before falling through to
+                # the generic unavailable screen.
+                current_text = update.message.text if update.message else ""
+                match = re.search(r"(?:Канал:|📢)\s*(.+?)(?:\n|$)", current_text)
+                title = match.group(1).strip() if match else ""
+                async with self.session_factory() as db:
+                    recovered = None
+                    if title:
+                        recovered = await db.scalar(select(Channel).join(Admin).where(
+                            Channel.title == title, Admin.external_id == str(user_id)
+                        ))
+                    if not recovered:
+                        tracked_id = self._user_channels.get(str(user_id))
+                        if tracked_id:
+                            recovered = await db.scalar(select(Channel).join(Admin).where(
+                                Channel.id == tracked_id, Admin.external_id == str(user_id)
+                            ))
+                if recovered and can_access_ads(str(user_id)):
+                    await self._render(user_id, f"{action.split(':', 1)[0]}:{recovered.id}", str(recovered.id))
+                    return
         elif action.startswith("ads_memory_detail:"):
             _, _, channel_id, _ = action.split(":", 3)
             if can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, channel_id):
