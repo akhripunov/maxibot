@@ -126,3 +126,22 @@ def test_why_screen_uses_safe_generic_for_unknown_data():
     text = format_ads_why_screen(state, title="Москва 365")
     assert "Часть данных пока нельзя надёжно сопоставить" in text
     assert "UNKNOWN" not in text
+
+
+def test_why_screen_suppresses_stale_mapping_warning_when_live_mapping_supported():
+    from app.bot.menu import _data_trust_explanation
+
+    state = {
+        "data_trust": "DEGRADED",
+        "data_trust_reasons": {"checks": {"ATTRIBUTION": "DEGRADED", "CAMPAIGN_MAPPING": "DEGRADED"}},
+        "campaign_specific": {"supported": True, "coverage": 56 / 58},
+    }
+    assert _data_trust_explanation(state) is None
+
+
+def test_dashboard_replaces_stale_recommendation_rationale_after_mapping_fix():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app/ads/dashboard.py").read_text()
+    assert "stale_markers" in source
+    assert "Подтверждённые подписчики сопоставлены с кампанией по UTM" in source

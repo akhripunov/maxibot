@@ -181,6 +181,17 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     if confirmed is None:
         confirmed = window.get("qualified_outcomes")
     confirmed = int(confirmed) if confirmed is not None else None
+    campaign_mapping = metrics.get("campaign_specific") if isinstance(metrics, dict) else None
+    if object_type == "CHANNEL" and len(active_campaigns) == 1:
+        # Recompute this small deterministic flag from canonical visits so an
+        # older persisted snapshot cannot keep showing stale unavailable copy.
+        from app.ads.attribution import build_maxibot_metrics
+        mapping_metrics = await build_maxibot_metrics(
+            db, channel_id=object_id,
+            end_date=(snapshots[0].period_to if snapshots else datetime.now(timezone.utc).date()),
+            windows=("7d",),
+        )
+        campaign_mapping = mapping_metrics.get("campaign_specific")
 
     health = await db.scalar(select(AdsDataHealth).where(*_scope(AdsDataHealth, object_type, object_id))
                              .order_by(AdsDataHealth.checked_at.desc()).limit(1))
@@ -213,6 +224,11 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     if root_cause_status != "PROVEN" and recommendation:
         root_cause = "Рекламная причина пока не доказана."
     objective = _objective(links, object_type)
+    why_summary = recommendation.rationale if recommendation else None
+    if campaign_mapping and campaign_mapping.get("supported") and why_summary:
+        stale_markers = ("campaign-specific", "сопоставление с конкретной", "конкретной рекламной кампанией недоступно")
+        if any(marker in str(why_summary).lower() for marker in stale_markers):
+            why_summary = "Подтверждённые подписчики сопоставлены с кампанией по UTM; рекламная причина пока не доказана."
 
     campaign_rows = []
     for campaign in campaigns:
@@ -246,11 +262,12 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         "target_cpa": objective["target_cpa"], "currency": objective["currency"],
         "actual_business_cpa": business_cpa(spend=spend, confirmed_outcomes=confirmed),
         "confirmed_business_outcomes": confirmed, "business_outcome_name": objective["type"],
+        "campaign_specific": campaign_mapping or {"supported": False, "reason": "mapping is unknown"},
         "creative_summary": {"active": len(active_creatives), "attention": len(attention),
                              "status": "ATTENTION" if attention else "OK" if active_creatives else "NONE"},
         "current_stage": stage, "analysis_running": running,
         "primary_root_cause": root_cause, "root_cause_status": root_cause_status,
-        "why_summary": recommendation.rationale if recommendation else None,
+        "why_summary": why_summary,
         "next_best_action": next_action, "last_updated_at": snapshots[0].created_at if snapshots else None,
         "data_trust": health_status, "data_trust_reasons": _json(health.reasons_json, {}) if health else {},
         "active_campaigns": campaign_rows, "current_recommendation": recommendation,

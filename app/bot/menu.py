@@ -628,6 +628,8 @@ def _data_trust_explanation(state: dict) -> str | None:
     reasons = state.get("data_trust_reasons") or {}
     checks = reasons.get("checks") if isinstance(reasons, dict) else {}
     checks = checks if isinstance(checks, dict) else {}
+    campaign_mapping = state.get("campaign_specific") or {}
+    mapping_supported = isinstance(campaign_mapping, dict) and campaign_mapping.get("supported") is True
     explanations = (
         ("ATTRIBUTION", "Часть результатов пока нельзя надёжно связать с конкретной рекламной кампанией."),
         ("UNMATCHED_ATTRIBUTION", "Часть переходов пока нельзя надёжно связать с конкретной рекламной кампанией."),
@@ -638,8 +640,15 @@ def _data_trust_explanation(state: dict) -> str | None:
         ("MEMORY_DATABASE", "История прошлых проверок временно недоступна для сравнения."),
     )
     for key, message in explanations:
+        if mapping_supported and key in {"ATTRIBUTION", "UNMATCHED_ATTRIBUTION", "CAMPAIGN_MAPPING"}:
+            continue
         if str(checks.get(key) or "").upper() in {"DEGRADED", "UNHEALTHY", "UNKNOWN"}:
             return f"{message} Поэтому рекомендация предварительная."
+    if mapping_supported and not any(
+        str(checks.get(key) or "").upper() in {"DEGRADED", "UNHEALTHY", "UNKNOWN"}
+        for key in checks if key not in {"ATTRIBUTION", "UNMATCHED_ATTRIBUTION", "CAMPAIGN_MAPPING"}
+    ):
+        return None
     if status in {"DEGRADED", "UNHEALTHY", "UNKNOWN"}:
         return "Часть данных пока нельзя надёжно сопоставить с рекламной кампанией. Поэтому рекомендация предварительная."
     return None
