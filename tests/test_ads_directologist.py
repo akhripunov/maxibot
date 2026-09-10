@@ -9,6 +9,7 @@ from app.ads.directologist import (
     confidence,
     root_cause_status,
 )
+from app.ads.directologist import _channel_campaign_match
 
 
 def test_windows_exclude_partial_today_and_use_equal_seven_day_periods():
@@ -35,6 +36,23 @@ def test_attribution_quality_never_upgrades_unresolved_or_unattributed():
     assert attribution_quality(has_yclid=True, campaign_match=None, deterministic_link=True) == "OBSERVED"
     assert attribution_quality(has_yclid=True, campaign_match=False, deterministic_link=True) == "UNRESOLVED"
     assert attribution_quality(has_yclid=False, campaign_match=None, deterministic_link=False) == "UNATTRIBUTED"
+
+
+def test_channel_matching_accepts_suffixed_utm_campaign_and_keeps_wrong_campaign_unresolved():
+    visit = SimpleNamespace(
+        utm_campaign="msk365_rsya_msk_click_test1.713798021.5791778274",
+        campaign_metadata_json=None,
+    )
+    assert _channel_campaign_match(visit, "msk365_rsya_msk_click_test1") is True
+    assert _channel_campaign_match(visit, "other-campaign") is False
+
+
+def test_confirmed_channel_summary_uses_utm_matcher_for_single_campaign():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app/ads/directologist.py").read_text()
+    assert "_channel_campaign_match(visit, campaign.external_id)" in source
+    assert 'TrafficMembership.attribution_status.in_(("EXACT", "HIGH"))' in source
 
 
 def test_trend_and_confidence_fail_closed_for_small_samples():

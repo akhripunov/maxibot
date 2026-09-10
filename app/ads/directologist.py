@@ -21,6 +21,7 @@ from app.db.models import (
     BotPromotionProfile,
     BotTrafficVisit, TrafficMembership, TrafficVisit,
 )
+from app.traffic.funnel_reporting import campaign_matches
 
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 WINDOW_DAYS = 7
@@ -137,6 +138,15 @@ def _campaign_match_json(value: str | None, external_id: str) -> bool | None:
     return external_id in text
 
 
+def _channel_campaign_match(visit: TrafficVisit | None, external_id: str) -> bool | None:
+    """Match landing UTM campaign, including MAXIBOT's suffixed format."""
+    if not visit:
+        return None
+    if visit.utm_campaign:
+        return campaign_matches(visit.utm_campaign, external_id)
+    return _campaign_match_json(visit.campaign_metadata_json, external_id)
+
+
 async def confirmed_outcome_summary(
     db: AsyncSession,
     *,
@@ -178,7 +188,7 @@ async def confirmed_outcome_summary(
         for membership in memberships:
             visit = await db.get(TrafficVisit, membership.attributed_visit_id) if membership.attributed_visit_id else None
             yclid = visit.yclid if visit else None
-            campaign_match = _campaign_match_json(visit.campaign_metadata_json if visit else None, campaign.external_id)
+            campaign_match = _channel_campaign_match(visit, campaign.external_id)
             rows.append({"id": membership.id, "type": "CHANNEL", "has_yclid": bool(yclid), "quality": attribution_quality(has_yclid=bool(yclid), campaign_match=campaign_match, deterministic_link=True), "source": "TrafficMembership", "dedupe_key": f"{membership.channel_id}:{membership.max_user_id}"})
     deduped = {row["dedupe_key"]: row for row in rows}
     attributed = [row for row in deduped.values() if row["quality"] in {"OBSERVED", "MATCHED"}]
