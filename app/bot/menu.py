@@ -2674,7 +2674,11 @@ class MenuRepository:
 
     @staticmethod
     def _subscription_limits(admin: Admin) -> tuple[int, int]:
-        return {"free": (1, 0), "start": (3, 1), "pro": (10, 3)}.get((admin.subscription_tariff or "free").lower(), (1, 0))
+        active = subscription_status(admin.subscription_expires_at) == "активен"
+        tariff = (admin.subscription_tariff or "start").lower() if active else "free"
+        if active and tariff == "free":
+            tariff = "start"
+        return {"free": (1, 0), "start": (3, 1), "pro": (10, 3)}.get(tariff, (1, 0))
 
     async def _check_quota(self, db, admin: Admin, *, bots: bool = False) -> None:
         channels = await db.scalar(select(func.count(Channel.id)).where(Channel.admin_id == admin.id)) or 0

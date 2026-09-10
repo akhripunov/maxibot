@@ -51,3 +51,14 @@ def test_quota_and_ai_payment_paths_are_explicit_and_isolated():
     assert '"SUBSCRIPTION_BOT_LIMIT"' in menu
     assert 'order_kind="ai_promotion"' in runtime
     assert 'admin.ai_promotion_expires_at' in Path("app/main.py").read_text()
+
+
+def test_expired_paid_tariff_falls_back_to_free_quotas():
+    from types import SimpleNamespace
+    from app.bot.menu import MenuRepository
+
+    expired_pro = SimpleNamespace(
+        subscription_tariff="pro",
+        subscription_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    assert MenuRepository._subscription_limits(expired_pro) == (1, 0)
