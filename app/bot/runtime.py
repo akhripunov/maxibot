@@ -783,6 +783,36 @@ class MaxBotRuntime:
                         await self.client.answer_callback(update.callback_id)
                     await self._render(user_id, f"ads_campaigns:{recovered.id}", str(recovered.id))
                     return
+        # Older MAX message copies (and a few clients that omit callback
+        # arguments) can deliver the read-only creatives action without a
+        # usable channel id. Recover the current channel from the visible
+        # dashboard instead of falling through to the generic unavailable
+        # screen.
+        malformed_readonly_ads = {
+            "ads_creatives": r"^ads_creatives:[0-9a-f-]{20,}$",
+            "ads_learning": r"^ads_learning:[0-9a-f-]{20,}$",
+            "ads_history": r"^ads_history:[0-9a-f-]{20,}$",
+        }
+        malformed_prefix = next((prefix for prefix in malformed_readonly_ads if action == prefix or action.startswith(prefix + ":")), None)
+        if malformed_prefix and not re.match(malformed_readonly_ads[malformed_prefix], action):
+            current_text = update.message.text if update.message else ""
+            match = re.search(r"(?:Канал:|📢)\s*(.+?)(?:\n|$)", current_text)
+            channel_title = match.group(1).strip() if match else ""
+            if channel_title:
+                async with self.session_factory() as db:
+                    recovered = await db.scalar(
+                        select(Channel).join(Admin).where(
+                            Channel.title == channel_title,
+                            Admin.external_id == str(user_id),
+                        )
+                    )
+                if recovered and can_access_ads(str(user_id)):
+                    if update.callback_id:
+                        await self.client.answer_callback(update.callback_id)
+                    await self._render(user_id, f"{malformed_prefix}:{recovered.id}", str(recovered.id))
+                    return
+            logger.info("MAX malformed creatives callback ignored")
+            return
         if action in {"connect_channel", "about"}:
             await self.repo.mark_onboarding_seen(str(user_id))
         if update.callback_id:
