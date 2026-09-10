@@ -220,7 +220,9 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     # envelope is assembled; the provider may cite this field directly.
     evidence_ids = evidence_registry({"FACTS": {**fact_context, "MAXIBOT_QUALIFIED_MEMBERSHIP_RATE": True, "V2_ANALYSIS": dataset}})
     suff, missing = sufficiency(mapped_campaigns=1, report_days=int(dataset["data_quality"].get("history_days", 0)), conversions=fact_set.conversion_sample, attribution_available=bool(traffic.get("visits")), direct_available=bool(dataset["data_quality"].get("rows_loaded")))
-    health = data_health(direct_available=bool(dataset["data_quality"].get("rows_loaded")), mapped_campaigns=1, attribution_available=bool(traffic.get("visits")), snapshot_fresh=bool(dataset["data_quality"].get("rows_loaded")), ai_available=bool(provider_from_settings()), memory_db_available=True, unmatched_attribution=int(traffic.get("UNATTRIBUTED", 0)))
+    campaign_mapping = maxibot_metrics.get("campaign_specific") or {}
+    campaign_mapping_supported = bool(campaign_mapping.get("supported"))
+    health = data_health(direct_available=bool(dataset["data_quality"].get("rows_loaded")), mapped_campaigns=1, attribution_available=bool(traffic.get("visits")), snapshot_fresh=bool(dataset["data_quality"].get("rows_loaded")), ai_available=bool(provider_from_settings()), memory_db_available=True, unmatched_attribution=0 if campaign_mapping_supported else int(traffic.get("UNATTRIBUTED", 0)))
     # Keep one canonical copy of trend features in FACTS.TRENDS.  V2_ANALYSIS
     # retains the evidence registry and selected granular observations, but
     # does not repeat the same trend object a second time.
@@ -232,7 +234,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
         confirmed_outcomes=maxibot_metrics["7d"].get("qualified_memberships", maxibot_metrics["7d"].get("qualified_outcomes", 0)),
         # The current ADS/traffic alignment is explicitly not campaign-scoped.
         # Never turn object-level outcomes into paid CPA without that proof.
-        attribution_coverage=1.0 if maxibot_metrics.get("campaign_specific", {}).get("supported") else 0.0,
+        attribution_coverage=float(campaign_mapping.get("coverage", 0.0)) if campaign_mapping_supported else 0.0,
     )
     facts = {"campaign": {"id": campaign.id, "name": campaign.name}, **fact_context, "data_sufficiency": suff, "missing_data": missing, "data_health": health, "MAXIBOT_METRICS": maxibot_metrics, "OBJECTIVE_AT_ANALYSIS_TIME": objective_at_analysis, "OBJECTIVE_EVALUATION": objective_evaluation, "TRENDS": dataset.get("trends", {}), "DIRECTOLOGIST": dataset.get("DIRECTOLOGIST"), "V2_ANALYSIS": context_dataset, "QUALITY_DECISION_SNAPSHOT": dataset.get("QUALITY_DECISION_SNAPSHOT")}
     facts.update(closed_loop)
@@ -240,8 +242,8 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     facts["confidence_axes"] = {
         "performance_confidence": "HIGH" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 10 and dataset["campaign_summary"]["metrics"].get("clicks", 0) >= 100 else "MEDIUM" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 3 else "LOW",
         "attribution_confidence": "INSUFFICIENT" if membership_rate is None else "LOW" if membership_rate < 0.10 else "MEDIUM" if membership_rate < 0.50 else "HIGH",
-        "attribution_semantics": "campaign-specific сопоставление с рекламной кампанией недоступно; это не membership rate",
-        "campaign_specific_matching": False,
+        "attribution_semantics": "результаты сопоставлены с рекламной кампанией по UTM; это не membership rate" if campaign_mapping_supported else "сопоставление с конкретной кампанией пока не подтверждено; это не membership rate",
+        "campaign_specific_matching": True if campaign_mapping_supported else "UNKNOWN",
     }
     facts["MAXIBOT_QUALIFIED_MEMBERSHIP_RATE"] = {
         "value": membership_rate,
@@ -250,8 +252,8 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
         "meaning": "visit_to_qualified_membership_conversion",
         "qualified_memberships": int(fact_set.qualified_subscriptions) if fact_set.qualified_subscriptions is not None else None,
         "tracked_landing_visits": int(fact_set.landing_visits) if fact_set.landing_visits is not None else None,
-        "campaign_specific": False,
-        "campaign_specific_matching": "UNKNOWN",
+        "campaign_specific": campaign_mapping_supported,
+        "campaign_specific_matching": True if campaign_mapping_supported else "UNKNOWN",
         "window": "7d",
         "scope": "CHANNEL",
     }

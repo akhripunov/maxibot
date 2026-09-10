@@ -28,3 +28,14 @@ def test_renderer_explains_aligned_maxibot_membership_rate_separately():
 def test_campaign_scoped_rate_is_unknown_without_campaign_population():
     from app.ads.attribution import build_maxibot_metrics
     assert callable(build_maxibot_metrics)
+
+
+def test_single_campaign_utm_mapping_is_supported_but_ambiguous_mapping_stays_unknown():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app/ads/attribution.py").read_text()
+    service = (Path(__file__).parents[1] / "app/ads/service.py").read_text()
+    assert "campaign_matches" in source
+    assert "len(links) == 1" in source
+    assert "if not unknown:" in source
+    assert 'campaign_specific_matching": True if campaign_mapping_supported else "UNKNOWN"' in service

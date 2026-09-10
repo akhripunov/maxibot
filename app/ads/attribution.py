@@ -7,8 +7,9 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import BotConversion, BotTrafficVisit
+from app.db.models import AdsCampaign, AdsPromotionCampaignLink, BotConversion, BotTrafficVisit, TrafficMembership, TrafficVisit
 from app.traffic.analytics import traffic_stats_for_channels
+from app.traffic.funnel_reporting import campaign_matches
 from sqlalchemy import func, select
 
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -34,7 +35,7 @@ async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: 
             "qualified_memberships": qualified,
             "membership_rate": qualified / visits if visits else None,
             "scope": "CHANNEL",
-            "campaign_specific": False,
+            "campaign_specific": None,
             "campaign_scope": None,
             "attribution_level": "EXACT_OR_HIGH_MEMBERSHIP",
             "provenance": {
@@ -49,7 +50,40 @@ async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: 
                 "calculated_at": datetime.now(timezone.utc).isoformat(),
             },
         }
-    result["campaign_specific"] = {"supported": False, "value": None, "reason": "reliable campaign-scoped visit and membership population is unavailable"}
+    links = list((await db.scalars(select(AdsPromotionCampaignLink).where(
+        AdsPromotionCampaignLink.channel_id == channel_id,
+        AdsPromotionCampaignLink.object_type == "CHANNEL",
+        AdsPromotionCampaignLink.status == "ACTIVE",
+    ))).all())
+    campaign_specific: dict[str, Any] = {"supported": False, "value": None, "reason": "reliable campaign-scoped visit and membership population is unavailable"}
+    if len(links) == 1:
+        campaign = await db.get(AdsCampaign, links[0].campaign_id)
+        if campaign:
+            start, end = window_bounds(end_date=end_date, window="7d")
+            memberships = list((await db.scalars(select(TrafficMembership).join(
+                TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id
+            ).where(
+                TrafficMembership.channel_id == channel_id,
+                TrafficMembership.attribution_status.in_(("EXACT", "HIGH")),
+                TrafficMembership.joined_at >= start,
+                TrafficMembership.joined_at < end,
+            ))).all())
+            matched = 0
+            unknown = 0
+            for membership in memberships:
+                visit = await db.get(TrafficVisit, membership.attributed_visit_id)
+                if visit and visit.utm_campaign:
+                    matched += int(campaign_matches(visit.utm_campaign, campaign.external_id))
+                else:
+                    unknown += 1
+            if not unknown:
+                campaign_specific = {
+                    "supported": True,
+                    "value": matched,
+                    "coverage": matched / len(memberships) if memberships else 1.0,
+                    "reason": "single active campaign with deterministic landing UTM mapping",
+                    "campaign_id": campaign.external_id,
+                }
     return result
 
 
