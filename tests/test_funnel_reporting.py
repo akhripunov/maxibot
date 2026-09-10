@@ -6,6 +6,17 @@ def test_campaign_matches_real_yandex_utm_component_format():
     assert not campaign_matches("msk365_rsya_msk_click_test1.713798021.5791778274", "713798022")
 
 
+def test_campaign_matches_production_moscow_365_shape():
+    values = [
+        "msk365_rsya_msk_click_test3.713798021.5791778274",
+        "msk365_rsya_msk_click_test1.713798021.5791778274",
+        "m365_rsya_msk_nb_test3.713798021.5791778274",
+        "m365_rsya_msk_click_test4.713827609.5792027870",
+    ]
+    assert all(campaign_matches(value, "713798021") for value in values[:3])
+    assert not campaign_matches(values[3], "713798021")
+
+
 def test_report_distinguishes_unique_yclid_from_raw_requests_and_revisits():
     report = canonical_paid_click_report([
         FunnelObservation("a", "m365", frozenset({"MAX_LINK_ASSIGNED"})),
