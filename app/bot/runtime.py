@@ -799,19 +799,31 @@ class MaxBotRuntime:
             current_text = update.message.text if update.message else ""
             match = re.search(r"(?:Канал:|📢)\s*(.+?)(?:\n|$)", current_text)
             channel_title = match.group(1).strip() if match else ""
-            if channel_title:
-                async with self.session_factory() as db:
+            async with self.session_factory() as db:
+                recovered = None
+                if channel_title:
                     recovered = await db.scalar(
                         select(Channel).join(Admin).where(
                             Channel.title == channel_title,
                             Admin.external_id == str(user_id),
                         )
                     )
-                if recovered and can_access_ads(str(user_id)):
-                    if update.callback_id:
-                        await self.client.answer_callback(update.callback_id)
-                    await self._render(user_id, f"{malformed_prefix}:{recovered.id}", str(recovered.id))
-                    return
+                # If MAX supplied a keyboard-only stale copy, use the channel
+                # tracked for this dialog as a bounded fallback.
+                if not recovered:
+                    tracked_id = self._user_channels.get(str(user_id))
+                    if tracked_id:
+                        recovered = await db.scalar(
+                            select(Channel).join(Admin).where(
+                                Channel.id == tracked_id,
+                                Admin.external_id == str(user_id),
+                            )
+                        )
+            if recovered and can_access_ads(str(user_id)):
+                if update.callback_id:
+                    await self.client.answer_callback(update.callback_id)
+                await self._render(user_id, f"{malformed_prefix}:{recovered.id}", str(recovered.id))
+                return
             logger.info("MAX malformed creatives callback ignored")
             return
         if action in {"connect_channel", "about"}:
