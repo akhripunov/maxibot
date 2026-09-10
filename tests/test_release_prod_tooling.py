@@ -155,7 +155,7 @@ def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0082_subscription_tariffs_v1" in result.stdout
+    assert "TARGET_DOWN_REVISION=0081_ads_bot_ai_support_v1" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():
