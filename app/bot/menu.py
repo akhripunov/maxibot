@@ -974,7 +974,7 @@ def subscription_management_text(admin: Admin, *, channel_count: int = 0, bot_co
     return (
         "💳 Управление подпиской\n\n"
         f"Текущий тариф: {tariff}\n"
-        f"Оплачено до: {paid_until}\n"
+        f"Оплачено до: {paid_until}\n\n"
         f"Подключено каналов: {channel_count}/{subscription_quota(admin)[0]}\n"
         f"Подключено ботов: {bot_count}/{subscription_quota(admin)[1]}\n"
         "Ежедневные отчёты: ✅ Активно"
