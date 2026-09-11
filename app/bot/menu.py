@@ -2025,7 +2025,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             ],
         )
     if screen == "owner_admin":
-        stats = await owner_admin_stats(db)
+        stats = await owner_admin_stats(db, admin.id)
         try:
             storage = await storage_diagnostics(db)
             status_icon = {"NORMAL": "🟢", "WARNING": "🟡", "CRITICAL": "🔴", "UNKNOWN": "⚠️"}.get(storage["status"], "⚠️")
@@ -2036,8 +2036,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             "🔐 MAXIBOT · Администратор\n\n"
             f"👤 Клиентов всего: {stats['clients_total']}\n"
             f"🆕 Новых сегодня: {stats['clients_today']}\n\n"
-            f"📋 Подключено каналов: {stats['channels_total']}\n"
-            f"🤖 Подключено своих ботов: {stats['custom_bots_total']}\n\n"
+            f"📋 Подключено каналов: {stats['channels_total']} ({stats['own_channels']} мои)\n"
+            f"🤖 Подключено ботов: {stats['custom_bots_total']} ({stats['own_bots']} мои)\n\n"
             f"🚫 Заблокировали MAXIBOT: {stats['blocked_bot_users']}\n\n"
             f"🎫 Открытых тикетов: {stats['open_tickets']}\n\n"
             f"{storage_line}",
@@ -2573,7 +2573,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
     return "Функция пока недоступна.", buttons(("⬅️ Назад", "home"))
 
 
-async def owner_admin_stats(db: AsyncSession) -> dict[str, int]:
+async def owner_admin_stats(db: AsyncSession, platform_admin_id: str) -> dict[str, int]:
     demo_filter = Admin.external_id != "demo"
     clients_total = int(await db.scalar(select(func.count(Admin.id)).where(demo_filter)) or 0)
     channels_total = int(await db.scalar(
@@ -2591,6 +2591,12 @@ async def owner_admin_stats(db: AsyncSession) -> dict[str, int]:
         SupportTicket.status.in_(("NEW", "IN_PROGRESS"))
     )) or 0)
     custom_bots_total = int(await db.scalar(select(func.count(BotConnection.id)).join(Admin).where(demo_filter)) or 0)
+    own_channels = int(await db.scalar(select(func.count(Channel.id)).where(
+        Channel.admin_id == platform_admin_id,
+    )) or 0)
+    own_bots = int(await db.scalar(select(func.count(BotConnection.id)).where(
+        BotConnection.owner_admin_id == platform_admin_id,
+    )) or 0)
     blocked_bot_users = int(await db.scalar(select(func.count(BotRecipientState.id)).where(
         BotRecipientState.bot_key == "system",
         BotRecipientState.status == "BLOCKED",
@@ -2600,6 +2606,8 @@ async def owner_admin_stats(db: AsyncSession) -> dict[str, int]:
         "clients_today": clients_today,
         "channels_total": channels_total,
         "custom_bots_total": custom_bots_total,
+        "own_channels": own_channels,
+        "own_bots": own_bots,
         "open_tickets": open_tickets,
         "blocked_bot_users": blocked_bot_users,
     }
