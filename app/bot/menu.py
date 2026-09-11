@@ -1357,15 +1357,15 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
     if screen == "owner_clients":
         if not is_maxibot_owner(admin):
             return "⛔ Раздел доступен только владельцу MAXIBOT.", buttons(("⬅️ Главное меню", "home"))
-        client_ids = list((await db.scalars(
-            select(Admin.external_id).where(Admin.external_id != "demo").order_by(Admin.external_id)
-        )).all())
         channel_rows = list((await db.execute(
             select(Admin.external_id, Channel.id, Channel.title)
             .join(Channel, Channel.admin_id == Admin.id)
-            .where(Admin.external_id != "demo")
+            .where(Admin.external_id != "demo", Channel.admin_id != admin.id)
             .order_by(Admin.external_id, Channel.title)
         )).all())
+        # The owner’s own channels are operational/demo objects, not client
+        # accounts. Clients without a connected channel are omitted entirely.
+        client_ids = sorted({external_id for external_id, _, _ in channel_rows})
         campaign_rows = list((await db.execute(
             select(Channel.id, AdsCampaign.name)
             .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.channel_id == Channel.id)
@@ -1377,6 +1377,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 AdsAccount.provider == "YANDEX_DIRECT",
                 AdsAccount.status == "CONNECTED",
                 AdsCampaign.state == "ON",
+                Channel.admin_id != admin.id,
             )
             .order_by(Channel.id, AdsCampaign.name)
         )).all())
@@ -1390,15 +1391,12 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         for external_id in client_ids:
             lines.append(f"👤 ID пользователя: {external_id}")
             owned_channels = channels_by_client.get(external_id, [])
-            if not owned_channels:
-                lines.append("Подключённые каналы: нет")
-            else:
-                for channel_key, title in owned_channels:
-                    campaigns = campaigns_by_channel.get(channel_key, [])
-                    lines.append(f"📢 Канал: {title}")
-                    lines.append("Активные рекламные кампании: " + (", ".join(campaigns) if campaigns else "нет"))
-                    collecting = bool(settings.ads_periodic_collection_enabled and campaigns)
-                    lines.append(f"Сбор данных по рекламе: {'✅ идёт' if collecting else '⏸ не идёт'}")
+            for channel_key, title in owned_channels:
+                campaigns = campaigns_by_channel.get(channel_key, [])
+                lines.append(f"📢 Канал: {title}")
+                lines.append("Активные рекламные кампании: " + (", ".join(campaigns) if campaigns else "нет"))
+                collecting = bool(settings.ads_periodic_collection_enabled and campaigns)
+                lines.append(f"Сбор данных по рекламе: {'✅ идёт' if collecting else '⏸ не идёт'}")
             lines.append("")
         if not client_ids:
             lines.append("Клиентов пока нет.")
