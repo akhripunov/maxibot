@@ -1285,7 +1285,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return (
             f"💾 Хранилище ADS\n\n{status}\n\n"
             f"PostgreSQL: {human_size(storage['database']['total'])}\n"
-            f"ADS/V2: {human_size(storage['ads_total'])}\n{rows}\n\n"
+            f"ADS/V2: {human_size(storage['ads_total'])}\n\n{rows}\n\n"
             f"VPS: всего {human_size(storage['disk']['total'])}, свободно {human_size(storage['disk']['free'])} ({storage['disk']['free_percent']:.1f}%)\n\n"
             f"Рост 7 дней: {human_size(storage['growth_7d']) if storage.get('growth_7d') is not None else 'н/д'}\nРост 30 дней: {human_size(storage['growth_30d']) if storage.get('growth_30d') is not None else 'н/д'}\nПрогноз: {storage.get('growth_basis', 'недостаточно данных')}\n\n"
             f"Сбор данных: {'✅ включён' if periodic.get('enabled') else '⏸ выключен'}\n"
