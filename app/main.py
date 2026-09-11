@@ -27,7 +27,7 @@ from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
 from app.core.config import settings
 from app.security import validate_max_init_data
-from app.integrations.yandex_oauth import authorize_url, combined_scope, configured, consume_state, create_state, create_system_state, exchange_code, get_encrypted_token, save_token, save_system_token
+from app.integrations.yandex_oauth import authorize_url, combined_scope, configured, consume_state, create_bot_state, create_state, create_system_state, exchange_code, get_encrypted_token, save_bot_token, save_token, save_system_token
 from app.integrations.yandex_metrica import ensure_channel_setup, ensure_system_setup
 from app.integrations.yandex_direct import YandexDirectAPIError, YandexDirectClient
 from app.db.models import now as model_now
@@ -2072,6 +2072,18 @@ async def yandex_system_oauth_start(admin_id: str, db: AsyncSession = Depends(ge
     return RedirectResponse(authorize_url(state), status_code=302)
 
 
+@app.get("/oauth/yandex/bot/start")
+async def yandex_bot_oauth_start(admin_id: str, bot_id: str, db: AsyncSession = Depends(get_session)):
+    if not configured():
+        raise HTTPException(503, "Yandex OAuth is not configured")
+    admin = await db.scalar(select(Admin).where(Admin.external_id == admin_id))
+    bot = await db.scalar(select(BotConnection).where(BotConnection.id == bot_id, BotConnection.owner_admin_id == admin.id if admin else False))
+    if not admin or not bot:
+        raise HTTPException(404, "bot not found")
+    state = await create_bot_state(admin.external_id, bot.id)
+    return RedirectResponse(authorize_url(state, scopes=combined_scope()), status_code=302)
+
+
 @app.get("/oauth/yandex/callback", response_class=HTMLResponse)
 async def yandex_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None, db: AsyncSession = Depends(get_session)):
     flow = await consume_state(state or "")
@@ -2097,6 +2109,14 @@ async def yandex_oauth_callback(code: str | None = None, state: str | None = Non
             profile.yandex_owner_login = str(metrica_setup["owner_login"]) if metrica_setup.get("owner_login") else None
             await db.commit()
             return HTMLResponse("<h1>Яндекс Метрика MAXIBOT подключена</h1><p>Системный счётчик и цель bot_started настроены.</p>")
+        if flow.get("bot"):
+            admin = await db.scalar(select(Admin).where(Admin.external_id == flow["admin"]))
+            bot = await db.scalar(select(BotConnection).where(BotConnection.id == flow["bot"], BotConnection.owner_admin_id == admin.id if admin else False))
+            if not admin or not bot:
+                raise ValueError("bot unavailable")
+            await save_bot_token(admin.external_id, bot.id, payload, db=db)
+            await db.commit()
+            return HTMLResponse("<h1>Яндекс.Директ подключён</h1><p>Авторизация бота сохранена.</p>")
         channel = await db.get(Channel, flow["channel"])
         if not channel:
             raise ValueError("channel unavailable")

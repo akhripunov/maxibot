@@ -76,6 +76,16 @@ async def create_system_state(admin_external_id: str) -> str:
     return state
 
 
+async def create_bot_state(admin_external_id: str, bot_id: str) -> str:
+    state = secrets.token_urlsafe(32)
+    client = _redis()
+    try:
+        await client.setex(f"yandex:oauth:state:{state}", 600, json.dumps({"admin": admin_external_id, "bot": bot_id}))
+    finally:
+        await client.aclose()
+    return state
+
+
 async def consume_state(state: str) -> dict | None:
     if not state:
         return None
@@ -140,6 +150,21 @@ async def save_system_token(admin_external_id: str, token_payload: dict, *, db: 
     ))
     if not profile:
         raise ValueError("canonical system BOT promotion profile unavailable")
+    profile.yandex_oauth_token_encrypted = encrypted
+    profile.yandex_oauth_connected_at = datetime.now(timezone.utc)
+    return encrypted
+
+
+async def save_bot_token(admin_external_id: str, bot_id: str, token_payload: dict, *, db: AsyncSession) -> str:
+    encrypted = encrypt_token(token_payload["access_token"])
+    profile = await db.scalar(select(BotPromotionProfile).join(
+        Admin, Admin.id == BotPromotionProfile.owner_admin_id,
+    ).where(
+        BotPromotionProfile.bot_connection_id == bot_id,
+        Admin.external_id == admin_external_id,
+    ))
+    if not profile:
+        raise ValueError("customer BOT promotion profile unavailable")
     profile.yandex_oauth_token_encrypted = encrypted
     profile.yandex_oauth_connected_at = datetime.now(timezone.utc)
     return encrypted
