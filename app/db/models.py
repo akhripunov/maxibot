@@ -351,6 +351,29 @@ class BotTrafficEvent(Base):
     dedupe_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
 
 
+class BotRecipientState(Base):
+    """Current delivery state of a user in a bot dialog.
+
+    This is deliberately separate from ``BlockedUser``: the latter is a
+    per-channel moderation block, while this table records a MAX user removing
+    (or restarting) the bot dialog so the owner dashboard can show a truthful
+    current blocked count.
+    """
+    __tablename__ = "bot_recipient_states"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    bot_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    user_external_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE", server_default="ACTIVE", index=True)
+    blocked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    block_reason: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("bot_key", "user_external_id", name="uq_bot_recipient_state_bot_user"),
+    )
+
+
 class BotConversion(Base):
     __tablename__ = "bot_conversion_queue"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

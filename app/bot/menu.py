@@ -18,7 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder, FreeTrial
+from app.db.models import Admin, Channel, ChannelSlugRegistry, Conversation, Message, BlockedUser, AdminFeedMessage, SupportTicket, SupportTicketMessage, BotConnection, CustomBotSession, CustomBotMessage, LandingPage, TrafficProfile, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, BotRecipientState, TrafficVisit, MembershipEvent, TrafficMembership, TrafficEvent, TrafficAttributionCandidate, MaxIdentityLink, TrafficSubscription, OfflineConversion, MaxJoinEvent, SubscriptionOrder, FreeTrial
 from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send_offline_conversion, resolve_exact_identity_visit
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
@@ -2038,6 +2038,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             f"🆕 Новых сегодня: {stats['clients_today']}\n\n"
             f"📋 Подключено каналов: {stats['channels_total']}\n"
             f"🤖 Подключено своих ботов: {stats['custom_bots_total']}\n\n"
+            f"🚫 Заблокировали MAXIBOT: {stats['blocked_bot_users']}\n\n"
             f"🎫 Открытых тикетов: {stats['open_tickets']}\n\n"
             f"{storage_line}",
             buttons(("💾 Хранилище ADS", "ads_storage"), ("⬅️ Назад", "home")),
@@ -2590,16 +2591,61 @@ async def owner_admin_stats(db: AsyncSession) -> dict[str, int]:
         SupportTicket.status.in_(("NEW", "IN_PROGRESS"))
     )) or 0)
     custom_bots_total = int(await db.scalar(select(func.count(BotConnection.id)).join(Admin).where(demo_filter)) or 0)
+    blocked_bot_users = int(await db.scalar(select(func.count(BotRecipientState.id)).where(
+        BotRecipientState.bot_key == "system",
+        BotRecipientState.status == "BLOCKED",
+    )) or 0)
     return {
         "clients_total": clients_total,
         "clients_today": clients_today,
         "channels_total": channels_total,
         "custom_bots_total": custom_bots_total,
         "open_tickets": open_tickets,
+        "blocked_bot_users": blocked_bot_users,
     }
 
 
 class MenuRepository:
+    async def mark_bot_recipient_active(self, user_external_id: str, bot_key: str = "system") -> None:
+        if not user_external_id:
+            return
+        async with self.session_factory() as db:
+            row = await db.scalar(select(BotRecipientState).where(
+                BotRecipientState.bot_key == bot_key,
+                BotRecipientState.user_external_id == str(user_external_id),
+            ))
+            timestamp = now()
+            if row is None:
+                db.add(BotRecipientState(bot_key=bot_key, user_external_id=str(user_external_id),
+                                         status="ACTIVE", last_seen_at=timestamp, updated_at=timestamp))
+            else:
+                row.status = "ACTIVE"
+                row.last_seen_at = timestamp
+                row.blocked_at = None
+                row.block_reason = None
+                row.updated_at = timestamp
+            await db.commit()
+
+    async def mark_bot_recipient_blocked(self, user_external_id: str, reason: str, bot_key: str = "system") -> None:
+        if not user_external_id:
+            return
+        async with self.session_factory() as db:
+            row = await db.scalar(select(BotRecipientState).where(
+                BotRecipientState.bot_key == bot_key,
+                BotRecipientState.user_external_id == str(user_external_id),
+            ))
+            timestamp = now()
+            if row is None:
+                db.add(BotRecipientState(bot_key=bot_key, user_external_id=str(user_external_id),
+                                         status="BLOCKED", blocked_at=timestamp,
+                                         block_reason=reason[:64], updated_at=timestamp))
+            else:
+                row.status = "BLOCKED"
+                row.blocked_at = timestamp
+                row.block_reason = reason[:64]
+                row.updated_at = timestamp
+            await db.commit()
+
     async def bind_system_startapp(self, token: str, max_user_id: str) -> bool:
         if not max_user_id:
             return False

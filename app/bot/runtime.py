@@ -519,6 +519,7 @@ class MaxBotRuntime:
         if not user_id or str(user_id) == "0":
             logger.warning("MAX start ignored: no target user")
             return
+        await self.repo.mark_bot_recipient_active(str(user_id))
         # Claim before the first await. This covers bot_started followed by
         # message_created(/start), retries, and duplicate poller deliveries.
         if not self._claim_start(str(user_id), channel_code):
@@ -1964,6 +1965,7 @@ class MaxBotRuntime:
                 and str(update.user_id) == str(update.chat_id)
             )
             if private_dialog_event or private_bot_removed:
+                await self.repo.mark_bot_recipient_blocked(str(update.user_id or update.chat_id), update.update_type)
                 await self.repo.reset_onboarding(str(update.user_id))
                 logger.info("MAX_PRIVATE_DIALOG_REMOVED_ONBOARDING_RESET event=%s", update.update_type)
             result = await self.repo.unbind_inbox_chat(update.chat_id)
