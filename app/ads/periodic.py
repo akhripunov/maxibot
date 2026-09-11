@@ -327,7 +327,13 @@ async def trigger_continuous_analysis(session_factory, *, now: datetime | None =
 async def collection_health(db: AsyncSession, *, now: datetime | None = None) -> dict[str, object]:
     """Return sanitized scheduler diagnostics for an admin/status surface."""
     now = now or datetime.now(timezone.utc)
-    last = await db.scalar(select(AdsCollectionRun).where(AdsCollectionRun.status == "COMPLETED").order_by(AdsCollectionRun.completed_at.desc()).limit(1))
+    # Some legacy/manual rows can carry COMPLETED without a completion
+    # timestamp.  PostgreSQL sorts NULLs first for DESC, so exclude those
+    # rows or the admin screen would incorrectly display "н/д" forever.
+    last = await db.scalar(select(AdsCollectionRun).where(
+        AdsCollectionRun.status == "COMPLETED",
+        AdsCollectionRun.completed_at.is_not(None),
+    ).order_by(AdsCollectionRun.completed_at.desc()).limit(1))
     next_run = await db.scalar(select(AdsCollectionRun).where(AdsCollectionRun.status.in_(("PENDING", "RETRYABLE_FAILED"))).order_by(AdsCollectionRun.scheduled_at).limit(1))
     if not next_run:
         # The scheduler materializes due slots only.  For a compact admin
