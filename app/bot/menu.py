@@ -1586,10 +1586,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         title, detail = labels[screen.split(":", 1)[0]]
         if screen.startswith("promotion_bot_yandex:") and configured():
             return (
-                f"{title}\n\n🤖 {bot.display_name or bot.username}\n\n{detail}",
+                detail,
                 [[{"text": "Авторизоваться в Яндекс", "type": "link", "url": f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/bot/start?admin_id={quote(str(admin.external_id), safe='')}&bot_id={quote(str(bot.id), safe='')}",}],
-                 [{"text": "⬅️ Бот", "callback_data": f"promotion_bot:{bot.id}"}],
-                 [{"text": "⬅️ Продвижение", "callback_data": "promotion"}]],
+                 [{"text": "⬅️ Назад", "callback_data": f"promotion_bot:{bot.id}"}]],
             )
         return (f"{title}\n\n🤖 {bot.display_name or bot.username}\n\n{detail}",
                 buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
