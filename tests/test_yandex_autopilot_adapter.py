@@ -43,6 +43,18 @@ async def test_pause_ad_collects_verified_before_after_and_real_rollback():
 
 
 @pytest.mark.asyncio
+async def test_enable_ad_and_restore_placement_are_verified():
+    direct = FakeDirect()
+    direct.ads[11]["State"] = "OFF"
+    direct.campaign["ExcludedSites"] = {"Items": ["example.test"]}
+    adapter = YandexAutopilotAdapter(direct)
+    enabled = await adapter.execute({"action_type": "ENABLE_AD", "provider_campaign_id": 101, "target": {"ad_id": 11}})
+    assert enabled["verified_after_state"]["ad"]["State"] == "ON"
+    restored = await adapter.execute({"action_type": "RESTORE_PLACEMENT", "provider_campaign_id": 101, "target": {"placement": "example.test"}})
+    assert restored["verified_after_state"]["campaign"]["ExcludedSites"]["Items"] == []
+
+
+@pytest.mark.asyncio
 async def test_placement_and_budget_mutations_verify_provider_state():
     adapter = YandexAutopilotAdapter(FakeDirect())
     placement = await adapter.execute({"action_type": "EXCLUDE_PLACEMENT", "provider_campaign_id": 101, "target": {"placement": "example.test"}})
@@ -56,3 +68,10 @@ async def test_create_ad_test_requires_precise_payload_and_verifies_created_ad()
     adapter = YandexAutopilotAdapter(FakeDirect())
     result = await adapter.execute({"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test", "Mobile": "NO"}}}})
     assert result["verified_after_state"]["created_ad_id"] == 12
+
+
+@pytest.mark.asyncio
+async def test_create_creative_test_uses_same_verified_ad_creation_path():
+    adapter = YandexAutopilotAdapter(FakeDirect())
+    result = await adapter.execute({"action_type": "CREATE_CREATIVE_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextImageAd": {"AdImageHash": "image-hash", "Href": "https://example.test"}}}})
+    assert result["verified_after_state"]["ad"]["CampaignId"] == 101
