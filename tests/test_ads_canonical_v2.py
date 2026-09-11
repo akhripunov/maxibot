@@ -50,7 +50,7 @@ def test_collection_scope_is_generic_link_driven():
     migration_0074 = (ROOT / "alembic/versions/0074_ads_provider_neutral_links.py").read_text()
     assert "AdsPromotionCampaignLink.status == \"ACTIVE\"" in periodic
     assert "AdsAccount.status == \"CONNECTED\"" in periodic
-    assert "AdsCampaign.state != \"ARCHIVED\"" in periodic
+    assert "AdsCampaign.state == \"ON\"" in periodic
     assert "713929699" in migration_0074
     assert "bp.bot_key = 'maxibot'" in migration_0074
 

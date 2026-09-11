@@ -67,7 +67,9 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
         select(AdsCampaign)
         .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
-        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED")
+        # Only running Direct campaigns produce new observations. Paused
+        # campaigns retain history but must not receive fresh slots.
+        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
         .distinct().limit(limit)
     )).all())
     created = 0
@@ -213,6 +215,17 @@ async def process_periodic_collection(session_factory) -> int:
             run = await db.get(AdsCollectionRun, run_id)
             if not run or run.status != "PROCESSING":
                 continue
+            # A slot may have been queued before Direct reported a campaign as
+            # paused. Do not fetch provider data for that stale slot; history
+            # remains available and the scheduler will resume after the state
+            # returns to ON.
+            campaign = await db.get(AdsCampaign, run.campaign_id) if run.campaign_id else None
+            if run.trigger == "PERIODIC" and (not campaign or campaign.state != "ON"):
+                run.status = "SKIPPED"
+                run.error_code = "CAMPAIGN_NOT_ACTIVE"
+                run.completed_at = datetime.now(timezone.utc)
+                await db.commit()
+                continue
             try:
                 await collect_one_slot(db, run)
                 await db.commit()
@@ -338,7 +351,7 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
     if not next_run:
         # The scheduler materializes due slots only.  For a compact admin
         # diagnostic, calculate the next campaign slot without inserting it.
-        eligible_campaigns = list((await db.scalars(select(AdsCampaign).join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED").distinct())).all())
+        eligible_campaigns = list((await db.scalars(select(AdsCampaign).join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON").distinct())).all())
         candidates = [_slot_time(now if _slot_time(now, c.id, "CAMPAIGN") > now else now + timedelta(minutes=settings.ads_collection_campaign_interval_minutes), c.id, "CAMPAIGN") for c in eligible_campaigns]
         if candidates:
             next_run = type("NextSlot", (), {"scheduled_at": min(candidates)})()
@@ -348,7 +361,7 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
         .select_from(AdsCampaign)
         .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
-        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED")
+        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
     )
     retry_backlog = await db.scalar(select(func.count(AdsCollectionRun.id)).where(AdsCollectionRun.status == "RETRYABLE_FAILED"))
     failed_runs = await db.scalar(select(func.count(AdsCollectionRun.id)).where(AdsCollectionRun.status == "FAILED"))
@@ -375,7 +388,7 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
         .select_from(AdsCampaign)
         .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
-        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state != "ARCHIVED", ~exists(recent_campaign))
+        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON", ~exists(recent_campaign))
     )
     return {
         "enabled": settings.ads_periodic_collection_enabled,

@@ -2041,7 +2041,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                     AdsAccount.admin_id == admin.id,
                     AdsAccount.provider == "YANDEX_DIRECT",
                     AdsAccount.status == "CONNECTED",
-                    AdsCampaign.state != "ARCHIVED",
+                    AdsCampaign.state == "ON",
                 )
             ) or 0)
             collection_line = (

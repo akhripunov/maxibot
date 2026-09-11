@@ -39,7 +39,7 @@ def test_collection_scope_is_active_generic_links_not_canary_names():
     assert "AdsPromotionCampaignLink.status == \"ACTIVE\"" in PERIODIC
     assert "AdsAccount.provider == \"YANDEX_DIRECT\"" in PERIODIC
     assert "AdsAccount.status == \"CONNECTED\"" in PERIODIC
-    assert "AdsCampaign.state != \"ARCHIVED\"" in PERIODIC
+    assert "AdsCampaign.state == \"ON\"" in PERIODIC
 
 
 def test_bot_scope_uses_generic_link_and_preserves_channel_ai_selection():
