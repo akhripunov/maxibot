@@ -1068,9 +1068,9 @@ def promotion_yandex_summary(channel_title: str, connected: bool,
 def yandex_connection_instructions() -> str:
     """Canonical explanation shown above the Yandex authorization button."""
     return (
-        "_Подключение Яндекс.Директ_\n\n"
+        "Подключение Яндекс.Директ\n\n"
         "Для настройки рекламных кампаний необходимо авторизоваться в Яндекс.\n\n"
-        "_Инструкция:_\n"
+        "Инструкция:\n"
         "1. Нажмите кнопку «Авторизоваться в Яндекс»\n"
         "2. Войдите в аккаунт Яндекс\n"
         "3. Разрешите доступ приложению\n"

@@ -3,7 +3,8 @@ from app.bot.menu import promotion_yandex_summary, yandex_connection_instruction
 
 def test_yandex_connection_instructions_are_canonical():
     text = yandex_connection_instructions()
-    assert "_Подключение Яндекс.Директ_" in text
+    assert "Подключение Яндекс.Директ" in text
+    assert "_Подключение Яндекс.Директ_" not in text
     assert "*Подключение Яндекс.Директ*" not in text
     assert '1. Нажмите кнопку «Авторизоваться в Яндекс»' in text
     assert "4. Вы будете автоматически возвращены в бота" in text
