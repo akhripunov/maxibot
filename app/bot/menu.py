@@ -1701,7 +1701,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if not profile:
             return await render_screen(db, admin, "promotion")
         state = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
-        title = f"🤖 {profile.display_name or profile.bot_key}"
+        bot_row = await db.get(BotConnection, profile.bot_connection_id) if profile.bot_connection_id else None
+        title = f"🤖 {(bot_row.display_name if bot_row else None) or profile.bot_key}"
         prefix = screen.split(":", 1)[0]
         formatter = {
             "ads_bot_campaigns": format_ads_campaigns_screen,
@@ -1727,11 +1728,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if not profile:
             return await render_screen(db, admin, "promotion")
         dashboard = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
+        bot_row = await db.get(BotConnection, profile.bot_connection_id) if profile.bot_connection_id else None
+        bot_title = (bot_row.display_name if bot_row else None) or profile.bot_key
         controls = (ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id)
                     if bot_key == "system" else
                     ads_unified_buttons("ads_bot", bot_key, f"promotion_bot:{bot_key}", objective_id=profile.id))
         return (
-            format_ads_unified_dashboard(dashboard, title=profile.display_name or profile.bot_key),
+            format_ads_unified_dashboard(dashboard, title=bot_title),
             controls,
         )
         view = await latest_bot_view(db, profile.id)
