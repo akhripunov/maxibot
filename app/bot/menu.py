@@ -655,8 +655,56 @@ def _data_trust_explanation(state: dict) -> str | None:
     return None
 
 
+def _experiment_status_label(status: str | None) -> str:
+    return {
+        "EXPLORE": "🔵 Исследуем",
+        "PROMISING": "🟡 Перспективно",
+        "PROVEN": "✅ Доказано",
+        "REJECTED": "❌ Отклонено",
+        "SCALE": "📈 Масштабируем",
+    }.get(str(status or "").upper(), "🟡 Перспективно")
+
+
+def _experiment_metric(value) -> str:
+    if value is None:
+        return "пока нет данных"
+    try:
+        return f"{float(value):.0f} ₽"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_experiment_block(experiment: dict, *, completed: bool = False) -> str:
+    sequence = experiment.get("experiment_seq")
+    label = f"Эксперимент #{sequence}" if sequence is not None else "Эксперимент"
+    title = _owner_short_text(experiment.get("action") or experiment.get("title"), "изменение")
+    evaluation = str(experiment.get("evaluation_status") or "").upper()
+    if completed and evaluation == "SUCCESS":
+        lines = [f"✅ {label} успешен", "", f"Что тестировали:\n{title}"]
+        if experiment.get("before") is not None or experiment.get("after") is not None:
+            lines.extend([f"До: {_experiment_metric(experiment.get('before'))}", f"После: {_experiment_metric(experiment.get('after'))}"])
+        lines.extend(["", f"🧠 Результат:\n{_experiment_status_label(experiment.get('experiment_status') or 'PROMISING')}", "MaxiBot ищет следующий тест."])
+        return "\n".join(lines)
+    if completed and evaluation == "FAIL":
+        lines = [f"❌ {label} не сработал", "", f"Что тестировали:\n{title}"]
+        if experiment.get("before") is not None or experiment.get("after") is not None:
+            lines.extend([f"До: {_experiment_metric(experiment.get('before'))}", f"После: {_experiment_metric(experiment.get('after'))}"])
+        if experiment.get("rollback"):
+            lines.extend(["", "↩️ MaxiBot откатил изменение."])
+        lines.extend(["", "🧠 Результат:\n❌ Отклонено", "Сейчас:\nИщем следующую гипотезу"])
+        return "\n".join(lines)
+    lines = [f"🧪 Сейчас проверяем:\n{label}", _experiment_status_label(experiment.get("experiment_status")), "", f"Что изменено:\n{title}"]
+    if experiment.get("before") is not None or experiment.get("after") is not None:
+        lines.extend([f"До: {_experiment_metric(experiment.get('before'))}", f"Сейчас: {_experiment_metric(experiment.get('after'))}"])
+    if evaluation == "INCONCLUSIVE":
+        lines.extend(["", "⏳ Недостаточно данных.\nПродолжаем наблюдение."])
+    else:
+        lines.extend(["", "⏳ Проверяем результат"])
+    return "\n".join(lines)
+
+
 def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
-    """Render the same object-level control screen for CHANNEL and BOT."""
+    """Render the simple Recommendations/Autopilot object-level screen."""
     object_type = state["object"]["type"]
     objective_name = "Подписчик (userDidSubscribe)" if object_type == "CHANNEL" else "Запуск бота (bot_started)"
     outcome_label = "Подтверждённых подписчиков" if object_type == "CHANNEL" else "Подтверждённых запусков"
@@ -666,57 +714,43 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
     actual = state.get("actual_business_cpa")
     target_text = f"{target:.0f} {currency_label}" if target is not None else "не задан"
     actual_text = f"{actual:.0f} {currency_label}" if actual is not None else "пока не рассчитан"
-    stages = ("Анализ", "Рекомендация", "Проверка", "Результат", "Масштабирование")
-    active_index = {"ANALYSIS": 0, "RECOMMENDATION": 1, "CHECK": 2, "RESULT": 3, "SCALE": 4}.get(
-        state.get("current_stage"), 0
-    )
-    stage_lines = "\n".join(
-        f"{'●' if index == active_index else '✓' if index < active_index else '○'} {label}"
-        for index, label in enumerate(stages)
-    )
-    creative = state.get("creative_summary") or {}
-    if not creative.get("active"):
-        creative_text = "нет активных"
-    elif creative.get("attention"):
-        creative_text = f"{creative['active']} активных · {creative['attention']} требует внимания"
-    else:
-        creative_text = f"{creative['active']} активных · всё нормально"
-    root = state.get("primary_root_cause")
-    if not root:
-        root = "Пока недостаточно данных."
-    if state.get("root_cause_status") == "NOT_PROVEN" and state.get("current_recommendation"):
-        root = "Рекламная причина пока не доказана."
-    outcome = state.get("current_outcome")
-    result_line = ""
-    if state.get("current_stage") == "RESULT" and outcome:
-        result_line = "\n\n✅ Изменение помогло" if outcome.evaluation_status == "SUCCESS" else "\n\n❌ Изменение не помогло"
-    elif state.get("current_stage") == "SCALE":
-        result_line = "\n\n🚀 Подход подтверждён."
-    refresh_line = "\nОбновляем..." if state.get("analysis_running") else ""
-    updated = state.get("last_updated_at")
-    updated_text = updated.astimezone(MOSCOW).strftime("%d.%m %H:%M") if updated else "ещё не выполнялось"
     confirmed = state.get("confirmed_business_outcomes")
     execution_mode = str(state.get("execution_mode") or "ADVISORY").upper()
-    mode_text = "🚀 Автопилот включён" if execution_mode == "AUTONOMOUS" else "💡 Рекомендации"
     autopilot = state.get("autopilot") or {}
     budget_limit = autopilot.get("monthly_budget_limit")
-    budget_line = f"\n💰 Лимит автопилота: {budget_limit:.0f} ₽ / месяц" if budget_limit is not None else ""
-    return (
-        f"🤖 AI Продвижение\n\n{'Канал' if object_type == 'CHANNEL' else 'Бот'}: {title}\n"
-        f"Цель: {objective_name}\n🎯 Target CPA: {target_text}\n"
-        f"Фактический CPA: {actual_text}\n{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}\n\n"
-        f"{mode_text}{budget_line}\n\n"
-        f"🎨 Креативы: {creative_text}\n\nСейчас:\n{stage_lines}{refresh_line}\n\n"
-        f"Главная проблема:\n{_owner_short_text(root, 'Пока недостаточно данных.')}\n\n"
-        f"Почему:\n{_owner_short_text(state.get('why_summary'), 'MaxiBot ещё не может доказанно определить главную причину.')}\n\n"
-        f"➡️ Что делать:\n{_owner_short_text(state.get('next_best_action'), 'Продолжать сбор данных.')}"
-        f"{result_line}\n\nОбновлено: {updated_text}"
-    )
+    lines = [
+        "🤖 AI Продвижение", "", f"{'Канал' if object_type == 'CHANNEL' else 'Бот'}: {title}",
+        f"Цель: {objective_name}", f"🎯 Target CPA: {target_text}", f"💰 Лимит: {budget_limit:.0f} ₽ / месяц" if budget_limit is not None else "💰 Лимит: пока не задан",
+        f"Фактический CPA: {actual_text}", f"{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}", "",
+    ]
+    if execution_mode == "AUTONOMOUS":
+        lines.append("🚀 Автопилот включён")
+        experiment = state.get("current_experiment")
+        if experiment:
+            lines.extend(["", _format_experiment_block(experiment)])
+        else:
+            lines.extend(["", "🔎 Сейчас:\nИщем следующую гипотезу"])
+            last = state.get("last_completed_experiment")
+            if last:
+                lines.extend(["", "Последний тест:", _format_experiment_block(last, completed=True), "🧠 Результат сохранён в обучение."])
+    else:
+        lines.append("💡 Режим: Рекомендации")
+        recommendation = state.get("current_recommendation")
+        experiment = state.get("current_experiment")
+        if experiment and experiment.get("executed_by") == "HUMAN":
+            lines.extend(["", _format_experiment_block(experiment)])
+        elif recommendation:
+            lines.extend(["", "💡 Рекомендация", "", _owner_short_text(recommendation.title, "Проверить рекламные данные."), "", "Почему:", _owner_short_text(state.get("why_summary"), "Доказанных сигналов пока нет."), "", "Ожидаемый результат:", _owner_short_text(state.get("next_best_action"), "Собрать дополнительные данные.")])
+        else:
+            lines.extend(["", "💡 Сейчас:", "Пока ничего менять не нужно.", "", "MaxiBot продолжает собирать данные и ищет следующую гипотезу."])
+    learning = state.get("learning_summary") or {}
+    lines.extend(["", f"🧠 Обучение: {learning.get('total_experiments', 0)} тестов · {learning.get('successful_experiments', 0)} успешных · {learning.get('proven_memories', 0)} доказанных знания"])
+    return "\n".join(lines)
 
 
 def ads_unified_buttons(
     action_prefix: str, object_id: str, back_action: str, *, objective_id: str | None = None,
-    execution_mode: str = "ADVISORY",
+    execution_mode: str = "ADVISORY", recommendation_id: str | None = None,
 ) -> list[list[dict]]:
     """Canonical navigation; the refresh action reuses the bounded pipeline."""
     if action_prefix == "ads_bot":
@@ -744,9 +778,12 @@ def ads_unified_buttons(
     mode = str(execution_mode or "ADVISORY").upper()
     mode_route = f"ads_autopilot_disable:{object_type}:{target_id}" if mode == "AUTONOMOUS" else f"ads_autopilot_enable:{object_type}:{target_id}"
     mode_label = "⏸ Выключить автопилот" if mode == "AUTONOMOUS" else "🚀 Включить автопилот"
+    action_rows = [(mode_label, mode_route), ("↻ Обновить сейчас", routes["refresh"])]
+    if recommendation_id and mode != "AUTONOMOUS":
+        action_rows.append(("✅ Я внедрил", f"ads_implement:{object_type}:{target_id}:{recommendation_id}"))
     return buttons(
-        (mode_label, mode_route), ("💰 Бюджет", f"ads_budget:{object_type}:{target_id}"),
-        ("↻ Обновить сейчас", routes["refresh"]), ("🎯 Цель", routes["goal"]),
+        *action_rows,
+        ("🎯 Цель", routes["goal"]), ("💰 Бюджет", f"ads_budget:{object_type}:{target_id}"),
         ("📊 Кампании", routes["campaigns"]), ("🎨 Креативы", routes["creatives"]),
         ("🔍 Почему", routes["why"]), ("🧠 Обучение", routes["learning"]),
         ("🕘 История", routes["history"]), ("⬅️ Назад", back_action),
@@ -1901,9 +1938,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         dashboard = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
         bot_row = await db.get(BotConnection, profile.bot_connection_id) if profile.bot_connection_id else None
         bot_title = (bot_row.display_name if bot_row else None) or profile.bot_key
-        controls = (ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id, execution_mode=dashboard.get("execution_mode"))
+        controls = (ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id, execution_mode=dashboard.get("execution_mode"), recommendation_id=(dashboard.get("current_recommendation").id if dashboard.get("current_recommendation") else None))
                     if bot_key == "system" else
-                    ads_unified_buttons("ads_bot", bot_key, f"promotion_bot:{bot_key}", objective_id=profile.id, execution_mode=dashboard.get("execution_mode")))
+                    ads_unified_buttons("ads_bot", bot_key, f"promotion_bot:{bot_key}", objective_id=profile.id, execution_mode=dashboard.get("execution_mode"), recommendation_id=(dashboard.get("current_recommendation").id if dashboard.get("current_recommendation") else None)))
         return (
             format_ads_unified_dashboard(dashboard, title=bot_title),
             controls,
@@ -1938,7 +1975,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         dashboard = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
         return (
             format_ads_unified_dashboard(dashboard, title=channel.title),
-            ads_unified_buttons("ads", channel.id, f"promotion_channel:{channel.id}", execution_mode=dashboard.get("execution_mode")),
+            ads_unified_buttons("ads", channel.id, f"promotion_channel:{channel.id}", execution_mode=dashboard.get("execution_mode"), recommendation_id=(dashboard.get("current_recommendation").id if dashboard.get("current_recommendation") else None)),
         )
         view = await latest_view(db, channel.id)
         health = view["health"]; ai = view["ai"]; rec = view["recommendation"]

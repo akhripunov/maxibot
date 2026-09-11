@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.bot.menu import MenuRepository, is_maxibot_owner, official_bot_added_diagnostics
-from app.db.models import Admin, AdsAiRun, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
+from app.db.models import Admin, AdsAiOutcome, AdsAiRun, AdsRecommendation, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
 from app.daily_reports import send_due_daily_reports
@@ -23,6 +23,7 @@ from app.security_tokens import decrypt_token, encrypt_token
 from app.ads.service import can_access_ads, run_bot_check, run_check, toggle_campaign_link
 from app.ads.objectives import set_objective, disable_objective
 from app.ads.autopilot import AUTONOMOUS, ADVISORY, set_budget, set_mode
+from app.ads.outcomes import record_implementation_evidence
 from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
 from app.integrations.robokassa import amount_for_months, configured as robokassa_configured
 from app.integrations.subscriptions import subscription_status
@@ -1130,6 +1131,31 @@ class MaxBotRuntime:
                     except Exception:
                         logger.exception("ADS_MANUAL_CHECK_FAILED channel_id=%s", selected_id)
                 await self._render(user_id, f"ads:{selected_id}", selected_id)
+                return
+        elif action.startswith("ads_implement:"):
+            _, object_type, object_id, recommendation_id = action.split(":", 3)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                if object_type == "CHANNEL" and not await self.repo.channel_owned(user_id, object_id):
+                    return
+                async with self.session_factory() as db:
+                    recommendation = await db.get(AdsRecommendation, recommendation_id)
+                    if not recommendation:
+                        return
+                    if object_type == "CHANNEL":
+                        valid_scope = recommendation.promotion_object_type in {None, "CHANNEL"} and recommendation.channel_id == object_id
+                    else:
+                        valid_scope = recommendation.promotion_object_type == "BOT" and recommendation.promotion_object_id == object_id
+                    outcome = await db.scalar(select(AdsAiOutcome).where(
+                        AdsAiOutcome.recommendation_id == recommendation.id
+                    ).order_by(AdsAiOutcome.due_at.desc())) if valid_scope else None
+                    if not outcome:
+                        return
+                    await record_implementation_evidence(
+                        db, outcome,
+                        {"evidence_type": "OWNER_CONFIRMATION", "executed_by": "HUMAN", "reference": "main_screen"},
+                    )
+                    await db.commit()
+                await self._render(user_id, f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}")
                 return
         elif action.startswith("ads_bot_check:"):
             bot_key = action.split(":", 1)[1]

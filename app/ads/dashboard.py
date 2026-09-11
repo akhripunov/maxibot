@@ -123,6 +123,37 @@ def _creative_attention(creative: AdsCreative) -> bool:
                 and (features.get("evidence_ids") or features.get("reason") or features.get("evidence")))
 
 
+def _implementation_actor(outcome: AdsAiOutcome | None) -> str | None:
+    evidence = _json(outcome.implementation_evidence_json, {}) if outcome else {}
+    if isinstance(evidence, list):
+        evidence = evidence[0] if evidence else {}
+    actor = evidence.get("executed_by") if isinstance(evidence, dict) else None
+    return str(actor).upper() if actor else None
+
+
+def _experiment_view(recommendation: AdsRecommendation, outcome: AdsAiOutcome | None) -> dict[str, Any]:
+    delta = _json(outcome.observed_delta_json, {}) if outcome else {}
+    delta = delta if isinstance(delta, dict) else {}
+    before = delta.get("before") or delta.get("baseline") or delta.get("before_cpa")
+    after = delta.get("after") or delta.get("actual") or delta.get("after_cpa")
+    if before is None or after is None:
+        before = delta.get("actual_cpa_7d", {}).get("before") if isinstance(delta.get("actual_cpa_7d"), dict) else before
+        after = delta.get("actual_cpa_7d", {}).get("after") if isinstance(delta.get("actual_cpa_7d"), dict) else after
+    return {
+        "experiment_id": recommendation.experiment_id,
+        "experiment_seq": recommendation.experiment_seq,
+        "experiment_status": recommendation.experiment_status,
+        "title": recommendation.title,
+        "action": recommendation.hypothesis or recommendation.title,
+        "executed_by": _implementation_actor(outcome),
+        "implementation_confirmed": outcome.implementation_confirmed if outcome else "UNKNOWN",
+        "evaluation_status": outcome.evaluation_status if outcome else None,
+        "before": before,
+        "after": after,
+        "rollback": bool(outcome and outcome.execution_status == "ROLLED_BACK"),
+    }
+
+
 async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: str) -> dict[str, Any]:
     """Build a bounded dashboard for one CHANNEL or BOT promotion object."""
     object_type = object_type.upper()
@@ -268,7 +299,23 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             "implementation_status": measured.implementation_confirmed if measured else "UNKNOWN",
             "evaluation_status": measured.evaluation_status if measured else "PENDING",
             "delta": _json(measured.observed_delta_json, {}) if measured else {},
+            "mode": "Autopilot" if _implementation_actor(measured) == "MAXIBOT" else "Recommendations",
+            "executed_by": _implementation_actor(measured),
+            "before": _experiment_view(item, measured).get("before"),
+            "after": _experiment_view(item, measured).get("after"),
+            "rollback": bool(measured and measured.execution_status == "ROLLED_BACK"),
         })
+
+    experiment_rows = []
+    for item in all_recommendations:
+        measured = next((value for value in outcomes_by_recommendation.get(item.id, [])
+                         if value.implementation_confirmed == "YES"), None)
+        if measured:
+            experiment_rows.append(_experiment_view(item, measured))
+    active_experiment = next((item for item in experiment_rows if item.get("evaluation_status") not in {"SUCCESS", "FAIL"}), None)
+    completed_experiment = next((item for item in experiment_rows if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}), None)
+    total_experiments = len(experiment_rows)
+    successful_experiments = sum(item.get("evaluation_status") == "SUCCESS" for item in experiment_rows)
 
     return {
         "object": {"type": object_type, "id": object_id}, "objective": objective,
@@ -290,4 +337,11 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
                            "verified_count": len(memories)},
         "memories": memories, "memory_evidence_counts": evidence_counts, "creatives": active_creatives,
         "history": history,
+        "current_experiment": active_experiment,
+        "last_completed_experiment": completed_experiment,
+        "learning_summary": {
+            "total_experiments": total_experiments,
+            "successful_experiments": successful_experiments,
+            "proven_memories": sum(item.status == "TRUSTED" for item in memories),
+        },
     }
