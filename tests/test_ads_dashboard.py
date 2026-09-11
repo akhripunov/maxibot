@@ -118,6 +118,26 @@ def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     assert "История появится" in format_ads_history_screen(state, title="Москва 365")
 
 
+def test_campaign_screen_toggle_only_changes_analysis_state():
+    from app.bot.menu import format_ads_campaigns_screen
+
+    base = {
+        "id": "campaign-1", "external_id": "713798021", "name": "Основная",
+        "active": True, "provider": "YANDEX_DIRECT", "state": "ON",
+        "spend": 920, "clicks": 292, "analysis_enabled": True,
+        "execution_mode": "AUTONOMOUS", "recommendation": SimpleNamespace(title="не показывать"),
+    }
+    before = format_ads_campaigns_screen({"active_campaigns": [base]}, title="Москва 365")
+    after_row = {**base, "analysis_enabled": False}
+    after = format_ads_campaigns_screen({"active_campaigns": [after_row]}, title="Москва 365")
+    assert "✅ В анализе" in before and "⬜ Не в анализе" in after
+    assert "Расход: 920,00 ₽" in before and "Расход: 920,00 ₽" in after
+    assert "Клики: 292" in before and "Клики: 292" in after
+    assert "Состояние: ON" in before and "Состояние: ON" in after
+    assert "Рекомендация:" not in before and "Рекомендация:" not in after
+    assert before.replace("✅ В анализе", "ANALYSIS").replace("⬜ Не в анализе", "ANALYSIS") == after.replace("✅ В анализе", "ANALYSIS").replace("⬜ Не в анализе", "ANALYSIS")
+
+
 def test_main_screen_supports_human_running_and_inconclusive_experiments():
     human = _state()
     human["current_experiment"] = {

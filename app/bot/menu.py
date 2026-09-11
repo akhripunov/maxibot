@@ -36,7 +36,7 @@ from app.ads.service import can_access_ads, campaigns_for_channel, latest_view, 
 from app.ads.dashboard import build_ads_dashboard
 from app.ads.objectives import active_links, objective_for_link
 from app.ads.autopilot import AUTONOMOUS, ADVISORY, parse_config, promotion_policy
-from app.ads.analysis import build_report_view, dedupe_trend_findings
+from app.ads.analysis import build_report_view, build_v2_analysis_dataset, dedupe_trend_findings
 from app.ads.memory import set_status
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation, AdsAccount, AdsCampaign, AdsPromotionCampaignLink
 from app.ads.storage_health import TABLES, diagnostics as storage_diagnostics, human_size, ui_time
@@ -792,7 +792,8 @@ def format_ads_campaigns_screen(state: dict, *, title: str) -> str:
     lines = ["📊 Кампании", "", title, ""]
     for item in state.get("active_campaigns") or []:
         status = "🟢 Активна" if item.get("active") else "⚪ Неактивна"
-        mode = "🚀 Под управлением автопилота" if item.get("execution_mode") == "AUTONOMOUS" else "🔒 Только анализ"
+        analysis = "✅ В анализе" if item.get("analysis_enabled", item.get("linked", False)) else "⬜ Не в анализе"
+        mode = "🚀 Автопилот" if item.get("execution_mode") == "AUTONOMOUS" else "🔒 Только анализ"
         spend = item.get("spend")
         clicks = item.get("clicks")
         lines.extend([
@@ -801,11 +802,9 @@ def format_ads_campaigns_screen(state: dict, *, title: str) -> str:
             f"Расход: {_ru_number(spend) + ' ₽' if spend is not None else 'пока нет данных'}",
             f"Клики: {_ru_number(clicks, 0) if clicks is not None else 'пока нет данных'}",
             f"Состояние: {item.get('state') or 'UNKNOWN'}",
-            f"Режим: {mode}",
+            f"Анализ: {analysis}",
+            f"Автопилот: {mode}",
         ])
-        recommendation = item.get("recommendation")
-        if recommendation:
-            lines.append(f"Рекомендация: {_owner_short_text(recommendation.title)}")
         lines.append("")
     if len(lines) == 4:
         lines.append("Связанных кампаний пока нет.")
@@ -2039,33 +2038,27 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return await render_screen(db, admin, "promotion")
         state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
         available_campaigns = await campaigns_for_channel(db, channel.id)
-        known_ids = {item.get("id") for item in state.get("active_campaigns") or []}
+        existing_rows = {item.get("id"): item for item in state.get("active_campaigns") or []}
+        inventory_rows = []
         for campaign, linked in available_campaigns:
-            if campaign.id not in known_ids:
-                state.setdefault("active_campaigns", []).append({
-                    "id": campaign.id, "external_id": campaign.external_id, "name": campaign.name,
-                    "provider": "YANDEX_DIRECT", "state": campaign.state or campaign.status or "UNKNOWN",
-                    "active": str(campaign.state or campaign.status or "").upper() not in {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"},
-                    "linked": linked, "spend": None, "clicks": None, "recommendation": None,
-                })
+            row = dict(existing_rows.get(campaign.id) or {})
+            row.update({
+                "id": campaign.id, "external_id": campaign.external_id, "name": campaign.name,
+                "provider": "YANDEX_DIRECT", "state": campaign.state or campaign.status or "UNKNOWN",
+                "active": str(campaign.state or "").upper() not in {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
+                    and str(campaign.status or "").upper() not in {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"},
+                "linked": linked, "analysis_enabled": linked, "recommendation": None,
+            })
+            # Inventory metrics come from the canonical ADS observations and
+            # are intentionally independent from the analysis link toggle.
+            dataset = await build_v2_analysis_dataset(db, campaign=campaign)
+            metrics = (dataset.get("campaign_summary") or {}).get("metrics") or {}
+            has_data = bool((dataset.get("data_quality") or {}).get("rows_loaded"))
+            row["spend"] = metrics.get("cost") if has_data else None
+            row["clicks"] = metrics.get("clicks") if has_data else None
+            inventory_rows.append(row)
+        state["active_campaigns"] = inventory_rows
         return format_ads_campaigns_screen(state, title="Канал: " + channel.title), ads_campaign_selection_buttons(state, channel_id=channel.id)
-        campaigns = await campaigns_for_channel(db, channel.id)
-        view = await latest_view(db, channel.id)
-        fact_values = (view["facts"] or {}).get("facts") or {}
-        metric_labels = (("Показы", "impressions_7d"), ("Клики", "clicks_7d"), ("Расход", "cost_7d"), ("Конверсии", "conversions_7d"), ("CTR", "ctr_7d"), ("CPC", "cpc_7d"), ("CPA", "actual_cpa_7d"), ("CR", "conversion_rate_7d"))
-        available_metrics = [f"{label}: {_metric(key, fact_values.get(key))}" for label, key in metric_labels if fact_values.get(key) is not None]
-        metrics_text = "\n".join(available_metrics) if available_metrics else "Метрики пока недоступны в сохранённых данных."
-        if not campaigns:
-            return (f"🎯 Кампания\n\n📢 {channel.title}\n\n{metrics_text}\n\nКампании пока нет в сохранённых данных.", buttons(("⬅️ AI Продвижение", f"ads:{channel.id}")))
-        page_size = 10
-        page = campaigns[offset:offset + page_size]
-        rows = [(f"{'✅' if linked else '◻️'} {campaign.name[:42]}", f"ads_campaign_select:{channel.id}:{campaign.id}") for campaign, linked in page]
-        if offset:
-            rows.append(("⬅️ Предыдущие", f"ads_campaigns:{channel.id}:{max(0, offset - page_size)}"))
-        if offset + page_size < len(campaigns):
-            rows.append(("Следующие ➡️", f"ads_campaigns:{channel.id}:{offset + page_size}"))
-        rows.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
-        return (f"🎯 Кампания\n\n📢 {channel.title}\n\n{metrics_text}\n\nВыберите кампанию: {offset + 1}–{min(offset + page_size, len(campaigns))} из {len(campaigns)}.\n\n🔒 Только просмотр: данные рекламы не изменяются.", buttons(*rows))
     if screen.startswith(("ads_creatives:", "ads_learning:")):
         selected_id = screen.split(":", 1)[1]
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
