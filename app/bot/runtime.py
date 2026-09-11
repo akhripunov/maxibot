@@ -399,12 +399,16 @@ class MaxBotRuntime:
             return
         target = update.user_id or update.chat_id
         if target:
-            # A channel-bound custom bot should show the channel's configured
-            # prompt.  When one bot serves multiple channels, use a neutral
-            # prompt rather than choosing the wrong channel's copy.
+            # Every personal channel link carries its channel public_slug in
+            # the MAX start payload. Resolve that slug inside this custom bot
+            # too, so every linked channel gets its own welcome text rather
+            # than a generic bot greeting.
+            start_payloads = self._start_payload_candidates(update)
+            channel_code = start_payloads[0] if start_payloads else None
             channels = await self.repo.active_custom_channels(bot.id)
-            if len(channels) == 1:
-                welcome = render_channel_welcome_message(channels[0].welcome_text)
+            channel = next((item for item in channels if item.public_slug == channel_code), None)
+            if channel:
+                welcome = render_channel_welcome_message(channel.welcome_text)
             elif channels:
                 welcome = "📩 Пришлите текст, фото или видео — сообщение будет передано администратору."
             else:

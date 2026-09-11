@@ -538,5 +538,41 @@ def test_channel_custom_bot_start_uses_channel_submission_prompt():
 
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
     assert "channels = await self.repo.active_custom_channels(bot.id)" in source
-    assert "welcome = render_channel_welcome_message(channels[0].welcome_text)" in source
+    assert "channel = next((item for item in channels if item.public_slug == channel_code), None)" in source
+    assert "welcome = render_channel_welcome_message(channel.welcome_text)" in source
     assert "welcome = bot.welcome_text or default_welcome()" in source
+
+
+@pytest.mark.asyncio
+async def test_custom_bot_deep_link_uses_its_matched_channel_welcome():
+    from types import SimpleNamespace
+
+    class Repo:
+        async def bot_by_id(self, bot_id):
+            return SimpleNamespace(id=bot_id, status="ACTIVE", welcome_text="generic")
+
+        async def active_custom_channels(self, bot_id):
+            return [
+                SimpleNamespace(public_slug="first", welcome_text="Текст первого канала"),
+                SimpleNamespace(public_slug="second", welcome_text="Текст второго канала"),
+            ]
+
+    class Client:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, target, text, **kwargs):
+            self.sent.append((target, text))
+
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    client = Client()
+    runtime._custom_clients = {"bot-1": client}
+    update = MaxUpdate("bot_started", user_id="visitor-1", raw={"payload": "second"})
+    update.bot_connection_id = "bot-1"
+
+    await runtime._custom_start(update)
+
+    assert client.sent[0][0] == "visitor-1"
+    assert "Текст второго канала" in client.sent[0][1]
+    assert "Текст первого канала" not in client.sent[0][1]
