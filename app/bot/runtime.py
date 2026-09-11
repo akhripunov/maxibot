@@ -24,6 +24,7 @@ from app.ads.service import can_access_ads, run_bot_check, run_check, toggle_cam
 from app.ads.objectives import set_objective, disable_objective
 from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
 from app.integrations.robokassa import amount_for_months, configured as robokassa_configured
+from app.integrations.subscriptions import subscription_status
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,12 @@ class MaxBotRuntime:
         self._ads_ai_seen_events: set[tuple[str, str]] = set()
         self._broadcast_drafts: dict[str, str] = {}
         self._ads_objective_pending: dict[str, tuple[str, str, str | None]] = {}
+
+    async def _ai_promotion_active(self, user_id: str) -> bool:
+        """Return the owner-scoped paid AI entitlement state."""
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == str(user_id)))
+            return bool(admin and subscription_status(admin.ai_promotion_expires_at) == "активен")
 
     async def stop(self):
         self._stop.set()
@@ -759,6 +766,11 @@ class MaxBotRuntime:
             (update.button_payload or "").split(":", 1)[0] or "<none>",
             bool(update.callback_id),
         )
+        if action.startswith(("ads:", "ads_bot")) and not await self._ai_promotion_active(str(user_id)):
+            if update.callback_id:
+                await self.client.answer_callback(update.callback_id)
+            await self._render(user_id, "subscription_ai")
+            return
         if action.startswith("ads_campaigns:"):
             selected_id = action.split(":", 1)[1].split(":", 1)[0]
             if selected_id and can_access_ads(str(user_id)) and await self.repo.channel_owned(user_id, selected_id):

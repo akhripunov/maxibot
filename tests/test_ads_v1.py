@@ -13,12 +13,14 @@ DIRECT = (ROOT / "app" / "integrations" / "yandex_direct.py").read_text()
 MIGRATION = (ROOT / "alembic" / "versions" / "0046_ads_v1_foundation.py").read_text()
 
 
-def test_ads_v1_is_hidden_behind_server_side_gate_and_positioned_after_direct():
+def test_ads_v1_button_is_visible_and_unpaid_users_are_gated_at_callback():
     assert "can_access_ads(admin.external_id)" in MENU
-    assert 'controls = [(yandex_button' in MENU
-    assert 'controls.append(("🤖 AI Продвижение"' in MENU
-    assert '("📊 Аналитика"' in MENU
+    assert 'controls = [' in MENU
+    assert '("🤖 AI Продвижение", f"ads:{channel.id}")' in MENU
+    assert '("📊 Аналитика", f"promotion_analytics:{channel.id}")' in MENU
     assert "can_access_ads(str(user_id))" in RUNTIME
+    assert 'if action.startswith(("ads:", "ads_bot")) and not await self._ai_promotion_active' in RUNTIME
+    assert 'await self._render(user_id, "subscription_ai")' in RUNTIME
 
 
 def test_fact_engine_keeps_unknown_distinct_from_zero_and_calculates_metrics():
