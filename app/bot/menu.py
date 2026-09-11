@@ -1539,7 +1539,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             body = f"🔗 Яндекс.Директ\n\n🤖 MAXIBOT\n\nСтатус: {'подключено' if status else 'не подключено'}\nСистемный счётчик: {counter}\nЦель: {goal}\n\nИспользуется только отдельная system-scoped конфигурация."
             if configured():
                 system_oauth_url = f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/system/start?admin_id={quote(str(admin.external_id), safe='')}"
-                oauth_label = "🔄 Переподключить Яндекс" if status else "🔐 Подключить Яндекс"
+                oauth_label = "Авторизоваться в Яндекс"
                 return (body, [[{"text": oauth_label, "type": "link", "url": system_oauth_url}], [{"text": "⬅️ Назад", "callback_data": "promotion_maxibot"}]])
         elif screen == "promotion_maxibot_analytics":
             body = "📊 Аналитика\n\n🤖 MAXIBOT\n\nСистемный tracking ещё не активирован. Данные обычных каналов здесь не показываются."
@@ -2026,7 +2026,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 return (
                     text,
                     [
-                        [{"text": "🔄 Переподключить Яндекс", "type": "link", "url": authorize_url(state)}],
+                        [{"text": "Авторизоваться в Яндекс", "type": "link", "url": authorize_url(state)}],
                         [{"text": "⬅️ Назад", "callback_data": f"promotion_channel:{channel.id}"}],
                     ],
                 )
@@ -2034,7 +2034,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if oauth_configured:
             state = await create_state(admin.external_id, selected_id)
             return (text,
-                    [[{"text": "🔐 Подключить Яндекс", "type": "link", "url": authorize_url(state)}],
+                    [[{"text": "Авторизоваться в Яндекс", "type": "link", "url": authorize_url(state)}],
                      [{"text": "⬅️ Назад", "callback_data": f"promotion_channel:{channel.id}"}]])
         logger.warning("YANDEX_OAUTH_UI_UNAVAILABLE channel_id=%s", channel.id)
         return (

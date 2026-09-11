@@ -23,12 +23,12 @@ def test_yandex_screen_does_not_expose_server_configuration_to_users():
     yandex_screen = MENU_SOURCE[MENU_SOURCE.index('if screen.startswith("promotion_yandex:")'):MENU_SOURCE.index('if screen.startswith("promotion_settings:")')]
     for forbidden in ("YANDEX_OAUTH_CLIENT_ID", "YANDEX_OAUTH_CLIENT_SECRET", "YANDEX_OAUTH_REDIRECT_URI", "Callback:", "Проверить готовность OAuth"):
         assert forbidden not in yandex_screen
-    assert "🔐 Подключить Яндекс" in yandex_screen
+    assert "Авторизоваться в Яндекс" in yandex_screen
 
 
 def test_yandex_screen_offers_reconnect_after_a_real_connection():
     yandex_screen = MENU_SOURCE[MENU_SOURCE.index('if screen.startswith("promotion_yandex:")'):MENU_SOURCE.index('if screen.startswith("promotion_settings:")')]
-    assert "🔄 Переподключить Яндекс" in yandex_screen
+    assert "Авторизоваться в Яндекс" in yandex_screen
     assert "if oauth_configured:" in yandex_screen
 
 

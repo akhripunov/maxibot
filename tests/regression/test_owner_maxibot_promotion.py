@@ -191,7 +191,7 @@ def test_system_yandex_screen_has_only_oauth_and_promotion_back_buttons():
     start = MENU.index('elif screen == "promotion_maxibot_yandex":')
     end = MENU.index('elif screen == "promotion_maxibot_analytics":', start)
     screen = MENU[start:end]
-    assert 'oauth_label = "🔄 Переподключить Яндекс" if status else "🔐 Подключить Яндекс"' in screen
+    assert 'oauth_label = "Авторизоваться в Яндекс"' in screen
     assert '"⬅️ Назад", "callback_data": "promotion_maxibot"' in screen
     assert '"⬅️ Продвижение"' not in screen
     assert '"⬅️ МАКСИБОТ"' not in screen
