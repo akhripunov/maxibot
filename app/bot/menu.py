@@ -724,6 +724,15 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
         f"Фактический CPA: {actual_text}", f"{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}", "",
     ]
     lines.append("🚀 Автопилот включён" if execution_mode == "AUTONOMOUS" else "🚀 Автопилот выключен")
+    if execution_mode != "AUTONOMOUS":
+        selected_campaigns = [
+            str(item.get("external_id") or item.get("id"))
+            for item in (state.get("active_campaigns") or [])
+            if item.get("analysis_enabled", item.get("linked", False))
+        ]
+        lines.append(
+            "Выбранные кампании: " + (", ".join(selected_campaigns) if selected_campaigns else "не выбраны")
+        )
     if execution_mode == "AUTONOMOUS":
         experiment = state.get("current_experiment")
         if experiment:

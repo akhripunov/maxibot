@@ -138,6 +138,22 @@ def test_campaign_screen_toggle_only_changes_analysis_state():
     assert before.replace("✅ В анализе", "ANALYSIS").replace("⬜ Не в анализе", "ANALYSIS") == after.replace("✅ В анализе", "ANALYSIS").replace("⬜ Не в анализе", "ANALYSIS")
 
 
+def test_unified_screen_shows_selected_campaign_numbers_when_autopilot_off():
+    state = _state()
+    state["active_campaigns"] = [
+        {"id": "internal-1", "external_id": "713798021", "linked": True},
+        {"id": "internal-2", "external_id": "713735649", "linked": False},
+    ]
+    text = format_ads_unified_dashboard(state, title="Москва 365")
+    assert "🚀 Автопилот выключен" in text
+    assert "Выбранные кампании: 713798021" in text
+    assert "713735649" not in text
+
+    state["active_campaigns"] = [{"id": "internal-2", "external_id": "713735649", "linked": False}]
+    text = format_ads_unified_dashboard(state, title="Москва 365")
+    assert "Выбранные кампании: не выбраны" in text
+
+
 def test_main_screen_supports_human_running_and_inconclusive_experiments():
     human = _state()
     human["current_experiment"] = {
