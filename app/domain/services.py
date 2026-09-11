@@ -2,9 +2,8 @@ from app.core.config import settings
 
 
 def default_welcome() -> str:
-    # Keep the standalone custom-bot fallback unchanged. Channel defaults use
-    # default_channel_welcome() below and are normalized separately.
-    return "✅ Напишите ваш вопрос —\nя передам администратору."
+    # Standalone custom-bot fallback must explicitly support media messages.
+    return "📩 Пришлите текст, фото или видео —\nя передам сообщение администратору."
 
 
 def default_channel_welcome() -> str:

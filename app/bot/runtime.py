@@ -399,14 +399,14 @@ class MaxBotRuntime:
             return
         target = update.user_id or update.chat_id
         if target:
-            # A channel-bound custom bot must show the channel's configured
-            # submission prompt on deep-link start.  Previously it used the
-            # standalone custom-bot default, which omitted the explicit
-            # text/photo/video instruction.  Keep the old fallback for bots
-            # that are not bound to exactly one accepting channel.
+            # A channel-bound custom bot should show the channel's configured
+            # prompt.  When one bot serves multiple channels, use a neutral
+            # prompt rather than choosing the wrong channel's copy.
             channels = await self.repo.active_custom_channels(bot.id)
             if len(channels) == 1:
                 welcome = render_channel_welcome_message(channels[0].welcome_text)
+            elif channels:
+                welcome = "📩 Пришлите текст, фото или видео — сообщение будет передано администратору."
             else:
                 welcome = bot.welcome_text or default_welcome()
             await client.send_message(target, welcome)
