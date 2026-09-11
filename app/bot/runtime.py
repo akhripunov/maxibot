@@ -22,7 +22,7 @@ from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMa
 from app.security_tokens import decrypt_token, encrypt_token
 from app.ads.service import can_access_ads, run_bot_check, run_check, toggle_campaign_link
 from app.ads.objectives import set_objective, disable_objective
-from app.ads.autopilot import AUTONOMOUS, ADVISORY, set_budget, set_mode
+from app.ads.autopilot import AUTONOMOUS, ADVISORY, active_links, set_budget, set_mode
 from app.ads.outcomes import record_implementation_evidence
 from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
 from app.integrations.robokassa import amount_for_months, configured as robokassa_configured
@@ -1067,6 +1067,21 @@ class MaxBotRuntime:
         elif action.startswith("ads_autopilot_enable:"):
             _, object_type, object_id = action.split(":", 2)
             if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                # A single linked campaign is unambiguous: the primary
+                # control toggles it immediately. Multiple links retain the
+                # explicit campaign-selection screen.
+                async with self.session_factory() as db:
+                    links = await active_links(db, object_type=object_type, object_id=object_id)
+                    if len(links) == 1:
+                        try:
+                            await set_mode(db, object_type=object_type, object_id=object_id,
+                                           mode=AUTONOMOUS, campaign_id=links[0].campaign_id)
+                            await db.commit()
+                        except ValueError:
+                            await db.rollback()
+                        else:
+                            await self._render(user_id, f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}")
+                            return
                 await self._render(user_id, action)
                 return
         elif action.startswith("ads_autopilot_confirm:"):
@@ -1089,6 +1104,15 @@ class MaxBotRuntime:
         elif action.startswith("ads_autopilot_disable:"):
             _, object_type, object_id = action.split(":", 2)
             if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                async with self.session_factory() as db:
+                    links = await active_links(db, object_type=object_type, object_id=object_id)
+                    authorized = [link for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
+                    if len(authorized) == 1:
+                        await set_mode(db, object_type=object_type, object_id=object_id,
+                                       mode=ADVISORY, campaign_id=authorized[0].campaign_id)
+                        await db.commit()
+                        await self._render(user_id, f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}")
+                        return
                 await self._render(user_id, action)
                 return
         elif action.startswith("ads_autopilot_disable_confirm:"):

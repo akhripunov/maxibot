@@ -723,8 +723,8 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
         f"Цель: {objective_name}", f"🎯 Target CPA: {target_text}", f"💰 Лимит: {budget_limit:.0f} ₽ / месяц" if budget_limit is not None else "💰 Лимит: пока не задан",
         f"Фактический CPA: {actual_text}", f"{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}", "",
     ]
+    lines.append("🚀 Автопилот включён" if execution_mode == "AUTONOMOUS" else "🚀 Автопилот выключен")
     if execution_mode == "AUTONOMOUS":
-        lines.append("🚀 Автопилот включён")
         experiment = state.get("current_experiment")
         if experiment:
             lines.extend(["", _format_experiment_block(experiment)])

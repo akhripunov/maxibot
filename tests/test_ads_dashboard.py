@@ -42,6 +42,7 @@ def test_unified_screen_has_single_action_and_read_only_navigation():
     }
     text = format_ads_unified_dashboard(state, title="Test bot")
     assert "Фактический CPA: пока не рассчитан" in text
+    assert "🚀 Автопилот выключен" in text
     assert "💡 Режим: Рекомендации" in text
     assert "Пока ничего менять не нужно." in text
     assert "🧠 Обучение:" in text
