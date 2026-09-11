@@ -1164,8 +1164,8 @@ def render_bot_promotion(target: BotPromotionTarget) -> tuple[str, list[list[dic
         f"Лендинг: {target.landing_url or '—'}",
         buttons(
             ("🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ❌", target.yandex_action),
-            ("📊 Аналитика", target.analytics_action),
             ("🤖 AI Продвижение", target.ai_action),
+            ("📊 Аналитика", target.analytics_action),
             ("⬅️ Назад", "promotion"),
         ),
     )
