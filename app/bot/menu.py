@@ -1290,7 +1290,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             f"VPS: всего {human_size(storage['disk']['total'])}, свободно {human_size(storage['disk']['free'])} ({storage['disk']['free_percent']:.1f}%)\n\n"
             f"PostgreSQL: {human_size(storage['database']['total'])}\n"
             f"ADS/V2: {human_size(storage['ads_total'])}\n\n{rows}\n\n"
-            f"Рост 7 дней: {human_size(storage['growth_7d']) if storage.get('growth_7d') is not None else 'н/д'}\nРост 30 дней: {human_size(storage['growth_30d']) if storage.get('growth_30d') is not None else 'н/д'}\nПрогноз: {storage.get('growth_basis', 'недостаточно данных')}\n\n"
+            f"Рост 7 дней: примерно {human_size(storage['growth_7d'])}\nРост 30 дней: примерно {human_size(storage['growth_30d'])}\nПрогноз: {storage.get('growth_basis', 'недостаточно данных')}\n\n"
             f"Сбор данных: {'✅ включён' if periodic.get('enabled') else '⏸ выключен'}\n"
             f"Кампаний в сборе: {periodic.get('eligible_campaigns', 0)}\n"
             f"Последний успешный сбор: {last}\nСледующий сбор: {next_due}\n"

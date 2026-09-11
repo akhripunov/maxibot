@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shutil
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
@@ -78,6 +78,8 @@ async def diagnostics(db: AsyncSession) -> dict:
     db_size = int(await db.scalar(text("select pg_database_size(current_database())")) or 0)
     sizes: dict[str, dict[str, int]] = {}
     table_details: dict[str, dict[str, object]] = {}
+    now = datetime.now(timezone.utc)
+    growth_by_days = {7: 0.0, 30: 0.0}
     for table in TABLES:
         relation = int(await db.scalar(text("select pg_relation_size(:table)"), {"table": table}) or 0)
         total = int(await db.scalar(text("select pg_total_relation_size(:table)"), {"table": table}) or 0)
@@ -95,6 +97,13 @@ async def diagnostics(db: AsyncSession) -> dict:
             "retention_class": _retention_class(table),
             "status": "EMPTY" if row_count == 0 else "ACTIVE",
         }
+        if row_count:
+            for days in growth_by_days:
+                cutoff = now - timedelta(days=days)
+                recent_rows = int(await db.scalar(text(
+                    f'select count(*) from "{table}" where "{latest_column}" >= :cutoff'
+                ), {"cutoff": cutoff}) or 0)
+                growth_by_days[days] += total * (recent_rows / row_count)
     disk = shutil.disk_usage("/")
     free_percent = (disk.free / disk.total * 100.0) if disk.total else None
     periodic = await collection_health(db)
@@ -125,14 +134,15 @@ async def diagnostics(db: AsyncSession) -> dict:
         "ads_total": sum(item["total"] for item in sizes.values()),
         "disk": {"total": disk.total, "used": disk.used, "free": disk.free, "free_percent": free_percent},
         "periodic": periodic,
-        "growth_7d": None, "growth_30d": None,
+        "growth_7d": int(growth_by_days[7]),
+        "growth_30d": int(growth_by_days[30]),
         "projection": None,
         "retention": {"observations_days": settings.ads_observations_retention_days, "operational_days": settings.ads_operational_retention_days, "data_health_days": settings.ads_data_health_retention_days, "hourly_days": settings.ads_observations_retention_days, "daily_days": 0, "daily_aggregates": "LONG_TERM", "ai_history": "LONG_TERM", "metadata": "LONG_TERM", "last_run": retention_run.completed_at.isoformat() if retention_run and retention_run.completed_at else None, "deleted_rows": int(retention_summary.get("deleted", 0)) + int(retention_summary.get("deleted_collection_runs", 0)) + int(retention_summary.get("deleted_report_runs", 0)), "skipped_rows": int(retention_summary.get("skipped", 0)), "skip_reason": "daily aggregate coverage missing" if retention_summary.get("skipped") else None},
         "downsampling": {"eligible": None, "protected": None, "dry_run": True},
         "oldest": {"ads_observation": oldest_observation.isoformat() if oldest_observation else None, "daily_aggregate": oldest_daily.isoformat() if oldest_daily else None, "collection_run": oldest_collection.isoformat() if oldest_collection else None, "report_run": oldest_report.isoformat() if oldest_report else None},
         "ai_history_size": ai_history_size,
         "creatives": creative_summary,
-        "growth_basis": "Пока недостаточно истории для расчёта роста",
+        "growth_basis": "Оценка по новым строкам; исторические размеры БД отдельно не сохраняются",
         "status": storage_status(free_percent=free_percent, stale=int(periodic.get("stale_campaigns", 0)), retry_backlog=int(periodic.get("retry_backlog", 0))),
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
