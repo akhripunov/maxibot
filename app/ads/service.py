@@ -18,7 +18,7 @@ from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_bot_metrics, build_maxibot_metrics
 from app.ads.objectives import evaluate_objective, objective_for_link
 from app.core.config import settings
-from app.db.models import Admin, AdsAccount, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCollectionRun, AdsDataHealth, AdsMemory, AdsObservation, AdsPromotionCampaignLink, AdsRecommendation, AdsAiOutcome, BotPromotionProfile, Channel, LandingPage, TrafficProfile
+from app.db.models import Admin, AdsAccount, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCollectionRun, AdsDataHealth, AdsMemory, AdsObservation, AdsPromotionCampaignLink, AdsRecommendation, AdsAiOutcome, BotConnection, BotPromotionProfile, Channel, LandingPage, TrafficProfile
 from app.integrations.yandex_direct import YandexDirectClient
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
@@ -348,7 +348,15 @@ async def run_bot_check(db: AsyncSession, *, admin_external_id: str, bot_key: st
     """Run the existing bounded AI pipeline for one BOT promotion object."""
     if not can_access_ads(admin_external_id):
         raise PermissionError("ADS access denied")
-    profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == bot_key, BotPromotionProfile.bot_type == "SYSTEM"))
+    if bot_key == "maxibot":
+        profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == bot_key, BotPromotionProfile.bot_type == "SYSTEM"))
+    else:
+        owner = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)))
+        profile = await db.scalar(select(BotPromotionProfile).join(BotConnection, BotConnection.id == BotPromotionProfile.bot_connection_id).where(
+            BotConnection.id == bot_key,
+            BotConnection.owner_admin_id == (owner.id if owner else None),
+            BotPromotionProfile.bot_type == "CUSTOMER",
+        ))
     if not profile:
         raise PermissionError("BOT promotion object is not configured")
     pending = await _lock_object_and_pending_runs(db, object_type="BOT", object_id=profile.id)

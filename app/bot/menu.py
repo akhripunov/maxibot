@@ -1687,11 +1687,17 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         back = f"ads_objective:{object_type}:{object_id}"
         return ("🎯 Введите целевую стоимость в рублях одним сообщением.\n\nНапример: 20", buttons(("⬅️ Назад", back)))
     if screen.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:")):
-        if not screen.endswith(":system") or not is_maxibot_owner(admin) or not can_access_ads(admin.external_id):
+        bot_key = screen.rsplit(":", 1)[1]
+        if not bot_key or not can_access_ads(admin.external_id):
             return await render_screen(db, admin, "promotion")
-        profile = await db.scalar(select(BotPromotionProfile).where(
-            BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"
-        ))
+        if bot_key == "system":
+            if not is_maxibot_owner(admin):
+                return await render_screen(db, admin, "promotion")
+            profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"))
+        else:
+            profile = await db.scalar(select(BotPromotionProfile).join(BotConnection, BotConnection.id == BotPromotionProfile.bot_connection_id).where(
+                BotConnection.id == bot_key, BotConnection.owner_admin_id == admin.id, BotPromotionProfile.bot_type == "CUSTOMER"
+            ))
         if not profile:
             return await render_screen(db, admin, "promotion")
         state = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
@@ -1704,19 +1710,29 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             "ads_bot_learning": format_ads_learning_screen,
             "ads_bot_history": format_ads_history_screen,
         }[prefix]
-        return formatter(state, title=title), buttons(("⬅️ AI Продвижение", "ads_bot:system"))
+        return formatter(state, title=title), buttons(("⬅️ AI Продвижение", f"ads_bot:{bot_key}"))
     if screen.startswith("ads_bot:"):
         from app.ads.service import latest_bot_view
         bot_key = screen.split(":", 1)[1]
-        if bot_key != "system" or not is_maxibot_owner(admin) or not can_access_ads(admin.external_id):
+        if not bot_key or not can_access_ads(admin.external_id):
             return await render_screen(db, admin, "promotion")
-        profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"))
+        if bot_key == "system":
+            if not is_maxibot_owner(admin):
+                return await render_screen(db, admin, "promotion")
+            profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"))
+        else:
+            profile = await db.scalar(select(BotPromotionProfile).join(BotConnection, BotConnection.id == BotPromotionProfile.bot_connection_id).where(
+                BotConnection.id == bot_key, BotConnection.owner_admin_id == admin.id, BotPromotionProfile.bot_type == "CUSTOMER"
+            ))
         if not profile:
             return await render_screen(db, admin, "promotion")
         dashboard = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
+        controls = (ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id)
+                    if bot_key == "system" else
+                    ads_unified_buttons("ads_bot", bot_key, f"promotion_bot:{bot_key}", objective_id=profile.id))
         return (
             format_ads_unified_dashboard(dashboard, title=profile.display_name or profile.bot_key),
-            ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id),
+            controls,
         )
         view = await latest_bot_view(db, profile.id)
         health = view["health"]; ai = view["ai"]; rec = view["recommendation"]

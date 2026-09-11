@@ -1061,7 +1061,7 @@ class MaxBotRuntime:
                 return
         elif action.startswith("ads_bot_check:"):
             bot_key = action.split(":", 1)[1]
-            if can_access_ads(str(user_id)) and bot_key == "system":
+            if can_access_ads(str(user_id)) and bot_key:
                 async with self.session_factory() as db:
                     try:
                         origin_message_id = update.message.external_message_id if update.message else None
@@ -1079,7 +1079,7 @@ class MaxBotRuntime:
                 return
         elif action.startswith("ads_bot:"):
             bot_key = action.split(":", 1)[1]
-            if can_access_ads(str(user_id)) and bot_key == "system":
+            if can_access_ads(str(user_id)) and bot_key:
                 await self._render(user_id, action)
                 return
         elif action.startswith("ads_objective_edit:"):
@@ -1101,7 +1101,7 @@ class MaxBotRuntime:
                 await self._render(user_id, f"ads_objective:{object_type}:{object_id}")
                 return
         elif action.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_recommendations:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:")):
-            if can_access_ads(str(user_id)) and action.endswith(":system"):
+            if can_access_ads(str(user_id)) and action.split(":", 1)[1]:
                 await self._render(user_id, action)
                 return
         elif action.startswith("ads_status:"):
