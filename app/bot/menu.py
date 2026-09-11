@@ -1274,10 +1274,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         table_rows = []
         for index, table in enumerate(storage["table_details"].values(), start=1):
             latest = ui_time(table["latest"]) if table.get("latest") else "—"
+            retention = table.get("retention_class") or "—"
+            retention_label = "бессрочно" if retention == "LONG_TERM" else retention.removesuffix("d") + " дней" if retention.endswith("d") else retention
+            status_label = "есть данные" if table.get("status") == "ACTIVE" else "пусто"
             table_rows.append(
                 f"{index}. **{table['name']}**: {human_size(table['size'])}; "
-                f"строк {table['row_count']}; latest {latest}; "
-                f"retention {table['retention_class']}; {table['status']}"
+                f"строк: {table['row_count']}; обновление: {latest}; "
+                f"хранение: {retention_label}; состояние: {status_label}"
             )
         rows = "\n".join(table_rows)
         last = ui_time(periodic.get("last_successful_collection"))
