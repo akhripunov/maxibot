@@ -531,3 +531,12 @@ def test_stale_navigation_never_renders_channel_not_found_message():
     assert 'return await render_screen(db, admin, "channels")' in source
     assert 'return await render_screen(db, admin, "promotion")' in source
     assert "Канал не найден" not in source
+
+
+def test_channel_custom_bot_start_uses_channel_submission_prompt():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    assert "channels = await self.repo.active_custom_channels(bot.id)" in source
+    assert "welcome = render_channel_welcome_message(channels[0].welcome_text)" in source
+    assert "welcome = bot.welcome_text or default_welcome()" in source
