@@ -2035,11 +2035,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return (
             "🔐 MAXIBOT · Администратор\n\n"
             f"👤 Клиентов всего: {stats['clients_total']}\n"
-            f"🆕 Новых сегодня: {stats['clients_today']}\n\n"
+            f"🆕 Новых сегодня: {stats['clients_today']}\n"
+            f"🚫 Заблокировали MAXIBOT: {stats['blocked_bot_users']}\n\n"
             f"📋 Подключено каналов: {stats['channels_total']} ({stats['own_channels']} мои)\n"
             f"🤖 Подключено ботов: {stats['custom_bots_total']} ({stats['own_bots']} мои)\n\n"
-            f"🚫 Заблокировали MAXIBOT: {stats['blocked_bot_users']}\n\n"
-            f"🎫 Открытых тикетов: {stats['open_tickets']}\n\n"
             f"{storage_line}",
             buttons(("💾 Хранилище ADS", "ads_storage"), ("⬅️ Назад", "home")),
         )
