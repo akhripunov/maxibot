@@ -247,7 +247,7 @@ async def collect_yandex_v2(db: AsyncSession, *, token: str, campaign: AdsCampai
     metadata only. Unsupported dimensions are reported explicitly rather than
     represented by invented rows.
     """
-    provider = YandexAdsProvider(token)
+    provider = YandexAdsProvider(token, client_login=settings.yandex_direct_client_login)
     fields = ("Date", "CampaignId", "CampaignName", "Impressions", "Clicks", "Cost", "Conversions")
     request_hash = hashlib.sha256(json.dumps({"campaign": campaign.external_id, "from": date_from.isoformat(), "to": date_to.isoformat(), "fields": fields}, sort_keys=True).encode()).hexdigest()
     report_run = AdsReportRun(provider="YANDEX_DIRECT", report_type="CAMPAIGN_PERFORMANCE_REPORT", campaign_provider_id=campaign.external_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(fields), request_hash=request_hash, fetched_at=fetched_at, row_count=len(report_rows), parser_version="v1", status="SUCCESS", freshness_caveat="current calendar day may be incomplete or delayed")
@@ -332,7 +332,7 @@ def _identity(dimension: str, row: dict[str, Any]) -> tuple[str, str | None, str
 
 async def collect_granular_yandex_v2(db: AsyncSession, *, token: str, campaign: AdsCampaign, snapshot: AdsAnalysisSnapshot | None, date_from: date, date_to: date, fetched_at: datetime, collection_run_id: str, dimensions: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Collect independent documented reports and persist daily observations."""
-    provider = YandexAdsProvider(token)
+    provider = YandexAdsProvider(token, client_login=settings.yandex_direct_client_login)
     results: dict[str, Any] = {"reports": {}, "rows": 0, "errors": []}
     try:
         selected_dimensions = dimensions or tuple(d for d in GRANULAR_REPORTS if d != "SEARCH_QUERY")

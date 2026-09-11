@@ -465,10 +465,32 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
         if encrypted and not cache_fresh:
             # Campaign discovery is read-only and must not request reports.
             # Report calls are rate limited and belong to explicit AI checks.
-            client = YandexDirectClient(decrypt_token(encrypted))
+            token = decrypt_token(encrypted)
+            client_login = (settings.yandex_direct_client_login or "").strip() or None
+            client = YandexDirectClient(token, client_login=client_login)
+            unified_client = YandexDirectClient(token, api_version="v501", client_login=client_login)
             try:
                 account = await _account(db, channel.admin_id)
-                direct_campaigns = await client.get_campaigns()
+                if not client_login:
+                    client_login = (account.external_account_id or "").strip() or None
+                    if client_login:
+                        await client.close()
+                        await unified_client.close()
+                        client = YandexDirectClient(token, client_login=client_login)
+                        unified_client = YandexDirectClient(token, api_version="v501", client_login=client_login)
+                catalogs = [await client.get_campaigns()]
+                try:
+                    catalogs.append(await unified_client.get_campaigns())
+                except Exception:
+                    catalogs.append([])
+                direct_campaigns = []
+                seen_external_ids: set[str] = set()
+                for catalog in catalogs:
+                    for raw in catalog:
+                        external_id = str(raw.get("Id") or "")
+                        if external_id and external_id not in seen_external_ids:
+                            seen_external_ids.add(external_id)
+                            direct_campaigns.append(raw)
                 direct_campaign_ids: list[int] = []
                 for raw in direct_campaigns:
                     external_id = str(raw.get("Id") or "")
@@ -487,6 +509,10 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                     campaign.status = raw.get("Status")
                 if landing_url:
                     ads = await client.get_ads(direct_campaign_ids)
+                    try:
+                        ads += await unified_client.get_ads(direct_campaign_ids)
+                    except Exception:
+                        pass
                     matching_external_ids = {
                         str(ad.get("CampaignId"))
                         for ad in ads
@@ -496,6 +522,7 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                 await db.commit()
             finally:
                 await client.close()
+                await unified_client.close()
     rows = list((await db.scalars(
         select(AdsCampaign)
         # AdsCampaign keeps both the canonical account_id and the legacy

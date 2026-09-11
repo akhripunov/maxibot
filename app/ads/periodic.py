@@ -146,7 +146,7 @@ async def collect_campaign_slot(db: AsyncSession, run: AdsCollectionRun) -> None
     campaign, channel, encrypted, today = await _collection_context(db, run)
     date_from = today - timedelta(days=6)
     from app.ads.providers.yandex import YandexAdsProvider
-    provider = YandexAdsProvider(decrypt_token(encrypted))
+    provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login)
     try:
         report = await provider.campaign_performance(int(campaign.external_id), date_from=date_from, date_to=today)
     finally:
@@ -171,7 +171,7 @@ async def collect_granular_slot(db: AsyncSession, run: AdsCollectionRun) -> None
 async def collect_entity_configuration(db: AsyncSession, run: AdsCollectionRun) -> None:
     campaign, channel, encrypted, _ = await _collection_context(db, run)
     from app.ads.providers.yandex import YandexAdsProvider
-    provider = YandexAdsProvider(decrypt_token(encrypted))
+    provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login)
     try:
         campaigns = await provider.campaigns([int(campaign.external_id)])
         ads_report = await provider.ads([int(campaign.external_id)])

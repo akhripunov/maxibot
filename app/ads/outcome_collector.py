@@ -52,7 +52,7 @@ async def collect_one_outcome(db: AsyncSession, outcome: AdsAiOutcome) -> None:
     date_to = datetime.now(timezone.utc).astimezone(MOSCOW).date()
     date_from = date_to - timedelta(days=6)
     from app.ads.providers.yandex import YandexAdsProvider
-    provider = YandexAdsProvider(decrypt_token(encrypted))
+    provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login)
     try:
         report = await provider.campaign_performance(int(campaign.external_id), date_from=date_from, date_to=date_to)
         traffic = await traffic_stats_for_channels(db, [channel.id])

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from app.ads.providers.base import AdsProvider, ProviderReport
+from app.core.config import settings
 from app.integrations.yandex_direct import YandexDirectClient
 
 
@@ -46,15 +47,37 @@ class YandexAdsProvider(AdsProvider):
     """Read-only adapter; Yandex report names stay outside ADS core."""
     provider_name = "YANDEX_DIRECT"
 
-    def __init__(self, token: str):
-        self.client = YandexDirectClient(token)
+    def __init__(self, token: str, *, client_login: str | None = None):
+        # The API principal is the OAuth token; for agency accounts the
+        # advertiser context must additionally be supplied as Client-Login.
+        # Keep both API generations because unified performance campaigns are
+        # exposed by v501 while legacy campaigns remain on v5.
+        login = (client_login or settings.yandex_direct_client_login or "").strip() or None
+        self.client = YandexDirectClient(token, client_login=login)
+        self.unified_client = YandexDirectClient(token, api_version="v501", client_login=login)
 
     async def close(self):
         await self.client.close()
+        await self.unified_client.close()
 
     async def campaigns(self, campaign_ids: list[int] | None = None) -> ProviderReport:
         fields = ("Id", "Name", "Type", "State", "Status", "StatusPayment", "StartDate", "EndDate")
-        return ProviderReport(self.provider_name, "CAMPAIGNS", await self.client.get_campaigns(campaign_ids), fields, fetched_at=datetime.now(timezone.utc))
+        catalogs = [await self.client.get_campaigns(campaign_ids)]
+        try:
+            catalogs.append(await self.unified_client.get_campaigns(campaign_ids))
+        except Exception:
+            # Older accounts/tokens may not expose v501. Legacy discovery is
+            # still valid, but must not hide the v5 result.
+            pass
+        rows = []
+        seen: set[str] = set()
+        for catalog in catalogs:
+            for row in catalog:
+                ident = str(row.get("Id") or "")
+                if ident and ident not in seen:
+                    seen.add(ident)
+                    rows.append(row)
+        return ProviderReport(self.provider_name, "CAMPAIGNS", rows, fields, fetched_at=datetime.now(timezone.utc))
 
     async def campaign_performance(self, campaign_id: int, *, date_from: date, date_to: date) -> ProviderReport:
         fields = ("Date", "CampaignId", "CampaignName", "Impressions", "Clicks", "Cost", "Conversions")
