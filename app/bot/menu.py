@@ -2038,6 +2038,22 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return await render_screen(db, admin, "promotion")
         state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
         available_campaigns = await campaigns_for_channel(db, channel.id)
+        if not available_campaigns:
+            # A transient empty provider-scope response must not erase the
+            # inventory screen. Reuse the durable campaign links for this
+            # channel; this keeps the campaign control screen stable while
+            # preserving campaign scope isolation.
+            stored_links = list((await db.scalars(select(AdsPromotionCampaignLink).where(
+                AdsPromotionCampaignLink.object_type == "CHANNEL",
+                AdsPromotionCampaignLink.channel_id == channel.id,
+            ))).all())
+            stored_campaign_ids = [link.campaign_id for link in stored_links]
+            stored_campaigns = list((await db.scalars(select(AdsCampaign).where(
+                AdsCampaign.id.in_(stored_campaign_ids),
+                AdsCampaign.state != "ARCHIVED",
+            ).order_by(AdsCampaign.name))).all()) if stored_campaign_ids else []
+            active_link_ids = {link.campaign_id for link in stored_links if link.status == "ACTIVE"}
+            available_campaigns = [(campaign, campaign.id in active_link_ids) for campaign in stored_campaigns]
         existing_rows = {item.get("id"): item for item in state.get("active_campaigns") or []}
         inventory_rows = []
         for campaign, linked in available_campaigns:
