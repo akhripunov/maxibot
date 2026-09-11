@@ -2279,10 +2279,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             own_campaigns = int(await db.scalar(
                 select(func.count(func.distinct(AdsCampaign.id)))
                 .select_from(AdsCampaign)
-                .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
                 .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
                 .where(
-                    AdsPromotionCampaignLink.status == "ACTIVE",
                     AdsAccount.admin_id == admin.id,
                     AdsAccount.provider == "YANDEX_DIRECT",
                     AdsAccount.status == "CONNECTED",

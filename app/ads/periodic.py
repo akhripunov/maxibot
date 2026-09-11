@@ -66,11 +66,12 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
     now = now or datetime.now(timezone.utc)
     rows = list((await db.scalars(
         select(AdsCampaign)
-        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
         # Only running Direct campaigns produce new observations. Paused
-        # campaigns retain history but must not receive fresh slots.
-        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
+        # campaigns retain history but must not receive fresh slots. The
+        # promotion link is deliberately not part of this predicate: its
+        # status controls analysis/autopilot scope, not data collection.
+        .where(AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
         .distinct().limit(limit)
     )).all())
     created = 0
@@ -111,7 +112,7 @@ async def claim_due_slots(db: AsyncSession, *, now: datetime | None = None, limi
 
 
 async def _health(db: AsyncSession, campaign: AdsCampaign, *, status: str, reason: str) -> None:
-    links = list((await db.scalars(select(AdsPromotionCampaignLink.channel_id).where(AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.status == "ACTIVE", AdsPromotionCampaignLink.channel_id.is_not(None)))).all())
+    links = list((await db.scalars(select(AdsPromotionCampaignLink.channel_id).where(AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.channel_id.is_not(None)))).all())
     for channel_id in links:
         current = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.channel_id == channel_id).order_by(AdsDataHealth.checked_at.desc()).limit(1))
         if current:
@@ -126,7 +127,9 @@ async def _collection_context(db: AsyncSession, run: AdsCollectionRun):
     campaign = await db.get(AdsCampaign, run.campaign_id)
     if not campaign:
         raise ValueError("COLLECTION_CAMPAIGN_NOT_FOUND")
-    link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.status == "ACTIVE"))
+    # Any durable link supplies the owning object/token for read-only
+    # collection. ACTIVE/INACTIVE is reserved for analysis/autopilot scope.
+    link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.campaign_id == campaign.id))
     channel = await db.get(Channel, link.channel_id) if link and link.object_type == "CHANNEL" and link.channel_id else None
     admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
     encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
@@ -426,7 +429,7 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
     if not next_run:
         # The scheduler materializes due slots only.  For a compact admin
         # diagnostic, calculate the next campaign slot without inserting it.
-        eligible_campaigns = list((await db.scalars(select(AdsCampaign).join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON").distinct())).all())
+        eligible_campaigns = list((await db.scalars(select(AdsCampaign).join(AdsAccount, AdsAccount.id == AdsCampaign.account_id).where(AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON").distinct())).all())
         candidates = [_slot_time(now if _slot_time(now, c.id, "CAMPAIGN") > now else now + timedelta(minutes=settings.ads_collection_campaign_interval_minutes), c.id, "CAMPAIGN") for c in eligible_campaigns]
         if candidates:
             next_run = type("NextSlot", (), {"scheduled_at": min(candidates)})()
@@ -434,9 +437,8 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
     eligible = await db.scalar(
         select(func.count(func.distinct(AdsCampaign.id)))
         .select_from(AdsCampaign)
-        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
-        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
+        .where(AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
     )
     retry_backlog = await db.scalar(select(func.count(AdsCollectionRun.id)).where(AdsCollectionRun.status == "RETRYABLE_FAILED"))
     failed_runs = await db.scalar(select(func.count(AdsCollectionRun.id)).where(AdsCollectionRun.status == "FAILED"))
@@ -461,9 +463,8 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
     stale = await db.scalar(
         select(func.count(func.distinct(AdsCampaign.id)))
         .select_from(AdsCampaign)
-        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
-        .where(AdsPromotionCampaignLink.status == "ACTIVE", AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON", ~exists(recent_campaign))
+        .where(AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON", ~exists(recent_campaign))
     )
     return {
         "enabled": settings.ads_periodic_collection_enabled,
