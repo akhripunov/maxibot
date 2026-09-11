@@ -927,7 +927,7 @@ class MaxBotRuntime:
         callback_message_id = update.message.external_message_id if update.message else ""
         current_message_id = await self.repo.service_message_id(user_id)
         action = update.button_payload or "home"
-        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "ads_storage"} or action.startswith(("promotion_", "subscription", "free_trial", "channels", "channel:", "settings:", "channel_admin_", "ads"))
+        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "owner_clients", "ads_storage"} or action.startswith(("promotion_", "subscription", "free_trial", "channels", "channel:", "settings:", "channel_admin_", "ads"))
         if callback_message_id and current_message_id and callback_message_id != current_message_id and not navigation_action:
             logger.info("MAX stale callback ignored")
             return
@@ -1377,6 +1377,10 @@ class MaxBotRuntime:
                 await self._render(user_id, f"conversation:{conversation_id}:0")
         elif action == "about":
             await self._render(user_id, "about")
+        elif action == "owner_admin":
+            await self._render(user_id, "owner_admin")
+        elif action == "owner_clients":
+            await self._render(user_id, "owner_clients")
         elif action == "support_start":
             # Keep old callback messages safe: route them to the same direct
             # personal-support screen instead of reopening the legacy ticket.

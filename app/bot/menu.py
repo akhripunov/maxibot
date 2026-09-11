@@ -1354,6 +1354,55 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             reason = "Нет критичных ошибок" if not periodic.get("failed_runs") else "Есть ошибки collection run; см. статус последнего запуска"
             text = f"⚠️ Ошибки ADS\n\n{reason}\nОшибок: {periodic.get('failed_runs', 0)}\nПовторных попыток: {periodic.get('retry_backlog', 0)}"
         return text, buttons(("⬅️ Хранилище ADS", "ads_storage"), ("⬅️ Администратор", "owner_admin"))
+    if screen == "owner_clients":
+        if not is_maxibot_owner(admin):
+            return "⛔ Раздел доступен только владельцу MAXIBOT.", buttons(("⬅️ Главное меню", "home"))
+        client_ids = list((await db.scalars(
+            select(Admin.external_id).where(Admin.external_id != "demo").order_by(Admin.external_id)
+        )).all())
+        channel_rows = list((await db.execute(
+            select(Admin.external_id, Channel.id, Channel.title)
+            .join(Channel, Channel.admin_id == Admin.id)
+            .where(Admin.external_id != "demo")
+            .order_by(Admin.external_id, Channel.title)
+        )).all())
+        campaign_rows = list((await db.execute(
+            select(Channel.id, AdsCampaign.name)
+            .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.channel_id == Channel.id)
+            .join(AdsCampaign, AdsCampaign.id == AdsPromotionCampaignLink.campaign_id)
+            .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
+            .where(
+                AdsPromotionCampaignLink.object_type == "CHANNEL",
+                AdsPromotionCampaignLink.status == "ACTIVE",
+                AdsAccount.provider == "YANDEX_DIRECT",
+                AdsAccount.status == "CONNECTED",
+                AdsCampaign.state == "ON",
+            )
+            .order_by(Channel.id, AdsCampaign.name)
+        )).all())
+        campaigns_by_channel: dict[str, list[str]] = {}
+        for channel_key, campaign_name in campaign_rows:
+            campaigns_by_channel.setdefault(channel_key, []).append(campaign_name or "Без названия")
+        channels_by_client: dict[str, list[tuple[str, str]]] = {}
+        for external_id, channel_key, title in channel_rows:
+            channels_by_client.setdefault(external_id, []).append((channel_key, title or "Без названия"))
+        lines = ["👥 Клиенты", ""]
+        for external_id in client_ids:
+            lines.append(f"👤 ID пользователя: {external_id}")
+            owned_channels = channels_by_client.get(external_id, [])
+            if not owned_channels:
+                lines.append("Подключённые каналы: нет")
+            else:
+                for channel_key, title in owned_channels:
+                    campaigns = campaigns_by_channel.get(channel_key, [])
+                    lines.append(f"📢 Канал: {title}")
+                    lines.append("Активные рекламные кампании: " + (", ".join(campaigns) if campaigns else "нет"))
+                    collecting = bool(settings.ads_periodic_collection_enabled and campaigns)
+                    lines.append(f"Сбор данных по рекламе: {'✅ идёт' if collecting else '⏸ не идёт'}")
+            lines.append("")
+        if not client_ids:
+            lines.append("Клиентов пока нет.")
+        return "\n".join(lines).strip(), buttons(("⬅️ Администратор", "owner_admin"))
     if screen == "onboarding":
         return (
             "🤖 MAXIBOT\n\n"
@@ -2061,7 +2110,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             f"📋 Подключено каналов: {stats['channels_total']} ({stats['own_channels']} мои)\n"
             f"🤖 Подключено ботов: {stats['custom_bots_total']} ({stats['own_bots']} мои)\n\n"
             f"{storage_line}\n{collection_line}",
-            buttons(("💾 Хранилище ADS", "ads_storage"), ("⬅️ Назад", "home")),
+            buttons(("👥 Клиенты", "owner_clients"), ("💾 Хранилище ADS", "ads_storage"), ("⬅️ Назад", "home")),
         )
     if screen == "support_prompt":
         return (
