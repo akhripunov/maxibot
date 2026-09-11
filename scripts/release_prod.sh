@@ -127,7 +127,7 @@ fi
 [[ "${OWNER_APPROVED:-0}" == 1 ]] || die "--apply requires OWNER_APPROVED=1"
 CANONICAL_PRODUCTION_HOST=135.106.166.46
 PRODUCTION_HOST=${PRODUCTION_HOST:-${MAXIBOT_PRODUCTION_HOST:-$CANONICAL_PRODUCTION_HOST}}
-PRODUCTION_SSH_KEY=${PRODUCTION_SSH_KEY:-${MAXIBOT_PRODUCTION_SSH_KEY:-}}
+PRODUCTION_SSH_KEY=${PRODUCTION_SSH_KEY:-${MAXIBOT_PRODUCTION_SSH_KEY:-/Users/akhripuniov/.ssh/maxibot_selectel_ed25519}}
 PRODUCTION_ROOT=${PRODUCTION_ROOT:-${MAXIBOT_PRODUCTION_ROOT:-/opt/maxibot}}
 [[ -n "$PRODUCTION_HOST" ]] || die "PRODUCTION_HOST is required"
 [[ "$PRODUCTION_HOST" == "$CANONICAL_PRODUCTION_HOST" ]] || die "canonical production host required: $CANONICAL_PRODUCTION_HOST"
@@ -153,15 +153,79 @@ CURRENT_PRODUCTION_DB_HEAD=$(remote "docker exec maxibot-vps-db-1 psql -U maxibo
 [[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
 say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"
 say CURRENT_PRODUCTION_DB_HEAD "$CURRENT_PRODUCTION_DB_HEAD"
+MIGRATION_PATH=$(python3 - "$TARGET_SHA" "$CURRENT_PRODUCTION_DB_HEAD" "$TARGET_MIGRATION" <<'PY'
+import ast
+import re
+import subprocess
+import sys
+
+sha, current, target = sys.argv[1:]
+files = subprocess.check_output(
+    ["git", "ls-tree", "-r", "--name-only", sha, "alembic/versions"], text=True
+).splitlines()
+files = [name for name in files if name.endswith(".py") and "/__pycache__/" not in name]
+revisions = {}
+for name in files:
+    text = subprocess.check_output(["git", "show", f"{sha}:{name}"], text=True)
+    revision = re.search(r"^revision\s*=\s*([^\n]+)", text, re.M)
+    down = re.search(r"^down_revision\s*=\s*([^\n]+)", text, re.M)
+    if not revision:
+        continue
+    try:
+        rev = ast.literal_eval(revision.group(1).strip())
+        parent = ast.literal_eval(down.group(1).strip()) if down else None
+    except (ValueError, SyntaxError):
+        continue
+    if not isinstance(rev, str):
+        continue
+    parents = () if parent is None else ((parent,) if isinstance(parent, str) else tuple(parent))
+    if not all(isinstance(item, str) for item in parents):
+        raise SystemExit("migration graph contains an invalid parent reference")
+    revisions[rev] = parents
+
+if current not in revisions:
+    raise SystemExit(f"current production migration is absent from candidate graph: {current}")
+if target not in revisions:
+    raise SystemExit(f"target migration is absent from candidate graph: {target}")
+
+# Enumerate forward paths from the live revision to the target.  More than one
+# path means a merge/divergence that must be reviewed instead of guessed.
+children = {revision: [] for revision in revisions}
+for revision, parents in revisions.items():
+    for parent in parents:
+        if parent not in revisions:
+            raise SystemExit(f"migration graph references unknown parent: {parent}")
+        children[parent].append(revision)
+
+paths = []
+def walk(node, path, seen):
+    if node == target:
+        paths.append(tuple(path))
+        return
+    for child in sorted(children[node]):
+        if child in seen:
+            raise SystemExit("migration graph contains a cycle")
+        if len(paths) > 1:
+            return
+        walk(child, path + [child], seen | {child})
+
+walk(current, [current], {current})
+if not paths:
+    raise SystemExit(
+        f"no forward migration path from {current} to {target} in candidate graph"
+    )
+if len(paths) != 1:
+    raise SystemExit(
+        f"ambiguous migration path from {current} to {target}: {len(paths)} paths"
+    )
+print("->".join(paths[0]))
+PY
+)
+say MIGRATION_PATH "$MIGRATION_PATH"
 if [[ "$TARGET_MIGRATION" == "$CURRENT_PRODUCTION_DB_HEAD" ]]; then
-  # A code-only candidate may legitimately be released after its schema head
-  # has already been applied by production.  Alembic upgrade to the same head
-  # is idempotent; only a divergent or unknown head remains fail-closed.
   say MIGRATION_ALREADY_AT_TARGET YES
-elif [[ "$TARGET_DOWN" == "$CURRENT_PRODUCTION_DB_HEAD" ]]; then
-  say MIGRATION_ALREADY_AT_TARGET NO
 else
-  die "candidate migration baseline $TARGET_DOWN is incompatible with current production DB head $CURRENT_PRODUCTION_DB_HEAD"
+  say MIGRATION_ALREADY_AT_TARGET NO
 fi
 say PRODUCTION_BASELINE_COMPATIBILITY PASS
 WORK=$(mktemp -d)

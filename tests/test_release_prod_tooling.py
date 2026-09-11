@@ -1,6 +1,9 @@
 from pathlib import Path
 import subprocess
 import os
+import re
+import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,3 +181,84 @@ def test_dry_run_does_not_run_database_mutation():
     assert result.returncode == 0, result.stderr
     assert "MIGRATION_ALLOWED=NO" in result.stdout
     assert "alembic upgrade" not in result.stdout
+
+
+def _migration_graph_checker():
+    source = SCRIPT.read_text()
+    match = re.search(
+        r'MIGRATION_PATH=\$\(python3 - "\$TARGET_SHA" "\$CURRENT_PRODUCTION_DB_HEAD" "\$TARGET_MIGRATION" <<\'PY\'\n(.*?)\nPY\n\)',
+        source,
+        re.S,
+    )
+    assert match, "migration graph checker is missing"
+    return match.group(1)
+
+
+def _run_graph_checker(files, current, target):
+    with tempfile.TemporaryDirectory() as directory:
+        repo = Path(directory)
+        (repo / "alembic/versions").mkdir(parents=True)
+        for name, content in files.items():
+            path = repo / "alembic/versions" / name
+            path.write_text(content)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Release tests"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "graph"], cwd=repo, check=True)
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+        return subprocess.run(
+            [sys.executable, "-", sha, current, target],
+            cwd=repo,
+            input=_migration_graph_checker(),
+            text=True,
+            capture_output=True,
+        )
+
+
+def _revision(name, parent):
+    return f'revision = "{name}"\ndown_revision = {parent!r}\n'
+
+
+def test_migration_graph_allows_unique_linear_upgrade_from_0085_to_0087():
+    result = _run_graph_checker(
+        {
+            "0085.py": _revision("0085", None),
+            "0086.py": _revision("0086", "0085"),
+            "0087.py": _revision("0087", "0086"),
+        },
+        "0085",
+        "0087",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0085->0086->0087"
+
+
+def test_migration_graph_denies_unrelated_branch_and_absent_current():
+    files = {
+        "0085.py": _revision("0085", None),
+        "0086.py": _revision("0086", "0085"),
+        "0090.py": _revision("0090", "0085"),
+        "0087.py": _revision("0087", "0086"),
+    }
+    unrelated = _run_graph_checker(files, "0090", "0087")
+    absent = _run_graph_checker(files, "0000", "0087")
+    assert unrelated.returncode != 0
+    assert "no forward migration path" in unrelated.stderr
+    assert absent.returncode != 0
+    assert "absent from candidate graph" in absent.stderr
+
+
+def test_migration_graph_denies_ambiguous_diverged_path():
+    result = _run_graph_checker(
+        {
+            "0085.py": _revision("0085", None),
+            "0086a.py": _revision("0086a", "0085"),
+            "0086b.py": _revision("0086b", "0085"),
+            "0087.py": _revision("0087", ("0086a", "0086b")),
+        },
+        "0085",
+        "0087",
+    )
+    assert result.returncode != 0
+    assert "ambiguous migration path" in result.stderr
