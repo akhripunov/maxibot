@@ -254,7 +254,7 @@ class RealMaxClient(MaxClient):
 
     async def send_chat_message(self, chat_id, text, attachments=None, buttons=None):
         data: dict[str, Any] = {"text": text}
-        if "**" in text or "[Предложка]" in text:
+        if "**" in text or "[Предложка]" in text or "_Подключение Яндекс.Директ_" in text:
             data["format"] = "markdown"
         elif "<b>" in text or "<strong>" in text:
             data["format"] = "html"

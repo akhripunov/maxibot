@@ -5,7 +5,7 @@ MENU_SOURCE = (Path(__file__).resolve().parents[2] / "app/bot/menu.py").read_tex
 
 
 def test_promotion_channel_menu_has_short_yandex_label():
-    assert 'yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ❌"' in MENU_SOURCE
+    assert 'yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ⚠️ не подключен"' in MENU_SOURCE
     assert '(yandex_button, f"promotion_yandex:{channel.id}")' in MENU_SOURCE
     assert "Подключить Яндекс.Метрику" not in MENU_SOURCE
 

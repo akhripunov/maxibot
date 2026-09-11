@@ -667,7 +667,7 @@ class MaxBotRuntime:
         if rows:
             attachments.append({"type": "inline_keyboard", "payload": {"buttons": rows}})
         body = {"text": text, "attachments": attachments}
-        if "**" in text or "[Предложка]" in text:
+        if "**" in text or "[Предложка]" in text or "_Подключение Яндекс.Директ_" in text:
             body["format"] = "markdown"
         elif "<b>" in text or "<strong>" in text:
             body["format"] = "html"
