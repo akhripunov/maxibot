@@ -1163,7 +1163,7 @@ def render_bot_promotion(target: BotPromotionTarget) -> tuple[str, list[list[dic
         f"Метрика: {target.counter_id or '—'}\n"
         f"Лендинг: {target.landing_url or '—'}",
         buttons(
-            ("🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ❌", target.yandex_action),
+            ("🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ⚠️ не подключен", target.yandex_action),
             ("🤖 AI Продвижение", target.ai_action),
             ("📊 Аналитика", target.analytics_action),
             ("⬅️ Назад", "promotion"),
@@ -1622,7 +1622,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 logger.info("METRICA_GOAL_BACKFILL_DEFERRED channel_id=%s", channel.id)
         yandex_value = metrica.get("owner_login") or ("Подключён" if yandex else None)
         counter_id = (profile.yandex_counter_id if profile else None) or metrica.get("counter_id")
-        yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ❌"
+        yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ⚠️ не подключен"
         controls = [
             (yandex_button, f"promotion_yandex:{channel.id}"),
             ("🤖 AI Продвижение", f"ads:{channel.id}"),
