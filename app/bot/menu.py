@@ -1272,10 +1272,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         periodic = storage["periodic"]
         status = {"NORMAL": "🟢 Норма", "WARNING": "🟡 Внимание", "CRITICAL": "🔴 Критично", "UNKNOWN": "⚠️ Недоступно"}.get(storage["status"], "⚠️ Недоступно")
         table_rows = []
-        for table in storage["table_details"].values():
+        for index, table in enumerate(storage["table_details"].values(), start=1):
             latest = ui_time(table["latest"]) if table.get("latest") else "—"
             table_rows.append(
-                f"• {table['name']}: {human_size(table['size'])}; "
+                f"{index}. **{table['name']}**: {human_size(table['size'])}; "
                 f"строк {table['row_count']}; latest {latest}; "
                 f"retention {table['retention_class']}; {table['status']}"
             )
@@ -1322,8 +1322,12 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return "💾 Хранилище ADS\n\n⚠️ Данные хранилища временно недоступны.", buttons(("⬅️ Назад", "ads_storage"))
         if screen == "ads_storage_tables":
             groups = {"CORE": TABLES[:5], "METRICS": TABLES[5:9], "SERVICE": TABLES[9:10], "AI": TABLES[10:]}
+            numbered = {name: index for index, name in enumerate(TABLES, start=1)}
             text = "📊 ADS · 16/16 таблиц\n\n" + "\n".join(
-                f"{group}: " + ", ".join(storage["table_details"][name]["name"] for name in names)
+                f"{group}:\n" + "\n".join(
+                    f"{numbered[name]}. **{storage['table_details'][name]['name']}**"
+                    for name in names
+                )
                 for group, names in groups.items()
             )
         elif screen == "ads_storage_creatives":
