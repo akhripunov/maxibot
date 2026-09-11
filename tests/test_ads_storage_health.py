@@ -51,6 +51,12 @@ def test_storage_technical_details_are_available_behind_details_button():
     detail = source[source.index('if screen == "ads_storage":'):source.index('if screen == "about":')]
     main, subviews = detail.split('if screen.startswith("ads_storage_"):', 1)
     assert '("ℹ️ Подробнее", "ads_storage_details")' in main
+    assert '("📡 Сбор данных", "ads_storage_collection")' in main
+    assert '("⚠️ Ошибки", "ads_storage_errors")' in main
+    assert '("⬅️ Назад", "owner_admin")' in main
+    assert '"ads_storage_tables")' not in main
+    assert '"ads_storage_creatives")' not in main
+    assert '"ads_storage_retention")' not in main
     assert "Наблюдения:" not in main
     assert 'screen == "ads_storage_details"' in subviews
     assert "Наблюдения:" in subviews

@@ -1301,12 +1301,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             f"Повторных попыток в очереди: {periodic.get('retry_backlog', 0)}\n"
             f"Кампаний с устаревшими данными: {periodic.get('stale_campaigns', 0)}"
         ), buttons(
-            ("📊 Все 16 таблиц", "ads_storage_tables"),
-            ("🎨 Креативы", "ads_storage_creatives"),
             ("📡 Сбор данных", "ads_storage_collection"),
-            ("🧹 Retention", "ads_storage_retention"),
-            ("ℹ️ Подробнее", "ads_storage_details"),
             ("⚠️ Ошибки", "ads_storage_errors"),
+            ("ℹ️ Подробнее", "ads_storage_details"),
             ("⬅️ Назад", "owner_admin"),
         )
     if screen.startswith("ads_storage_"):
