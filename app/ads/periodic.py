@@ -424,8 +424,12 @@ async def collection_health(db: AsyncSession, *, now: datetime | None = None) ->
     last = await db.scalar(select(AdsCollectionRun).where(
         AdsCollectionRun.status == "COMPLETED",
         AdsCollectionRun.completed_at.is_not(None),
+        AdsCollectionRun.collection_type == "CAMPAIGN",
     ).order_by(AdsCollectionRun.completed_at.desc()).limit(1))
-    next_run = await db.scalar(select(AdsCollectionRun).where(AdsCollectionRun.status.in_(("PENDING", "RETRYABLE_FAILED"))).order_by(AdsCollectionRun.scheduled_at).limit(1))
+    next_run = await db.scalar(select(AdsCollectionRun).where(
+        AdsCollectionRun.collection_type == "CAMPAIGN",
+        AdsCollectionRun.status.in_(("PENDING", "RETRYABLE_FAILED")),
+    ).order_by(AdsCollectionRun.scheduled_at).limit(1))
     if not next_run:
         # The scheduler materializes due slots only.  For a compact admin
         # diagnostic, calculate the next campaign slot without inserting it.
