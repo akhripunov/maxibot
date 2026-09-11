@@ -1387,6 +1387,14 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         channels_by_client: dict[str, list[tuple[str, str]]] = {}
         for external_id, channel_key, title in channel_rows:
             channels_by_client.setdefault(external_id, []).append((channel_key, title or "Без названия"))
+        yandex_by_channel = {
+            channel_key: bool(enabled and token_present)
+            for channel_key, enabled, token_present in (await db.execute(
+                select(Channel.id, TrafficProfile.yandex_enabled, TrafficProfile.yandex_oauth_token_encrypted.is_not(None))
+                .join(TrafficProfile, TrafficProfile.channel_id == Channel.id)
+                .where(Channel.admin_id != admin.id)
+            )).all()
+        }
         lines = ["👥 Клиенты", ""]
         for external_id in client_ids:
             lines.append(f"👤 ID пользователя: {external_id}")
@@ -1394,13 +1402,14 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             for channel_key, title in owned_channels:
                 campaigns = campaigns_by_channel.get(channel_key, [])
                 lines.append(f"📢 Канал: {title}")
+                lines.append(f"Яндекс.Директ подключён: {'✅ да' if yandex_by_channel.get(channel_key, False) else '❌ нет'}")
                 lines.append("Активные рекламные кампании: " + (", ".join(campaigns) if campaigns else "нет"))
                 collecting = bool(settings.ads_periodic_collection_enabled and campaigns)
                 lines.append(f"Сбор данных по рекламе: {'✅ идёт' if collecting else '⏸ не идёт'}")
             lines.append("")
         if not client_ids:
             lines.append("Клиентов пока нет.")
-        return "\n".join(lines).strip(), buttons(("⬅️ Администратор", "owner_admin"))
+        return "\n".join(lines).strip(), buttons(("⬅️ Назад", "owner_admin"))
     if screen == "onboarding":
         return (
             "🤖 MAXIBOT\n\n"
