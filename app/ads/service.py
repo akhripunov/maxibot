@@ -480,7 +480,10 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                 await client.close()
     rows = list((await db.scalars(
         select(AdsCampaign)
-        .join(AdsAccount)
+        # AdsCampaign keeps both the canonical account_id and the legacy
+        # ads_account_id foreign keys.  State the canonical relationship
+        # explicitly so SQLAlchemy cannot choose an ambiguous join path.
+        .join(AdsAccount, AdsCampaign.account_id == AdsAccount.id)
         .join(Channel, AdsAccount.admin_id == Channel.admin_id)
         .where(Channel.id == channel_id, AdsCampaign.state != "ARCHIVED")
         .order_by(AdsCampaign.name)

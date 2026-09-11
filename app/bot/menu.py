@@ -779,8 +779,6 @@ def ads_unified_buttons(
     mode_route = f"ads_autopilot_disable:{object_type}:{target_id}" if mode == "AUTONOMOUS" else f"ads_autopilot_enable:{object_type}:{target_id}"
     mode_label = "⏸ Выключить автопилот" if mode == "AUTONOMOUS" else "🚀 Включить автопилот"
     action_rows = [(mode_label, mode_route), ("↻ Обновить сейчас", routes["refresh"])]
-    if recommendation_id and mode != "AUTONOMOUS":
-        action_rows.append(("✅ Я внедрил", f"ads_implement:{object_type}:{target_id}:{recommendation_id}"))
     return buttons(
         *action_rows,
         ("🎯 Цель", routes["goal"]), ("💰 Бюджет", f"ads_budget:{object_type}:{target_id}"),

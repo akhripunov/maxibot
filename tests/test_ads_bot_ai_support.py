@@ -33,6 +33,7 @@ def test_system_bot_ai_promotion_uses_unified_primary_controls_and_keeps_refresh
     assert 'ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id, execution_mode=dashboard.get("execution_mode"), recommendation_id=' in menu
     for label in ("↻ Обновить сейчас", "📊 Кампании", "🎨 Креативы", "🔍 Почему", "🧠 Обучение", "🕘 История"):
         assert label in menu
+    assert '"✅ Я внедрил"' not in menu
     assert 'action.startswith("ads_bot_check:")' in runtime
     assert 'action.startswith(("ads_bot_campaigns:"' in runtime
 
