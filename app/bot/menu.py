@@ -811,8 +811,18 @@ def format_ads_campaigns_screen(state: dict, *, title: str) -> str:
         lines.append("")
     if len(lines) == 4:
         lines.append("Связанных кампаний пока нет.")
-    lines.append("🔒 Только просмотр. Управление Яндекс.Директом отключено.")
+    lines.append("☑️ Нажмите кампанию, чтобы включить или выключить её в анализе. Яндекс.Директ не изменяется.")
     return "\n".join(lines).rstrip()
+
+
+def ads_campaign_selection_buttons(state: dict, *, channel_id: str) -> list[list[dict]]:
+    """Render the legacy link toggles while keeping the campaign data current."""
+    rows = [
+        [(f"{'✅' if item.get('linked') else '◻️'} {str(item.get('name') or item.get('external_id') or item.get('id'))[:42]}",
+          f"ads_campaign_select:{channel_id}:{item.get('id')}")]
+        for item in state.get("active_campaigns") or []
+    ]
+    return buttons(*rows, ("⬅️ AI Продвижение", f"ads:{channel_id}"))
 
 
 def format_ads_creatives_screen(state: dict, *, title: str) -> str:
@@ -2030,7 +2040,17 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if not channel or not can_access_ads(admin.external_id):
             return await render_screen(db, admin, "promotion")
         state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
-        return format_ads_campaigns_screen(state, title="Канал: " + channel.title), buttons(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+        available_campaigns = await campaigns_for_channel(db, channel.id)
+        known_ids = {item.get("id") for item in state.get("active_campaigns") or []}
+        for campaign, linked in available_campaigns:
+            if campaign.id not in known_ids:
+                state.setdefault("active_campaigns", []).append({
+                    "id": campaign.id, "external_id": campaign.external_id, "name": campaign.name,
+                    "provider": "YANDEX_DIRECT", "state": campaign.state or campaign.status or "UNKNOWN",
+                    "active": str(campaign.state or campaign.status or "").upper() not in {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"},
+                    "linked": linked, "spend": None, "clicks": None, "recommendation": None,
+                })
+        return format_ads_campaigns_screen(state, title="Канал: " + channel.title), ads_campaign_selection_buttons(state, channel_id=channel.id)
         campaigns = await campaigns_for_channel(db, channel.id)
         view = await latest_view(db, channel.id)
         fact_values = (view["facts"] or {}).get("facts") or {}

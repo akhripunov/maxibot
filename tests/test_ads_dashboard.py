@@ -6,6 +6,7 @@ from app.bot.menu import (
     format_ads_history_screen,
     format_ads_learning_screen,
     format_ads_unified_dashboard,
+    ads_campaign_selection_buttons,
     format_ads_why_screen,
 )
 
@@ -103,9 +104,14 @@ def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     state = _state("RECOMMENDATION", root="🎨 Креатив A")
     state["active_campaigns"] = [{
         "external_id": "713798021", "active": True, "provider": "YANDEX_DIRECT",
+        "id": "campaign-1", "name": "Основная", "linked": True,
         "spend": 148, "clicks": 43, "state": "ON", "recommendation": None,
     }]
     assert "713798021 — 🟢 Активна" in format_ads_campaigns_screen(state, title="Москва 365")
+    assert ads_campaign_selection_buttons(state, channel_id="channel-1")[0][0]["text"].startswith("✅")
+    assert "ads_campaign_select:channel-1:campaign-1" == ads_campaign_selection_buttons(state, channel_id="channel-1")[0][0]["callback_data"]
+    state["active_campaigns"][0]["linked"] = False
+    assert ads_campaign_selection_buttons(state, channel_id="channel-1")[0][0]["text"].startswith("◻️")
     assert "🎨 Креатив A" in format_ads_why_screen(state, title="Москва 365")
     assert "INCONCLUSIVE не считаются проверенным обучением" in format_ads_learning_screen(state, title="Москва 365")
     assert "История появится" in format_ads_history_screen(state, title="Москва 365")

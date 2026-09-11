@@ -277,7 +277,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         campaign_rows.append({
             "id": campaign.id, "external_id": campaign.external_id, "name": campaign.name,
             "provider": "YANDEX_DIRECT", "state": campaign.state or campaign.status or "UNKNOWN",
-            "active": campaign.id in active_ids, "spend": facts.get("cost_7d"),
+            "active": campaign.id in active_ids, "linked": campaign.id in active_link_ids, "spend": facts.get("cost_7d"),
             "clicks": facts.get("clicks_7d"), "confirmed_business_outcomes": None,
             "execution_mode": campaign_mode,
             "write_scope": "CAMPAIGN_SCOPED" if campaign_mode == "AUTONOMOUS" else "READ_ONLY",
