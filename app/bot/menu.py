@@ -37,7 +37,7 @@ from app.ads.dashboard import build_ads_dashboard
 from app.ads.objectives import active_links, objective_for_link
 from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
-from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation
+from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation, AdsAccount, AdsCampaign, AdsPromotionCampaignLink
 from app.ads.storage_health import TABLES, diagnostics as storage_diagnostics, human_size, ui_time
 from app.integrations.robokassa import payment_url, amount_for_months, TARIFFS, DISCOUNTS
 from app.integrations.subscriptions import subscription_status, free_trial_status, channel_promotion_entitlement as resolve_channel_promotion_entitlement
@@ -2030,8 +2030,29 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             storage = await storage_diagnostics(db)
             status_icon = {"NORMAL": "🟢", "WARNING": "🟡", "CRITICAL": "🔴", "UNKNOWN": "⚠️"}.get(storage["status"], "⚠️")
             storage_line = f"💾 ADS: {human_size(storage['ads_total'])} · {status_icon} свободно {human_size(storage['disk']['free'])}"
+            periodic = storage["periodic"]
+            own_campaigns = int(await db.scalar(
+                select(func.count(func.distinct(AdsCampaign.id)))
+                .select_from(AdsCampaign)
+                .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
+                .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
+                .where(
+                    AdsPromotionCampaignLink.status == "ACTIVE",
+                    AdsAccount.admin_id == admin.id,
+                    AdsAccount.provider == "YANDEX_DIRECT",
+                    AdsAccount.status == "CONNECTED",
+                    AdsCampaign.state != "ARCHIVED",
+                )
+            ) or 0)
+            collection_line = (
+                f"Сбор данных: {'✅ включён' if periodic.get('enabled') else '⏸ выключен'}\n"
+                f"Кампаний в сборе: {periodic.get('eligible_campaigns', 0)} ({own_campaigns} мои)\n"
+                f"Последний успешный сбор: {ui_time(periodic.get('last_successful_collection'))}\n"
+                f"Следующий сбор: {ui_time(periodic.get('next_due_collection'))}"
+            )
         except Exception:
             storage_line = "💾 ADS: ⚠️ данные хранилища недоступны"
+            collection_line = "Сбор данных: ⚠️ данные недоступны"
         return (
             "🔐 MAXIBOT · Администратор\n\n"
             f"👤 Клиентов всего: {stats['clients_total']}\n"
@@ -2039,7 +2060,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             f"🚫 Заблокировали MAXIBOT: {stats['blocked_bot_users']}\n\n"
             f"📋 Подключено каналов: {stats['channels_total']} ({stats['own_channels']} мои)\n"
             f"🤖 Подключено ботов: {stats['custom_bots_total']} ({stats['own_bots']} мои)\n\n"
-            f"{storage_line}",
+            f"{storage_line}\n{collection_line}",
             buttons(("💾 Хранилище ADS", "ads_storage"), ("⬅️ Назад", "home")),
         )
     if screen == "support_prompt":
