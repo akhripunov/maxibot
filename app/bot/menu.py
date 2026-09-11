@@ -2587,7 +2587,7 @@ class MenuRepository:
             return False
         async with self.session_factory() as db:
             visit = await db.scalar(select(BotTrafficVisit).where(BotTrafficVisit.token == token)) if token else None
-            if not visit:
+            if not visit and not token:
                 # A real bot_started update can arrive without the payload
                 # after Mini App resolve.  Recover only the same user's most
                 # recent verified technical handoff.

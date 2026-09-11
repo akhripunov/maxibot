@@ -56,3 +56,11 @@ def test_observability_start_path_keeps_conversion_single_and_start_only():
     assert 'await self._render(user_id, "home", force_new=True)' in start
     assert "bind_system_startapp" in start
     assert "BotConversion" not in start
+
+
+def test_system_start_fallback_never_intercepts_a_nonempty_channel_payload():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app/bot/menu.py").read_text(encoding="utf-8")
+    bind = source[source.index("async def bind_system_startapp"):source.index("async def queue_system_channel_connected")]
+    assert "if not visit and not token:" in bind
