@@ -40,8 +40,8 @@ def test_connected_bots_have_no_separate_list_screen():
 
 
 def test_channel_and_bot_yandex_buttons_show_connection_status():
-    assert '"🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ❌"' in MENU
-    assert '"🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ❌"' in MENU
+    assert '"🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ⚠️ не подключен"' in MENU
+    assert '"🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ⚠️ не подключен"' in MENU
 
 
 def test_add_bot_shows_intro_before_instruction():

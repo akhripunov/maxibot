@@ -77,13 +77,15 @@ async def test_closed_loop_success_fail_negative_and_run_n_plus_1(db):
     assert await db.scalar(select(func.count(AdsMemory.id))) == 2
 
     memories = await retrieve(db, channel_id=None, campaign_id="campaign-e2e", object_type="BOT", object_id="bot-e2e")
-    assert len(memories) == 2
+    # A confirmed FAIL is durable audit evidence, but must not be reused as a
+    # positive learning signal for the next recommendation.
+    assert len(memories) == 1
     assert all(item.status == "VALIDATED" for item in memories)
     context = await _closed_loop_context(db, object_type="BOT", object_id="bot-e2e", campaign_id="campaign-e2e")
     assert context["LEARNING_STATE"]["status"] == "AVAILABLE"
     assert {item["evaluation_status"] for item in context["LEARNING_STATE"]["verified_outcomes"]} == {"SUCCESS", "FAIL"}
     engine_context = _context(None, {"V2_ANALYSIS": {}}, "SUFFICIENT", [], memories)
-    assert len(engine_context["RETRIEVED_PRIVATE_MEMORIES"]) == 2
+    assert len(engine_context["RETRIEVED_PRIVATE_MEMORIES"]) == 1
     assert all(item["evidence_ids"] == ["FACT-001"] for item in engine_context["RETRIEVED_PRIVATE_MEMORIES"])
     assert all(item["status"] != "CANDIDATE" for item in engine_context["RETRIEVED_PRIVATE_MEMORIES"])
 

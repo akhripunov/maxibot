@@ -5,7 +5,7 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
-CURRENT_HEAD_MIGRATION = "0084_offline_conversion_goal_unique_v1"
+CURRENT_HEAD_MIGRATION = "0087_canonical_experiment_identity"
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -155,7 +155,7 @@ def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0083_subscription_entitlements_v1" in result.stdout
+    assert "TARGET_DOWN_REVISION=0086_ads_autopilot_v1" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():

@@ -277,9 +277,16 @@ async def execute_autonomous_action(
             outcome.implementation_confirmed = "NO"
             outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
         return ExecutionResult("DENIED", reason, evidence)
+    if outcome:
+        recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
+        if recommendation:
+            recommendation.experiment_status = "executing"
+        await db.flush()
+    provider_target = {**target, "provider_campaign_id": campaign.external_id}
     request = {"object_type": object_type, "object_id": object_id,
                "campaign_id": campaign_id, "provider_account_id": account.external_account_id,
-               "action_type": action_type, "target": target,
+               "provider_campaign_id": campaign.external_id,
+               "action_type": action_type, "target": provider_target,
                "rollback": rollback_for(action_type, target),
                "executed_by": "MAXIBOT", "scope_check": "AUTOPILOT_CAMPAIGN_SCOPE_CHECK_PASS"}
     try:
@@ -291,7 +298,7 @@ async def execute_autonomous_action(
             outcome.implementation_confirmed = "NO"
             outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
         return ExecutionResult("FAILED", type(exc).__name__, evidence)
-    evidence = {**request, "status": "IMPLEMENTED", "provider_response": response or {},
+    evidence = {**request, "status": "IMPLEMENTED", **(response or {}),
                 "executed_at": datetime.now(timezone.utc).isoformat()}
     if outcome:
         recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
@@ -301,6 +308,38 @@ async def execute_autonomous_action(
         outcome.implementation_confirmed = "YES"
         outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
     return ExecutionResult("IMPLEMENTED", "PROVIDER_CONFIRMED", evidence)
+
+
+async def rollback_autonomous_action(
+    db: AsyncSession, *, outcome: AdsAiOutcome,
+    provider_rollback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+) -> ExecutionResult:
+    """Perform and evidence a non-destructive rollback of one real experiment."""
+    try:
+        evidence = json.loads(outcome.implementation_evidence_json or "{}")
+    except (TypeError, ValueError):
+        evidence = {}
+    if outcome.implementation_confirmed != "YES" or not evidence:
+        return ExecutionResult("DENIED", "ROLLBACK_EVIDENCE_REQUIRED", {"status": "ROLLBACK_DENIED"})
+    if provider_rollback is None:
+        return ExecutionResult("DENIED", "PROVIDER_ROLLBACK_NOT_CONFIGURED", {"status": "ROLLBACK_DENIED"})
+    recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
+    if recommendation:
+        recommendation.experiment_status = "rolling_back"
+    try:
+        result = await provider_rollback(evidence)
+    except Exception as exc:
+        failed = {"status": "ROLLBACK_FAILED", "reason": type(exc).__name__, "rollback_of": evidence}
+        outcome.implementation_evidence_json = json.dumps(failed, ensure_ascii=False)
+        return ExecutionResult("FAILED", type(exc).__name__, failed)
+    completed = {"status": "ROLLED_BACK", "rollback_of": evidence, "rollback": result,
+                 "executed_by": "MAXIBOT", "executed_at": datetime.now(timezone.utc).isoformat()}
+    outcome.execution_status = "ROLLED_BACK"
+    outcome.implementation_confirmed = "YES"
+    outcome.implementation_evidence_json = json.dumps(completed, ensure_ascii=False)
+    if recommendation:
+        recommendation.experiment_status = "rolled_back"
+    return ExecutionResult("ROLLED_BACK", "PROVIDER_ROLLBACK_CONFIRMED", completed)
 
 
 async def active_experiment_count(db: AsyncSession, *, recommendation_ids: list[str]) -> int:
@@ -323,8 +362,7 @@ async def active_experiment_count_for_scope(db: AsyncSession, *, object_type: st
         .join(AdsRecommendation, AdsRecommendation.id == AdsAiOutcome.recommendation_id)
         .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
         .where(*scope, AdsAiRun.campaign_id == campaign_id,
-               AdsAiOutcome.status.in_(("PENDING", "RETRYABLE_FAILED")),
-               AdsAiOutcome.implementation_confirmed == "YES")) or 0)
+               AdsRecommendation.experiment_status.in_(("executing", "running", "evaluating", "rolling_back")))) or 0)
 
 
 async def evaluate_recommendation_guardrails(db: AsyncSession, *, recommendation: AdsRecommendation,

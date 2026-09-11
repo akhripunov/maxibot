@@ -322,7 +322,8 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                 ai.status, ai.validated_output_json, ai.policy_result_json = "COMPLETED", json.dumps(valid, ensure_ascii=False), json.dumps(verdict)
                 rec = valid["recommendation"]
                 recommendation_policy = {**verdict, "objective": objective_evaluation,
-                    "action_type": rec.get("autopilot_action_type") or rec.get("action_type"),
+                    "action_type": rec.get("autopilot_action_type") or rec.get("action_type") or (rec.get("action_code") if rec.get("action_code") in {"EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "PAUSE_AD", "ENABLE_AD", "CREATE_CREATIVE_TEST", "CREATE_AD_TEST", "BOUNDED_BUDGET_REALLOCATION"} else None),
+                    "action_target": rec.get("action_target"),
                     "action_scope": "CAMPAIGN",
                     "hypothesis": rec.get("hypothesis") or rec.get("reason"),
                     "success_metric": rec.get("success_metric"),
@@ -515,7 +516,7 @@ async def persist_development_result(db: AsyncSession, *, channel_id: str, outpu
         ai.status, ai.validation_error, ai.completed_at = ("CODEX_FAILED" if worker else "SCHEMA_INVALID"), error, datetime.now(timezone.utc); await db.commit(); return ai
     verdict = policy(valid, context.get("DATA_SUFFICIENCY", "INSUFFICIENT")); ai.status, ai.validated_output_json, ai.policy_result_json, ai.validation_error, ai.completed_at = ("CODEX_COMPLETED" if worker else "COMPLETED"), json.dumps(valid, ensure_ascii=False), json.dumps(verdict), None, datetime.now(timezone.utc)
     rec = valid["recommendation"]
-    recommendation_policy = {**verdict, "action_type": rec.get("autopilot_action_type") or rec.get("action_type"), "action_scope": "CAMPAIGN", "hypothesis": rec.get("hypothesis") or rec.get("reason"), "success_metric": rec.get("success_metric"), "minimum_sample": rec.get("minimum_sample"), "evaluation_window": rec.get("evaluation_window"), "rollback": rec.get("rollback"), "execution_mode": "ADVISORY"}
+    recommendation_policy = {**verdict, "action_type": rec.get("autopilot_action_type") or rec.get("action_type") or (rec.get("action_code") if rec.get("action_code") in {"EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "PAUSE_AD", "ENABLE_AD", "CREATE_CREATIVE_TEST", "CREATE_AD_TEST", "BOUNDED_BUDGET_REALLOCATION"} else None), "action_target": rec.get("action_target"), "action_scope": "CAMPAIGN", "hypothesis": rec.get("hypothesis") or rec.get("reason"), "success_metric": rec.get("success_metric"), "minimum_sample": rec.get("minimum_sample"), "evaluation_window": rec.get("evaluation_window"), "rollback": rec.get("rollback"), "execution_mode": "ADVISORY"}
     recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14))
     db.add(recommendation)
     await _assign_experiment_identity(db, recommendation)

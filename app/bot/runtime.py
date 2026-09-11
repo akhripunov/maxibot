@@ -521,7 +521,12 @@ class MaxBotRuntime:
         if not user_id or str(user_id) == "0":
             logger.warning("MAX start ignored: no target user")
             return
-        await self.repo.mark_bot_recipient_active(str(user_id))
+        # Recipient-state tracking was introduced after older repository
+        # adapters.  Keep /start available while a compatible adapter rolls
+        # out; production repository implements this method.
+        mark_recipient_active = getattr(self.repo, "mark_bot_recipient_active", None)
+        if mark_recipient_active:
+            await mark_recipient_active(str(user_id))
         # Claim before the first await. This covers bot_started followed by
         # message_created(/start), retries, and duplicate poller deliveries.
         if not self._claim_start(str(user_id), channel_code):

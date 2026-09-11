@@ -60,7 +60,7 @@ class YandexDirectClient:
         """Send one provider mutation; unavailable to the default client."""
         if not self._allow_write:
             raise PermissionError("YANDEX_DIRECT_READ_ONLY_CLIENT")
-        if method not in {"add", "update", "delete", "set"}:
+        if method not in {"add", "update", "delete", "set", "suspend", "resume"}:
             raise ValueError("YANDEX_DIRECT_MUTATION_METHOD_UNSUPPORTED")
         response = await self._client.post(
             f"/{resource}", json={"method": method, "params": params}
@@ -143,6 +143,28 @@ class YandexDirectClient:
             ))
         batches = await asyncio.gather(*requests) if requests else []
         return [ad for batch in batches for ad in batch]
+
+    async def get_ads_by_ids(self, ad_ids: Iterable[int | str]) -> list[dict[str, Any]]:
+        """Read exact ads before/after a bounded Autopilot mutation."""
+        ids = [int(value) for value in ad_ids if str(value).isdigit()]
+        if not ids:
+            return []
+        return await self._request(
+            "ads", selection={"Ids": ids},
+            fields=("Id", "CampaignId", "AdGroupId", "Type", "Subtype", "State", "Status", "StatusClarification"),
+            extra_params={"TextAdFieldNames": ["Title", "Title2", "Text", "Href", "DisplayUrlPath", "AdImageHash", "VideoExtension"],
+                          "TextImageAdFieldNames": ["AdImageHash", "Href"],
+                          "TextAdBuilderAdFieldNames": ["Creative", "Href"]},
+        )
+
+    async def get_campaign_configuration(self, campaign_id: int | str) -> dict[str, Any] | None:
+        """Return fields that V1 may change and must verify afterwards."""
+        ident = int(campaign_id)
+        rows = await self._request(
+            "campaigns", selection={"Ids": [ident]},
+            fields=("Id", "Name", "Type", "State", "Status", "ExcludedSites", "DailyBudget"),
+        )
+        return next((row for row in rows if int(row.get("Id", 0)) == ident), None)
 
     async def get_ad_images(self, image_hashes: Iterable[str]) -> list[dict[str, Any]]:
         hashes = [str(value) for value in image_hashes if value]

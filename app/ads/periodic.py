@@ -23,6 +23,7 @@ from app.db.models import (
 )
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
+from app.security_tokens import decrypt_token
 
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 MAX_ATTEMPTS = 3
@@ -236,6 +237,7 @@ async def process_periodic_collection(session_factory) -> int:
                 run.next_retry_at = datetime.now(timezone.utc) + timedelta(minutes=min(60, 5 * run.attempts)) if run.status == "RETRYABLE_FAILED" else None
                 await db.commit()
     await trigger_continuous_analysis(session_factory)
+    await trigger_autopilot_execution(session_factory)
     return processed
 
 
@@ -335,6 +337,79 @@ async def trigger_continuous_analysis(session_factory, *, now: datetime | None =
             except Exception:
                 logger.exception("ADS_CONTINUOUS_ANALYSIS_FAILED object_type=%s object_id=%s", object_type, object_id)
     return triggered
+
+
+async def trigger_autopilot_execution(session_factory) -> int:
+    """Run bounded execution in the existing periodic worker, never a new scheduler.
+
+    The global feature flags are intentionally the first gate: production can
+    deploy this code with zero provider writes until the owner enables both
+    flags and one exact campaign has been authorized in the UI.
+    """
+    if not settings.ads_autopilot_enabled or not settings.ads_write_actions_enabled:
+        return 0
+    from app.ads.autopilot import AUTOPILOT_ACTION_ALLOWLIST, execute_autonomous_action
+    from app.ads.yandex_autopilot import yandex_autopilot_adapter
+    from app.db.models import AdsAiOutcome, AdsAiRun, AdsDataHealth, AdsRecommendation
+
+    executed = 0
+    async with session_factory() as db:
+        candidates = list((await db.scalars(select(AdsRecommendation)
+            .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
+            .where(AdsRecommendation.status == "OPEN", AdsRecommendation.experiment_status == "planned")
+            .order_by(AdsRecommendation.created_at)
+            .limit(20))).all())
+        for recommendation in candidates:
+            object_type = recommendation.promotion_object_type or "CHANNEL"
+            object_id = recommendation.promotion_object_id or recommendation.channel_id
+            if not object_id:
+                continue
+            ai_run = await db.get(AdsAiRun, recommendation.ai_run_id)
+            if not ai_run or not ai_run.campaign_id:
+                continue
+            try:
+                payload = json.loads(recommendation.policy_json or "{}")
+            except (TypeError, ValueError):
+                payload = {}
+            action_type = str(payload.get("action_type") or recommendation.action_code or "").upper()
+            target = payload.get("action_target")
+            if action_type not in AUTOPILOT_ACTION_ALLOWLIST or not isinstance(target, dict):
+                continue
+            health_scope = (AdsDataHealth.channel_id == object_id,) if object_type == "CHANNEL" else (
+                AdsDataHealth.promotion_object_type == "BOT", AdsDataHealth.promotion_object_id == object_id,
+            )
+            health = await db.scalar(select(AdsDataHealth).where(*health_scope).order_by(AdsDataHealth.checked_at.desc()).limit(1))
+            # The ADS health model is older than the Control Plane naming;
+            # HEALTHY is the only state mapped to write-capable GOOD.
+            if not health or str(health.status).upper() != "HEALTHY":
+                continue
+            outcome = await db.scalar(select(AdsAiOutcome).where(
+                AdsAiOutcome.recommendation_id == recommendation.id
+            ).order_by(AdsAiOutcome.due_at).limit(1))
+            if not outcome:
+                continue
+            encrypted = None
+            if object_type == "CHANNEL":
+                external_id = await db.scalar(select(Admin.external_id).join(Channel, Channel.admin_id == Admin.id).where(Channel.id == object_id))
+                encrypted = await get_encrypted_token(str(external_id), object_id, db=db) if external_id else None
+            else:
+                profile = await db.get(BotPromotionProfile, object_id)
+                encrypted = profile.yandex_oauth_token_encrypted if profile else None
+            if not encrypted:
+                continue
+            adapter = yandex_autopilot_adapter(decrypt_token(encrypted))
+            try:
+                result = await execute_autonomous_action(
+                    db, object_type=object_type, object_id=object_id, campaign_id=ai_run.campaign_id,
+                    action_type=action_type, target=target, data_trust="GOOD",
+                    proposed_spend=float(payload.get("proposed_spend") or 0),
+                    provider_execute=adapter.execute, outcome=outcome,
+                )
+                await db.commit()
+                executed += int(result.status == "IMPLEMENTED")
+            finally:
+                await adapter.client.close()
+    return executed
 
 
 async def collection_health(db: AsyncSession, *, now: datetime | None = None) -> dict[str, object]:

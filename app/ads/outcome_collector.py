@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ads.facts import build_campaign_facts
 from app.ads.outcomes import backfill_missing_outcome_checkpoints, claim_due_outcomes, mark_outcome_completed, mark_outcome_retryable, outcome_metrics_sufficient
 from app.ads.v2 import collect_yandex_v2
-from app.db.models import Admin, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsRecommendation, AdsAiOutcome, Channel
+from app.db.models import Admin, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsRecommendation, AdsAiOutcome, BotPromotionProfile, Channel
 from app.core.config import settings
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
@@ -90,6 +90,28 @@ async def process_due_outcomes(session_factory) -> int:
                 continue
             try:
                 await collect_one_outcome(db, outcome)
+                # A verified failed autonomous experiment is a safety trigger:
+                # restore its recorded pre-state through the same provider
+                # adapter, never by destructive deletion.
+                if outcome.evaluation_status == "FAIL" and outcome.execution_status == "IMPLEMENTED":
+                    recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
+                    encrypted = None
+                    if recommendation and recommendation.promotion_object_type == "BOT":
+                        profile = await db.get(BotPromotionProfile, recommendation.promotion_object_id)
+                        encrypted = profile.yandex_oauth_token_encrypted if profile else None
+                    elif recommendation:
+                        channel = await db.get(Channel, recommendation.channel_id)
+                        external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
+                        encrypted = await get_encrypted_token(str(external_id), channel.id, db=db) if channel and external_id else None
+                    if encrypted:
+                        from app.ads.autopilot import rollback_autonomous_action
+                        from app.ads.yandex_autopilot import yandex_autopilot_adapter
+                        adapter = yandex_autopilot_adapter(decrypt_token(encrypted))
+                        try:
+                            await rollback_autonomous_action(db, outcome=outcome, provider_rollback=adapter.rollback)
+                            await db.commit()
+                        finally:
+                            await adapter.client.close()
                 processed += 1
             except Exception as exc:
                 await mark_outcome_retryable(db, outcome, type(exc).__name__)

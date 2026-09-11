@@ -12,7 +12,7 @@ async def retrieve(db: AsyncSession, *, channel_id: str | None, campaign_id: str
     if campaign_id: query = query.order_by((AdsMemory.campaign_id == campaign_id).desc(), AdsMemory.updated_at.desc())
     return list((await db.scalars(query.limit(12))).all())
 
-async def create_candidates(db: AsyncSession, *, channel_id: str | None, campaign_id: str | None, ai_run_id: str, snapshot_id: str, candidates: list[dict], known_evidence: set[str], proven_outcome: bool = False, object_type: str = "CHANNEL", object_id: str | None = None, experiment_id: str | None = None) -> list[AdsMemory]:
+async def create_candidates(db: AsyncSession, *, channel_id: str | None, campaign_id: str | None, ai_run_id: str, snapshot_id: str, candidates: list[dict], known_evidence: set[str], proven_outcome: bool = False, object_type: str = "CHANNEL", object_id: str | None = None, experiment_id: str | None = None, memory_status: str = "VALIDATED") -> list[AdsMemory]:
     """Persist memory only after a proven closed-loop outcome.
 
     AI suggestions remain in the validated run payload until an outcome has
@@ -28,7 +28,8 @@ async def create_candidates(db: AsyncSession, *, channel_id: str | None, campaig
         scope_filter = (AdsMemory.channel_id == channel_id) if object_type == "CHANNEL" else (AdsMemory.promotion_object_type == object_type, AdsMemory.promotion_object_id == object_id)
         duplicate = await db.scalar(select(AdsMemory).where(*((scope_filter,) if not isinstance(scope_filter, tuple) else scope_filter), AdsMemory.content == statement, AdsMemory.status != "REJECTED"))
         if duplicate: continue
-        memory = AdsMemory(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, campaign_id=campaign_id, experiment_id=experiment_id, content=statement, evidence_ids_json=json.dumps(refs), source_type="AI_INFERENCE", status="VALIDATED" if proven_outcome else "CANDIDATE")
+        status = memory_status if proven_outcome and memory_status in {"VALIDATED", "REJECTED"} else "CANDIDATE"
+        memory = AdsMemory(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, campaign_id=campaign_id, experiment_id=experiment_id, content=statement, evidence_ids_json=json.dumps(refs), source_type="AI_INFERENCE", status=status)
         db.add(memory); await db.flush()
         for ref in refs: db.add(AdsMemoryEvidence(memory_id=memory.id, experiment_id=experiment_id, evidence_type="FACT", evidence_ref_id=ref, snapshot_id=snapshot_id, ai_run_id=ai_run_id))
         created.append(memory)

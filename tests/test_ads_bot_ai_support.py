@@ -30,7 +30,7 @@ def test_bot_ai_snapshot_and_memory_are_bounded_and_separate():
 def test_system_bot_ai_promotion_uses_unified_primary_controls_and_keeps_refresh_route():
     menu = (ROOT / "app/bot/menu.py").read_text()
     runtime = (ROOT / "app/bot/runtime.py").read_text()
-    assert 'ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id)' in menu
+    assert 'ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id, execution_mode=dashboard.get("execution_mode"))' in menu
     for label in ("↻ Обновить сейчас", "📊 Кампании", "🎨 Креативы", "🔍 Почему", "🧠 Обучение", "🕘 История"):
         assert label in menu
     assert 'action.startswith("ads_bot_check:")' in runtime

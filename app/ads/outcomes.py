@@ -67,6 +67,9 @@ async def record_implementation_evidence(db: AsyncSession, outcome: AdsAiOutcome
     if confirmed not in {"YES", "NO", "UNKNOWN"}:
         raise ValueError("IMPLEMENTATION_CONFIRMATION_INVALID")
     import json
+    # Advisory recommendations share the same outcome loop, but their change
+    # was made by the owner rather than by the provider control plane.
+    rows = [{**row, "executed_by": row.get("executed_by", "HUMAN")} for row in rows]
     outcome.implementation_confirmed = confirmed
     outcome.implementation_evidence_json = json.dumps(rows, ensure_ascii=False, sort_keys=True)
     outcome.execution_status = execution_status
@@ -139,6 +142,9 @@ async def claim_due_outcomes(db: AsyncSession, *, now: datetime | None = None, l
         for row in rows:
             row.status = "PROCESSING"
             row.attempts += 1
+            recommendation = await db.get(AdsRecommendation, row.recommendation_id)
+            if recommendation and recommendation.experiment_status == "running":
+                recommendation.experiment_status = "evaluating"
     return rows
 
 
@@ -169,6 +175,8 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
     outcome.confidence = "LOW" if outcome.evaluation_status == "INCONCLUSIVE" else outcome.confidence
     outcome.reason_json = json.dumps({"reason": "Критерий проверен по явно заданной гипотезе рекомендации." if criteria is not None else "Недостаточно implementation evidence или явного критерия успеха для детерминированной оценки.", "success_criteria_met": criteria}, ensure_ascii=False)
     outcome.completed_at = datetime.now(timezone.utc)
+    if recommendation:
+        recommendation.experiment_status = "completed"
     if outcome.evaluation_status in {"SUCCESS", "FAIL"} and recommendation and recommendation.ai_run_id:
         ai = await db.get(AdsAiRun, recommendation.ai_run_id)
         try:
@@ -176,7 +184,7 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
             context = json.loads(ai.safe_context_json or "{}") if ai else {}
             from app.ads.llm import evidence_registry
             from app.ads.memory import create_candidates
-            await create_candidates(db, channel_id=recommendation.channel_id, campaign_id=ai.campaign_id if ai else None, ai_run_id=ai.id if ai else recommendation.ai_run_id, snapshot_id=followup_snapshot_id, candidates=validated.get("memory_candidates") or [], known_evidence=evidence_registry(context), proven_outcome=True, object_type=recommendation.promotion_object_type or "CHANNEL", object_id=recommendation.promotion_object_id or recommendation.channel_id)
+            await create_candidates(db, channel_id=recommendation.channel_id, campaign_id=ai.campaign_id if ai else None, ai_run_id=ai.id if ai else recommendation.ai_run_id, snapshot_id=followup_snapshot_id, candidates=validated.get("memory_candidates") or [], known_evidence=evidence_registry(context), proven_outcome=True, object_type=recommendation.promotion_object_type or "CHANNEL", object_id=recommendation.promotion_object_id or recommendation.channel_id, experiment_id=recommendation.experiment_id, memory_status="REJECTED" if outcome.evaluation_status == "FAIL" else "VALIDATED")
         except (TypeError, ValueError, KeyError):
             pass
     await db.commit()
