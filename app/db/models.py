@@ -799,6 +799,11 @@ class AdsPromotionCampaignLink(Base):
     currency: Mapped[Optional[str]] = mapped_column(String(8))
     objective_status: Mapped[Optional[str]] = mapped_column(String(16))
     objective_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # Object-level execution policy.  Existing rows default to advisory so a
+    # deployment can never turn on provider writes implicitly.
+    execution_mode: Mapped[str] = mapped_column(String(16), default="ADVISORY", server_default="ADVISORY", nullable=False, index=True)
+    autopilot_config_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}", nullable=False)
+    execution_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     __table_args__ = (
@@ -973,6 +978,7 @@ class AdsAiOutcome(Base):
     __tablename__ = "ads_ai_outcomes"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     recommendation_id: Mapped[str] = mapped_column(ForeignKey("ads_recommendations.id", ondelete="CASCADE"), index=True)
+    experiment_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     horizon: Mapped[str] = mapped_column(String(8), nullable=False)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(24), default="PENDING", nullable=False, index=True)
@@ -1035,6 +1041,9 @@ class AdsAiRun(Base):
 class AdsRecommendation(Base):
     __tablename__ = "ads_recommendations"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    experiment_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
+    experiment_seq: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+    experiment_status: Mapped[str] = mapped_column(String(24), default="planned", server_default="planned", nullable=False, index=True)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     ai_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_ai_runs.id", ondelete="SET NULL"), index=True)
     status: Mapped[str] = mapped_column(String(24), default="OPEN", nullable=False, index=True)
@@ -1060,6 +1069,7 @@ class AdsRecommendation(Base):
 class AdsMemory(Base):
     __tablename__ = "ads_memories"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    experiment_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16), index=True)
     promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
@@ -1079,6 +1089,7 @@ class AdsMemory(Base):
 class AdsMemoryEvidence(Base):
     __tablename__ = "ads_memory_evidence"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    experiment_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     memory_id: Mapped[str] = mapped_column(ForeignKey("ads_memories.id", ondelete="CASCADE"), index=True)
     evidence_type: Mapped[str] = mapped_column(String(32), nullable=False)
     evidence_ref_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)

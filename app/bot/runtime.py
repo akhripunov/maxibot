@@ -22,6 +22,7 @@ from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMa
 from app.security_tokens import decrypt_token, encrypt_token
 from app.ads.service import can_access_ads, run_bot_check, run_check, toggle_campaign_link
 from app.ads.objectives import set_objective, disable_objective
+from app.ads.autopilot import AUTONOMOUS, ADVISORY, set_budget, set_mode
 from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
 from app.integrations.robokassa import amount_for_months, configured as robokassa_configured
 from app.integrations.subscriptions import subscription_status
@@ -67,6 +68,7 @@ class MaxBotRuntime:
         self._ads_ai_seen_events: set[tuple[str, str]] = set()
         self._broadcast_drafts: dict[str, str] = {}
         self._ads_objective_pending: dict[str, tuple[str, str, str | None]] = {}
+        self._ads_budget_pending: dict[str, tuple[str, str, str | None]] = {}
 
     async def _ai_promotion_active(self, user_id: str) -> bool:
         """Return the owner-scoped paid AI entitlement state."""
@@ -1055,6 +1057,58 @@ class MaxBotRuntime:
                     await db.commit()
                     order_id = order.id
                 await self._render(user_id, f"subscription_payment:{order_id}", None if service_subscription else selected_id)
+                return
+        elif action.startswith("ads_autopilot_enable:"):
+            _, object_type, object_id = action.split(":", 2)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                await self._render(user_id, action)
+                return
+        elif action.startswith("ads_autopilot_confirm:"):
+            _, object_type, object_id, campaign_id = action.split(":", 3)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                await self._render(user_id, f"ads_autopilot_enable_confirm:{object_type}:{object_id}:{campaign_id}")
+                return
+        elif action.startswith("ads_autopilot_enable_confirm_apply:"):
+            _, object_type, object_id, campaign_id = action.split(":", 3)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                async with self.session_factory() as db:
+                    try:
+                        await set_mode(db, object_type=object_type, object_id=object_id, mode=AUTONOMOUS, campaign_id=campaign_id)
+                        await db.commit()
+                    except ValueError:
+                        await db.rollback()
+                        return
+                await self._render(user_id, f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}")
+                return
+        elif action.startswith("ads_autopilot_disable:"):
+            _, object_type, object_id = action.split(":", 2)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                await self._render(user_id, action)
+                return
+        elif action.startswith("ads_autopilot_disable_confirm:"):
+            _, object_type, object_id, campaign_id = action.split(":", 3)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                async with self.session_factory() as db:
+                    try:
+                        await set_mode(db, object_type=object_type, object_id=object_id, mode=ADVISORY, campaign_id=campaign_id)
+                        await db.commit()
+                    except ValueError:
+                        await db.rollback()
+                        return
+                await self._render(user_id, f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}")
+                return
+        elif action.startswith("ads_budget:"):
+            _, object_type, object_id = action.split(":", 2)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                await self._render(user_id, action)
+                return
+        elif action.startswith("ads_budget_input:"):
+            route = action.split(":")
+            _, object_type, object_id = route[:3]
+            campaign_id = route[3] if len(route) > 3 else None
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                self._ads_budget_pending[str(user_id)] = (object_type, object_id, campaign_id)
+                await self._render(user_id, action)
                 return
         elif action.startswith("ads_check:"):
             selected_id = action.split(":", 1)[1]
@@ -2091,6 +2145,20 @@ class MaxBotRuntime:
             return
         admin_id = actor_id if await self.repo.is_admin(actor_id) else None
         if admin_id and message.text:
+            budget_pending = getattr(self, "_ads_budget_pending", {}).pop(str(admin_id), None)
+            if budget_pending:
+                object_type, object_id, campaign_id = budget_pending
+                try:
+                    async with self.session_factory() as db:
+                        await set_budget(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id, monthly_budget_limit=message.text.strip())
+                        await db.commit()
+                    await self.client.send_message(admin_id, "✅ Лимит автопилота сохранён.")
+                    await self._render(admin_id, f"ads_budget:{object_type}:{object_id}")
+                except ValueError:
+                    self._ads_budget_pending[str(admin_id)] = budget_pending
+                    suffix = f":{campaign_id}" if campaign_id else ""
+                    await self._render(admin_id, f"ads_budget_input:{object_type}:{object_id}{suffix}")
+                return
             objective_pending = self._ads_objective_pending.pop(str(admin_id), None)
             if objective_pending:
                 object_type, object_id, campaign_id = objective_pending

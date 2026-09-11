@@ -35,6 +35,7 @@ from app.traffic.bot_conversion_dedupe import paid_bot_conversion_key
 from app.ads.service import can_access_ads, campaigns_for_channel, latest_view, campaigns_for_promotion_object
 from app.ads.dashboard import build_ads_dashboard
 from app.ads.objectives import active_links, objective_for_link
+from app.ads.autopilot import AUTONOMOUS, ADVISORY, parse_config, promotion_policy
 from app.ads.analysis import build_report_view, dedupe_trend_findings
 from app.ads.memory import set_status
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation, AdsAccount, AdsCampaign, AdsPromotionCampaignLink
@@ -695,10 +696,16 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
     updated = state.get("last_updated_at")
     updated_text = updated.astimezone(MOSCOW).strftime("%d.%m %H:%M") if updated else "ещё не выполнялось"
     confirmed = state.get("confirmed_business_outcomes")
+    execution_mode = str(state.get("execution_mode") or "ADVISORY").upper()
+    mode_text = "🚀 Автопилот включён" if execution_mode == "AUTONOMOUS" else "💡 Рекомендации"
+    autopilot = state.get("autopilot") or {}
+    budget_limit = autopilot.get("monthly_budget_limit")
+    budget_line = f"\n💰 Лимит автопилота: {budget_limit:.0f} ₽ / месяц" if budget_limit is not None else ""
     return (
         f"🤖 AI Продвижение\n\n{'Канал' if object_type == 'CHANNEL' else 'Бот'}: {title}\n"
         f"Цель: {objective_name}\n🎯 Target CPA: {target_text}\n"
         f"Фактический CPA: {actual_text}\n{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}\n\n"
+        f"{mode_text}{budget_line}\n\n"
         f"🎨 Креативы: {creative_text}\n\nСейчас:\n{stage_lines}{refresh_line}\n\n"
         f"Главная проблема:\n{_owner_short_text(root, 'Пока недостаточно данных.')}\n\n"
         f"Почему:\n{_owner_short_text(state.get('why_summary'), 'MaxiBot ещё не может доказанно определить главную причину.')}\n\n"
@@ -709,6 +716,7 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
 
 def ads_unified_buttons(
     action_prefix: str, object_id: str, back_action: str, *, objective_id: str | None = None,
+    execution_mode: str = "ADVISORY",
 ) -> list[list[dict]]:
     """Canonical navigation; the refresh action reuses the bounded pipeline."""
     if action_prefix == "ads_bot":
@@ -731,7 +739,13 @@ def ads_unified_buttons(
             "learning": f"ads_learning:{object_id}",
             "history": f"ads_history:{object_id}",
         }
+    target_id = objective_id or object_id
+    object_type = "BOT" if action_prefix == "ads_bot" else "CHANNEL"
+    mode = str(execution_mode or "ADVISORY").upper()
+    mode_route = f"ads_autopilot_disable:{object_type}:{target_id}" if mode == "AUTONOMOUS" else f"ads_autopilot_enable:{object_type}:{target_id}"
+    mode_label = "⏸ Выключить автопилот" if mode == "AUTONOMOUS" else "🚀 Включить автопилот"
     return buttons(
+        (mode_label, mode_route), ("💰 Бюджет", f"ads_budget:{object_type}:{target_id}"),
         ("↻ Обновить сейчас", routes["refresh"]), ("🎯 Цель", routes["goal"]),
         ("📊 Кампании", routes["campaigns"]), ("🎨 Креативы", routes["creatives"]),
         ("🔍 Почему", routes["why"]), ("🧠 Обучение", routes["learning"]),
@@ -743,6 +757,7 @@ def format_ads_campaigns_screen(state: dict, *, title: str) -> str:
     lines = ["📊 Кампании", "", title, ""]
     for item in state.get("active_campaigns") or []:
         status = "🟢 Активна" if item.get("active") else "⚪ Неактивна"
+        mode = "🚀 Под управлением автопилота" if item.get("execution_mode") == "AUTONOMOUS" else "🔒 Только анализ"
         spend = item.get("spend")
         clicks = item.get("clicks")
         lines.extend([
@@ -751,6 +766,7 @@ def format_ads_campaigns_screen(state: dict, *, title: str) -> str:
             f"Расход: {_ru_number(spend) + ' ₽' if spend is not None else 'пока нет данных'}",
             f"Клики: {_ru_number(clicks, 0) if clicks is not None else 'пока нет данных'}",
             f"Состояние: {item.get('state') or 'UNKNOWN'}",
+            f"Режим: {mode}",
         ])
         recommendation = item.get("recommendation")
         if recommendation:
@@ -821,7 +837,9 @@ def format_ads_history_screen(state: dict, *, title: str) -> str:
         created = item.get("created_at")
         status = item.get("evaluation_status") or "PENDING"
         implementation = "IMPLEMENTED" if item.get("implementation_status") == "YES" else "НЕ ПОДТВЕРЖДЕНО"
-        lines.extend(["", created.astimezone(MOSCOW).strftime("%d.%m") if created else "—",
+        experiment = item.get("experiment_seq")
+        lines.extend(["", f"🧪 Эксперимент #{experiment}" if experiment is not None else "🧪 Эксперимент —",
+                      created.astimezone(MOSCOW).strftime("%d.%m") if created else "—",
                       _owner_short_text(item.get("title")), implementation, status])
         delta = item.get("delta") or {}
         cpa = delta.get("actual_cpa_7d") or {}
@@ -1516,6 +1534,87 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 channel = await db.get(Channel, trial.activated_channel_id) if trial.activated_channel_id else None
                 return free_trial_active_text(channel.title if channel else "Канал удалён", trial.trial_end_at), buttons(("⬅️ Назад", "subscription"))
             return free_trial_used_text(), buttons(("💳 Выбрать тариф", "subscription"), ("⬅️ Назад", "subscription"))
+    if screen.startswith(("ads_autopilot_enable:", "ads_autopilot_enable_confirm:", "ads_autopilot_disable:", "ads_budget:", "ads_budget_input:")):
+        if not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        parts = screen.split(":")
+        action_name, object_type, object_id = parts[0], parts[1], parts[2]
+        campaign_id_from_route = parts[3] if len(parts) > 3 else None
+        if object_type not in {"CHANNEL", "BOT"} or not object_id:
+            return await render_screen(db, admin, "promotion")
+        links = list((await db.scalars(select(AdsPromotionCampaignLink).where(
+            AdsPromotionCampaignLink.object_type == object_type,
+            (AdsPromotionCampaignLink.channel_id == object_id) if object_type == "CHANNEL" else (AdsPromotionCampaignLink.bot_promotion_profile_id == object_id),
+            AdsPromotionCampaignLink.status == "ACTIVE",
+        ).order_by(AdsPromotionCampaignLink.created_at))).all())
+        campaigns = {row.id: row for row in (await db.scalars(select(AdsCampaign).where(
+            AdsCampaign.id.in_([link.campaign_id for link in links])
+        ))).all()} if links else {}
+        if action_name == "ads_budget_input":
+            if not links:
+                return "💰 Лимит автопилота\n\nНет связанных кампаний.", buttons(("⬅️ Назад", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
+            if len(links) > 1 and not campaign_id_from_route:
+                rows = [[(f"📊 {campaigns.get(link.campaign_id).name if campaigns.get(link.campaign_id) else link.campaign_id}",
+                          f"ads_budget_input:{object_type}:{object_id}:{link.campaign_id}")] for link in links]
+                rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
+                return "💰 Выберите кампанию для лимита", rows
+            # The campaign id is carried in the callback and is never inferred
+            # from a display name.
+            return ("💰 Лимит автопилота\n\nВведите месячный лимит в рублях одним сообщением.\n"
+                    "Лимит действует только как внутренний safety envelope MaxiBot.",
+                    buttons(("⬅️ Назад", f"ads_budget:{object_type}:{object_id}")))
+        if action_name == "ads_budget":
+            policy = await promotion_policy(db, object_type=object_type, object_id=object_id)
+            limit = policy.get("monthly_budget_limit")
+            limit_text = f"{limit:.0f} ₽ / месяц" if limit is not None else "не задан"
+            rows = []
+            for link in links:
+                campaign = campaigns.get(link.campaign_id)
+                rows.append([(f"📊 Лимит: {campaign.name if campaign else link.campaign_id}",
+                              f"ads_budget_input:{object_type}:{object_id}:{link.campaign_id}")])
+            rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
+            return ("💰 Бюджет автопилота\n\n"
+                    f"Текущий месячный лимит: {limit_text}\n"
+                    "Это внутренний предел MaxiBot, а не изменение бюджета в Яндекс.Директе.",
+                    rows)
+        authorized = [link for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
+        if action_name == "ads_autopilot_enable_confirm":
+            link = next((item for item in links if item.campaign_id == campaign_id_from_route), None)
+            if not link:
+                return "Кампания не найдена или больше не подключена.", buttons(("⬅️ Назад", f"ads_autopilot_enable:{object_type}:{object_id}"))
+            campaign = campaigns.get(link.campaign_id)
+            title = campaign.name if campaign else link.campaign_id
+            return ("🚀 Подтверждение автопилота\n\n"
+                    f"Кампания: {title}\n"
+                    "Режим: автономные действия только из V1 allowlist\n"
+                    "Остальные связанные кампании останутся только для анализа.\n"
+                    "Яндекс.Директ не изменяется без включённых глобальных флагов и проверки Data Trust.",
+                    buttons(("✅ Включить для этой кампании", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"),
+                            ("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}")))
+        if action_name == "ads_autopilot_enable":
+            if not links:
+                return ("🚀 Автопилот\n\nНет связанных кампаний для выбора.", buttons(("⬅️ Назад", "promotion")))
+            text = ("🚀 Включить автопилот\n\n"
+                    "Выберите одну кампанию под управлением Autopilot.\n"
+                    "Остальные кампании останутся доступными только для анализа.")
+            rows = []
+            for link in links:
+                campaign = campaigns.get(link.campaign_id)
+                title = campaign.name if campaign else link.campaign_id
+                rows.append([(f"☑️ {title}" if link in authorized else f"☐ {title}"),
+                             f"ads_autopilot_confirm:{object_type}:{object_id}:{link.campaign_id}"])
+            rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
+            return text, rows
+        if action_name == "ads_autopilot_disable":
+            if not authorized:
+                return ("⏸ Автопилот уже выключен.", buttons(("⬅️ AI Продвижение", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}")))
+            rows = []
+            for link in authorized:
+                campaign = campaigns.get(link.campaign_id)
+                rows.append([(f"⏸ Выключить: {campaign.name if campaign else link.campaign_id}"),
+                             f"ads_autopilot_disable_confirm:{object_type}:{object_id}:{link.campaign_id}"])
+            rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
+            return "⏸ Выключить автопилот\n\nВыберите кампанию:", rows
         if not channels:
             return (
                 "🎁 Начало бесплатного периода\n\n"
@@ -1802,9 +1901,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         dashboard = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
         bot_row = await db.get(BotConnection, profile.bot_connection_id) if profile.bot_connection_id else None
         bot_title = (bot_row.display_name if bot_row else None) or profile.bot_key
-        controls = (ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id)
+        controls = (ads_unified_buttons("ads_bot", "system", "promotion_maxibot", objective_id=profile.id, execution_mode=dashboard.get("execution_mode"))
                     if bot_key == "system" else
-                    ads_unified_buttons("ads_bot", bot_key, f"promotion_bot:{bot_key}", objective_id=profile.id))
+                    ads_unified_buttons("ads_bot", bot_key, f"promotion_bot:{bot_key}", objective_id=profile.id, execution_mode=dashboard.get("execution_mode")))
         return (
             format_ads_unified_dashboard(dashboard, title=bot_title),
             controls,
@@ -1839,7 +1938,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         dashboard = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
         return (
             format_ads_unified_dashboard(dashboard, title=channel.title),
-            ads_unified_buttons("ads", channel.id, f"promotion_channel:{channel.id}"),
+            ads_unified_buttons("ads", channel.id, f"promotion_channel:{channel.id}", execution_mode=dashboard.get("execution_mode")),
         )
         view = await latest_view(db, channel.id)
         health = view["health"]; ai = view["ai"]; rec = view["recommendation"]

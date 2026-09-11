@@ -37,13 +37,15 @@ def _log_api_error(response: httpx.Response, *, operation: str) -> None:
 
 
 class YandexDirectClient:
-    """Read-only Yandex Direct API v5 client.
+    """Yandex Direct API v5 client.
 
-    Only GET-style API methods are exposed. No campaign, bid, ad, or budget
-    mutation methods belong in this client.
+    Read-only is the default. Provider writes can only be enabled by the
+    bounded Autopilot Control Plane, which passes ``allow_write=True`` to an
+    isolated adapter. No regular UI path should construct such an adapter.
     """
 
-    def __init__(self, token: str, base_url: str | None = None, api_version: str | None = None):
+    def __init__(self, token: str, base_url: str | None = None, api_version: str | None = None, *, allow_write: bool = False):
+        self._allow_write = bool(allow_write)
         self._client = httpx.AsyncClient(
             base_url=(base_url or settings.yandex_direct_api_url).rstrip("/") + "/" + (api_version or settings.yandex_direct_api_version).strip("/"),
             timeout=20,
@@ -53,6 +55,26 @@ class YandexDirectClient:
                 "Content-Type": "application/json; charset=utf-8",
             },
         )
+
+    async def mutate(self, resource: str, *, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Send one provider mutation; unavailable to the default client."""
+        if not self._allow_write:
+            raise PermissionError("YANDEX_DIRECT_READ_ONLY_CLIENT")
+        if method not in {"add", "update", "delete", "set"}:
+            raise ValueError("YANDEX_DIRECT_MUTATION_METHOD_UNSUPPORTED")
+        response = await self._client.post(
+            f"/{resource}", json={"method": method, "params": params}
+        )
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            _log_api_error(response, operation=f"{method.upper()} /{resource}")
+            raise
+        data = response.json()
+        if data.get("error"):
+            details = data["error"] if isinstance(data["error"], dict) else {"error": data["error"]}
+            raise YandexDirectAPIError(str(details.get("Description") or details.get("error_code") or details))
+        return data.get("result") if isinstance(data.get("result"), dict) else {}
 
     async def close(self) -> None:
         await self._client.aclose()

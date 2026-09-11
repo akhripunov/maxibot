@@ -16,6 +16,7 @@ from app.db.models import (
     AdsDataHealth, AdsMemory, AdsMemoryEvidence, AdsPromotionCampaignLink,
     AdsRecommendation,
 )
+from app.ads.autopilot import promotion_policy
 
 INACTIVE_CAMPAIGN_STATES = {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
 RUNNING_AI_STATES = {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
@@ -228,6 +229,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     if root_cause_status != "PROVEN" and recommendation:
         root_cause = "Рекламная причина пока не доказана."
     objective = _objective(links, object_type)
+    autopilot = await promotion_policy(db, object_type=object_type, object_id=object_id)
     why_summary = recommendation.rationale if recommendation else None
     if campaign_mapping and campaign_mapping.get("supported") and why_summary:
         stale_markers = ("campaign-specific", "сопоставление с конкретной", "конкретной рекламной кампанией недоступно")
@@ -236,6 +238,8 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
 
     campaign_rows = []
     for campaign in campaigns:
+        link = next((item for item in links if item.campaign_id == campaign.id and item.status == "ACTIVE"), None)
+        campaign_mode = str(link.execution_mode or "ADVISORY").upper() if link else "ADVISORY"
         pair = next(((snapshot, payload) for snapshot, payload in parsed_snapshots
                      if snapshot.campaign_id == campaign.id), None)
         facts = (pair[1].get("facts") or {}) if pair else {}
@@ -244,6 +248,8 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             "provider": "YANDEX_DIRECT", "state": campaign.state or campaign.status or "UNKNOWN",
             "active": campaign.id in active_ids, "spend": facts.get("cost_7d"),
             "clicks": facts.get("clicks_7d"), "confirmed_business_outcomes": None,
+            "execution_mode": campaign_mode,
+            "write_scope": "CAMPAIGN_SCOPED" if campaign_mode == "AUTONOMOUS" else "READ_ONLY",
             "actual_business_cpa": None, "last_analysis_at": pair[0].created_at if pair else None,
             "recommendation": next((item for item in recommendations if run_by_id.get(item.ai_run_id)
                                     and run_by_id[item.ai_run_id].campaign_id == campaign.id), None),
@@ -254,6 +260,9 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         measured = next((value for value in outcomes_by_recommendation.get(item.id, [])
                          if value.status == "COMPLETED"), None)
         history.append({
+            "experiment_id": item.experiment_id,
+            "experiment_seq": item.experiment_seq,
+            "experiment_status": item.experiment_status,
             "created_at": item.created_at,
             "title": item.title,
             "implementation_status": measured.implementation_confirmed if measured else "UNKNOWN",
@@ -263,6 +272,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
 
     return {
         "object": {"type": object_type, "id": object_id}, "objective": objective,
+        "execution_mode": autopilot["execution_mode"], "autopilot": autopilot,
         "target_cpa": objective["target_cpa"], "currency": objective["currency"],
         "actual_business_cpa": business_cpa(spend=spend, confirmed_outcomes=confirmed),
         "confirmed_business_outcomes": confirmed, "business_outcome_name": objective["type"],

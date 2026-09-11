@@ -98,6 +98,7 @@ async def ensure_outcome_checkpoints(
             continue
         db.add(AdsAiOutcome(
             recommendation_id=recommendation.id,
+            experiment_id=recommendation.experiment_id,
             horizon=horizon,
             due_at=created_at + delta,
             execution_status="RECOMMENDATION_ONLY",
