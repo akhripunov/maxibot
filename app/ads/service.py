@@ -73,11 +73,26 @@ async def _account(db: AsyncSession, admin_id: str) -> AdsAccount:
 
 async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str, report_campaign_ids: set[str] | None = None) -> tuple[list[AdsCampaign], dict[str, list[dict[str, Any]]]]:
     client_login = (settings.yandex_direct_client_login or account.external_account_id or "").strip() or None
-    client = YandexDirectClient(decrypt_token(encrypted), client_login=client_login); reports: dict[str, list[dict[str, Any]]] = {}
+    token = decrypt_token(encrypted)
+    client = YandexDirectClient(token, client_login=client_login)
+    # Unified Performance Campaigns are served by the v501 Campaigns API;
+    # keep v5 for legacy campaign types and merge both catalogs by provider ID.
+    unified_client = YandexDirectClient(token, api_version="v501", client_login=client_login)
+    reports: dict[str, list[dict[str, Any]]] = {}
     try:
-        for raw in await client.get_campaigns():
+        catalogs = [await client.get_campaigns()]
+        try:
+            catalogs.append(await unified_client.get_campaigns())
+        except Exception:
+            # Some tokens/accounts do not expose v501; preserve legacy v5
+            # discovery while recording no secret/provider response details.
+            logger.warning("YANDEX_V501_CAMPAIGN_SYNC_UNAVAILABLE", exc_info=False)
+        seen_external_ids: set[str] = set()
+        for raw in [item for catalog in catalogs for item in catalog]:
             external_id = str(raw.get("Id") or "")
-            if not external_id: continue
+            if not external_id or external_id in seen_external_ids:
+                continue
+            seen_external_ids.add(external_id)
             campaign = await db.scalar(select(AdsCampaign).where(AdsCampaign.account_id == account.id, AdsCampaign.external_id == external_id))
             if not campaign:
                 campaign = AdsCampaign(account_id=account.id, ads_account_id=account.id, external_id=external_id, external_campaign_id=external_id, name=str(raw.get("Name") or external_id))
@@ -100,7 +115,9 @@ async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str,
         # Statistics are owned by ADS Data Layer V2. This flow only discovers
         # campaign metadata and never re-fetches reports for the AI prompt.
         return campaigns, reports
-    finally: await client.close()
+    finally:
+        await client.close()
+        await unified_client.close()
 
 async def _mapped(db: AsyncSession, channel_id: str) -> list[str]:
     return list((await db.scalars(select(AdsPromotionCampaignLink.campaign_id).where(AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.channel_id == channel_id, AdsPromotionCampaignLink.status == "ACTIVE"))).all())
