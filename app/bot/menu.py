@@ -1299,23 +1299,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             f"Последний успешный сбор: {last}\nСледующий сбор: {next_due}\n"
             f"Задержка: {'нет' if not periodic.get('stale_campaigns', 0) else 'есть'}\nОшибки: {periodic.get('failed_runs', 0)}\n"
             f"Повторных попыток в очереди: {periodic.get('retry_backlog', 0)}\n"
-            f"Кампаний с устаревшими данными: {periodic.get('stale_campaigns', 0)}\n\n"
-            f"Наблюдения: {settings.ads_observations_retention_days} дней\nОперационные записи: {settings.ads_operational_retention_days} дней\n"
-            f"Дневные агрегаты: долгосрочно\nAI history: долгосрочно\n"
-            f"Самое старое наблюдение: {ui_time(storage['oldest'].get('ads_observation'))}\n"
-            f"Самый старый агрегат: {ui_time(storage['oldest'].get('daily_aggregate'))}\n"
-            f"Старый collection run: {ui_time(storage['oldest'].get('collection_run'))}\n"
-            f"Старый report run: {ui_time(storage['oldest'].get('report_run'))}\n"
-            f"Retention last run: {ui_time(storage['retention'].get('last_run'))}\n"
-            f"Удалено строк: {storage['retention'].get('deleted_rows', 0)}\n"
-            f"Пропущено строк: {storage['retention'].get('skipped_rows', 0)}\n"
-            f"Защищённых строк: {storage['retention'].get('skipped_rows', 0)}\n"
-            f"Архивация данных: не используется, действует bounded retention"
+            f"Кампаний с устаревшими данными: {periodic.get('stale_campaigns', 0)}"
         ), buttons(
             ("📊 Все 16 таблиц", "ads_storage_tables"),
             ("🎨 Креативы", "ads_storage_creatives"),
             ("📡 Сбор данных", "ads_storage_collection"),
             ("🧹 Retention", "ads_storage_retention"),
+            ("ℹ️ Подробнее", "ads_storage_details"),
             ("⚠️ Ошибки", "ads_storage_errors"),
             ("⬅️ Назад", "owner_admin"),
         )
@@ -1359,6 +1349,20 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                     f"Операционные записи: {retention['operational_days']} дней\n"
                     "Дневные агрегаты и AI history: долгосрочно\n"
                     f"Последний запуск: {ui_time(retention.get('last_run'))}")
+        elif screen == "ads_storage_details":
+            text = ("ℹ️ Подробнее о хранилище ADS\n\n"
+                    f"Наблюдения: {settings.ads_observations_retention_days} дней\n"
+                    f"Операционные записи: {settings.ads_operational_retention_days} дней\n"
+                    "Дневные агрегаты: долгосрочно\nAI history: долгосрочно\n\n"
+                    f"Самое старое наблюдение: {ui_time(storage['oldest'].get('ads_observation'))}\n"
+                    f"Самый старый агрегат: {ui_time(storage['oldest'].get('daily_aggregate'))}\n"
+                    f"Старый collection run: {ui_time(storage['oldest'].get('collection_run'))}\n"
+                    f"Старый report run: {ui_time(storage['oldest'].get('report_run'))}\n"
+                    f"Retention last run: {ui_time(storage['retention'].get('last_run'))}\n"
+                    f"Удалено строк: {storage['retention'].get('deleted_rows', 0)}\n"
+                    f"Пропущено строк: {storage['retention'].get('skipped_rows', 0)}\n"
+                    f"Защищённых строк: {storage['retention'].get('skipped_rows', 0)}\n"
+                    "Архивация данных: не используется, действует bounded retention")
         else:
             periodic = storage["periodic"]
             reason = "Нет критичных ошибок" if not periodic.get("failed_runs") else "Есть ошибки collection run; см. статус последнего запуска"

@@ -45,6 +45,17 @@ def test_storage_labels_are_russian_and_zero_states_are_explicit():
     assert "Ошибки: {periodic.get('failed_runs', 0)}" in detail
 
 
+def test_storage_technical_details_are_available_behind_details_button():
+    from pathlib import Path
+    source = Path("app/bot/menu.py").read_text()
+    detail = source[source.index('if screen == "ads_storage":'):source.index('if screen == "about":')]
+    main, subviews = detail.split('if screen.startswith("ads_storage_"):', 1)
+    assert '("ℹ️ Подробнее", "ads_storage_details")' in main
+    assert "Наблюдения:" not in main
+    assert 'screen == "ads_storage_details"' in subviews
+    assert "Наблюдения:" in subviews
+
+
 def test_storage_screen_renders_all_canonical_tables_with_bounded_metadata():
     from pathlib import Path
     source = Path("app/bot/menu.py").read_text()
