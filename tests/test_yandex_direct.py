@@ -30,6 +30,11 @@ async def test_get_campaign_uses_direct_api_v5_and_only_read_payload(monkeypatch
     assert "Campaigns" not in payload
 
 
+def test_direct_client_sets_client_login_for_agency_context():
+    client = YandexDirectClient("opaque", "https://direct.test", "v5", client_login="getuniq-u44683-2")
+    assert client._client.headers["Client-Login"] == "getuniq-u44683-2"
+
+
 @pytest.mark.asyncio
 async def test_direct_api_errors_are_not_silenced():
     async def handler(request: httpx.Request):

@@ -44,16 +44,19 @@ class YandexDirectClient:
     isolated adapter. No regular UI path should construct such an adapter.
     """
 
-    def __init__(self, token: str, base_url: str | None = None, api_version: str | None = None, *, allow_write: bool = False):
+    def __init__(self, token: str, base_url: str | None = None, api_version: str | None = None, *, allow_write: bool = False, client_login: str | None = None):
         self._allow_write = bool(allow_write)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept-Language": "ru",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        if client_login:
+            headers["Client-Login"] = str(client_login).strip()
         self._client = httpx.AsyncClient(
             base_url=(base_url or settings.yandex_direct_api_url).rstrip("/") + "/" + (api_version or settings.yandex_direct_api_version).strip("/"),
             timeout=20,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept-Language": "ru",
-                "Content-Type": "application/json; charset=utf-8",
-            },
+            headers=headers,
         )
 
     async def mutate(self, resource: str, *, method: str, params: dict[str, Any]) -> dict[str, Any]:

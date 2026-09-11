@@ -72,7 +72,8 @@ async def _account(db: AsyncSession, admin_id: str) -> AdsAccount:
     value = AdsAccount(admin_id=admin_id, connection_status="CONNECTED"); db.add(value); await db.flush(); return value
 
 async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str, report_campaign_ids: set[str] | None = None) -> tuple[list[AdsCampaign], dict[str, list[dict[str, Any]]]]:
-    client = YandexDirectClient(decrypt_token(encrypted)); reports: dict[str, list[dict[str, Any]]] = {}
+    client_login = (settings.yandex_direct_client_login or account.external_account_id or "").strip() or None
+    client = YandexDirectClient(decrypt_token(encrypted), client_login=client_login); reports: dict[str, list[dict[str, Any]]] = {}
     try:
         for raw in await client.get_campaigns():
             external_id = str(raw.get("Id") or "")

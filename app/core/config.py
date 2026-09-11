@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     yandex_metrica_api_url: str = "https://api-metrika.yandex.net"
     yandex_direct_api_url: str = "https://api.direct.yandex.com/json"
     yandex_direct_api_version: str = "v5"
+    yandex_direct_client_login: str | None = Field(default=None, validation_alias="YANDEX_DIRECT_CLIENT_LOGIN")
     max_join_request_signal: bool = False
     max_open_signal_enabled: bool = True
     max_open_likely_enabled: bool = True
