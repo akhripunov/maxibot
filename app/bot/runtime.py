@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.bot.menu import MenuRepository, official_bot_added_diagnostics
+from app.bot.menu import MenuRepository, is_maxibot_owner, official_bot_added_diagnostics
 from app.db.models import Admin, AdsAiRun, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
@@ -72,7 +72,7 @@ class MaxBotRuntime:
         """Return the owner-scoped paid AI entitlement state."""
         async with self.session_factory() as db:
             admin = await db.scalar(select(Admin).where(Admin.external_id == str(user_id)))
-            return bool(admin and subscription_status(admin.ai_promotion_expires_at) == "активен")
+            return bool(admin and (is_maxibot_owner(admin) or subscription_status(admin.ai_promotion_expires_at) == "активен"))
 
     async def stop(self):
         self._stop.set()

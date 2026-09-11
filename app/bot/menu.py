@@ -1609,7 +1609,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         "ads:", "ads_",
     )):
         selected_id = screen.split(":", 1)[1] if ":" in screen else None
-        if selected_id and await resolve_channel_promotion_entitlement(db, admin.external_id, selected_id) == "NONE":
+        if selected_id and not is_maxibot_owner(admin) and await resolve_channel_promotion_entitlement(db, admin.external_id, selected_id) == "NONE":
             return await render_screen(db, admin, f"subscription:{selected_id}", selected_id)
     if screen.startswith("promotion_channel:"):
         screen_parts = screen.split(":")

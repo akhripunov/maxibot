@@ -21,6 +21,8 @@ def test_ads_v1_button_is_visible_and_unpaid_users_are_gated_at_callback():
     assert "can_access_ads(str(user_id))" in RUNTIME
     assert 'if action.startswith(("ads:", "ads_bot")) and not await self._ai_promotion_active' in RUNTIME
     assert 'await self._render(user_id, "subscription_ai")' in RUNTIME
+    assert "is_maxibot_owner(admin) or subscription_status(admin.ai_promotion_expires_at) == \"активен\"" in RUNTIME
+    assert "not is_maxibot_owner(admin) and await resolve_channel_promotion_entitlement" in MENU
 
 
 def test_fact_engine_keeps_unknown_distinct_from_zero_and_calculates_metrics():
