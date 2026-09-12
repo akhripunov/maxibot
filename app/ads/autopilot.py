@@ -128,14 +128,16 @@ async def object_links(db: AsyncSession, *, object_type: str, object_id: str) ->
 async def promotion_policy(db: AsyncSession, *, object_type: str, object_id: str) -> dict[str, Any]:
     links = await object_links(db, object_type=object_type, object_id=object_id)
     if not links:
-        return {"execution_mode": ADVISORY, **default_autopilot_config(), "active_links": 0}
+        return {"execution_mode": ADVISORY, **default_autopilot_config(), "active_links": 0,
+                "execution_capability": "DISABLED" if not (settings.ads_autopilot_enabled and settings.ads_write_actions_enabled) else "BLOCKED"}
     authorized = [link.campaign_id for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
     mode = AUTONOMOUS if authorized else ADVISORY
     source = next((link for link in links if link.campaign_id in authorized), links[0])
     config = parse_config(source.autopilot_config_json)
+    capability = "READY" if settings.ads_autopilot_enabled and settings.ads_write_actions_enabled else "DISABLED"
     return {"execution_mode": mode, **config, "active_links": len(links),
             "authorized_campaign_ids": authorized,
-            "write_scope": "CAMPAIGN_SCOPED"}
+            "write_scope": "CAMPAIGN_SCOPED", "execution_capability": capability}
 
 
 async def autopilot_enable_requirements(db: AsyncSession, *, object_type: str, object_id: str,

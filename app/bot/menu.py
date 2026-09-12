@@ -734,11 +734,13 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
             "Выбранные кампании: " + (", ".join(selected_campaigns) if selected_campaigns else "не выбраны")
         )
     if execution_mode == "AUTONOMOUS":
+        if str(autopilot.get("execution_capability") or "READY") != "READY":
+            lines.extend(["⚠️ Выполнение изменений временно отключено системой.", "MaxiBot продолжает анализ без provider-write."])
         experiment = state.get("current_experiment")
         if experiment:
             lines.extend(["", _format_experiment_block(experiment)])
         else:
-            lines.extend(["", "🔎 Сейчас:\nИщем следующую гипотезу"])
+            lines.extend(["", "⏳ Ожидаем данные", "Причина: для первого безопасного эксперимента пока недостаточно данных или подходящего действия."])
             last = state.get("last_completed_experiment")
             if last:
                 lines.extend(["", "Последний тест:", _format_experiment_block(last, completed=True), "🧠 Результат сохранён в обучение."])
@@ -1625,10 +1627,21 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 return "Кампания не найдена или больше не подключена.", buttons(("⬅️ Назад", f"ads_autopilot_enable:{object_type}:{object_id}"))
             campaign = campaigns.get(link.campaign_id)
             title = campaign.name if campaign else link.campaign_id
+            config = parse_config(link.autopilot_config_json)
+            budget = config.get("weekly_budget_limit") if config.get("weekly_budget_limit") is not None else config.get("monthly_budget_limit")
+            target = link.target_cpa
+            provider_state = str(campaign.state or campaign.status or "UNKNOWN") if campaign else "UNKNOWN"
             return ("🚀 Подтверждение автопилота\n\n"
-                    f"Кампания: {title}\n"
+                    f"Кампания: {title}\nID: {link.campaign_id}\n"
+                    f"Target CPA: {float(target):g} ₽\n" if target is not None else "Target CPA: не задан\n"
+                    ) + (f"Бюджет: {float(budget):g} ₽ / неделю\n" if budget is not None else "Бюджет: не задан\n") + (
+                    f"Состояние Direct: {provider_state}\n"
+                    "Data Trust: проверяется перед каждым изменением\n"
                     "Режим: автономные действия только из V1 allowlist\n"
+                    "Разрешённые действия: EXCLUDE_PLACEMENT, RESTORE_PLACEMENT, PAUSE_AD, ENABLE_AD, CREATE_CREATIVE_TEST, CREATE_AD_TEST, BOUNDED_BUDGET_REALLOCATION\n"
+                    "Лимиты: max_test_spend и max_budget_change_percent из политики\n"
                     "Остальные связанные кампании останутся только для анализа.\n"
+                    "MaxiBot получит право управлять только этой кампанией.\n"
                     "Яндекс.Директ не изменяется без включённых глобальных флагов и проверки Data Trust.",
                     buttons(("✅ Включить для этой кампании", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"),
                             ("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}")))
@@ -1644,8 +1657,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 title = campaign.name if campaign else link.campaign_id
                 missing = await autopilot_enable_requirements(db, object_type=object_type, object_id=object_id, campaign_id=link.campaign_id)
                 suffix = " · не готово: " + ", ".join(missing) if missing else " · готово к запуску"
-                rows.append([(f"☑️ {title}" if link in authorized else f"☐ {title}") + suffix,
-                             f"ads_autopilot_confirm:{object_type}:{object_id}:{link.campaign_id}"])
+                rows.append([{"text": (f"☑️ {title}" if link in authorized else f"☐ {title}") + suffix,
+                              "callback_data": f"ads_autopilot_confirm:{object_type}:{object_id}:{link.campaign_id}"}])
             rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
             return text, rows
         if action_name == "ads_autopilot_disable":
@@ -1654,8 +1667,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             rows = []
             for link in authorized:
                 campaign = campaigns.get(link.campaign_id)
-                rows.append([(f"⏸ Выключить: {campaign.name if campaign else link.campaign_id}"),
-                             f"ads_autopilot_disable_confirm:{object_type}:{object_id}:{link.campaign_id}"])
+                rows.append([{"text": f"⏸ Выключить: {campaign.name if campaign else link.campaign_id}",
+                              "callback_data": f"ads_autopilot_disable_confirm:{object_type}:{object_id}:{link.campaign_id}"}])
             rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
             return "⏸ Выключить автопилот\n\nВыберите кампанию:", rows
         if not channels:
