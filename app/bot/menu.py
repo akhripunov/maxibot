@@ -703,6 +703,16 @@ def _format_experiment_block(experiment: dict, *, completed: bool = False) -> st
     return "\n".join(lines)
 
 
+def _human_memory_status(status: str | None) -> str:
+    return {
+        "SUPPORTED": "Подтверждено",
+        "VALIDATED": "Проверено",
+        "REJECTED": "Отклонено",
+        "STALE": "Устарело",
+        "SUPERSEDED": "Заменено",
+    }.get(str(status or "").upper(), "Статус уточняется")
+
+
 def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
     """Render the simple Recommendations/Autopilot object-level screen."""
     object_type = state["object"]["type"]
@@ -755,7 +765,10 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
         else:
             lines.extend(["", "MaxiBot продолжает собирать данные и ищет следующую гипотезу."])
     learning = state.get("learning_summary") or {}
-    lines.extend(["", f"🧠 Обучение: {learning.get('total_experiments', 0)} тестов · {learning.get('successful_experiments', 0)} успешных · {learning.get('proven_memories', 0)} доказанных знания"])
+    validated = int(learning.get("validated_knowledge", learning.get("proven_memories", 0)) or 0)
+    supported = int(learning.get("supported_knowledge", 0) or 0)
+    rejected = int(learning.get("rejected_knowledge", 0) or 0)
+    lines.extend(["", f"🧠 Знания: {validated} подтверждено · {supported} проверяется · {rejected} отклонено"] if validated + supported + rejected else ["", "🧠 Знания: пока нет"])
     return "\n".join(lines)
 
 
@@ -794,7 +807,7 @@ def ads_unified_buttons(
         *action_rows,
         ("🎯 Цель", routes["goal"]), ("💰 Бюджет", f"ads_budget:{object_type}:{target_id}"),
         ("📊 Кампании", routes["campaigns"]), ("🎨 Креативы", routes["creatives"]),
-        ("🔍 Почему", routes["why"]), ("🧠 Обучение", routes["learning"]),
+        ("🔍 Почему", routes["why"]), ("🧠 Знания", routes["learning"]),
         ("🕘 История", routes["history"]), ("⬅️ Назад", back_action),
     )
 
@@ -872,17 +885,21 @@ def format_ads_why_screen(state: dict, *, title: str) -> str:
 
 
 def format_ads_learning_screen(state: dict, *, title: str) -> str:
-    groups = {"EXPLORE": "🧪 Исследуем", "PROMISING": "📈 Перспективно", "PROVEN": "🚀 Доказано", "REJECTED": "⛔ Отклонено"}
-    lines = ["🧠 Обучение", "", title, "", f"Состояние: {groups.get(state['learning_state']['status'], state['learning_state']['status'])}"]
-    counts = state.get("memory_evidence_counts") or {}
-    for memory in state.get("memories") or []:
-        group = "PROVEN" if memory.status == "TRUSTED" else "PROMISING"
-        lines.extend(["", f"{groups[group]} · {_owner_short_text(memory.content)}",
-                      f"Уверенность: {_owner_confidence(memory.confidence)} · evidence: {counts.get(memory.id, 0)}",
-                      f"Проверено: {memory.updated_at.astimezone(MOSCOW):%d.%m.%Y}"])
-    if not state.get("memories"):
-        lines.extend(["", "Проверенного обучения пока нет."])
-    lines.extend(["", "Рекомендации и INCONCLUSIVE не считаются проверенным обучением."])
+    status_labels = {"SUPPORTED": "🟡 Проверяется", "VALIDATED": "✅ Подтверждено", "TRUSTED": "✅ Подтверждено", "REJECTED": "❌ Отклонено", "STALE": "🕒 Требует перепроверки", "SUPERSEDED": "🔄 Заменено новым знанием"}
+    maturity_labels = {"EXPLORE": "🔵 Исследуем", "VALIDATE": "🟡 Подтверждаем", "SCALE": "📈 Масштабируем"}
+    knowledge = state.get("knowledge") or []
+    summary = state.get("knowledge_summary") or {}
+    lines = ["🧠 Знания MaxiBot", "", title, "", f"Подтверждено: {summary.get('validated', 0)}", f"Проверяется: {summary.get('supported', 0)}", f"Отклонено: {summary.get('rejected', 0)}"]
+    for item in knowledge:
+        lines.extend(["", status_labels.get(item.get("status"), "🟡 Проверяется"), _owner_short_text(item.get("claim"), "Знание пока формируется.")])
+        sources = item.get("source_experiments") or []
+        lines.append("Основано на: " + ("Эксперименты " + ", ".join(f"#{seq}" for seq in sources) if sources else "Источник решения не зафиксирован"))
+        if item.get("confidence") and item.get("confidence") != "UNKNOWN":
+            lines.append("Уверенность: " + _owner_confidence(item["confidence"]))
+        if item.get("maturity"):
+            lines.append("📈 Зрелость: " + maturity_labels.get(str(item["maturity"]).upper(), "данные уточняются"))
+    if not knowledge:
+        lines.extend(["", "Пока знаний нет.", "MaxiBot формирует знания только по результатам реальных экспериментов."])
     return "\n".join(lines)
 
 

@@ -21,7 +21,7 @@ from app.ads.autopilot import promotion_policy
 
 INACTIVE_CAMPAIGN_STATES = {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
 RUNNING_AI_STATES = {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
-VERIFIED_MEMORY_STATES = {"VALIDATED", "TRUSTED"}
+VERIFIED_MEMORY_STATES = {"SUPPORTED", "VALIDATED", "TRUSTED", "REJECTED", "STALE", "SUPERSEDED"}
 _PRIORITY = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 _ROOT_CAUSE_ICONS = {
     "PLACEMENT": "📍 Площадка", "CREATIVE": "🎨 Креатив",
@@ -139,6 +139,27 @@ def _experiment_view(recommendation: AdsRecommendation, outcome: AdsAiOutcome | 
     if before is None or after is None:
         before = delta.get("actual_cpa_7d", {}).get("before") if isinstance(delta.get("actual_cpa_7d"), dict) else before
         after = delta.get("actual_cpa_7d", {}).get("after") if isinstance(delta.get("actual_cpa_7d"), dict) else after
+    knowledge = []
+    maturity_by_experiment = {item.experiment_id: item.maturity_after for item in all_recommendations if item.experiment_id}
+    for memory in memories:
+        source_experiments = sorted({
+            experiment_seq_by_id.get(evidence.experiment_id)
+            for evidence in evidence_by_memory.get(memory.id, [])
+            if experiment_seq_by_id.get(evidence.experiment_id) is not None
+        })
+        knowledge.append({
+            "id": memory.id, "claim": memory.content,
+            "status": str(memory.status or "UNKNOWN").upper(),
+            "confidence": str(memory.confidence or "UNKNOWN").upper(),
+            "source_experiments": source_experiments,
+            "evidence_count": evidence_counts.get(memory.id, 0),
+            "maturity": maturity_by_experiment.get(memory.experiment_id),
+        })
+    knowledge_summary = {
+        "validated": sum(item["status"] in {"VALIDATED", "TRUSTED"} for item in knowledge),
+        "supported": sum(item["status"] == "SUPPORTED" for item in knowledge),
+        "rejected": sum(item["status"] == "REJECTED" for item in knowledge),
+    }
     return {
         "experiment_id": recommendation.experiment_id,
         "experiment_seq": recommendation.experiment_seq,
@@ -492,12 +513,16 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         "learning_state": {"status": "PROVEN" if learning_proven else "PROMISING" if memories else "EXPLORE",
                            "verified_count": len(memories)},
         "memories": memories, "memory_evidence_counts": evidence_counts, "creatives": active_creatives,
+        "knowledge": knowledge, "knowledge_summary": knowledge_summary,
         "history": history,
         "current_experiment": active_experiment,
         "last_completed_experiment": completed_experiment,
         "learning_summary": {
             "total_experiments": total_experiments,
             "successful_experiments": successful_experiments,
-            "proven_memories": sum(item.status == "TRUSTED" for item in memories),
+            "proven_memories": knowledge_summary["validated"],
+            "validated_knowledge": knowledge_summary["validated"],
+            "supported_knowledge": knowledge_summary["supported"],
+            "rejected_knowledge": knowledge_summary["rejected"],
         },
     }

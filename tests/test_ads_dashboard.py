@@ -45,7 +45,7 @@ def test_unified_screen_has_single_action_and_read_only_navigation():
     assert "🚀 Автопилот выключен" in text
     assert "💡 Статус: Рекомендации" in text
     assert "Пока ничего менять не нужно." not in text
-    assert "🧠 Обучение:" in text
+    assert "🧠 Знания: пока нет" in text
     assert "Data Trust" not in text
     labels = [button["text"] for row in ads_unified_buttons("ads_bot", "system", "back") for button in row]
     assert "↻ Обновить сейчас" in labels and "🎨 Креативы" in labels
@@ -86,7 +86,7 @@ def test_unified_screen_renders_recommendations_and_autopilot_states():
     running = format_ads_unified_dashboard(autopilot, title="Москва 365")
     assert "🚀 Автопилот включён" in running
     assert "Эксперимент #18" in running and "Новый креатив №4" in running
-    assert "12 тестов · 4 успешных · 3 доказанных знания" in running
+    assert "🧠 Знания: 3 подтверждено · 0 проверяется · 0 отклонено" in running
 
     success_state = _state()
     success_state["execution_mode"] = "AUTONOMOUS"
@@ -114,7 +114,7 @@ def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     state["active_campaigns"][0]["linked"] = False
     assert ads_campaign_selection_buttons(state, channel_id="channel-1")[0][0]["text"].startswith("◻️")
     assert "🎨 Креатив A" in format_ads_why_screen(state, title="Москва 365")
-    assert "INCONCLUSIVE не считаются проверенным обучением" in format_ads_learning_screen(state, title="Москва 365")
+    assert "Пока знаний нет." in format_ads_learning_screen(state, title="Москва 365")
     empty = format_ads_history_screen(state, title="Москва 365")
     assert "Экспериментов пока не было." in empty
     assert "После запуска Автопилота здесь появится история:" in empty
@@ -164,6 +164,22 @@ def test_history_mixed_rows_renders_only_canonical_experiment():
     assert "Старая проверка" not in text
     assert "Эксперимент #None" not in text
     assert "SUCCESS" not in text
+
+
+def test_knowledge_screen_separates_memory_status_and_maturity():
+    state = _state()
+    state["knowledge_summary"] = {"validated": 1, "supported": 1, "rejected": 1}
+    state["knowledge"] = [
+        {"status": "VALIDATED", "claim": "Рабочая гипотеза", "confidence": "HIGH", "source_experiments": [12], "maturity": "SCALE"},
+        {"status": "SUPPORTED", "claim": "Предварительная гипотеза", "confidence": "MEDIUM", "source_experiments": [14], "maturity": "VALIDATE"},
+        {"status": "REJECTED", "claim": "Отклонённая гипотеза", "confidence": "LOW", "source_experiments": [7, 9], "maturity": "EXPLORE"},
+    ]
+    text = format_ads_learning_screen(state, title="Москва 365")
+    assert "🧠 Знания MaxiBot" in text
+    assert "✅ Подтверждено" in text and "🟡 Проверяется" in text and "❌ Отклонено" in text
+    assert "📈 Зрелость: 📈 Масштабируем" in text
+    assert "Основано на: Эксперименты #14" in text
+    assert "VALIDATED" not in text and "SUPPORTED" not in text and "REJECTED" not in text
 def test_history_learning_chain_renders_persisted_causality_without_raw_memory_ids():
     state = _state()
     state["history"] = [{
