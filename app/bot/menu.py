@@ -743,7 +743,7 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
             if last:
                 lines.extend(["", "Последний тест:", _format_experiment_block(last, completed=True), "🧠 Результат сохранён в обучение."])
     else:
-        lines.append("💡 Режим: Рекомендации")
+        lines.append("💡 Статус: Рекомендации")
         recommendation = state.get("current_recommendation")
         experiment = state.get("current_experiment")
         if experiment and experiment.get("executed_by") == "HUMAN":

@@ -43,7 +43,7 @@ def test_unified_screen_has_single_action_and_read_only_navigation():
     text = format_ads_unified_dashboard(state, title="Test bot")
     assert "Фактический CPA: пока не рассчитан" in text
     assert "🚀 Автопилот выключен" in text
-    assert "💡 Режим: Рекомендации" in text
+    assert "💡 Статус: Рекомендации" in text
     assert "Пока ничего менять не нужно." in text
     assert "🧠 Обучение:" in text
     assert "Data Trust" not in text
@@ -70,7 +70,7 @@ def _state(stage="ANALYSIS", *, root=None, outcome=None, proven=False):
 def test_unified_screen_renders_recommendations_and_autopilot_states():
     insufficient = format_ads_unified_dashboard(_state(), title="Москва 365")
     assert "Фактический CPA: пока не рассчитан" in insufficient
-    assert "💡 Режим: Рекомендации" in insufficient
+    assert "💡 Статус: Рекомендации" in insufficient
     assert "Пока ничего менять не нужно." in insufficient
 
     recommendation_state = _state("RECOMMENDATION", root="📍 Площадка site.ru")
