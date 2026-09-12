@@ -751,7 +751,7 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
         elif recommendation:
             lines.extend(["", "💡 Рекомендация", "", _owner_short_text(recommendation.title, "Проверить рекламные данные."), "", "Почему:", _owner_short_text(state.get("why_summary"), "Доказанных сигналов пока нет."), "", "Ожидаемый результат:", _owner_short_text(state.get("next_best_action"), "Собрать дополнительные данные.")])
         else:
-            lines.extend(["", "💡 Сейчас:", "Пока ничего менять не нужно.", "", "MaxiBot продолжает собирать данные и ищет следующую гипотезу."])
+            lines.extend(["", "MaxiBot продолжает собирать данные и ищет следующую гипотезу."])
     learning = state.get("learning_summary") or {}
     lines.extend(["", f"🧠 Обучение: {learning.get('total_experiments', 0)} тестов · {learning.get('successful_experiments', 0)} успешных · {learning.get('proven_memories', 0)} доказанных знания"])
     return "\n".join(lines)
