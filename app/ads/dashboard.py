@@ -139,27 +139,6 @@ def _experiment_view(recommendation: AdsRecommendation, outcome: AdsAiOutcome | 
     if before is None or after is None:
         before = delta.get("actual_cpa_7d", {}).get("before") if isinstance(delta.get("actual_cpa_7d"), dict) else before
         after = delta.get("actual_cpa_7d", {}).get("after") if isinstance(delta.get("actual_cpa_7d"), dict) else after
-    knowledge = []
-    maturity_by_experiment = {item.experiment_id: item.maturity_after for item in all_recommendations if item.experiment_id}
-    for memory in memories:
-        source_experiments = sorted({
-            experiment_seq_by_id.get(evidence.experiment_id)
-            for evidence in evidence_by_memory.get(memory.id, [])
-            if experiment_seq_by_id.get(evidence.experiment_id) is not None
-        })
-        knowledge.append({
-            "id": memory.id, "claim": memory.content,
-            "status": str(memory.status or "UNKNOWN").upper(),
-            "confidence": str(memory.confidence or "UNKNOWN").upper(),
-            "source_experiments": source_experiments,
-            "evidence_count": evidence_counts.get(memory.id, 0),
-            "maturity": maturity_by_experiment.get(memory.experiment_id),
-        })
-    knowledge_summary = {
-        "validated": sum(item["status"] in {"VALIDATED", "TRUSTED"} for item in knowledge),
-        "supported": sum(item["status"] == "SUPPORTED" for item in knowledge),
-        "rejected": sum(item["status"] == "REJECTED" for item in knowledge),
-    }
     return {
         "experiment_id": recommendation.experiment_id,
         "experiment_seq": recommendation.experiment_seq,
@@ -493,6 +472,28 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     completed_experiment = next((item for item in experiment_rows if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}), None)
     total_experiments = len(experiment_rows)
     successful_experiments = sum(item.get("evaluation_status") == "SUCCESS" for item in experiment_rows)
+
+    knowledge = []
+    maturity_by_experiment = {item.experiment_id: item.maturity_after for item in all_recommendations if item.experiment_id}
+    for memory in memories:
+        source_experiments = sorted({
+            experiment_seq_by_id.get(evidence.experiment_id)
+            for evidence in evidence_by_memory.get(memory.id, [])
+            if experiment_seq_by_id.get(evidence.experiment_id) is not None
+        })
+        knowledge.append({
+            "id": memory.id, "claim": memory.content,
+            "status": str(memory.status or "UNKNOWN").upper(),
+            "confidence": str(memory.confidence or "UNKNOWN").upper(),
+            "source_experiments": source_experiments,
+            "evidence_count": evidence_counts.get(memory.id, 0),
+            "maturity": maturity_by_experiment.get(memory.experiment_id),
+        })
+    knowledge_summary = {
+        "validated": sum(item["status"] in {"VALIDATED", "TRUSTED"} for item in knowledge),
+        "supported": sum(item["status"] == "SUPPORTED" for item in knowledge),
+        "rejected": sum(item["status"] == "REJECTED" for item in knowledge),
+    }
 
     return {
         "object": {"type": object_type, "id": object_id}, "objective": objective,
