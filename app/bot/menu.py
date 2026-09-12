@@ -2070,8 +2070,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             row.update({
                 "id": campaign.id, "external_id": campaign.external_id, "name": campaign.name,
                 "provider": "YANDEX_DIRECT", "state": campaign.state or campaign.status or "UNKNOWN",
-                "active": str(campaign.state or "").upper() not in {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
-                    and str(campaign.status or "").upper() not in {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"},
+                "active": (
+                    str(campaign.state or "").upper() == "ON"
+                    or (not campaign.state and str(campaign.status or "").upper() == "ACCEPTED")
+                ),
                 "linked": linked, "analysis_enabled": linked, "recommendation": None,
             })
             # Inventory metrics come from the canonical ADS observations and

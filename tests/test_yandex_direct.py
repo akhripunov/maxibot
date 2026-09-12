@@ -101,6 +101,20 @@ async def test_campaign_report_json_error_with_http_200_is_not_empty_success():
 
 
 @pytest.mark.asyncio
+async def test_campaign_catalog_report_discovers_wizard_campaigns():
+    async def handler(request: httpx.Request):
+        return httpx.Response(200, text="Date\tCampaignId\tCampaignName\tImpressions\tClicks\tCost\tConversions\n2026-08-25\t713637226\tmsk365_mk_msk_conv_test1\t163\t11\t229.67\t3\n")
+
+    client = YandexDirectClient("opaque", "https://direct.test", "v5")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(base_url="https://direct.test/v5", transport=httpx.MockTransport(handler))
+    rows = await client.get_campaign_catalog_report(date_from="2026-08-18", date_to="2026-09-11")
+    await client.close()
+    assert rows[0]["CampaignId"] == "713637226"
+    assert rows[0]["CampaignName"] == "msk365_mk_msk_conv_test1"
+
+
+@pytest.mark.asyncio
 async def test_get_ads_requests_text_ad_image_hash_field():
     requests = []
 

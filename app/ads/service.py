@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import asyncio
 import time
+import logging
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -28,6 +29,31 @@ _CAMPAIGN_SCOPE_CACHE: dict[str, tuple[float, set[str]]] = {}
 MOSCOW = ZoneInfo("Europe/Moscow")
 _INACTIVE_CAMPAIGN_STATES = {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
 _PENDING_AI_STATES = {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
+logger = logging.getLogger(__name__)
+
+
+async def _report_campaign_catalog(client: YandexDirectClient, *, lookback_days: int = 90) -> list[dict[str, Any]]:
+    """Return Master/wizard campaigns absent from Campaigns.get."""
+    today = datetime.now(timezone.utc).astimezone(MOSCOW).date()
+    rows = await client.get_campaign_catalog_report(
+        date_from=(today - timedelta(days=lookback_days)).isoformat(),
+        date_to=today.isoformat(),
+    )
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        external_id = str(row.get("CampaignId") or "")
+        if not external_id or external_id in seen:
+            continue
+        seen.add(external_id)
+        result.append({
+            "Id": external_id,
+            "Name": str(row.get("CampaignName") or external_id),
+            "Type": "UC_TEXT",
+            "State": "UNKNOWN",
+            "Status": "UNKNOWN",
+        })
+    return result
 
 
 async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecommendation) -> None:
@@ -81,6 +107,10 @@ async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str,
     reports: dict[str, list[dict[str, Any]]] = {}
     try:
         catalogs = [await client.get_campaigns()]
+        try:
+            catalogs.append(await _report_campaign_catalog(client))
+        except Exception:
+            logger.warning("YANDEX_REPORT_CAMPAIGN_CATALOG_UNAVAILABLE", exc_info=False)
         try:
             catalogs.append(await unified_client.get_campaigns())
         except Exception:
@@ -480,6 +510,10 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                         unified_client = YandexDirectClient(token, api_version="v501", client_login=client_login)
                 catalogs = [await client.get_campaigns()]
                 try:
+                    catalogs.append(await _report_campaign_catalog(client))
+                except Exception:
+                    catalogs.append([])
+                try:
                     catalogs.append(await unified_client.get_campaigns())
                 except Exception:
                     catalogs.append([])
@@ -496,7 +530,11 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                     external_id = str(raw.get("Id") or "")
                     if not external_id:
                         continue
-                    direct_campaign_ids.append(int(external_id))
+                    # Reports-only UC_TEXT campaigns do not expose an Ads
+                    # catalog through the standard Ads service. Keep them in
+                    # the inventory, but do not send them to Ads.get.
+                    if str(raw.get("Type") or "").upper() != "UC_TEXT":
+                        direct_campaign_ids.append(int(external_id))
                     campaign = await db.scalar(select(AdsCampaign).where(
                         AdsCampaign.account_id == account.id,
                         AdsCampaign.external_id == external_id,

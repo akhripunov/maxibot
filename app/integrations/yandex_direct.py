@@ -247,6 +247,44 @@ class YandexDirectClient:
         headers = [header.strip() for header in rows[0]]
         return [dict(zip(headers, row)) for row in rows[1:] if row and any(cell.strip() for cell in row)]
 
+    async def get_campaign_catalog_report(
+        self, *, date_from: str, date_to: str,
+    ) -> list[dict[str, str]]:
+        """Discover report-only campaign types (for example Master campaigns).
+
+        The Campaigns service does not expose every campaign created by the
+        Direct web wizard. The documented performance report still includes
+        CampaignId/CampaignName for campaigns that had delivery in the window,
+        so this remains a read-only, bounded discovery fallback.
+        """
+        params: dict[str, Any] = {
+            "SelectionCriteria": {"DateFrom": date_from, "DateTo": date_to},
+            "FieldNames": ["Date", "CampaignId", "CampaignName", "Impressions", "Clicks", "Cost", "Conversions"],
+            "ReportName": f"MAXIBOT read-only campaign catalog {date_from} {date_to}",
+            "ReportType": "CAMPAIGN_PERFORMANCE_REPORT",
+            "DateRangeType": "CUSTOM_DATE",
+            "Format": "TSV",
+            "IncludeVAT": "NO",
+        }
+        response = await self._client.post(
+            "/reports", json={"params": params},
+            headers={"skipReportHeader": "true", "skipColumnHeader": "false", "skipReportSummary": "true", "returnMoneyInMicros": "false"},
+        )
+        response.raise_for_status()
+        text = response.text.strip()
+        if not text:
+            return []
+        if text.startswith("{"):
+            data = response.json()
+            if data.get("error"):
+                details = data["error"] if isinstance(data["error"], dict) else {"error": data["error"]}
+                raise YandexDirectAPIError(str(details.get("Description") or details.get("error_code") or details))
+        rows = list(csv.reader(io.StringIO(text), delimiter="\t"))
+        if not rows:
+            return []
+        headers = [header.strip() for header in rows[0]]
+        return [dict(zip(headers, row)) for row in rows[1:] if row and any(cell.strip() for cell in row)]
+
     async def get_performance_report(
         self,
         report_type: str,
