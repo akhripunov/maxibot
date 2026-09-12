@@ -1620,10 +1620,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             limit = policy.get("weekly_budget_limit") if policy.get("weekly_budget_limit") is not None else policy.get("monthly_budget_limit")
             limit_text = f"{limit:.0f} ₽ / неделю" if limit is not None else "не задан"
             rows = []
-            for link in links:
-                campaign = campaigns.get(link.campaign_id)
-                rows.append([(f"📊 Лимит: {campaign.name if campaign else link.campaign_id}",
-                              f"ads_budget_input:{object_type}:{object_id}:{link.campaign_id}")])
+            if len(links) == 1:
+                rows.append([("💰 Установить бюджет", f"ads_budget_input:{object_type}:{object_id}:{links[0].campaign_id}")])
+            else:
+                for link in links:
+                    campaign = campaigns.get(link.campaign_id)
+                    rows.append([(f"💰 Установить: {campaign.name if campaign else link.campaign_id}",
+                                  f"ads_budget_input:{object_type}:{object_id}:{link.campaign_id}")])
             rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
             return ("💰 Бюджет автопилота\n\n"
                     f"Текущий месячный лимит: {limit_text}\n"
