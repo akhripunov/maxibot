@@ -6,7 +6,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.ads.facts import build_campaign_facts
 from app.ads.health import data_health, sufficiency
@@ -172,7 +172,7 @@ async def campaigns_for_promotion_object(db: AsyncSession, *, object_type: str, 
             or_(AdsCampaign.state.is_(None), AdsCampaign.state.not_in(_INACTIVE_CAMPAIGN_STATES)),
             or_(AdsCampaign.status.is_(None), AdsCampaign.status.not_in(_INACTIVE_CAMPAIGN_STATES)),
         )
-        .order_by(AdsCampaign.name)
+        .order_by(case((AdsCampaign.state == "ON", 0), else_=1), AdsCampaign.name)
     )).all())
 
 
