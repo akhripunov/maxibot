@@ -24,6 +24,7 @@ from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, norm
 from app.core.config import settings
 from app.traffic.deep_link import valid_max_target
 from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, system_connection_status
+from app.integrations.yandex_direct import YandexDirectClient
 from app.integrations.yandex_metrica import channel_setup_status, ensure_channel_goals_for_existing_counter, YandexMetricaClient
 from app.security_tokens import decrypt_token
 from app.traffic.metrica_sender import send_user_subscribed, send_user_unsubscribed
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 MAXIBOT_CHANNEL_URL = "https://max.ru/channel_maxibot"
 MOSCOW = ZoneInfo("Europe/Moscow")
+_AUTOPILOT_INACTIVE_PROVIDER_STATES = {"SUSPENDED", "OFF", "ARCHIVED", "DELETED", "REJECTED"}
 YANDEX_UTM_TEMPLATE = "utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_name_lat}.{campaign_id}.{gbid}&utm_content={creative_id}.{ad_id}.{retargeting_id}&utm_term={keyword}"
 PROMOTION_VIDEO_URL = f"{settings.traffic_public_base_url.rstrip('/')}/video-instruction"
 
@@ -58,6 +60,32 @@ EXTERNAL_LINKS_IN_AI_RESULT = "NOT_ALLOWED"
 _AI_MARKDOWN_EXTERNAL_LINK_RE = re.compile(r"\[([^\]]+)\]\(\s*(?:(?:https?://|www\.)[^)]+|(?:[a-z0-9-]+\.)+[a-z]{2,63}[^)]*)\)", re.IGNORECASE)
 _AI_EXTERNAL_URL_RE = re.compile(r"(?<![\w@])(?:https?://|www\.)[^\s<>()\]]+", re.IGNORECASE)
 _AI_BARE_DOMAIN_RE = re.compile(r"(?<![\w@])(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:/[^\s<>()\]]*)?(?![\w.-])", re.IGNORECASE)
+
+
+async def _fresh_campaign_provider_state(db: AsyncSession, admin: Admin, campaign: AdsCampaign,
+                                          *, object_type: str, object_id: str) -> str | None:
+    """Read provider state before Autopilot confirmation; never write to Direct."""
+    if object_type != "CHANNEL":
+        return str(campaign.state or campaign.status or "").upper() or None
+    encrypted = await get_encrypted_token(admin.external_id, object_id, db=db)
+    if not encrypted:
+        return None
+    try:
+        client = YandexDirectClient(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login)
+        try:
+            raw = await client.get_campaign(int(campaign.external_id))
+        finally:
+            await client.close()
+        if not raw:
+            return None
+        campaign.name = str(raw.get("Name") or campaign.name)
+        campaign.state = raw.get("State")
+        campaign.status = raw.get("Status")
+        await db.flush()
+        return str(raw.get("State") or raw.get("Status") or "").upper() or None
+    except Exception:
+        logger.warning("AUTOPILOT_PROVIDER_PREFLIGHT_UNAVAILABLE", exc_info=False)
+        return None
 
 
 def sanitize_ai_user_text(value: object) -> str:
@@ -1752,25 +1780,54 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             config = parse_config(link.autopilot_config_json)
             budget = config.get("weekly_budget_limit") if config.get("weekly_budget_limit") is not None else config.get("monthly_budget_limit")
             target = link.target_cpa
-            provider_state = str(campaign.state or campaign.status or "UNKNOWN") if campaign else "UNKNOWN"
+            provider_state = await _fresh_campaign_provider_state(
+                db, admin, campaign, object_type=object_type, object_id=object_id,
+            ) if campaign else None
+            provider_state = str(provider_state or "UNKNOWN").upper()
+            missing = await autopilot_enable_requirements(
+                db, object_type=object_type, object_id=object_id, campaign_id=campaign_id_from_route,
+            )
+            provider_ready = provider_state == "ON"
+            eligible = provider_ready and not missing
+            provider_label = {
+                "ON": "🟢 Кампания активна",
+                "SUSPENDED": "⚪ Кампания остановлена",
+                "OFF": "⚪ Кампания остановлена",
+            }.get(provider_state, "⏳ Не удалось подтвердить состояние кампании")
+            if provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:
+                blocked_reason = "⚠️ Кампания остановлена в Яндекс.Директе."
+            elif not provider_ready:
+                blocked_reason = "⚠️ Не удалось получить состояние кампании из Яндекс.Директа."
+            elif missing:
+                blocked_reason = "⚠️ " + ("Target CPA не задан." if "задать цену за цель" in missing else "Бюджет не задан.")
+            else:
+                blocked_reason = ""
             confirmation = (
-                "🚀 Подтверждение автопилота\n\n"
-                f"Кампания: {title}\nID: {link.campaign_id}\n"
+                "🚀 Включение автопилота\n\n"
+                f"Кампания: {title}\n\n"
+                "🎯 Цель\n"
                 + (f"Target CPA: {float(target):g} ₽\n" if target is not None else "Target CPA: не задан\n")
-                + (f"Бюджет: {float(budget):g} ₽ / неделю\n" if budget is not None else "Бюджет: не задан\n")
-                + f"Состояние Direct: {provider_state}\n"
-                "Data Trust: проверяется перед каждым изменением\n"
-                "Режим: автономные действия только из V1 allowlist\n"
-                "Разрешённые действия: EXCLUDE_PLACEMENT, RESTORE_PLACEMENT, PAUSE_AD, ENABLE_AD, CREATE_CREATIVE_TEST, CREATE_AD_TEST, BOUNDED_BUDGET_REALLOCATION\n"
-                "Лимиты: max_test_spend и max_budget_change_percent из политики\n"
-                "Остальные связанные кампании останутся только для анализа.\n"
-                "MaxiBot получит право управлять только этой кампанией.\n"
-                "Яндекс.Директ не изменяется без включённых глобальных флагов и проверки Data Trust."
+                + "\n💰 Бюджет\n"
+                + (f"{float(budget):g} ₽ / неделю\n" if budget is not None else "не задан\n")
+                + f"\n📊 Кампания\n{provider_label}\n\n"
+                "Что сможет делать MaxiBot:\n"
+                "✓ создавать и тестировать объявления\n✓ тестировать креативы\n"
+                "✓ отключать и включать объявления\n✓ исключать и возвращать неэффективные площадки\n"
+                "✓ менять бюджет в разрешённых пределах\n\n"
+                "🛡 Ограничения\n"
+                "• управляет только этой кампанией\n• остальные кампании остаются только для анализа\n"
+                "• одновременно не более одного эксперимента\n• каждое изменение проходит проверки безопасности\n"
+                "• стратегия и таргетинг в текущей версии не изменяются\n"
+                + (f"\nМаксимум на один тест: {float(config['max_test_spend']):g} ₽\n" if config.get("max_test_spend") is not None else "")
+                + (f"Максимальное изменение бюджета: {float(config['max_budget_change_percent']):g}%\n" if config.get("max_budget_change_percent") is not None else "")
+                + (f"\n{blocked_reason}" if blocked_reason else "\nПосле включения MaxiBot сам начнёт искать первый безопасный эксперимент.")
             )
-            return confirmation, buttons(
-                ("✅ Включить для этой кампании", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"),
-                ("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}"),
-            )
+            controls = [("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}")]
+            if eligible:
+                controls.insert(0, ("✅ Включить автопилот", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"))
+            else:
+                controls.insert(0, ("🔧 Исправить настройку", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
+            return confirmation, buttons(*controls)
         if action_name == "ads_autopilot_enable":
             if not links:
                 return ("🚀 Автопилот\n\nНет связанных кампаний для выбора.", buttons(("⬅️ Назад", "promotion")))

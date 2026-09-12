@@ -64,3 +64,20 @@ def test_autopilot_migration_adds_columns_without_new_table():
     assert "experiment_seq" in experiment_migration
     assert "experiment_status" in experiment_migration
     assert "op.create_table" not in experiment_migration
+
+
+def test_autopilot_confirmation_is_human_readable_and_hides_internal_policy_names():
+    source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
+    section = source[source.index('if action_name == "ads_autopilot_enable_confirm":'):source.index('if action_name == "ads_autopilot_enable":', source.index('if action_name == "ads_autopilot_enable_confirm":'))]
+    for forbidden in ("ID: {link.campaign_id}", "V1 allowlist", "EXCLUDE_PLACEMENT"):
+        assert forbidden not in section
+    assert "Включение автопилота" in section
+    assert "остальные кампании остаются только для анализа" in section
+
+
+def test_autopilot_confirmation_fails_closed_without_confirmed_provider_state():
+    source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
+    section = source[source.index("provider_ready = provider_state == \"ON\""):source.index("if action_name == \"ads_autopilot_enable\":", source.index("provider_ready = provider_state == \"ON\""))]
+    assert "Не удалось получить состояние кампании" in section
+    assert "if eligible:" in section
+    assert "Включить автопилот" in section
