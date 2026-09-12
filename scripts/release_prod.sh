@@ -156,7 +156,17 @@ if [[ "$MODE" == DRY_RUN ]]; then
       PROD_WORKER_IMAGE=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}'" 2>/dev/null || true)
       ROLLBACK_CONFIG=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'" 2>/dev/null || true)
       PROD_WRITE_FLAGS=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}'" 2>/dev/null | grep -E '^(ADS_AUTOPILOT_ENABLED|ADS_WRITE_ACTIONS_ENABLED)=' || true)
-      if [[ "$PROD_DB_HEAD" != "$TARGET_MIGRATION" || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || -z "$ROLLBACK_CONFIG" || "$PROD_WRITE_FLAGS" == *"=true"* ]]; then
+      DB_REHEARSAL_OK=0
+      if [[ "$PROD_DB_HEAD" == "$TARGET_MIGRATION" ]]; then
+        DB_REHEARSAL_OK=1
+        say MIGRATION_REHEARSAL "PASS (already at target)"
+      elif MIGRATION_REHEARSAL=$(python3 "$ROOT_DIR/scripts/migration_rehearsal.py" "$TARGET_SHA" "$PROD_DB_HEAD" "$TARGET_MIGRATION" 2>&1); then
+        DB_REHEARSAL_OK=1
+        say MIGRATION_REHEARSAL "$MIGRATION_REHEARSAL"
+      else
+        say MIGRATION_REHEARSAL "BLOCKED $(printf '%s' "$MIGRATION_REHEARSAL" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+      fi
+      if [[ "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || -z "$ROLLBACK_CONFIG" || "$PROD_WRITE_FLAGS" == *"=true"* ]]; then
         PREFLIGHT_OK=0
       fi
     fi
