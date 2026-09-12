@@ -8,7 +8,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
-CURRENT_HEAD_MIGRATION = "0090_self_learning_loop_v2"
+PRODUCTION_HEAD_MIGRATION = "0090_self_learning_loop_v2"
+CANDIDATE_HEAD_MIGRATION = "0091_generic_promotion_platform"
 IMAGE_PREFLIGHT = ROOT / "scripts" / "release_image_preflight.py"
 APPROVED_SHA = "a" * 40
 
@@ -92,7 +93,7 @@ def test_release_entrypoint_is_valid_shell():
 def test_dry_run_is_non_mutating_and_fail_closed():
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     env = os.environ.copy()
-    env["TARGET_MIGRATION"] = CURRENT_HEAD_MIGRATION
+    env["TARGET_MIGRATION"] = CANDIDATE_HEAD_MIGRATION
     result = subprocess.run(
         [str(SCRIPT), sha, "--dry-run"],
         cwd=ROOT,
@@ -228,16 +229,16 @@ def _run_release(target_migration=None):
     )
 
 
-def test_release_parser_handles_real_merge_tuple_and_current_head_path():
+def test_release_parser_handles_real_merge_tuple_and_candidate_head_path():
     source = SCRIPT.read_text()
     assert "isinstance(value, (tuple, list))" in source
     assert 'down_revision = ("0059_ads_ai_worker_release", "0058_metrica_upload_tracking")' in (
         ROOT / "alembic/versions/0060_merge_ads_foundation_heads.py"
     ).read_text()
-    result = _run_release(CURRENT_HEAD_MIGRATION)
+    result = _run_release(CANDIDATE_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
-    assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0089_creative_experiment_v1" in result.stdout
+    assert f"TARGET_MIGRATION={CANDIDATE_HEAD_MIGRATION}" in result.stdout
+    assert f"TARGET_DOWN_REVISION={PRODUCTION_HEAD_MIGRATION}" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():
@@ -256,7 +257,7 @@ def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():
 
 
 def test_dry_run_does_not_run_database_mutation():
-    result = _run_release(CURRENT_HEAD_MIGRATION)
+    result = _run_release(CANDIDATE_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert "MIGRATION_ALLOWED=NO" in result.stdout
     assert "alembic upgrade" not in result.stdout
@@ -318,6 +319,33 @@ def test_migration_graph_allows_unique_linear_upgrade_from_0085_to_0087():
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "0085->0086->0087"
+
+
+def test_migration_graph_allows_same_head_without_upgrade():
+    result = _run_graph_checker(
+        {
+            "0091.py": _revision("0091", "0090"),
+            "0090.py": _revision("0090", None),
+        },
+        "0091",
+        "0091",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0091"
+
+
+def test_migration_graph_allows_multi_step_candidate_upgrade():
+    result = _run_graph_checker(
+        {
+            "0090.py": _revision("0090", None),
+            "0091.py": _revision("0091", "0090"),
+            "0092.py": _revision("0092", "0091"),
+        },
+        "0090",
+        "0092",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0090->0091->0092"
 
 
 def test_migration_graph_denies_unrelated_branch_and_absent_current():
