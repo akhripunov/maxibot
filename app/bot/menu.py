@@ -1912,6 +1912,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         _, object_type, object_id = screen.split(":", 2)
         back = f"ads_objective:{object_type}:{object_id}"
         return ("🎯 Введите целевую стоимость в рублях одним сообщением.\n\nНапример: 20", buttons(("⬅️ Назад", back)))
+    if screen.startswith("ads_objective_saved:"):
+        _, object_type, object_id, target = screen.split(":", 3)
+        back = f"ads_objective:{object_type}:{object_id}"
+        return (f"✅ Цель установлена: {target} ₽", buttons(("⬅️ Назад", back)))
     if screen.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:")):
         bot_key = screen.rsplit(":", 1)[1]
         if not bot_key or not can_access_ads(admin.external_id):
