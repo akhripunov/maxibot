@@ -116,8 +116,17 @@ async def active_links(db: AsyncSession, *, object_type: str, object_id: str) ->
     ).order_by(AdsPromotionCampaignLink.created_at))).all())
 
 
+async def object_links(db: AsyncSession, *, object_type: str, object_id: str) -> list[AdsPromotionCampaignLink]:
+    predicate = (AdsPromotionCampaignLink.channel_id == object_id
+                 if object_type == "CHANNEL"
+                 else AdsPromotionCampaignLink.bot_promotion_profile_id == object_id)
+    return list((await db.scalars(select(AdsPromotionCampaignLink).where(
+        AdsPromotionCampaignLink.object_type == object_type, predicate
+    ).order_by(AdsPromotionCampaignLink.created_at))).all())
+
+
 async def promotion_policy(db: AsyncSession, *, object_type: str, object_id: str) -> dict[str, Any]:
-    links = await active_links(db, object_type=object_type, object_id=object_id)
+    links = await object_links(db, object_type=object_type, object_id=object_id)
     if not links:
         return {"execution_mode": ADVISORY, **default_autopilot_config(), "active_links": 0}
     authorized = [link.campaign_id for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
@@ -132,7 +141,7 @@ async def promotion_policy(db: AsyncSession, *, object_type: str, object_id: str
 async def autopilot_enable_requirements(db: AsyncSession, *, object_type: str, object_id: str,
                                         campaign_id: str | None) -> list[str]:
     """Return missing owner prerequisites before enabling campaign autopilot."""
-    links = await active_links(db, object_type=object_type, object_id=object_id)
+    links = await object_links(db, object_type=object_type, object_id=object_id)
     if not links:
         return ["выбрать кампанию для автопилота"]
     selected = next((link for link in links if link.campaign_id == campaign_id), None)
@@ -183,25 +192,20 @@ async def set_mode(db: AsyncSession, *, object_type: str, object_id: str, mode: 
 async def set_budget(db: AsyncSession, *, object_type: str, object_id: str, monthly_budget_limit: Any,
                      campaign_id: str | None = None) -> dict[str, Any]:
     limit = _positive(monthly_budget_limit, field="MONTHLY_BUDGET_LIMIT")
-    links = await active_links(db, object_type=object_type, object_id=object_id)
+    links = await object_links(db, object_type=object_type, object_id=object_id)
     if not links:
         raise ValueError("ACTIVE_PROMOTION_CAMPAIGN_NOT_FOUND")
     selected = next((link for link in links if link.campaign_id == campaign_id), None) if campaign_id else None
     if campaign_id and not selected:
         raise ValueError("AUTOPILOT_CAMPAIGN_NOT_LINKED")
-    # Budget is campaign-scoped in V1, just like write authorization.  A
-    # missing campaign is accepted only for legacy advisory objects, where it
-    # is applied to the sole active link to avoid ambiguous writes.
-    if selected is None:
-        if len(links) != 1:
-            raise ValueError("AUTOPILOT_CAMPAIGN_SELECTION_REQUIRED")
-        selected = links[0]
     now = datetime.now(timezone.utc)
-    config = parse_config(selected.autopilot_config_json)
-    config["monthly_budget_limit"] = limit
-    config["weekly_budget_limit"] = limit
-    selected.autopilot_config_json = json.dumps(config, ensure_ascii=False)
-    selected.execution_updated_at = now
+    targets = [selected] if selected is not None else links
+    for link in targets:
+        config = parse_config(link.autopilot_config_json)
+        config["monthly_budget_limit"] = limit
+        config["weekly_budget_limit"] = limit
+        link.autopilot_config_json = json.dumps(config, ensure_ascii=False)
+        link.execution_updated_at = now
     await db.flush()
     return await promotion_policy(db, object_type=object_type, object_id=object_id)
 

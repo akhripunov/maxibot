@@ -1598,7 +1598,6 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         links = list((await db.scalars(select(AdsPromotionCampaignLink).where(
             AdsPromotionCampaignLink.object_type == object_type,
             (AdsPromotionCampaignLink.channel_id == object_id) if object_type == "CHANNEL" else (AdsPromotionCampaignLink.bot_promotion_profile_id == object_id),
-            AdsPromotionCampaignLink.status == "ACTIVE",
         ).order_by(AdsPromotionCampaignLink.created_at))).all())
         campaigns = {row.id: row for row in (await db.scalars(select(AdsCampaign).where(
             AdsCampaign.id.in_([link.campaign_id for link in links])
@@ -1606,13 +1605,6 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if action_name == "ads_budget_input":
             if not links:
                 return "💰 Лимит автопилота\n\nНет связанных кампаний.", buttons(("⬅️ Назад", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
-            if len(links) > 1 and not campaign_id_from_route:
-                rows = [[(f"📊 {campaigns.get(link.campaign_id).name if campaigns.get(link.campaign_id) else link.campaign_id}",
-                          f"ads_budget_input:{object_type}:{object_id}:{link.campaign_id}")] for link in links]
-                rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
-                return "💰 Выберите кампанию для лимита", rows
-            # The campaign id is carried in the callback and is never inferred
-            # from a display name.
             return ("💰 Лимит автопилота\n\nВведите недельный бюджет в рублях одним сообщением.\n"
                     "Например: 1000\n\nMaxiBot не выйдет за этот внутренний лимит и не изменяет бюджет в Яндекс.Директе.", buttons())
         if action_name == "ads_budget":
@@ -1620,16 +1612,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             limit = policy.get("weekly_budget_limit") if policy.get("weekly_budget_limit") is not None else policy.get("monthly_budget_limit")
             limit_text = f"{limit:.0f} ₽ / неделю" if limit is not None else "не задан"
             rows = []
-            if len(links) == 1:
-                rows.append([("💰 Установить бюджет", f"ads_budget_input:{object_type}:{object_id}:{links[0].campaign_id}")])
-            else:
-                for link in links:
-                    campaign = campaigns.get(link.campaign_id)
-                    rows.append([(f"💰 Установить: {campaign.name if campaign else link.campaign_id}",
-                                  f"ads_budget_input:{object_type}:{object_id}:{link.campaign_id}")])
+            rows.append([("💰 Установить бюджет", f"ads_budget_input:{object_type}:{object_id}")])
             rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
             return ("💰 Бюджет автопилота\n\n"
-                    f"Текущий месячный лимит: {limit_text}\n"
+                    f"Текущий недельный бюджет: {limit_text}\n"
                     "Это внутренний недельный предел MaxiBot, а не изменение бюджета в Яндекс.Директе.\nMaxiBot не выйдет за установленную сумму.",
                     rows)
         authorized = [link for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
