@@ -569,6 +569,19 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                         for raw in direct_campaigns
                         if str(raw.get("Id") or "") in matching_external_ids
                     }
+                    # Preserve scope even when the provider's Ads endpoint
+                    # omits landing URLs: existing channel links are durable
+                    # evidence of the campaign family for this object.
+                    linked_names = list((await db.scalars(select(AdsCampaign.name).join(
+                        AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id
+                    ).where(
+                        AdsPromotionCampaignLink.object_type == "CHANNEL",
+                        AdsPromotionCampaignLink.channel_id == channel_id,
+                    ))).all())
+                    scoped_prefixes.update(
+                        str(name or "").split("_", 1)[0].strip().lower()
+                        for name in linked_names
+                    )
                     matching_external_ids.update(
                         str(item.get("Id"))
                         for item in report_catalog
