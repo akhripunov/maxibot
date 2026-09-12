@@ -261,6 +261,23 @@ async def _closed_loop_context(db: AsyncSession, *, object_type: str, object_id:
         verified.append({"outcome_id": item.id, "horizon": item.horizon, "evaluation_status": item.evaluation_status, "implementation_confirmed": item.implementation_confirmed, "reason": reason})
     return {"PREVIOUS_RECOMMENDATIONS": previous, "MEASURED_OUTCOMES": measured, "LEARNING_STATE": {"status": "AVAILABLE" if verified else "PENDING", "verified_outcomes": verified, "promotion_policy": "verified SUCCESS/FAIL only; no learning from INCONCLUSIVE"}}
 
+
+async def _active_experiment_exists(
+    db: AsyncSession, *, object_type: str, object_id: str, campaign_id: str,
+) -> bool:
+    """Keep max_parallel_experiments=1 at decision time, not only execution time."""
+    object_scope = (
+        AdsAiRun.channel_id == object_id
+        if object_type == "CHANNEL"
+        else (AdsAiRun.promotion_object_type == object_type, AdsAiRun.promotion_object_id == object_id)
+    )
+    predicates = (object_scope,) if not isinstance(object_scope, tuple) else object_scope
+    return bool(await db.scalar(select(AdsRecommendation.id)
+        .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
+        .where(*predicates, AdsAiRun.campaign_id == campaign_id,
+               AdsRecommendation.experiment_status.in_(("executing", "running", "evaluating", "rolling_back")))
+        .limit(1)))
+
 async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channel: Channel | None, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime, object_type: str = "CHANNEL", object_id: str | None = None, bot_id: str | None = None) -> AdsAiRun:
     channel_id = channel.id if channel else None
     object_id = object_id or channel_id
@@ -379,9 +396,10 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                     "evaluation_window": rec.get("evaluation_window"),
                     "rollback": rec.get("rollback"),
                     "execution_mode": "ADVISORY"}
-                recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id)
-                db.add(recommendation); await _assign_experiment_identity(db, recommendation); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
-                await create_candidates(db, channel_id=channel_id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids, object_type=object_type, object_id=object_id, experiment_id=recommendation.experiment_id)
+                if not await _active_experiment_exists(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id):
+                    recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id)
+                    db.add(recommendation); await _assign_experiment_identity(db, recommendation); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
+                    await create_candidates(db, channel_id=channel_id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids, object_type=object_type, object_id=object_id, experiment_id=recommendation.experiment_id)
         except Exception as exc:
             ai.status, ai.validation_error = "FAILED", type(exc).__name__
     ai.completed_at = datetime.now(timezone.utc)

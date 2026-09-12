@@ -2240,10 +2240,14 @@ class MaxBotRuntime:
                         f"✅ Цель установлена: {target_value:g} ₽",
                         buttons=[[{"text": "⬅️ Назад", "callback_data": f"ads:{object_id}"}]],
                     )
-                    await self.repo.clear_ads_objective_pending(str(admin_id))
+                    clear_pending = getattr(self.repo, "clear_ads_objective_pending", None)
+                    if clear_pending:
+                        await clear_pending(str(admin_id))
                 except ValueError:
                     self._ads_objective_pending[str(admin_id)] = objective_pending
-                    await self.repo.set_ads_objective_pending(str(admin_id), *objective_pending)
+                    set_pending = getattr(self.repo, "set_ads_objective_pending", None)
+                    if set_pending:
+                        await set_pending(str(admin_id), *objective_pending)
                     await self._render(admin_id, f"ads_objective_input:{object_type}:{object_id}")
                 return
             custom_state, pending_bot_id = await self.repo.custom_bot_state(admin_id)

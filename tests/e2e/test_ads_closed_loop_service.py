@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ads.memory import retrieve
 from app.ads.outcomes import ensure_outcome_checkpoints, mark_outcome_completed, record_implementation_evidence
-from app.ads.service import _closed_loop_context, _context
+from app.ads.service import _active_experiment_exists, _assign_experiment_identity, _closed_loop_context, _context
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsMemory, AdsMemoryEvidence, AdsRecommendation, Base
 
 
@@ -97,3 +97,39 @@ async def test_repeated_promotion_is_idempotent(db):
     assert await db.scalar(select(func.count(AdsAiOutcome.id))) == 3
     assert await db.scalar(select(func.count(AdsMemory.id))) == 1
     assert await db.scalar(select(func.count(AdsMemoryEvidence.id))) == 1
+
+
+@pytest.mark.asyncio
+async def test_first_experiment_identity_needs_no_preexisting_open_recommendation(db):
+    ai = AdsAiRun(id="ai-first", promotion_object_type="BOT", promotion_object_id="bot-first", campaign_id="campaign-first")
+    recommendation = AdsRecommendation(id="rec-first", ai_run_id=ai.id, promotion_object_type="BOT", promotion_object_id="bot-first", title="first")
+    db.add_all([ai, recommendation])
+    await _assign_experiment_identity(db, recommendation)
+    assert recommendation.experiment_id == recommendation.id
+    assert recommendation.experiment_seq == 1
+    assert recommendation.experiment_status == "planned"
+    assert not await _active_experiment_exists(db, object_type="BOT", object_id="bot-first", campaign_id="campaign-first")
+
+
+@pytest.mark.asyncio
+async def test_active_experiment_blocks_second_experiment_but_completed_allows_next(db):
+    ai = AdsAiRun(id="ai-active", promotion_object_type="BOT", promotion_object_id="bot-loop", campaign_id="campaign-loop")
+    active = AdsRecommendation(id="rec-active", ai_run_id=ai.id, promotion_object_type="BOT", promotion_object_id="bot-loop", title="active", experiment_status="running")
+    db.add_all([ai, active])
+    await db.flush()
+    assert await _active_experiment_exists(db, object_type="BOT", object_id="bot-loop", campaign_id="campaign-loop")
+    active.experiment_status = "completed"
+    await db.flush()
+    assert not await _active_experiment_exists(db, object_type="BOT", object_id="bot-loop", campaign_id="campaign-loop")
+
+
+def test_enable_path_invokes_decision_runner_and_control_plane_is_write_gated():
+    runtime = open("app/bot/runtime.py", encoding="utf-8").read()
+    periodic = open("app/ads/periodic.py", encoding="utf-8").read()
+    service = open("app/ads/service.py", encoding="utf-8").read()
+    assert 'set_mode(db, object_type=object_type, object_id=object_id, mode=AUTONOMOUS' in runtime
+    assert "await run_check(db" in runtime and "await run_bot_check(db" in runtime
+    assert "await trigger_autopilot_execution(session_factory)" in periodic
+    assert "execute_autonomous_action(" in periodic
+    assert "_assign_experiment_identity(db, recommendation)" in service
+    assert "ads_write_actions_enabled" in periodic

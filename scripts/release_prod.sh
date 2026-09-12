@@ -303,6 +303,16 @@ say ROLLBACK_READY YES
 # This is the migration safety gate. No DB write or runtime switch precedes it.
 remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose -p maxibot-vps -f docker-compose.vps.yml config --quiet; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx api; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx worker"
 remote "set -eu; test \"\$(docker info --format '{{.Architecture}}')\" = x86_64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64"
+# Resolve the effective compose configuration and prove both runtime roles
+# point at the exact approved candidate before any migration can start.
+EFFECTIVE_IMAGES=$(remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose -p maxibot-vps -f docker-compose.vps.yml config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)[\"services\"]; print(s[\"api\"].get(\"image\",\"\")); print(s[\"worker\"].get(\"image\",\"\"))'")
+API_EFFECTIVE_IMAGE=$(printf '%s\n' "$EFFECTIVE_IMAGES" | sed -n '1p')
+WORKER_EFFECTIVE_IMAGE=$(printf '%s\n' "$EFFECTIVE_IMAGES" | sed -n '2p')
+[[ "$API_EFFECTIVE_IMAGE" == "maxibot-vps-api:$TARGET_SHA" ]] || die "effective API image does not match approved candidate"
+[[ "$WORKER_EFFECTIVE_IMAGE" == "maxibot-vps-api:$TARGET_SHA" ]] || die "effective worker image does not match approved candidate"
+say PRE_APPLY_API_IMAGE "$API_EFFECTIVE_IMAGE"
+say PRE_APPLY_WORKER_IMAGE "$WORKER_EFFECTIVE_IMAGE"
+say PRE_APPLY_IMAGE_PARITY PASS
 remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic heads | grep -q '^$TARGET_MIGRATION'"
 say MIGRATION_ALLOWED YES
 
@@ -359,6 +369,15 @@ FINAL_RUNTIME_SHA=$FINAL_SHA
 FINAL_ALEMBIC_HEAD=$FINAL_ALEMBIC
 FINAL_STATUS=PASS
 EOF"
+RELEASE_REF="refs/maxibot/release/$TARGET_SHA"
+git show-ref --verify --quiet "refs/heads/$(git symbolic-ref --short HEAD)" || die "candidate branch is unavailable"
+git update-ref "$RELEASE_REF" "$TARGET_SHA"
+git push origin "$TARGET_SHA:$RELEASE_REF"
+REMOTE_RELEASE_REF_SHA=$(git ls-remote --refs origin "$RELEASE_REF" | awk 'NR == 1 {print $1}')
+[[ "$REMOTE_RELEASE_REF_SHA" == "$TARGET_SHA" ]] || die "remote release ref verification failed"
+say RELEASE_REF "$RELEASE_REF"
+say RELEASE_REF_PUSHED YES
+say REMOTE_RELEASE_REF_SHA "$REMOTE_RELEASE_REF_SHA"
 say FINAL_RUNTIME_SHA "$FINAL_SHA"
 say FINAL_ALEMBIC_HEAD "$FINAL_ALEMBIC"
 say API_WORKER_IMAGE_PARITY PASS

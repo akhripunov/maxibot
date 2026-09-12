@@ -126,9 +126,11 @@ async def test_objective_input_saves_confirms_and_returns_to_objective_screen(mo
     class Client:
         def __init__(self):
             self.sent = []
+            self.sent_kwargs = []
 
         async def send_message(self, target, text, *args, **kwargs):
             self.sent.append((target, text))
+            self.sent_kwargs.append(kwargs)
             return "confirmation-message"
 
     class Link:
@@ -163,7 +165,10 @@ async def test_objective_input_saves_confirms_and_returns_to_objective_screen(mo
     assert calls[0]["object_id"] == "channel-1"
     assert calls[0]["campaign_id"] == "campaign-1"
     assert runtime.client.sent == [("admin-1", "✅ Цель установлена: 25 ₽")]
-    assert rendered == [("admin-1", "ads_objective:CHANNEL:channel-1")]
+    # Confirmation is a message with an explicit return button; the runtime
+    # must not immediately replace it with a second objective screen.
+    assert rendered == []
+    assert runtime.client.sent_kwargs[0]["buttons"][0][0]["callback_data"] == "ads:channel-1"
     assert runtime._ads_objective_pending == {}
 
 

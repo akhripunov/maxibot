@@ -8,7 +8,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
-CURRENT_HEAD_MIGRATION = "0087_canonical_experiment_identity"
+CURRENT_HEAD_MIGRATION = "0088_durable_ads_objective_input"
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -57,6 +57,12 @@ def test_release_tooling_contains_required_safety_gates():
         "RUNTIME_HEALTH=FAIL_CONTAINER_EXITED",
         "RUNTIME_HEALTH=FAIL_TIMEOUT",
         "sleep $HEALTH_POLL_INTERVAL_SECONDS",
+        "PRE_APPLY_IMAGE_PARITY PASS",
+        "PRE_APPLY_API_IMAGE",
+        "PRE_APPLY_WORKER_IMAGE",
+        "refs/maxibot/release/",
+        "git push origin \"$TARGET_SHA:$RELEASE_REF\"",
+        "REMOTE_RELEASE_REF_SHA",
     ):
         assert marker in source
 
@@ -158,7 +164,7 @@ def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0086_ads_autopilot_v1" in result.stdout
+    assert "TARGET_DOWN_REVISION=0087_canonical_experiment_identity" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():
@@ -181,6 +187,13 @@ def test_dry_run_does_not_run_database_mutation():
     assert result.returncode == 0, result.stderr
     assert "MIGRATION_ALLOWED=NO" in result.stdout
     assert "alembic upgrade" not in result.stdout
+
+
+def test_release_parity_gate_precedes_migration_and_release_ref_is_durable():
+    source = SCRIPT.read_text()
+    assert source.index("PRE_APPLY_IMAGE_PARITY PASS") < source.index("alembic upgrade $TARGET_MIGRATION")
+    assert source.index('RELEASE_REF="refs/maxibot/release/') < source.index("say RELEASE_STATUS PASS")
+    assert "git ls-remote --refs origin \"$RELEASE_REF\"" in source
 
 
 def _migration_graph_checker():
