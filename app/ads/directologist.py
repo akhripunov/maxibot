@@ -22,6 +22,7 @@ from app.db.models import (
     BotTrafficVisit, TrafficMembership, TrafficVisit,
 )
 from app.traffic.funnel_reporting import campaign_matches
+from app.ads.platform import outcome_type_for
 
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 WINDOW_DAYS = 7
@@ -160,6 +161,8 @@ async def confirmed_outcome_summary(
         AdsPromotionCampaignLink.status == "ACTIVE",
     ).limit(1))
     object_type = link.object_type if link else "UNKNOWN"
+    destination_platform = str(getattr(link, "destination_platform", None) or "MAX").upper() if link else "MAX"
+    outcome_type = outcome_type_for(destination_platform, object_type) if object_type in {"CHANNEL", "BOT"} else "UNKNOWN"
     rows: list[dict[str, Any]] = []
     if object_type == "BOT":
         profile = await db.get(BotPromotionProfile, link.bot_promotion_profile_id) if link and link.bot_promotion_profile_id else None
@@ -173,7 +176,8 @@ async def confirmed_outcome_summary(
             visit = await db.get(BotTrafficVisit, conversion.bot_visit_id)
             yclid = visit.yclid if visit else None
             campaign_match = bool(visit and visit.utm_campaign == campaign.external_id)
-            rows.append({"id": conversion.id, "type": "BOT", "has_yclid": bool(yclid), "quality": attribution_quality(has_yclid=bool(yclid), campaign_match=campaign_match, deterministic_link=True), "source": "BotConversion.bot_started", "dedupe_key": conversion.paid_journey_key or conversion.bot_visit_id})
+            quality = attribution_quality(has_yclid=bool(yclid), campaign_match=campaign_match, deterministic_link=True)
+            rows.append({"id": conversion.id, "type": "BOT", "platform": destination_platform, "outcome_type": outcome_type, "has_yclid": bool(yclid), "quality": quality, "source": "BotConversion.bot_started", "dedupe_key": conversion.paid_journey_key or conversion.bot_visit_id})
     elif object_type == "CHANNEL":
         membership_query = select(TrafficMembership).join(
             TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id
@@ -189,11 +193,20 @@ async def confirmed_outcome_summary(
             visit = await db.get(TrafficVisit, membership.attributed_visit_id) if membership.attributed_visit_id else None
             yclid = visit.yclid if visit else None
             campaign_match = _channel_campaign_match(visit, campaign.external_id)
-            rows.append({"id": membership.id, "type": "CHANNEL", "has_yclid": bool(yclid), "quality": attribution_quality(has_yclid=bool(yclid), campaign_match=campaign_match, deterministic_link=True), "source": "TrafficMembership", "dedupe_key": f"{membership.channel_id}:{membership.max_user_id}"})
+            quality = attribution_quality(has_yclid=bool(yclid), campaign_match=campaign_match, deterministic_link=True)
+            rows.append({"id": membership.id, "type": "CHANNEL", "platform": destination_platform, "outcome_type": outcome_type, "has_yclid": bool(yclid), "quality": quality, "source": "TrafficMembership", "dedupe_key": f"{membership.channel_id}:{membership.max_user_id}"})
     deduped = {row["dedupe_key"]: row for row in rows}
     attributed = [row for row in deduped.values() if row["quality"] in {"OBSERVED", "MATCHED"}]
     return {
         "object_type": object_type,
+        "destination_platform": destination_platform,
+        "outcome_type": outcome_type,
+        "normalized_outcome": {
+            "platform": destination_platform,
+            "object_type": object_type,
+            "outcome_type": outcome_type,
+            "attribution_quality": "OBSERVED_OR_MATCHED",
+        },
         "confirmed_total": len(deduped),
         "attributed_outcomes": len(attributed),
         "unattributed_outcomes": sum(row["quality"] == "UNATTRIBUTED" for row in deduped.values()),
@@ -201,6 +214,8 @@ async def confirmed_outcome_summary(
         "attribution_coverage": len(attributed) / len(deduped) if deduped else None,
         "quality_counts": {quality: sum(row["quality"] == quality for row in deduped.values()) for quality in ("OBSERVED", "MATCHED", "MODELED", "UNRESOLVED", "UNATTRIBUTED")},
         "rows": list(deduped.values()),
+        # Keep the historical diagnostic text for existing consumers; the
+        # normalized fields above are the contract used by ADS Core.
         "source_of_truth": "TrafficMembership/max_subscriber or BotConversion/bot_started; Metrika is separate",
     }
 
@@ -286,13 +301,14 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
     current["confirmed_outcomes"] = outcomes["attributed_outcomes"] if outcomes["object_type"] != "UNKNOWN" else None
     current["confirmed_cpa"] = current["cost"] / current["confirmed_outcomes"] if current.get("confirmed_outcomes") else None
     metrics["current"] = current
-    metrics["confirmed_outcome_kpi"] = "max_subscriber" if outcomes["object_type"] == "CHANNEL" else "bot_started" if outcomes["object_type"] == "BOT" else "UNKNOWN"
+    metrics["confirmed_outcome_kpi"] = outcomes.get("outcome_type", "UNKNOWN")
     trend = classify_trend(current=current.get("provider_cpa"), baseline=metrics["baseline"].get("provider_cpa"), metric="provider_cpa", clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"))
     attribution = outcomes.get("attribution_coverage")
     confidence_pack = confidence(clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"), freshness_hours=None, attribution_coverage=attribution, root_cause_proven=False, windows_ready=metrics["status"] == "READY")
     return {
         "version": "directologist_v1",
         "object_type": outcomes["object_type"],
+        "destination_platform": outcomes.get("destination_platform", "MAX"),
         "windows": windows,
         "metrics": metrics,
         "outcomes": {key: value for key, value in outcomes.items() if key != "rows"},

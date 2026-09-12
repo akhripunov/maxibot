@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.models import AdsAccount, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsCreative, AdsEntity, AdsPromotionCampaignLink, AdsRecommendation
+from app.ads.platform import promotion_ref_from_link
 from app.ads.creative_experiment import assert_one_creative_variable, persist_creative_mapping, provider_lifecycle, measurement_start
 from app.ads.creative_builder import build_creative_candidate
 from app.ads.creative_storage import store_media_if_available
@@ -367,12 +368,21 @@ async def set_budget(db: AsyncSession, *, object_type: str, object_id: str, mont
 
 
 async def validate_campaign_scope(db: AsyncSession, *, object_type: str, object_id: str,
-                                 campaign_id: str, action_type: str) -> GuardrailDecision:
+                                 campaign_id: str, action_type: str,
+                                 destination_platform: str | None = None) -> GuardrailDecision:
     """Fail closed unless the exact linked campaign has explicit write scope."""
     links = await active_links(db, object_type=object_type, object_id=object_id)
     link = next((item for item in links if item.campaign_id == campaign_id), None)
     if not link:
         return GuardrailDecision(False, "CAMPAIGN_NOT_LINKED", action_type, ADVISORY)
+    try:
+        ref = promotion_ref_from_link(link)
+    except ValueError:
+        return GuardrailDecision(False, "PROMOTION_PLATFORM_IDENTITY_INVALID", action_type, ADVISORY)
+    if ref.object_type != str(object_type).upper() or ref.object_id != str(object_id):
+        return GuardrailDecision(False, "PROMOTION_OBJECT_SCOPE_MISMATCH", action_type, ADVISORY)
+    if destination_platform and ref.platform != str(destination_platform).upper():
+        return GuardrailDecision(False, "DESTINATION_PLATFORM_SCOPE_MISMATCH", action_type, ADVISORY)
     mode = str(link.execution_mode or ADVISORY).upper()
     if mode != AUTONOMOUS:
         return GuardrailDecision(False, "CAMPAIGN_NOT_AUTHORIZED_FOR_AUTOPILOT", action_type, mode)
@@ -416,8 +426,10 @@ async def execute_autonomous_action(
     guardrails, and makes dry-run tests side-effect free.
     """
     action_type = str(action_type or "").upper()
+    requested_platform = target.get("destination_platform") if isinstance(target, dict) else None
     scope = await validate_campaign_scope(db, object_type=object_type, object_id=object_id,
-                                          campaign_id=campaign_id, action_type=action_type)
+                                          campaign_id=campaign_id, action_type=action_type,
+                                          destination_platform=requested_platform)
     if not scope.allowed:
         evidence = {"status": "EXECUTION_DENIED", "reason": scope.reason,
                     "object_type": object_type, "object_id": object_id,

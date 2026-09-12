@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import AdsCampaign, AdsPromotionCampaignLink
+from app.ads.platform import outcome_type_for
 
 OBJECTIVE_TYPE = "TARGET_CPA"
 ACTIVE = "ACTIVE"
@@ -17,11 +18,12 @@ DISABLED = "DISABLED"
 PRIMARY_OUTCOMES = {"CHANNEL": "max_subscriber", "BOT": "bot_started"}
 
 
-def primary_outcome(object_type: str) -> str:
+def primary_outcome(object_type: str, platform: str = "MAX") -> str:
+    """Resolve a normalized business outcome at the platform boundary."""
     try:
-        return PRIMARY_OUTCOMES[object_type.upper()]
-    except KeyError as exc:
-        raise ValueError("ADS_PROMOTION_OBJECT_TYPE_UNSUPPORTED") from exc
+        return outcome_type_for(platform, object_type)
+    except ValueError:
+        raise ValueError("ADS_PROMOTION_OBJECT_TYPE_UNSUPPORTED") from None
 
 
 def validate_target_cpa(value: Any) -> Decimal:
@@ -101,8 +103,9 @@ async def disable_objective(db: AsyncSession, *, object_type: str, object_id: st
 async def objective_for_link(db: AsyncSession, *, object_type: str, object_id: str, campaign_id: str) -> dict[str, Any]:
     links = await active_links(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id)
     link = links[0] if links else None
+    platform = getattr(link, "destination_platform", None) or "MAX"
     if not link or link.objective_status != ACTIVE or link.objective_type != OBJECTIVE_TYPE or link.target_cpa is None:
-        return {"objective_mode": "NONE", "objective_status": "UNSET", "primary_outcome": primary_outcome(object_type)}
+        return {"objective_mode": "NONE", "objective_status": "UNSET", "primary_outcome": primary_outcome(object_type, platform)}
     return {
         "objective_mode": OBJECTIVE_TYPE,
         "objective_type": link.objective_type,
@@ -110,7 +113,8 @@ async def objective_for_link(db: AsyncSession, *, object_type: str, object_id: s
         "currency": link.currency or "RUB",
         "objective_status": link.objective_status,
         "objective_updated_at": link.objective_updated_at.isoformat() if link.objective_updated_at else None,
-        "primary_outcome": primary_outcome(object_type),
+        "primary_outcome": primary_outcome(object_type, platform),
+        "destination_platform": platform,
         "promotion_object_type": object_type,
         "promotion_object_id": object_id,
         "campaign_id": campaign_id,

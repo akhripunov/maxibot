@@ -28,11 +28,12 @@ def maturity_for(*, outcome_status: str | None, evidence_sufficient: bool, effec
         return "SCALE"
     return "VALIDATE"
 
-async def retrieve(db: AsyncSession, *, channel_id: str | None, campaign_id: str | None, object_type: str = "CHANNEL", object_id: str | None = None) -> list[AdsMemory]:
+async def retrieve(db: AsyncSession, *, channel_id: str | None, campaign_id: str | None, object_type: str = "CHANNEL", object_id: str | None = None, destination_platform: str = "MAX") -> list[AdsMemory]:
     # Never widen scope across owners. Campaign-specific memories outrank the
     # promotion-object scope, while account/global memories are intentionally
     # not eligible for private retrieval in V1.
-    scope = [AdsMemory.scope == "PRIVATE", AdsMemory.status.in_(ACTIVE)]
+    scope = [AdsMemory.scope == "PRIVATE", AdsMemory.status.in_(ACTIVE),
+             AdsMemory.destination_platform == str(destination_platform or "MAX").upper()]
     if object_type == "CHANNEL":
         scope.append(AdsMemory.channel_id == channel_id)
     else:
@@ -44,7 +45,7 @@ async def retrieve(db: AsyncSession, *, channel_id: str | None, campaign_id: str
         query = query.order_by(AdsMemory.updated_at.desc())
     return list((await db.scalars(query.limit(12))).all())
 
-async def create_candidates(db: AsyncSession, *, channel_id: str | None, campaign_id: str | None, ai_run_id: str, snapshot_id: str, candidates: list[dict], known_evidence: set[str], proven_outcome: bool = False, object_type: str = "CHANNEL", object_id: str | None = None, experiment_id: str | None = None, memory_status: str = "VALIDATED") -> list[AdsMemory]:
+async def create_candidates(db: AsyncSession, *, channel_id: str | None, campaign_id: str | None, ai_run_id: str, snapshot_id: str, candidates: list[dict], known_evidence: set[str], proven_outcome: bool = False, object_type: str = "CHANNEL", object_id: str | None = None, experiment_id: str | None = None, memory_status: str = "VALIDATED", destination_platform: str = "MAX") -> list[AdsMemory]:
     """Persist memory only after a proven closed-loop outcome.
 
     AI suggestions remain in the validated run payload until an outcome has
@@ -57,7 +58,8 @@ async def create_candidates(db: AsyncSession, *, channel_id: str | None, campaig
         statement = str(item.get("statement") or "").strip()
         refs = item.get("source_evidence_ids") or []
         if not statement or not refs or any(ref not in known_evidence for ref in refs): continue
-        scope_filter = (AdsMemory.channel_id == channel_id) if object_type == "CHANNEL" else (AdsMemory.promotion_object_type == object_type, AdsMemory.promotion_object_id == object_id)
+        platform_filter = AdsMemory.destination_platform == str(destination_platform or "MAX").upper()
+        scope_filter = ((AdsMemory.channel_id == channel_id), platform_filter) if object_type == "CHANNEL" else (AdsMemory.promotion_object_type == object_type, AdsMemory.promotion_object_id == object_id, platform_filter)
         key = claim_key(statement, objective=item.get("objective"), action=item.get("action_code"))
         duplicate = await db.scalar(select(AdsMemory).where(*((scope_filter,) if not isinstance(scope_filter, tuple) else scope_filter), AdsMemory.status != "REJECTED", AdsMemory.kind == f"CLAIM:{key}"))
         if duplicate:
@@ -75,7 +77,7 @@ async def create_candidates(db: AsyncSession, *, channel_id: str | None, campaig
             continue
         status = memory_status if proven_outcome and memory_status in {"VALIDATED", "REJECTED"} else "INSUFFICIENT_EVIDENCE" if not proven_outcome else "CANDIDATE"
         confidence = "HIGH" if proven_outcome and memory_status == "VALIDATED" else "LOW"
-        memory = AdsMemory(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, campaign_id=campaign_id, experiment_id=experiment_id, content=statement, evidence_ids_json=json.dumps(refs), source_type="AI_INFERENCE", status=status, kind=f"CLAIM:{key}", confidence=confidence)
+        memory = AdsMemory(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=str(destination_platform or "MAX").upper(), campaign_id=campaign_id, experiment_id=experiment_id, content=statement, evidence_ids_json=json.dumps(refs), source_type="AI_INFERENCE", status=status, kind=f"CLAIM:{key}", confidence=confidence)
         db.add(memory); await db.flush()
         for ref in refs: db.add(AdsMemoryEvidence(memory_id=memory.id, experiment_id=experiment_id, evidence_type="FACT", evidence_ref_id=ref, snapshot_id=snapshot_id, ai_run_id=ai_run_id))
         created.append(memory)

@@ -190,7 +190,7 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
             context = json.loads(ai.safe_context_json or "{}") if ai else {}
             from app.ads.llm import evidence_registry
             from app.ads.memory import create_candidates
-            await create_candidates(db, channel_id=recommendation.channel_id, campaign_id=ai.campaign_id if ai else None, ai_run_id=ai.id if ai else recommendation.ai_run_id, snapshot_id=followup_snapshot_id, candidates=validated.get("memory_candidates") or [], known_evidence=evidence_registry(context), proven_outcome=True, object_type=recommendation.promotion_object_type or "CHANNEL", object_id=recommendation.promotion_object_id or recommendation.channel_id, experiment_id=recommendation.experiment_id, memory_status="REJECTED" if outcome.evaluation_status == "FAIL" else "VALIDATED")
+            await create_candidates(db, channel_id=recommendation.channel_id, campaign_id=ai.campaign_id if ai else None, ai_run_id=ai.id if ai else recommendation.ai_run_id, snapshot_id=followup_snapshot_id, candidates=validated.get("memory_candidates") or [], known_evidence=evidence_registry(context), proven_outcome=True, object_type=recommendation.promotion_object_type or "CHANNEL", object_id=recommendation.promotion_object_id or recommendation.channel_id, experiment_id=recommendation.experiment_id, memory_status="REJECTED" if outcome.evaluation_status == "FAIL" else "VALIDATED", destination_platform=getattr(recommendation, "destination_platform", None) or "MAX")
         except (TypeError, ValueError, KeyError):
             pass
     await db.commit()

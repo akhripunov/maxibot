@@ -18,6 +18,7 @@ from app.db.models import (
     AdsRecommendation,
 )
 from app.ads.autopilot import promotion_policy
+from app.ads.platform import outcome_type_for
 
 INACTIVE_CAMPAIGN_STATES = {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
 RUNNING_AI_STATES = {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
@@ -86,18 +87,24 @@ def stage_for_state(
 def _objective(links: list[AdsPromotionCampaignLink], object_type: str) -> dict[str, Any]:
     configured = [link for link in links if link.objective_status == "ACTIVE" and link.objective_type
                   and link.target_cpa is not None]
-    primary_outcome = "max_subscriber" if object_type == "CHANNEL" else "bot_started"
+    platforms = {str(getattr(link, "destination_platform", None) or "MAX").upper() for link in links}
+    platform = next(iter(platforms), "MAX")
+    primary_outcome = outcome_type_for(platform, object_type)
     if not configured:
         return {"type": primary_outcome, "mode": "NONE", "status": "UNSET",
-                "target_cpa": None, "currency": "RUB", "updated_at": None}
-    values = {(link.objective_type, float(link.target_cpa), link.currency or "RUB") for link in configured}
+                "target_cpa": None, "currency": "RUB", "updated_at": None,
+                "destination_platform": platform}
+    values = {(link.objective_type, float(link.target_cpa), link.currency or "RUB",
+               str(getattr(link, "destination_platform", None) or "MAX").upper()) for link in configured}
     updated_at = max((link.objective_updated_at for link in configured if link.objective_updated_at), default=None)
     if len(values) != 1:
         return {"type": primary_outcome, "mode": "TARGET_CPA", "status": "CONFLICT",
-                "target_cpa": None, "currency": "RUB", "updated_at": updated_at}
-    objective_type, target_cpa, currency = next(iter(values))
+                "target_cpa": None, "currency": "RUB", "updated_at": updated_at,
+                "destination_platform": platform}
+    objective_type, target_cpa, currency, platform = next(iter(values))
     return {"type": primary_outcome, "mode": objective_type, "status": "ACTIVE",
-            "target_cpa": target_cpa, "currency": currency, "updated_at": updated_at}
+            "target_cpa": target_cpa, "currency": currency, "updated_at": updated_at,
+            "destination_platform": platform}
 
 
 def _root_cause(recommendation: AdsRecommendation | None) -> tuple[str | None, str]:
@@ -180,6 +187,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     object_type = object_type.upper()
     links = list((await db.scalars(select(AdsPromotionCampaignLink)
         .where(*_link_scope(object_type, object_id)).order_by(AdsPromotionCampaignLink.created_at))).all())
+    destination_platforms = {str(getattr(link, "destination_platform", None) or "MAX").upper() for link in links} or {"MAX"}
     campaign_ids = list(dict.fromkeys(link.campaign_id for link in links))
     campaigns = list((await db.scalars(select(AdsCampaign).where(AdsCampaign.id.in_(campaign_ids))
         .order_by(AdsCampaign.name))).all()) if campaign_ids else []
@@ -263,7 +271,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
                              .order_by(AdsDataHealth.checked_at.desc()).limit(1))
     health_status = health.status if health else "UNKNOWN"
     memories = list((await db.scalars(select(AdsMemory).where(
-        *_scope(AdsMemory, object_type, object_id), AdsMemory.status.in_(VERIFIED_MEMORY_STATES))
+        *_scope(AdsMemory, object_type, object_id), AdsMemory.destination_platform.in_(destination_platforms), AdsMemory.status.in_(VERIFIED_MEMORY_STATES))
         .order_by(AdsMemory.updated_at.desc()).limit(12))).all())
     evidence_counts: dict[str, int] = {}
     if memories:
@@ -325,6 +333,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     history = []
     memory_rows = list((await db.scalars(select(AdsMemory).where(
         *_scope(AdsMemory, object_type, object_id),
+        AdsMemory.destination_platform.in_(destination_platforms),
         AdsMemory.experiment_id.is_not(None),
     ).order_by(AdsMemory.updated_at.desc()).limit(100))).all())
     memories_by_experiment: dict[str, list[AdsMemory]] = {}

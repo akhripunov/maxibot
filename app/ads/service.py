@@ -330,6 +330,14 @@ async def _active_experiment_exists(
 async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channel: Channel | None, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime, object_type: str = "CHANNEL", object_id: str | None = None, bot_id: str | None = None) -> AdsAiRun:
     channel_id = channel.id if channel else None
     object_id = object_id or channel_id
+    link_scope = (AdsPromotionCampaignLink.channel_id == object_id) if object_type == "CHANNEL" else (
+        AdsPromotionCampaignLink.bot_promotion_profile_id == object_id
+    )
+    scoped_link = await db.scalar(select(AdsPromotionCampaignLink).where(
+        AdsPromotionCampaignLink.object_type == object_type, link_scope,
+        AdsPromotionCampaignLink.campaign_id == campaign.id,
+    ))
+    destination_platform = str(getattr(scoped_link, "destination_platform", None) or "MAX").upper()
     closed_loop = await _closed_loop_context(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id)
     dataset = await build_v2_analysis_dataset(
         db,
@@ -388,7 +396,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     }
     facts["report_trace"] = {"source": "ADS Data Layer V2", "source_fields": ["Date", "Impressions", "Clicks", "Cost", "Conversions"], "date_from": report_date_from.isoformat(), "date_to": report_date_to.isoformat(), "report_timezone": "Europe/Moscow", "aggregation": "deterministic V2 dataset; dimensions analyzed independently", "snapshot_timestamp_utc": snapshot_at.isoformat(), "freshness": "based on latest persisted V2 observations"}
     facts["current_day_quality"] = {"status": "POSSIBLY_INCOMPLETE_CURRENT_DAY", "window": "1d", "reason": "current calendar-day report values can be partial or delayed", "ai_guidance": "do not treat current-day zero cost/conversions as strong deterioration evidence; prefer confirmed 3d/7d data"}
-    snapshot = AdsAnalysisSnapshot(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, campaign_id=campaign.id, source="MANUAL_CHECK", period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
+    snapshot = AdsAnalysisSnapshot(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, campaign_id=campaign.id, source="MANUAL_CHECK", period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
     db.add(snapshot); await db.flush()
     snapshot.facts_json = json.dumps(facts, ensure_ascii=False)
     health_scope = AdsDataHealth.channel_id == channel_id if channel else (AdsDataHealth.promotion_object_type == object_type, AdsDataHealth.promotion_object_id == object_id)
@@ -398,8 +406,8 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
         current_health.reasons_json = json.dumps({**health, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)
         current_health.checked_at = datetime.now(timezone.utc)
     else:
-        db.add(AdsDataHealth(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, status=health["status"], reasons_json=json.dumps({**health, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)))
-    memories = await retrieve(db, channel_id=channel_id, campaign_id=campaign.id, object_type=object_type, object_id=object_id)
+        db.add(AdsDataHealth(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, status=health["status"], reasons_json=json.dumps({**health, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)))
+    memories = await retrieve(db, channel_id=channel_id, campaign_id=campaign.id, object_type=object_type, object_id=object_id, destination_platform=destination_platform)
     context = _context(campaign, facts, suff, missing, memories)
     context, final_budget = bound_ai_context(
         context,
@@ -411,12 +419,12 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     context_bytes = len(json.dumps(context, ensure_ascii=False).encode("utf-8"))
     context["FACTS"]["V2_ANALYSIS"]["context_budget"].update({**final_budget, "context_bytes": context_bytes, "context_fact_count": len(context["FACTS"]["V2_ANALYSIS"].get("evidence", {}))})
     if context_bytes > settings.ads_ai_context_max_bytes or facts["V2_ANALYSIS"]["context_budget"].get("budget_exceeded"):
-        ai = AdsAiRun(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, campaign_id=campaign.id, status="CODEX_FAILED", provider="CODEX_WORKER", model="CODEX_CLI", input_snapshot_id=snapshot.id, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION, safe_context_json=json.dumps(context, ensure_ascii=False), validation_error="AI_CONTEXT_BUDGET_EXCEEDED", is_test=True)
+        ai = AdsAiRun(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, campaign_id=campaign.id, status="CODEX_FAILED", provider="CODEX_WORKER", model="CODEX_CLI", input_snapshot_id=snapshot.id, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION, safe_context_json=json.dumps(context, ensure_ascii=False), validation_error="AI_CONTEXT_BUDGET_EXCEEDED", is_test=True)
         db.add(ai); await db.flush()
         if worker_mode:
             run.status, run.error_code = "COMPLETED", error
         return ai
-    ai = AdsAiRun(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, campaign_id=campaign.id, status=WAITING if worker_mode else "SKIPPED", provider="CODEX_WORKER" if worker_mode else settings.ads_llm_provider, model="CODEX_CLI" if worker_mode else settings.ads_llm_model, input_snapshot_id=snapshot.id, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION, safe_context_json=json.dumps(context, ensure_ascii=False), is_test=worker_mode)
+    ai = AdsAiRun(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, campaign_id=campaign.id, status=WAITING if worker_mode else "SKIPPED", provider="CODEX_WORKER" if worker_mode else settings.ads_llm_provider, model="CODEX_CLI" if worker_mode else settings.ads_llm_model, input_snapshot_id=snapshot.id, prompt_version=PROMPT_VERSION, schema_version=SCHEMA_VERSION, safe_context_json=json.dumps(context, ensure_ascii=False), is_test=worker_mode)
     db.add(ai); await db.flush()
     if worker_mode:
         run.status, run.error_code = "COMPLETED", error
@@ -447,9 +455,9 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                     "execution_mode": "ADVISORY"}
                 await _lock_experiment_scope(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id)
                 if not await _active_experiment_exists(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id):
-                    recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id, hypothesis_key=__import__("app.ads.memory", fromlist=["claim_key"]).claim_key(rec.get("hypothesis") or rec.get("reason"), objective=objective_evaluation.get("objective_type"), action=rec.get("action_code")), maturity_before="EXPLORE", maturity_after="EXPLORE", maturity_reason="Новая гипотеза", influenced_by_memory_ids_json=json.dumps([x.id for x in memories if x.status in {"SUPPORTED", "VALIDATED", "TRUSTED"}][:8]), avoided_due_to_memory_ids_json=json.dumps([x.id for x in memories if x.status == "REJECTED"][:8]))
+                    recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, destination_platform=destination_platform, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id, hypothesis_key=__import__("app.ads.memory", fromlist=["claim_key"]).claim_key(rec.get("hypothesis") or rec.get("reason"), objective=objective_evaluation.get("objective_type"), action=rec.get("action_code")), maturity_before="EXPLORE", maturity_after="EXPLORE", maturity_reason="Новая гипотеза", influenced_by_memory_ids_json=json.dumps([x.id for x in memories if x.status in {"SUPPORTED", "VALIDATED", "TRUSTED"}][:8]), avoided_due_to_memory_ids_json=json.dumps([x.id for x in memories if x.status == "REJECTED"][:8]))
                     db.add(recommendation); await _assign_experiment_identity(db, recommendation); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
-                    await create_candidates(db, channel_id=channel_id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids, object_type=object_type, object_id=object_id, experiment_id=recommendation.experiment_id)
+                    await create_candidates(db, channel_id=channel_id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids, object_type=object_type, object_id=object_id, experiment_id=recommendation.experiment_id, destination_platform=destination_platform)
         except Exception as exc:
             ai.status, ai.validation_error = "FAILED", type(exc).__name__
     ai.completed_at = datetime.now(timezone.utc)
