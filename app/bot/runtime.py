@@ -2237,7 +2237,7 @@ class MaxBotRuntime:
                     await self.client.send_message(
                         admin_id,
                         f"✅ Цель установлена: {target_value:g} ₽",
-                        buttons=[[{"text": "⬅️ Назад", "callback_data": f"ads_objective:{object_type}:{object_id}"}]],
+                        buttons=[[{"text": "⬅️ Назад", "callback_data": f"ads:{object_id}"}]],
                     )
                     await self.repo.clear_ads_objective_pending(str(admin_id))
                 except ValueError:
