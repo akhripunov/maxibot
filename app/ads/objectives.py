@@ -53,11 +53,28 @@ async def active_links(db: AsyncSession, *, object_type: str, object_id: str, ca
     return list((await db.scalars(query.order_by(AdsPromotionCampaignLink.created_at))).all())
 
 
+async def object_links(db: AsyncSession, *, object_type: str, object_id: str, campaign_id: str | None = None) -> list[AdsPromotionCampaignLink]:
+    """Return all synchronized campaign links, independent of analysis selection.
+
+    Link status is the separate analysis/autopilot selection state; an owner
+    must be able to configure the object-level target CPA before selecting a
+    campaign for analysis.
+    """
+    predicate = AdsPromotionCampaignLink.channel_id == object_id if object_type == "CHANNEL" else AdsPromotionCampaignLink.bot_promotion_profile_id == object_id
+    query = select(AdsPromotionCampaignLink).where(
+        AdsPromotionCampaignLink.object_type == object_type,
+        predicate,
+    )
+    if campaign_id:
+        query = query.where(AdsPromotionCampaignLink.campaign_id == campaign_id)
+    return list((await db.scalars(query.order_by(AdsPromotionCampaignLink.created_at))).all())
+
+
 async def set_objective(db: AsyncSession, *, object_type: str, object_id: str, target_cpa: Any, currency: str = "RUB", campaign_id: str | None = None) -> list[AdsPromotionCampaignLink]:
     object_type = object_type.upper()
     target = validate_target_cpa(target_cpa)
     currency = validate_currency(currency)
-    links = await active_links(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id)
+    links = await object_links(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id)
     if not links:
         raise ValueError("ACTIVE_PROMOTION_CAMPAIGN_NOT_FOUND")
     timestamp = datetime.now(timezone.utc)
