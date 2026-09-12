@@ -560,10 +560,21 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                     }
                     # Master campaigns (UC_TEXT) are report-visible but do
                     # not expose their ads through the standard Ads service.
-                    # Keep those report-discovered campaign IDs in the
-                    # channel inventory instead of dropping them at the URL
-                    # scope filter.
-                    matching_external_ids.update(str(item.get("Id")) for item in report_catalog if item.get("Id"))
+                    # Scope them to the same campaign-name family as the
+                    # landing-matched legacy campaigns.  The report is
+                    # account-wide, so adding every report row would leak
+                    # campaigns belonging to other channels in this account.
+                    scoped_prefixes = {
+                        str(raw.get("Name") or "").split("_", 1)[0].strip().lower()
+                        for raw in direct_campaigns
+                        if str(raw.get("Id") or "") in matching_external_ids
+                    }
+                    matching_external_ids.update(
+                        str(item.get("Id"))
+                        for item in report_catalog
+                        if item.get("Id")
+                        and str(item.get("Name") or "").split("_", 1)[0].strip().lower() in scoped_prefixes
+                    )
                     _CAMPAIGN_SCOPE_CACHE[channel_id] = (time.monotonic(), matching_external_ids)
                 await db.commit()
             finally:
