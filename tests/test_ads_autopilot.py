@@ -8,6 +8,9 @@ from app.ads.autopilot import (
     AUTOPILOT_ACTION_ALLOWLIST,
     default_autopilot_config,
     validate_action,
+    assess_provider_capabilities,
+    store_provider_capability_assessment,
+    stored_provider_capabilities,
 )
 
 
@@ -78,6 +81,75 @@ def test_autopilot_confirmation_is_human_readable_and_hides_internal_policy_name
 def test_autopilot_confirmation_fails_closed_without_confirmed_provider_state():
     source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
     section = source[source.index("provider_ready = provider_state == \"ON\""):source.index("if action_name == \"ads_autopilot_enable\":", source.index("provider_ready = provider_state == \"ON\""))]
-    assert "Не удалось получить состояние кампании" in section
+    assert "Не удалось подтвердить состояние" in section
     assert "if eligible:" in section
     assert "Включить автопилот" in section
+
+
+def test_unknown_provider_preflight_offers_retry_and_details_instead_of_fix_settings():
+    source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
+    section = source[source.index('if action_name == "ads_autopilot_enable_confirm":'):source.index('if action_name == "ads_autopilot_enable":', source.index('if action_name == "ads_autopilot_enable_confirm":'))]
+    assert "↻ Проверить ещё раз" in section
+    assert "🔍 Технические детали" in section
+    assert "ads_autopilot_preflight_retry:" in section
+    assert "ads_autopilot_preflight_details:" in section
+    unknown_controls = section[section.index("elif not provider_ready:"):section.index("else:", section.index("elif not provider_ready:"))]
+    assert "🔧 Исправить настройку" not in unknown_controls
+
+
+def test_preflight_retry_is_read_only_and_returns_to_confirmation_renderer():
+    source = (Path(__file__).resolve().parents[1] / "app/bot/runtime.py").read_text()
+    assert 'action.startswith(("ads_autopilot_preflight_retry:", "ads_autopilot_preflight_details:"))' in source
+    assert 'await self._render(user_id, f"{action}")' in source
+    menu_source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
+    assert "The provider read below is always fresh and read-only." in menu_source
+
+
+def test_unknown_campaign_state_can_have_partial_child_capabilities_without_budget_access():
+    assessment = assess_provider_capabilities(
+        campaign_id="713637226",
+        campaign_state="UNKNOWN",
+        adgroups=[{"Id": 7, "CampaignId": "713637226"}],
+        ads=[{"Id": 11, "AdGroupId": 7, "CampaignId": "713637226", "State": "ON"}],
+        budget_state_visible=False,
+    )
+    assert assessment["provider_manageability"] == "PARTIAL"
+    assert set(assessment["verified_capabilities"]) == {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST", "ENABLE_AD", "PAUSE_AD"}
+    assert "BOUNDED_BUDGET_REALLOCATION" not in assessment["verified_capabilities"]
+
+
+def test_child_capability_scope_rejects_cross_campaign_objects():
+    assessment = assess_provider_capabilities(
+        campaign_id="713637226",
+        campaign_state="UNKNOWN",
+        adgroups=[{"Id": 7, "CampaignId": "999"}],
+        ads=[{"Id": 11, "AdGroupId": 7, "CampaignId": "999", "State": "ON"}],
+    )
+    assert assessment["provider_manageability"] == "NONE"
+    assert assessment["verified_capabilities"] == []
+
+
+def test_control_plane_denies_unverified_capability(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "ads_autopilot_enabled", True)
+    monkeypatch.setattr(settings, "ads_write_actions_enabled", True)
+    decision = validate_action(
+        execution_mode=AUTONOMOUS,
+        action_type="BOUNDED_BUDGET_REALLOCATION",
+        data_trust="GOOD",
+        active_experiments=0,
+        verified_provider_capabilities={"PAUSE_AD", "ENABLE_AD"},
+    )
+    assert not decision.allowed
+    assert decision.reason == "PROVIDER_CAPABILITY_NOT_VERIFIED"
+
+
+def test_provider_capability_assessment_uses_existing_campaign_metadata():
+    from app.db.models import AdsCampaign
+    campaign = AdsCampaign(account_id="account", external_id="713637226", name="report-only")
+    assessment = assess_provider_capabilities(campaign_id="713637226", campaign_state="UNKNOWN")
+    store_provider_capability_assessment(campaign, assessment)
+    stored = stored_provider_capabilities(campaign)
+    assert stored["provider_manageability"] == "NONE"
+    assert stored["verified_capabilities"] == []
+    assert "provider_capability_assessment" in campaign.provider_metadata_json

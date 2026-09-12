@@ -67,6 +67,87 @@ AUTOPILOT_ACTION_ALLOWLIST = frozenset({
     "EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "PAUSE_AD", "ENABLE_AD",
     "CREATE_CREATIVE_TEST", "CREATE_AD_TEST", "BOUNDED_BUDGET_REALLOCATION",
 })
+_AD_ACTIONS = frozenset({"PAUSE_AD", "ENABLE_AD"})
+_CREATIVE_ACTIONS = frozenset({"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"})
+
+
+def assess_provider_capabilities(*, campaign_id: str | int, campaign_state: str | None,
+                                 adgroups: list[dict[str, Any]] | None = None,
+                                 ads: list[dict[str, Any]] | None = None,
+                                 creatives_visible: bool = False,
+                                 placement_state_visible: bool = False,
+                                 budget_state_visible: bool = False,
+                                 ad_write_supported: bool = True,
+                                 ad_reread_supported: bool = True,
+                                 ad_rollback_supported: bool = True,
+                                 ad_create_supported: bool = True,
+                                 ad_create_reread_supported: bool = True,
+                                 ad_create_rollback_supported: bool = True) -> dict[str, Any]:
+    """Build a fail-closed, per-action provider capability assessment.
+
+    Campaigns.get state is intentionally independent from child-object
+    ownership.  A report row or a local campaign link never proves a write
+    capability; every ad must point to an AdGroup whose provider CampaignId
+    matches the exact authorized campaign.
+    """
+    exact_campaign_id = str(campaign_id)
+    groups = [row for row in (adgroups or []) if str(row.get("CampaignId") or "") == exact_campaign_id]
+    group_ids = {str(row.get("Id")) for row in groups if row.get("Id") is not None}
+    owned_ads = [row for row in (ads or []) if str(row.get("CampaignId") or "") == exact_campaign_id
+                 and str(row.get("AdGroupId") or "") in group_ids]
+    capabilities: list[str] = []
+    evidence: list[dict[str, Any]] = []
+    if owned_ads and ad_write_supported and ad_reread_supported and ad_rollback_supported:
+        capabilities.extend(sorted(_AD_ACTIONS))
+        evidence.append({"capability": "PAUSE_AD/ENABLE_AD", "ad_ids": [str(row.get("Id")) for row in owned_ads], "ad_group_ids": sorted(group_ids), "ownership": "provider_verified", "reread": True, "rollback": True})
+    if groups and ad_create_supported and ad_create_reread_supported and ad_create_rollback_supported:
+        capabilities.extend(sorted(_CREATIVE_ACTIONS))
+        evidence.append({"capability": "CREATE_AD_TEST/CREATE_CREATIVE_TEST", "ad_group_ids": sorted(group_ids), "ownership": "provider_verified", "reread": True, "rollback": True})
+    # Campaign-level operations remain blocked while campaign state or the
+    # corresponding exact campaign object is not independently readable.
+    if str(campaign_state or "").upper() == "ON" and placement_state_visible:
+        capabilities.extend(["EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT"])
+    if str(campaign_state or "").upper() == "ON" and budget_state_visible:
+        capabilities.append("BOUNDED_BUDGET_REALLOCATION")
+    capabilities = sorted(set(capabilities))
+    manageability = "FULL" if {"EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "BOUNDED_BUDGET_REALLOCATION"}.issubset(capabilities) else "PARTIAL" if capabilities else "NONE"
+    return {
+        "provider_campaign_state": str(campaign_state or "UNKNOWN").upper(),
+        "provider_manageability": manageability,
+        "verified_capabilities": capabilities,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "verification_evidence": evidence,
+        "campaign_id": exact_campaign_id,
+        "campaign_state_source": "Campaigns.get" if campaign_state else "UNAVAILABLE",
+        "creatives_visible": bool(creatives_visible),
+    }
+
+
+def store_provider_capability_assessment(campaign: AdsCampaign, assessment: dict[str, Any]) -> dict[str, Any]:
+    """Persist the bounded assessment in the existing campaign metadata JSON."""
+    try:
+        metadata = json.loads(campaign.provider_metadata_json or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["provider_capability_assessment"] = assessment
+    campaign.provider_metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    return assessment
+
+
+def stored_provider_capabilities(campaign: AdsCampaign | None) -> dict[str, Any]:
+    """Read only the canonical capability assessment, never infer capabilities."""
+    if not campaign:
+        return {"provider_manageability": "NONE", "verified_capabilities": []}
+    try:
+        metadata = json.loads(campaign.provider_metadata_json or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    value = metadata.get("provider_capability_assessment") if isinstance(metadata, dict) else None
+    return value if isinstance(value, dict) and isinstance(value.get("verified_capabilities"), list) else {
+        "provider_manageability": "NONE", "verified_capabilities": []
+    }
 FUTURE_ACTIONS = frozenset({"CREATE_CAMPAIGN", "CREATE_AD_GROUP", "CHANGE_TARGETING", "CHANGE_STRATEGY", "CHANGE_BID", "SCALE_CAMPAIGN"})
 
 
@@ -131,7 +212,8 @@ def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
                     attribution_quality: str = "KNOWN", experiment_spend: float = 0.0,
                     experiment_budget_cap: float | None = None, evidence_sufficient: bool = True,
                     effect_size: float | None = None, provider_ready: bool = True,
-                    rollback_available: bool = True, max_duration_expired: bool = False) -> GuardrailDecision:
+                    rollback_available: bool = True, max_duration_expired: bool = False,
+                    verified_provider_capabilities: list[str] | set[str] | None = None) -> GuardrailDecision:
     config = {**default_autopilot_config(), **(config or {})}
     action_type = str(action_type or "").upper()
     mode = str(execution_mode or ADVISORY).upper()
@@ -142,6 +224,8 @@ def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
         return GuardrailDecision(False, "AUTOPILOT_GLOBAL_GUARD_DISABLED", action_type, mode)
     if action_type not in AUTOPILOT_ACTION_ALLOWLIST or action_type not in set(config.get("allowed_actions") or AUTOPILOT_ACTION_ALLOWLIST):
         return GuardrailDecision(False, "ACTION_NOT_ALLOWLISTED", action_type, mode)
+    if verified_provider_capabilities is not None and action_type not in {str(item).upper() for item in verified_provider_capabilities}:
+        return GuardrailDecision(False, "PROVIDER_CAPABILITY_NOT_VERIFIED", action_type, mode)
     if trust != "GOOD":
         return GuardrailDecision(False, f"DATA_TRUST_{trust}", action_type, mode)
     if not provider_ready:
@@ -360,6 +444,15 @@ async def execute_autonomous_action(
     # Missing safety attestations are ambiguous and therefore fail closed.
     evidence_sufficient = bool(target.get("evidence_sufficient", False)) if isinstance(target, dict) else False
     provider_ready = bool(target.get("provider_ready", False)) if isinstance(target, dict) else False
+    verified_provider_capabilities = target.get("verified_provider_capabilities") if isinstance(target, dict) else None
+    if verified_provider_capabilities is None:
+        stored = stored_provider_capabilities(campaign)
+        try:
+            campaign_metadata = json.loads(campaign.provider_metadata_json or "{}")
+        except (TypeError, ValueError):
+            campaign_metadata = {}
+        if stored.get("provider_manageability") in {"FULL", "PARTIAL", "NONE"} and isinstance(campaign_metadata, dict) and "provider_capability_assessment" in campaign_metadata:
+            verified_provider_capabilities = stored.get("verified_capabilities", [])
     rollback_available = bool(target.get("rollback_available", False)) if isinstance(target, dict) else False
     active_experiments = await active_experiment_count_for_scope(
         db, object_type=object_type, object_id=object_id, campaign_id=campaign_id
@@ -374,6 +467,7 @@ async def execute_autonomous_action(
                            experiment_budget_cap=target.get("experiment_budget_cap") if isinstance(target, dict) else None,
                            evidence_sufficient=evidence_sufficient, provider_ready=provider_ready,
                            rollback_available=rollback_available,
+                           verified_provider_capabilities=verified_provider_capabilities,
                            max_duration_expired=bool(target.get("max_duration_expired", False)) if isinstance(target, dict) else False)
     if not guard.allowed:
         evidence = {"status": "EXECUTION_DENIED", "reason": guard.reason,
@@ -388,7 +482,7 @@ async def execute_autonomous_action(
     guardrail_evidence = {
         "guardrail_decision_id": __import__("uuid").uuid4().hex,
         "timestamp": datetime.now(timezone.utc).isoformat(), "rules_version": "autopilot-v2",
-        "inputs": {"target_cpa": objective_target, "monthly_budget": policy.get("monthly_budget_limit"), "actual_spend": monthly_spend, "reserved_budget": target.get("experiment_spend", 0), "experiment_cap": target.get("experiment_budget_cap"), "stop_loss": policy.get("stop_loss_multiple"), "data_trust": data_trust, "attribution_quality": attribution_quality, "campaign_scope": campaign_id, "provider_ready": provider_ready, "allowlist": action_type in AUTOPILOT_ACTION_ALLOWLIST, "rollback_available": rollback_available, "active_experiments": active_experiments},
+        "inputs": {"target_cpa": objective_target, "monthly_budget": policy.get("monthly_budget_limit"), "actual_spend": monthly_spend, "reserved_budget": target.get("experiment_spend", 0), "experiment_cap": target.get("experiment_budget_cap"), "stop_loss": policy.get("stop_loss_multiple"), "data_trust": data_trust, "attribution_quality": attribution_quality, "campaign_scope": campaign_id, "provider_ready": provider_ready, "verified_provider_capabilities": verified_provider_capabilities, "allowlist": action_type in AUTOPILOT_ACTION_ALLOWLIST, "rollback_available": rollback_available, "active_experiments": active_experiments},
         "result": "ALLOW", "reasons": [guard.reason],
     }
     if outcome:

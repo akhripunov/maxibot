@@ -168,7 +168,10 @@ class YandexAutopilotAdapter:
             group = next((row for row in groups if int(row.get("Id", 0)) == ad_group_id), None)
             if not group or int(group.get("CampaignId", 0)) != campaign_id:
                 raise ProviderVerificationError("AD_GROUP_CAMPAIGN_SCOPE_NOT_VERIFIED")
-        before_campaign = await self._campaign(campaign_id)
+        # CREATE_* is a child-object action.  Campaigns.get may be unavailable
+        # for report-only campaign types; the verified AdGroup ownership and
+        # post-create ad reread are the required scope proofs instead.
+        before_campaign = None
         image_hash = target.get("provider_image_hash")
         image_bytes = target.get("image_bytes")
         if image_bytes and not image_hash:
