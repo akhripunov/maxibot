@@ -1753,20 +1753,24 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             budget = config.get("weekly_budget_limit") if config.get("weekly_budget_limit") is not None else config.get("monthly_budget_limit")
             target = link.target_cpa
             provider_state = str(campaign.state or campaign.status or "UNKNOWN") if campaign else "UNKNOWN"
-            return ("🚀 Подтверждение автопилота\n\n"
-                    f"Кампания: {title}\nID: {link.campaign_id}\n"
-                    f"Target CPA: {float(target):g} ₽\n" if target is not None else "Target CPA: не задан\n"
-                    ) + (f"Бюджет: {float(budget):g} ₽ / неделю\n" if budget is not None else "Бюджет: не задан\n") + (
-                    f"Состояние Direct: {provider_state}\n"
-                    "Data Trust: проверяется перед каждым изменением\n"
-                    "Режим: автономные действия только из V1 allowlist\n"
-                    "Разрешённые действия: EXCLUDE_PLACEMENT, RESTORE_PLACEMENT, PAUSE_AD, ENABLE_AD, CREATE_CREATIVE_TEST, CREATE_AD_TEST, BOUNDED_BUDGET_REALLOCATION\n"
-                    "Лимиты: max_test_spend и max_budget_change_percent из политики\n"
-                    "Остальные связанные кампании останутся только для анализа.\n"
-                    "MaxiBot получит право управлять только этой кампанией.\n"
-                    "Яндекс.Директ не изменяется без включённых глобальных флагов и проверки Data Trust.",
-                    buttons(("✅ Включить для этой кампании", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"),
-                            ("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}")))
+            confirmation = (
+                "🚀 Подтверждение автопилота\n\n"
+                f"Кампания: {title}\nID: {link.campaign_id}\n"
+                + (f"Target CPA: {float(target):g} ₽\n" if target is not None else "Target CPA: не задан\n")
+                + (f"Бюджет: {float(budget):g} ₽ / неделю\n" if budget is not None else "Бюджет: не задан\n")
+                + f"Состояние Direct: {provider_state}\n"
+                "Data Trust: проверяется перед каждым изменением\n"
+                "Режим: автономные действия только из V1 allowlist\n"
+                "Разрешённые действия: EXCLUDE_PLACEMENT, RESTORE_PLACEMENT, PAUSE_AD, ENABLE_AD, CREATE_CREATIVE_TEST, CREATE_AD_TEST, BOUNDED_BUDGET_REALLOCATION\n"
+                "Лимиты: max_test_spend и max_budget_change_percent из политики\n"
+                "Остальные связанные кампании останутся только для анализа.\n"
+                "MaxiBot получит право управлять только этой кампанией.\n"
+                "Яндекс.Директ не изменяется без включённых глобальных флагов и проверки Data Trust."
+            )
+            return confirmation, buttons(
+                ("✅ Включить для этой кампании", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"),
+                ("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}"),
+            )
         if action_name == "ads_autopilot_enable":
             if not links:
                 return ("🚀 Автопилот\n\nНет связанных кампаний для выбора.", buttons(("⬅️ Назад", "promotion")))
