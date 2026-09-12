@@ -656,6 +656,21 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                         if item.get("Id")
                         and str(item.get("Name") or "").split("_", 1)[0].strip().lower() in scoped_prefixes
                     )
+                    # An explicit owner linkage is the authoritative channel
+                    # scope.  Keep linked campaigns in the inventory even
+                    # when the provider catalog omits them (for example while
+                    # a newly-created campaign is still activating) or when
+                    # their name family differs from the landing campaign.
+                    linked_external_ids = list((await db.scalars(select(AdsCampaign.external_id).join(
+                        AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id
+                    ).where(
+                        AdsPromotionCampaignLink.object_type == "CHANNEL",
+                        AdsPromotionCampaignLink.channel_id == channel_id,
+                        AdsPromotionCampaignLink.status == "ACTIVE",
+                    ))).all())
+                    matching_external_ids.update(
+                        str(external_id) for external_id in linked_external_ids if external_id
+                    )
                     _CAMPAIGN_SCOPE_CACHE[channel_id] = (time.monotonic(), matching_external_ids)
                 await db.commit()
             finally:
