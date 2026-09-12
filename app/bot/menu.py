@@ -35,7 +35,7 @@ from app.traffic.bot_conversion_dedupe import paid_bot_conversion_key
 from app.ads.service import can_access_ads, campaigns_for_channel, latest_view, campaigns_for_promotion_object
 from app.ads.dashboard import build_ads_dashboard
 from app.ads.objectives import active_links, objective_for_link
-from app.ads.autopilot import AUTONOMOUS, ADVISORY, parse_config, promotion_policy
+from app.ads.autopilot import AUTONOMOUS, ADVISORY, autopilot_enable_requirements, parse_config, promotion_policy
 from app.ads.analysis import build_report_view, build_v2_analysis_dataset, dedupe_trend_findings
 from app.ads.memory import set_status
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsMemory, AdsRecommendation, AdsAccount, AdsCampaign, AdsPromotionCampaignLink
@@ -1654,7 +1654,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             for link in links:
                 campaign = campaigns.get(link.campaign_id)
                 title = campaign.name if campaign else link.campaign_id
-                rows.append([(f"☑️ {title}" if link in authorized else f"☐ {title}"),
+                missing = await autopilot_enable_requirements(db, object_type=object_type, object_id=object_id, campaign_id=link.campaign_id)
+                suffix = " · не готово: " + ", ".join(missing) if missing else " · готово к запуску"
+                rows.append([(f"☑️ {title}" if link in authorized else f"☐ {title}") + suffix,
                              f"ads_autopilot_confirm:{object_type}:{object_id}:{link.campaign_id}"])
             rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
             return text, rows

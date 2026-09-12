@@ -128,6 +128,24 @@ async def promotion_policy(db: AsyncSession, *, object_type: str, object_id: str
             "write_scope": "CAMPAIGN_SCOPED"}
 
 
+async def autopilot_enable_requirements(db: AsyncSession, *, object_type: str, object_id: str,
+                                        campaign_id: str | None) -> list[str]:
+    """Return missing owner prerequisites before enabling campaign autopilot."""
+    links = await active_links(db, object_type=object_type, object_id=object_id)
+    if not links:
+        return ["выбрать кампанию для автопилота"]
+    selected = next((link for link in links if link.campaign_id == campaign_id), None)
+    if not selected:
+        return ["выбрать кампанию для автопилота"]
+    missing: list[str] = []
+    if not selected.objective_type or selected.target_cpa is None or float(selected.target_cpa) <= 0:
+        missing.append("задать цену за цель")
+    config = parse_config(selected.autopilot_config_json)
+    if config.get("monthly_budget_limit") is None or float(config.get("monthly_budget_limit") or 0) <= 0:
+        missing.append("задать бюджет автопилота")
+    return missing
+
+
 async def set_mode(db: AsyncSession, *, object_type: str, object_id: str, mode: str,
                    campaign_id: str | None = None) -> dict[str, Any]:
     mode = str(mode or ADVISORY).upper()
@@ -141,6 +159,10 @@ async def set_mode(db: AsyncSession, *, object_type: str, object_id: str, mode: 
     selected = next((link for link in links if link.campaign_id == campaign_id), None) if campaign_id else None
     if mode == AUTONOMOUS and not selected:
         raise ValueError("AUTOPILOT_CAMPAIGN_NOT_LINKED")
+    if mode == AUTONOMOUS:
+        missing = await autopilot_enable_requirements(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id)
+        if missing:
+            raise ValueError("AUTOPILOT_PREREQUISITES_MISSING:" + ",".join(missing))
     now = datetime.now(timezone.utc)
     for link in links:
         # V1 intentionally permits one authorized campaign per object.  A

@@ -1098,6 +1098,7 @@ class MaxBotRuntime:
                         await db.commit()
                     except ValueError:
                         await db.rollback()
+                        await self._render(user_id, f"ads_autopilot_enable:{object_type}:{object_id}")
                         return
                 await self._render(user_id, f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}")
                 return
