@@ -8,7 +8,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
-CURRENT_HEAD_MIGRATION = "0089_creative_experiment_v1"
+CURRENT_HEAD_MIGRATION = "0090_self_learning_loop_v2"
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -164,7 +164,7 @@ def test_release_parser_handles_real_merge_tuple_and_current_head_path():
     result = _run_release(CURRENT_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CURRENT_HEAD_MIGRATION}" in result.stdout
-    assert "TARGET_DOWN_REVISION=0088_durable_ads_objective_input" in result.stdout
+    assert "TARGET_DOWN_REVISION=0089_creative_experiment_v1" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():
