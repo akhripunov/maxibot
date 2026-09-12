@@ -7,6 +7,7 @@ state before and after the one mutation.  Missing target details are denied.
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from app.integrations.yandex_direct import YandexDirectClient
@@ -39,6 +40,24 @@ def _result_id(response: dict[str, Any]) -> int:
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         raise ProviderVerificationError("PROVIDER_ADD_RESPONSE_INVALID")
     return _id(rows[0].get("Id"), "PROVIDER_CREATED_AD_ID")
+
+
+def _micros(amount: Any, field: str) -> int:
+    """Convert a currency amount to provider micros without float drift."""
+    try:
+        value = Decimal(str(amount))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f"{field}_REQUIRED")
+    if value <= 0:
+        raise ValueError(f"{field}_REQUIRED")
+    return int((value * Decimal("1000000")).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def _pay_for_conversion(campaign: dict[str, Any]) -> dict[str, Any] | None:
+    network = (((campaign.get("TextCampaign") or {}).get("BiddingStrategy") or {}).get("Network") or {})
+    if str(network.get("BiddingStrategyType") or "").upper() != "PAY_FOR_CONVERSION":
+        return None
+    return network.get("PayForConversion") if isinstance(network.get("PayForConversion"), dict) else {}
 
 
 class YandexAutopilotAdapter:
@@ -90,6 +109,15 @@ class YandexAutopilotAdapter:
             return {"rollback_action": "RESTORE_EXCLUDED_SITES", "provider_response": response, "verified_after_state": {"campaign": after}}
         if action == "BOUNDED_BUDGET_REALLOCATION":
             budget = (before.get("campaign") or {}).get("DailyBudget")
+            pay = _pay_for_conversion(before.get("campaign") or {})
+            if pay is not None:
+                previous = pay.get("WeeklySpendLimit")
+                payload = {"Id": campaign_id, "TextCampaign": {"BiddingStrategy": {"Network": {"BiddingStrategyType": "PAY_FOR_CONVERSION", "PayForConversion": {"WeeklySpendLimit": previous}}}}}
+                response = await self.client.mutate("campaigns", method="update", params={"Campaigns": [payload]})
+                after = await self._campaign(campaign_id)
+                if ((_pay_for_conversion(after) or {}).get("WeeklySpendLimit") != previous):
+                    raise ProviderVerificationError("ROLLBACK_BUDGET_NOT_VERIFIED")
+                return {"rollback_action": "RESTORE_WEEKLY_SPEND_LIMIT", "provider_response": response, "verified_after_state": {"campaign": after}}
             response = await self.client.mutate("campaigns", method="update", params={"Campaigns": [{"Id": campaign_id, "DailyBudget": budget}]})
             after = await self._campaign(campaign_id)
             if after.get("DailyBudget") != budget:
@@ -144,11 +172,30 @@ class YandexAutopilotAdapter:
         return {"before_state": {"campaign": before}, "requested_mutation": {"resource": "campaigns", "method": "update", "excluded_sites": items}, "provider_response": response, "verified_after_state": {"campaign": after}}
 
     async def _budget(self, campaign_id: int, target: dict[str, Any]) -> dict[str, Any]:
+        before = await self._campaign(campaign_id)
+        pay = _pay_for_conversion(before)
+        if pay is not None:
+            amount = _micros(target.get("weekly_budget_amount"), "WEEKLY_BUDGET_AMOUNT")
+            cpa = pay.get("Cpa")
+            if cpa is not None and amount < int(cpa) * 20:
+                raise ValueError("WEEKLY_BUDGET_BELOW_CPA_MINIMUM")
+            strategy = deepcopy((before.get("TextCampaign") or {}).get("BiddingStrategy") or {})
+            network = strategy.setdefault("Network", {})
+            current = deepcopy(network.get("PayForConversion") or {})
+            current["WeeklySpendLimit"] = amount
+            network["BiddingStrategyType"] = "PAY_FOR_CONVERSION"
+            network["PayForConversion"] = current
+            payload = {"Id": campaign_id, "TextCampaign": {"BiddingStrategy": strategy}}
+            response = await self.client.mutate("campaigns", method="update", params={"Campaigns": [payload]})
+            after = await self._campaign(campaign_id)
+            after_pay = _pay_for_conversion(after)
+            if not after_pay or after_pay.get("WeeklySpendLimit") != amount:
+                raise ProviderVerificationError("BUDGET_NOT_VERIFIED")
+            return {"before_state": {"campaign": before}, "requested_mutation": {"resource": "campaigns", "method": "update", "weekly_spend_limit": amount}, "provider_response": response, "verified_after_state": {"campaign": after}}
         amount = _id(target.get("daily_budget_amount"), "DAILY_BUDGET_AMOUNT")
         mode = str(target.get("daily_budget_mode") or "STANDARD").upper()
         if mode not in {"STANDARD", "DISTRIBUTED"}:
             raise ValueError("DAILY_BUDGET_MODE_INVALID")
-        before = await self._campaign(campaign_id)
         response = await self.client.mutate("campaigns", method="update", params={"Campaigns": [{"Id": campaign_id, "DailyBudget": {"Amount": amount, "Mode": mode}}]})
         after = await self._campaign(campaign_id)
         if (after.get("DailyBudget") or {}).get("Amount") != amount:

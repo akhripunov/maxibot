@@ -63,6 +63,83 @@ async def test_placement_and_budget_mutations_verify_provider_state():
     assert budget["verified_after_state"]["campaign"]["DailyBudget"]["Amount"] == 2_000_000
 
 
+class PayForConversionDirect(FakeDirect):
+    def __init__(self):
+        super().__init__()
+        self.campaign = {"Id": 101, "ExcludedSites": {"Items": []}, "DailyBudget": None,
+                         "TextCampaign": {"BiddingStrategy": {"Network": {
+                             "BiddingStrategyType": "PAY_FOR_CONVERSION",
+                             "PayForConversion": {"GoalId": 7, "Cpa": 20_000_000,
+                                                   "WeeklySpendLimit": 2_000_000_000},
+                         }, "Search": {"BiddingStrategyType": "SERVING_OFF"}}}}
+
+    async def mutate(self, resource, *, method, params):
+        if resource == "campaigns" and method == "update":
+            update = params["Campaigns"][0]
+            if "TextCampaign" in update:
+                self.campaign["TextCampaign"] = update["TextCampaign"]
+            return {}
+        return await super().mutate(resource, method=method, params=params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount,micros", [(1800, 1_800_000_000), (2200, 2_200_000_000)])
+async def test_pay_for_conversion_uses_weekly_spend_limit_and_preserves_strategy(amount, micros):
+    direct = PayForConversionDirect()
+    adapter = YandexAutopilotAdapter(direct)
+    result = await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+                                    "target": {"weekly_budget_amount": amount}})
+    payload = direct.campaign["TextCampaign"]["BiddingStrategy"]["Network"]["PayForConversion"]
+    assert payload["WeeklySpendLimit"] == micros
+    assert payload["GoalId"] == 7
+    assert payload["Cpa"] == 20_000_000
+    assert result["verified_after_state"]["campaign"]["TextCampaign"]["BiddingStrategy"]["Network"]["BiddingStrategyType"] == "PAY_FOR_CONVERSION"
+
+
+@pytest.mark.asyncio
+async def test_pay_for_conversion_rejects_budget_below_cpa_minimum():
+    adapter = YandexAutopilotAdapter(PayForConversionDirect())
+    with pytest.raises(ValueError, match="WEEKLY_BUDGET_BELOW_CPA_MINIMUM"):
+        await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+                               "target": {"weekly_budget_amount": 399}})
+
+
+@pytest.mark.asyncio
+async def test_pay_for_conversion_accepts_exact_cpa_minimum():
+    result = await YandexAutopilotAdapter(PayForConversionDirect()).execute(
+        {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+         "target": {"weekly_budget_amount": 400}}
+    )
+    assert result["verified_after_state"]["campaign"]["TextCampaign"]["BiddingStrategy"]["Network"]["PayForConversion"]["WeeklySpendLimit"] == 400_000_000
+
+
+@pytest.mark.asyncio
+async def test_pay_for_conversion_reread_mismatch_is_not_verified():
+    class Mismatch(PayForConversionDirect):
+        async def get_campaign_configuration(self, campaign_id):
+            row = await super().get_campaign_configuration(campaign_id)
+            if row:
+                row["TextCampaign"]["BiddingStrategy"]["Network"]["PayForConversion"]["WeeklySpendLimit"] += 1
+            return row
+    with pytest.raises(Exception, match="BUDGET_NOT_VERIFIED"):
+        await YandexAutopilotAdapter(Mismatch()).execute(
+            {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+             "target": {"weekly_budget_amount": 1800}}
+        )
+
+
+@pytest.mark.asyncio
+async def test_pay_for_conversion_rollback_restores_weekly_budget():
+    direct = PayForConversionDirect()
+    adapter = YandexAutopilotAdapter(direct)
+    result = await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+                                    "target": {"weekly_budget_amount": 1800}})
+    rollback = await adapter.rollback({"action_type": "BOUNDED_BUDGET_REALLOCATION",
+                                       "target": {"provider_campaign_id": 101},
+                                       "before_state": result["before_state"]})
+    assert rollback["verified_after_state"]["campaign"]["TextCampaign"]["BiddingStrategy"]["Network"]["PayForConversion"]["WeeklySpendLimit"] == 2_000_000_000
+
+
 @pytest.mark.asyncio
 async def test_create_ad_test_requires_precise_payload_and_verifies_created_ad():
     adapter = YandexAutopilotAdapter(FakeDirect())

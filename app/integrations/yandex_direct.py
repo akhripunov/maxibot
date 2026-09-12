@@ -166,7 +166,8 @@ class YandexDirectClient:
         ident = int(campaign_id)
         rows = await self._request(
             "campaigns", selection={"Ids": [ident]},
-            fields=("Id", "Name", "Type", "State", "Status", "ExcludedSites", "DailyBudget"),
+            fields=("Id", "Name", "Type", "State", "Status", "ExcludedSites", "DailyBudget", "StatusClarification"),
+            extra_params={"TextCampaignFieldNames": ["BiddingStrategy", "Settings", "CounterIds", "RelevantKeywords"]},
         )
         return next((row for row in rows if int(row.get("Id", 0)) == ident), None)
 
