@@ -61,6 +61,11 @@ class YandexAutopilotAdapter:
             return await self._create_ad_test(action, campaign_id, target)
         raise ValueError("ACTION_NOT_ALLOWLISTED")
 
+    async def refresh_ad_lifecycle(self, campaign_id: int | str, ad_id: int | str) -> dict[str, Any]:
+        """Reread a created treatment and expose the canonical moderation state."""
+        row = await self._ad(_id(campaign_id, "PROVIDER_CAMPAIGN_ID"), _id(ad_id, "AD_ID"))
+        return {"ad": row, "provider_lifecycle": provider_lifecycle(row)}
+
     async def rollback(self, evidence: dict[str, Any]) -> dict[str, Any]:
         """Non-destructive rollback using the immutable before-state evidence."""
         action = str(evidence.get("action_type") or "").upper()
@@ -91,7 +96,8 @@ class YandexAutopilotAdapter:
                 raise ProviderVerificationError("ROLLBACK_BUDGET_NOT_VERIFIED")
             return {"rollback_action": "RESTORE_DAILY_BUDGET", "provider_response": response, "verified_after_state": {"campaign": after}}
         if action in {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"}:
-            ad_id = _id((evidence.get("after_state") or {}).get("created_ad_id"), "CREATED_AD_ID")
+            after_state = evidence.get("after_state") or evidence.get("verified_after_state") or {}
+            ad_id = _id(after_state.get("created_ad_id"), "CREATED_AD_ID")
             response = await self.client.mutate("ads", method="suspend", params={"SelectionCriteria": {"Ids": [ad_id]}})
             after = await self._ad(campaign_id, ad_id)
             if str(after.get("State") or "").upper() != "OFF":
@@ -156,17 +162,41 @@ class YandexAutopilotAdapter:
             raise ValueError("TEST_AD_PAYLOAD_REQUIRED")
         control_ad_id = target.get("control_ad_id")
         control = await self._ad(campaign_id, _id(control_ad_id, "CONTROL_AD_ID")) if control_ad_id else None
+        get_groups = getattr(self.client, "get_ad_groups_by_ids", None)
+        if get_groups is not None:
+            groups = await get_groups([ad_group_id])
+            group = next((row for row in groups if int(row.get("Id", 0)) == ad_group_id), None)
+            if not group or int(group.get("CampaignId", 0)) != campaign_id:
+                raise ProviderVerificationError("AD_GROUP_CAMPAIGN_SCOPE_NOT_VERIFIED")
+        before_campaign = await self._campaign(campaign_id)
+        image_hash = target.get("provider_image_hash")
+        image_bytes = target.get("image_bytes")
+        if image_bytes and not image_hash:
+            add_image = getattr(self.client, "add_ad_image", None)
+            if add_image is None:
+                raise ProviderVerificationError("PROVIDER_IMAGE_UPLOAD_UNAVAILABLE")
+            image_result = await add_image(image_bytes)
+            rows = image_result.get("AddResults") or image_result.get("addResults") or []
+            image_hash = rows[0].get("AdImageHash") if rows and isinstance(rows[0], dict) else None
+            if not image_hash:
+                raise ProviderVerificationError("PROVIDER_IMAGE_ID_MISSING")
+            target["provider_image_hash"] = image_hash
         request_ad = {"AdGroupId": ad_group_id, **deepcopy(ad_payload)}
+        if image_hash:
+            for key in ("TextImageAd", "TextAd", "TextAdBuilderAd", "ResponsiveAd"):
+                if isinstance(request_ad.get(key), dict):
+                    request_ad[key].setdefault("AdImageHash", image_hash)
         response = await self.client.mutate("ads", method="add", params={"Ads": [request_ad]})
         created_ad_id = _result_id(response)
         after = await self._ad(campaign_id, created_ad_id)
         lifecycle = provider_lifecycle(after, created=True)
         return {
-            "before_state": {"campaign": await self._campaign(campaign_id), "control_ad": control},
+            "before_state": {"campaign": before_campaign, "control_ad": control},
             "requested_mutation": {"resource": "ads", "method": "add", "ad_group_id": ad_group_id, "action": action},
             "provider_response": response,
             "verified_after_state": {
                 "created_ad_id": created_ad_id, "ad": after, "provider_lifecycle": lifecycle,
+                "provider_image_hash": image_hash,
                 "measurement_started_at": measurement_start(lifecycle).isoformat() if measurement_start(lifecycle) else None,
             },
         }

@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.models import AdsAccount, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsCreative, AdsEntity, AdsPromotionCampaignLink, AdsRecommendation
 from app.ads.creative_experiment import assert_one_creative_variable, persist_creative_mapping, provider_lifecycle, measurement_start
+from app.ads.creative_builder import build_creative_candidate
+from app.ads.creative_storage import store_media_if_available
 
 
 async def reserve_experiment_budget(db: AsyncSession, *, recommendation: AdsRecommendation,
@@ -421,8 +423,48 @@ async def execute_autonomous_action(
     if action_type == "CREATE_CREATIVE_TEST":
         if not recommendation:
             return ExecutionResult("DENIED", "CREATIVE_EXPERIMENT_RECOMMENDATION_REQUIRED", {"status": "EXECUTION_DENIED", "reason": "CREATIVE_EXPERIMENT_RECOMMENDATION_REQUIRED"})
+        if not isinstance(target.get("ad_payload"), dict):
+            control_entity = await db.get(AdsEntity, target.get("control_ad_entity_id")) if target.get("control_ad_entity_id") else None
+            control_creative = await db.get(AdsCreative, target.get("control_creative_id")) if target.get("control_creative_id") else None
+            if not control_entity:
+                control_entity = await db.scalar(select(AdsEntity).where(
+                    AdsEntity.campaign_id == campaign_id, AdsEntity.entity_type.in_(("AD", "AD_ENTITY"))
+                ).order_by(AdsEntity.last_seen_at.desc()).limit(1))
+            if control_entity and not control_creative:
+                control_creative = await db.scalar(select(AdsCreative).where(
+                    AdsCreative.ad_entity_id == control_entity.id
+                ).order_by(AdsCreative.updated_at.desc()).limit(1))
+            candidate = build_creative_candidate(
+                campaign_id=campaign_id, experiment_id=recommendation.experiment_id or recommendation.id,
+                objective=target.get("objective"), target_cpa=objective_target,
+                control={"provider_ad_id": control_entity.provider_entity_id} if control_entity else None,
+                hypothesis=recommendation.hypothesis or recommendation.title,
+            )
+            stored = await store_media_if_available(candidate["image_bytes"], mime_type=candidate["mime_type"], extension=candidate["extension"])
+            if stored.get("state") != "STORED":
+                return ExecutionResult("DENIED", "CREATIVE_ASSET_NOT_DURABLY_STORED", {"status": "EXECUTION_DENIED", "asset": stored})
+            treatment_creative = AdsCreative(
+                campaign_id=campaign_id, content_hash=candidate["content_hash"], creative_type="IMAGE",
+                title=candidate["headline"], body=candidate["text"], cta=candidate["cta"],
+                source_type="AUTONOMOUS_GENERATOR", storage_provider="MAIL_RU_WEBDAV",
+                storage_key=stored.get("storage_key"), media_storage_state=stored.get("state"),
+                mime_type=candidate["mime_type"], file_size=stored.get("file_size"),
+                ai_features_json=json.dumps({"concept": candidate["creative_concept"], "experiment_id": recommendation.experiment_id}, ensure_ascii=False),
+            )
+            db.add(treatment_creative)
+            await db.flush()
+            target["treatment_creative_id"] = treatment_creative.id
+            if control_entity:
+                target["control_ad_entity_id"] = control_entity.id
+                target["control_ad_id"] = target.get("control_ad_id") or control_entity.provider_entity_id
+            if control_creative:
+                target["control_creative_id"] = control_creative.id
+            target["image_bytes"] = candidate["image_bytes"]
+            target["ad_payload"] = {"TextImageAd": {"Title": candidate["headline"], "Text": candidate["text"], "Href": target.get("href") or "https://example.invalid"}}
+            target["control_ad_payload"] = {"Creative": control_creative.content_hash if control_creative else "CONTROL", "Title": candidate["headline"], "Text": candidate["text"]}
+            target["treatment_comparison_payload"] = {"Creative": candidate["content_hash"], "Title": candidate["headline"], "Text": candidate["text"]}
         control_payload = target.get("control_ad_payload")
-        treatment_payload = target.get("ad_payload")
+        treatment_payload = target.get("treatment_comparison_payload") or target.get("ad_payload")
         if not isinstance(control_payload, dict) or not isinstance(treatment_payload, dict):
             return ExecutionResult("DENIED", "CREATIVE_MAPPING_REQUIRED", {"status": "EXECUTION_DENIED", "reason": "CREATIVE_MAPPING_REQUIRED"})
         try:
@@ -459,6 +501,18 @@ async def execute_autonomous_action(
         if recommendation:
             lifecycle = (response or {}).get("verified_after_state", {}).get("provider_lifecycle") if isinstance(response, dict) else None
             recommendation.provider_lifecycle = lifecycle or ("CREATED" if action_type == "CREATE_CREATIVE_TEST" else recommendation.provider_lifecycle)
+            if action_type in {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"} and isinstance(response, dict):
+                created_id = (response.get("verified_after_state") or {}).get("created_ad_id")
+                if created_id:
+                    entity = AdsEntity(provider="YANDEX_DIRECT", entity_type="AD", provider_entity_id=str(created_id), campaign_id=campaign_id, status=str((response.get("verified_after_state") or {}).get("ad", {}).get("State") or "UNKNOWN"), provider_metadata_json=json.dumps({"experiment_id": recommendation.experiment_id, "role": "TREATMENT"}, ensure_ascii=False))
+                    db.add(entity)
+                    await db.flush()
+                    recommendation.treatment_ad_entity_id = entity.id
+                    if action_type == "CREATE_CREATIVE_TEST" and recommendation.treatment_creative_id:
+                        treatment = await db.get(AdsCreative, recommendation.treatment_creative_id)
+                        if treatment:
+                            treatment.ad_entity_id = entity.id
+                            treatment.external_creative_id = str((response.get("verified_after_state") or {}).get("ad", {}).get("CreativeId") or "") or None
             recommendation.measurement_started_at = measurement_start(recommendation.provider_lifecycle)
             recommendation.experiment_status = "running" if recommendation.provider_lifecycle == "ACTIVE" else "planned"
         outcome.execution_status = "IMPLEMENTED"

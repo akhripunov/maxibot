@@ -5,6 +5,7 @@ import logging
 import csv
 import io
 import asyncio
+import base64
 from typing import Any, Iterable
 
 import httpx
@@ -168,6 +169,18 @@ class YandexDirectClient:
             fields=("Id", "Name", "Type", "State", "Status", "ExcludedSites", "DailyBudget"),
         )
         return next((row for row in rows if int(row.get("Id", 0)) == ident), None)
+
+    async def get_ad_groups_by_ids(self, group_ids: Iterable[int | str]) -> list[dict[str, Any]]:
+        ids = [int(value) for value in group_ids if str(value).isdigit()]
+        if not ids:
+            return []
+        return await self._request("adgroups", selection={"Ids": ids}, fields=("Id", "CampaignId", "Status", "State"))
+
+    async def add_ad_image(self, content: bytes) -> dict[str, Any]:
+        if not self._allow_write:
+            raise PermissionError("YANDEX_DIRECT_READ_ONLY_CLIENT")
+        encoded = base64.b64encode(content).decode("ascii")
+        return await self.mutate("adimages", method="add", params={"Images": [{"Image": encoded}]})
 
     async def get_ad_images(self, image_hashes: Iterable[str]) -> list[dict[str, Any]]:
         hashes = [str(value) for value in image_hashes if value]

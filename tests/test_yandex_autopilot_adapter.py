@@ -75,3 +75,23 @@ async def test_create_creative_test_uses_same_verified_ad_creation_path():
     adapter = YandexAutopilotAdapter(FakeDirect())
     result = await adapter.execute({"action_type": "CREATE_CREATIVE_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextImageAd": {"AdImageHash": "image-hash", "Href": "https://example.test"}}}})
     assert result["verified_after_state"]["ad"]["CampaignId"] == 101
+
+
+@pytest.mark.asyncio
+async def test_created_ad_rollback_accepts_verified_after_state_contract():
+    direct = FakeDirect()
+    adapter = YandexAutopilotAdapter(direct)
+    result = await adapter.execute({"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test"}}}})
+    rollback = await adapter.rollback({"action_type": "CREATE_AD_TEST", "target": {"provider_campaign_id": 101}, "before_state": result["before_state"], "verified_after_state": result["verified_after_state"]})
+    assert rollback["verified_after_state"]["ad"]["State"] == "OFF"
+
+
+@pytest.mark.asyncio
+async def test_adgroup_campaign_scope_is_fail_closed_when_provider_can_verify():
+    class GroupAware(FakeDirect):
+        async def get_ad_groups_by_ids(self, ids):
+            return [{"Id": ids[0], "CampaignId": 999}]
+
+    adapter = YandexAutopilotAdapter(GroupAware())
+    with pytest.raises(Exception, match="AD_GROUP_CAMPAIGN_SCOPE_NOT_VERIFIED"):
+        await adapter.execute({"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test"}}}})

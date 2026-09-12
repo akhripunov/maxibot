@@ -353,7 +353,7 @@ async def trigger_autopilot_execution(session_factory) -> int:
         return 0
     from app.ads.autopilot import AUTOPILOT_ACTION_ALLOWLIST, execute_autonomous_action
     from app.ads.yandex_autopilot import yandex_autopilot_adapter
-    from app.db.models import AdsAiOutcome, AdsAiRun, AdsDataHealth, AdsRecommendation
+    from app.db.models import AdsAiOutcome, AdsAiRun, AdsDataHealth, AdsRecommendation, AdsEntity
 
     executed = 0
     async with session_factory() as db:
@@ -402,6 +402,22 @@ async def trigger_autopilot_execution(session_factory) -> int:
                 continue
             adapter = yandex_autopilot_adapter(decrypt_token(encrypted))
             try:
+                if recommendation.experiment_kind == "CREATIVE" and recommendation.treatment_ad_entity_id and recommendation.provider_lifecycle in {"CREATED", "AWAITING_MODERATION", "REJECTED"}:
+                    treatment_entity = await db.get(AdsEntity, recommendation.treatment_ad_entity_id)
+                    if treatment_entity and treatment_entity.provider_entity_id:
+                        campaign_row = await db.get(AdsCampaign, ai_run.campaign_id)
+                        if not campaign_row:
+                            continue
+                        refreshed = await adapter.refresh_ad_lifecycle(campaign_row.external_id, treatment_entity.provider_entity_id)
+                        recommendation.provider_lifecycle = refreshed["provider_lifecycle"]
+                        treatment_entity.status = str((refreshed.get("ad") or {}).get("State") or "UNKNOWN")
+                        if recommendation.provider_lifecycle == "ACTIVE":
+                            recommendation.experiment_status = "running"
+                            recommendation.measurement_started_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        if recommendation.provider_lifecycle != "ACTIVE":
+                            continue
+                        continue
                 result = await execute_autonomous_action(
                     db, object_type=object_type, object_id=object_id, campaign_id=ai_run.campaign_id,
                     action_type=action_type, target=target, data_trust="GOOD",
