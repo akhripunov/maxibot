@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Any
 
 from app.integrations.yandex_direct import YandexDirectClient
+from app.ads.creative_experiment import measurement_start, provider_lifecycle
 
 
 class ProviderVerificationError(RuntimeError):
@@ -153,11 +154,22 @@ class YandexAutopilotAdapter:
         ad_payload = target.get("ad_payload")
         if not isinstance(ad_payload, dict) or not any(key in ad_payload for key in ("TextAd", "TextImageAd", "TextAdBuilderAd", "ResponsiveAd")):
             raise ValueError("TEST_AD_PAYLOAD_REQUIRED")
+        control_ad_id = target.get("control_ad_id")
+        control = await self._ad(campaign_id, _id(control_ad_id, "CONTROL_AD_ID")) if control_ad_id else None
         request_ad = {"AdGroupId": ad_group_id, **deepcopy(ad_payload)}
         response = await self.client.mutate("ads", method="add", params={"Ads": [request_ad]})
         created_ad_id = _result_id(response)
         after = await self._ad(campaign_id, created_ad_id)
-        return {"before_state": {"campaign": await self._campaign(campaign_id)}, "requested_mutation": {"resource": "ads", "method": "add", "ad_group_id": ad_group_id, "action": action}, "provider_response": response, "verified_after_state": {"created_ad_id": created_ad_id, "ad": after}}
+        lifecycle = provider_lifecycle(after, created=True)
+        return {
+            "before_state": {"campaign": await self._campaign(campaign_id), "control_ad": control},
+            "requested_mutation": {"resource": "ads", "method": "add", "ad_group_id": ad_group_id, "action": action},
+            "provider_response": response,
+            "verified_after_state": {
+                "created_ad_id": created_ad_id, "ad": after, "provider_lifecycle": lifecycle,
+                "measurement_started_at": measurement_start(lifecycle).isoformat() if measurement_start(lifecycle) else None,
+            },
+        }
 
 
 def yandex_autopilot_adapter(token: str) -> YandexAutopilotAdapter:

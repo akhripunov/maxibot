@@ -899,6 +899,8 @@ def format_ads_history_screen(state: dict, *, title: str, page: int = 0, page_si
             lines.append(f"Кампания: {sanitize_ai_user_text(item['campaign_name'])}")
         if item.get("hypothesis"):
             lines.append(f"Гипотеза: {_owner_short_text(item['hypothesis'])}")
+        if item.get("creative_kind") == "CREATIVE":
+            lines.append(f"Креатив: {sanitize_ai_user_text(item.get('control_creative') or 'Контроль')} → {sanitize_ai_user_text(item.get('treatment_creative') or 'Новый вариант')}")
         if item.get("started_at"):
             lines.append(f"Запущен: {item['started_at'].astimezone(MOSCOW):%d.%m.%Y %H:%M}")
         if item.get("completed_at"):
@@ -924,6 +926,10 @@ def format_ads_experiment_detail(item: dict, *, title: str) -> str:
         lines.extend(["", "📊 Кампания", sanitize_ai_user_text(item["campaign_name"])])
     if item.get("hypothesis"):
         lines.extend(["", "💡 Гипотеза", _owner_short_text(item["hypothesis"])])
+    if item.get("creative_kind") == "CREATIVE":
+        lines.extend(["", "🎨 Что проверяли", f"Было: {sanitize_ai_user_text(item.get('control_creative') or 'Существующий вариант')}", f"Стало: {sanitize_ai_user_text(item.get('treatment_creative') or 'Новый вариант')}"])
+        if item.get("creative_selection_reason"):
+            lines.extend(["", "🔍 Почему выбран вариант", _owner_short_text(item["creative_selection_reason"])])
     if item.get("objective"):
         objective = item["objective"]
         if isinstance(objective, dict):

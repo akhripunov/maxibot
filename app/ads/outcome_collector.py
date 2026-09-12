@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.integrations.yandex_oauth import get_encrypted_token
 from app.security_tokens import decrypt_token
 from app.traffic.analytics import traffic_stats_for_channels
+from app.ads.creative_experiment import creative_variant_metrics
 
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 
@@ -22,6 +23,39 @@ async def collect_one_outcome(db: AsyncSession, outcome: AdsAiOutcome) -> None:
     if outcome.due_at > datetime.now(timezone.utc):
         raise ValueError("OUTCOME_NOT_DUE")
     recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
+    if recommendation and recommendation.experiment_kind == "CREATIVE":
+        # Creative experiments are never evaluated from campaign totals: the
+        # concurrent control/treatment split is the causal measurement unit.
+        if recommendation.provider_lifecycle != "ACTIVE":
+            outcome.status = "COMPLETED"
+            outcome.evaluation_status = "INCONCLUSIVE"
+            outcome.observed_delta_json = json.dumps({"creative_lifecycle": recommendation.provider_lifecycle, "reason": "TREATMENT_NOT_PROVIDER_ACTIVE"}, ensure_ascii=False)
+            outcome.completed_at = datetime.now(timezone.utc)
+            recommendation.experiment_status = "completed"
+            await db.commit()
+            return
+        variants = await creative_variant_metrics(db, recommendation, date_from=outcome.created_at.date(), date_to=datetime.now(timezone.utc).date())
+        control, treatment = variants["CONTROL"], variants["TREATMENT"]
+        delta = {
+            "impressions_7d": {"before": control["impressions"], "after": treatment["impressions"]},
+            "clicks_7d": {"before": control["clicks"], "after": treatment["clicks"]},
+            "cost_7d": {"before": control["spend"], "after": treatment["spend"]},
+            "conversions_7d": {"before": control["subscriptions"], "after": treatment["subscriptions"]},
+            "actual_cpa_7d": {"before": control["cpa"], "after": treatment["cpa"]},
+            "creative_variants": variants,
+            "causal_interpretation": "CONCURRENT_CONTROL_TREATMENT",
+        }
+        if control["clicks"] < 10 or treatment["clicks"] < 10:
+            outcome.status = "COMPLETED"
+            outcome.evaluation_status = "INCONCLUSIVE"
+            outcome.observed_delta_json = json.dumps(delta, ensure_ascii=False)
+            outcome.actual_metrics_json = outcome.observed_delta_json
+            outcome.completed_at = datetime.now(timezone.utc)
+            recommendation.experiment_status = "completed"
+            await db.commit()
+        else:
+            await mark_outcome_completed(db, outcome, followup_snapshot_id=outcome.followup_snapshot_id or outcome.baseline_snapshot_id, delta=delta)
+        return
     ai = await db.get(AdsAiRun, recommendation.ai_run_id) if recommendation and recommendation.ai_run_id else None
     channel = await db.get(Channel, recommendation.channel_id) if recommendation else None
     campaign = await db.get(AdsCampaign, ai.campaign_id) if ai and ai.campaign_id else None

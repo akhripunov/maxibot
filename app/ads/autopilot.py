@@ -17,7 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import AdsAccount, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsPromotionCampaignLink, AdsRecommendation
+from app.db.models import AdsAccount, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsCreative, AdsEntity, AdsPromotionCampaignLink, AdsRecommendation
+from app.ads.creative_experiment import assert_one_creative_variable, persist_creative_mapping, provider_lifecycle, measurement_start
 
 ADVISORY = "ADVISORY"
 AUTONOMOUS = "AUTONOMOUS"
@@ -312,6 +313,26 @@ async def execute_autonomous_action(
         if recommendation:
             recommendation.experiment_status = "executing"
         await db.flush()
+    else:
+        recommendation = None
+    if action_type == "CREATE_CREATIVE_TEST":
+        if not recommendation:
+            return ExecutionResult("DENIED", "CREATIVE_EXPERIMENT_RECOMMENDATION_REQUIRED", {"status": "EXECUTION_DENIED", "reason": "CREATIVE_EXPERIMENT_RECOMMENDATION_REQUIRED"})
+        control_payload = target.get("control_ad_payload")
+        treatment_payload = target.get("ad_payload")
+        if not isinstance(control_payload, dict) or not isinstance(treatment_payload, dict):
+            return ExecutionResult("DENIED", "CREATIVE_MAPPING_REQUIRED", {"status": "EXECUTION_DENIED", "reason": "CREATIVE_MAPPING_REQUIRED"})
+        try:
+            assert_one_creative_variable(control_payload, treatment_payload)
+        except ValueError as exc:
+            return ExecutionResult("DENIED", str(exc), {"status": "EXECUTION_DENIED", "reason": str(exc)})
+        control_entity = await db.get(AdsEntity, target.get("control_ad_entity_id")) if target.get("control_ad_entity_id") else None
+        control_creative = await db.get(AdsCreative, target.get("control_creative_id")) if target.get("control_creative_id") else None
+        treatment_creative = await db.get(AdsCreative, target.get("treatment_creative_id")) if target.get("treatment_creative_id") else None
+        if not control_entity or not control_creative or not treatment_creative:
+            return ExecutionResult("DENIED", "CREATIVE_MAPPING_REQUIRED", {"status": "EXECUTION_DENIED", "reason": "CREATIVE_MAPPING_REQUIRED"})
+        await persist_creative_mapping(db, recommendation, control_entity=control_entity, control_creative=control_creative, treatment_creative=treatment_creative, selection_reason=target.get("selection_reason") or "Existing provider-ready creative")
+        target["control_ad_id"] = target.get("control_ad_id") or control_entity.provider_entity_id
     provider_target = {**target, "provider_campaign_id": campaign.external_id}
     request = {"object_type": object_type, "object_id": object_id,
                "campaign_id": campaign_id, "provider_account_id": account.external_account_id,
@@ -333,7 +354,10 @@ async def execute_autonomous_action(
     if outcome:
         recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
         if recommendation:
-            recommendation.experiment_status = "running"
+            lifecycle = (response or {}).get("verified_after_state", {}).get("provider_lifecycle") if isinstance(response, dict) else None
+            recommendation.provider_lifecycle = lifecycle or ("CREATED" if action_type == "CREATE_CREATIVE_TEST" else recommendation.provider_lifecycle)
+            recommendation.measurement_started_at = measurement_start(recommendation.provider_lifecycle)
+            recommendation.experiment_status = "running" if recommendation.provider_lifecycle == "ACTIVE" else "planned"
         outcome.execution_status = "IMPLEMENTED"
         outcome.implementation_confirmed = "YES"
         outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)

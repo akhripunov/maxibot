@@ -276,6 +276,10 @@ class SystemTrafficVisit(Base):
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(24), default="LANDING_VISIT", nullable=False)
     destination_type: Mapped[str] = mapped_column(String(16), default="BOT", server_default="BOT", nullable=False)
+    experiment_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
+    experiment_variant: Mapped[Optional[str]] = mapped_column(String(16), index=True)
+    provider_ad_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    provider_creative_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
 
 
 class SystemMaxIdentityLink(Base):
@@ -331,6 +335,10 @@ class BotTrafficVisit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(24), default="LANDING_VISIT", nullable=False)
+    experiment_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
+    experiment_variant: Mapped[Optional[str]] = mapped_column(String(16), index=True)
+    provider_ad_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    provider_creative_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
 
 
 class BotMaxIdentityLink(Base):
@@ -428,6 +436,10 @@ class TrafficVisit(Base):
     to_channel_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     converted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     destination_type: Mapped[str] = mapped_column(String(16), default="CHANNEL", server_default="CHANNEL", nullable=False)
+    experiment_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
+    experiment_variant: Mapped[Optional[str]] = mapped_column(String(16), index=True)
+    provider_ad_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    provider_creative_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
 
 class MembershipEvent(Base):
     __tablename__ = "membership_events"
@@ -1070,6 +1082,16 @@ class AdsRecommendation(Base):
     promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16))
     promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    experiment_kind: Mapped[Optional[str]] = mapped_column(String(32), index=True)
+    control_ad_entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_entities.id", ondelete="SET NULL"), index=True)
+    control_creative_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_creatives.id", ondelete="SET NULL"), index=True)
+    treatment_ad_entity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_entities.id", ondelete="SET NULL"), index=True)
+    treatment_creative_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_creatives.id", ondelete="SET NULL"), index=True)
+    creative_selection_reason: Mapped[Optional[str]] = mapped_column(Text)
+    provider_lifecycle: Mapped[str] = mapped_column(String(32), default="PLANNED", server_default="PLANNED", nullable=False, index=True)
+    measurement_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    control_variant_token: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    treatment_variant_token: Mapped[Optional[str]] = mapped_column(String(64), index=True)
 
 
 class AdsMemory(Base):

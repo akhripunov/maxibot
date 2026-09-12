@@ -46,10 +46,34 @@ import secrets
 from app.ads.codex_worker import claim_next_codex_run, fail_claimed_run, lease_active, worker_enabled, COMPLETED, FAILED, PROCESSING
 from app.ads.service import persist_development_result
 from app.ads.events import publish_ai_run_event
+from app.ads.creative_experiment import resolve_variant
 
 client = RealMaxClient() if settings.is_real_max else StubMaxClient()
 bot_runtime: MaxBotRuntime | None = None
 logger = logging.getLogger(__name__)
+
+
+async def _attach_creative_variant(visit, *, object_type: str, object_id: str, request: Request, db: AsyncSession) -> None:
+    """Persist creative experiment attribution on the durable visit row."""
+    params = request.query_params
+    provider_ad_id = params.get("ad_id")
+    if not provider_ad_id:
+        # Existing Direct tracking convention uses
+        # ``utm_content={creative_id}.{ad_id}.{retargeting_id}``.
+        parts = (params.get("utm_content") or "").split(".")
+        if len(parts) >= 2 and parts[1].isdigit():
+            provider_ad_id = parts[1]
+    resolved = await resolve_variant(
+        db, object_type=object_type, object_id=object_id,
+        experiment_token=params.get("maxibot_exp"),
+        provider_ad_id=provider_ad_id,
+    )
+    if not resolved:
+        return
+    visit.experiment_id = resolved["experiment_id"]
+    visit.experiment_variant = resolved["variant"]
+    visit.provider_ad_id = resolved.get("provider_ad_id") or provider_ad_id
+    visit.provider_creative_id = resolved.get("provider_creative_id")
 
 
 def _is_mobile_request(request: Request | None) -> bool:
@@ -839,6 +863,7 @@ async def system_landing(public_id: str, request: Request, db: AsyncSession = De
         await db.commit()
     else:
         token = visit.token
+    await _attach_creative_variant(visit, object_type="BOT", object_id=profile.id, request=request, db=db)
     await _bot_telemetry_event(db, visit, "SYSTEM_LANDING_RENDERED", {
         "device_family": _diagnostic_device_family(request),
         "browser_family": _diagnostic_browser_family(request),
@@ -2221,6 +2246,7 @@ async def _landing_page(public_id: str, request: Request, db: AsyncSession):
         db.add(visit)
         await db.commit()
         visit_created = True
+    await _attach_creative_variant(visit, object_type="CHANNEL", object_id=channel.id, request=request, db=db)
     await _traffic_diagnostic_event(
         db,
         visit,

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
-    AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCreative,
+    AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCreative, AdsEntity,
     AdsDataHealth, AdsMemory, AdsMemoryEvidence, AdsPromotionCampaignLink,
     AdsRecommendation,
 )
@@ -330,6 +330,13 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     memories_by_experiment: dict[str, list[AdsMemory]] = {}
     for memory in memory_rows:
         memories_by_experiment.setdefault(memory.experiment_id, []).append(memory)
+    creative_ids = {value for item in all_recommendations for value in (
+        item.control_creative_id, item.treatment_creative_id, item.control_ad_entity_id, item.treatment_ad_entity_id
+    ) if value}
+    creative_rows = list((await db.scalars(select(AdsCreative).where(AdsCreative.id.in_(creative_ids)))).all()) if creative_ids else []
+    entity_rows = list((await db.scalars(select(AdsEntity).where(AdsEntity.id.in_(creative_ids)))).all()) if creative_ids else []
+    creative_by_id = {item.id: item for item in creative_rows}
+    entity_by_id = {item.id: item for item in entity_rows}
     for item in all_recommendations:
         if not item.experiment_id:
             continue
@@ -365,6 +372,11 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             "rollback": bool(measured and measured.execution_status == "ROLLED_BACK"),
             "status_label": _experiment_status_label({"evaluation_status": measured.evaluation_status if measured else None, "experiment_status": item.experiment_status, "implementation_confirmed": measured.implementation_confirmed if measured else None}),
             "memories": [memory.content for memory in memories_by_experiment.get(item.experiment_id, [])],
+            "creative_kind": item.experiment_kind,
+            "control_creative": creative_by_id.get(item.control_creative_id).title if creative_by_id.get(item.control_creative_id) else None,
+            "treatment_creative": creative_by_id.get(item.treatment_creative_id).title if creative_by_id.get(item.treatment_creative_id) else None,
+            "creative_selection_reason": item.creative_selection_reason,
+            "provider_lifecycle": item.provider_lifecycle,
         })
     history.sort(key=lambda row: (
         0 if row["status_label"] == "🟡 Идёт" else 1,
