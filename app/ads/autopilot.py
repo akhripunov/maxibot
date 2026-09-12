@@ -34,6 +34,7 @@ FUTURE_ACTIONS = frozenset({"CREATE_CAMPAIGN", "CREATE_AD_GROUP", "CHANGE_TARGET
 def default_autopilot_config() -> dict[str, Any]:
     return {
         "monthly_budget_limit": None,
+        "weekly_budget_limit": None,
         "max_test_spend": DEFAULT_MAX_TEST_SPEND,
         "max_budget_change_percent": DEFAULT_MAX_BUDGET_CHANGE_PERCENT,
         "max_parallel_experiments": DEFAULT_MAX_PARALLEL_EXPERIMENTS,
@@ -96,9 +97,9 @@ def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
     max_parallel = int(config.get("max_parallel_experiments") or DEFAULT_MAX_PARALLEL_EXPERIMENTS)
     if active_experiments >= max_parallel:
         return GuardrailDecision(False, "MAX_PARALLEL_EXPERIMENTS", action_type, mode)
-    limit = monthly_budget_limit if monthly_budget_limit is not None else config.get("monthly_budget_limit")
+    limit = monthly_budget_limit if monthly_budget_limit is not None else (config.get("weekly_budget_limit") if config.get("weekly_budget_limit") is not None else config.get("monthly_budget_limit"))
     if limit is not None and monthly_spend + max(0.0, proposed_spend) > float(limit):
-        return GuardrailDecision(False, "MONTHLY_BUDGET_LIMIT", action_type, mode)
+        return GuardrailDecision(False, "WEEKLY_BUDGET_LIMIT", action_type, mode)
     if proposed_spend > float(config.get("max_test_spend") or DEFAULT_MAX_TEST_SPEND):
         return GuardrailDecision(False, "MAX_TEST_SPEND", action_type, mode)
     return GuardrailDecision(True, "ALLOWLISTED_GUARDS_PASSED", action_type, mode)
@@ -198,6 +199,7 @@ async def set_budget(db: AsyncSession, *, object_type: str, object_id: str, mont
     now = datetime.now(timezone.utc)
     config = parse_config(selected.autopilot_config_json)
     config["monthly_budget_limit"] = limit
+    config["weekly_budget_limit"] = limit
     selected.autopilot_config_json = json.dumps(config, ensure_ascii=False)
     selected.execution_updated_at = now
     await db.flush()

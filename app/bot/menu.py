@@ -717,10 +717,10 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
     confirmed = state.get("confirmed_business_outcomes")
     execution_mode = str(state.get("execution_mode") or "ADVISORY").upper()
     autopilot = state.get("autopilot") or {}
-    budget_limit = autopilot.get("monthly_budget_limit")
+    budget_limit = autopilot.get("weekly_budget_limit") if autopilot.get("weekly_budget_limit") is not None else autopilot.get("monthly_budget_limit")
     lines = [
         "🤖 AI Продвижение", "", f"{'Канал' if object_type == 'CHANNEL' else 'Бот'}: {title}",
-        f"Цель: {objective_name}", f"🎯 Target CPA: {target_text}", f"💰 Лимит: {budget_limit:.0f} ₽ / месяц" if budget_limit is not None else "💰 Лимит: пока не задан",
+        f"Цель: {objective_name}", f"🎯 Target CPA: {target_text}", f"💰 Лимит: {budget_limit:.0f} ₽ / неделю" if budget_limit is not None else "💰 Лимит: пока не задан",
         f"Фактический CPA: {actual_text}", f"{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}", "",
     ]
     lines.append("🚀 Автопилот включён" if execution_mode == "AUTONOMOUS" else "🚀 Автопилот выключен")
@@ -1613,13 +1613,12 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 return "💰 Выберите кампанию для лимита", rows
             # The campaign id is carried in the callback and is never inferred
             # from a display name.
-            return ("💰 Лимит автопилота\n\nВведите месячный лимит в рублях одним сообщением.\n"
-                    "Лимит действует только как внутренний safety envelope MaxiBot.",
-                    buttons(("⬅️ Назад", f"ads_budget:{object_type}:{object_id}")))
+            return ("💰 Лимит автопилота\n\nВведите недельный бюджет в рублях одним сообщением.\n"
+                    "Например: 1000\n\nMaxiBot не выйдет за этот внутренний лимит и не изменяет бюджет в Яндекс.Директе.", buttons())
         if action_name == "ads_budget":
             policy = await promotion_policy(db, object_type=object_type, object_id=object_id)
-            limit = policy.get("monthly_budget_limit")
-            limit_text = f"{limit:.0f} ₽ / месяц" if limit is not None else "не задан"
+            limit = policy.get("weekly_budget_limit") if policy.get("weekly_budget_limit") is not None else policy.get("monthly_budget_limit")
+            limit_text = f"{limit:.0f} ₽ / неделю" if limit is not None else "не задан"
             rows = []
             for link in links:
                 campaign = campaigns.get(link.campaign_id)
@@ -1628,7 +1627,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
             return ("💰 Бюджет автопилота\n\n"
                     f"Текущий месячный лимит: {limit_text}\n"
-                    "Это внутренний предел MaxiBot, а не изменение бюджета в Яндекс.Директе.",
+                    "Это внутренний недельный предел MaxiBot, а не изменение бюджета в Яндекс.Директе.\nMaxiBot не выйдет за установленную сумму.",
                     rows)
         authorized = [link for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
         if action_name == "ads_autopilot_enable_confirm":

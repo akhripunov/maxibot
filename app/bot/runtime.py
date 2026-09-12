@@ -2210,8 +2210,11 @@ class MaxBotRuntime:
                     async with self.session_factory() as db:
                         await set_budget(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id, monthly_budget_limit=message.text.strip())
                         await db.commit()
-                    await self.client.send_message(admin_id, "✅ Лимит автопилота сохранён.")
-                    await self._render(admin_id, f"ads_budget:{object_type}:{object_id}")
+                    await self.client.send_message(
+                        admin_id,
+                        f"✅ Бюджет установлен: {float(message.text.strip()):g} ₽ в неделю",
+                        buttons=[[{"text": "⬅️ Назад", "callback_data": f"ads:{object_id}"}]],
+                    )
                 except ValueError:
                     self._ads_budget_pending[str(admin_id)] = budget_pending
                     suffix = f":{campaign_id}" if campaign_id else ""
