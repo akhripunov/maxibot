@@ -880,6 +880,12 @@ class MaxBotRuntime:
         if navigation and update.callback_id:
             await self._navigation_callback(update, str(user_id), action)
             return
+        if navigation and not update.callback_id:
+            # Some MAX clients omit callback_id on an otherwise valid button
+            # event. Keep navigation functional instead of falling through
+            # silently; there is no callback to acknowledge in this case.
+            await self._render(user_id, action)
+            return
         # Non-navigation callbacks keep the immediate acknowledgement to
         # avoid retries while their action performs longer work.
         if update.callback_id and action == "custom_bot_token":
