@@ -137,6 +137,43 @@ def test_history_projection_is_bounded_and_exposes_safe_detail_chain():
     assert "Что изменил автопилот" in detail and "Почему" in detail and "Что узнал автопилот" in detail
 
 
+def test_history_learning_chain_renders_persisted_causality_without_raw_memory_ids():
+    state = _state()
+    state["history"] = [{
+        "experiment_id": "exp-13-internal", "experiment_seq": 13,
+        "status_label": "🟡 Запланирован", "campaign_name": "Основная",
+        "hypothesis": "Проверить новую площадку", "started_at": None,
+        "completed_at": None, "delta": {}, "evaluation_status": "PENDING",
+        "objective": "userDidSubscribe", "action": "EXCLUDE_PLACEMENT",
+        "rationale": "Сравнить с подтверждённым сигналом",
+        "why_selected": "На выбор повлияли сохранённые знания: эксперимент #12: Площадка снижает CPA",
+        "influenced_by": [{"claim": "Площадка снижает CPA", "status": "SUPPORTED", "source_experiments": [12]}],
+        "avoided_due_to_memory": [{"claim": "Старая гипотеза не работает", "status": "REJECTED", "source_experiments": [7, 9]}],
+        "learned_memories": [], "next_experiment_seqs": [],
+        "learning_chain": {"result": "PENDING", "learned": [], "used_in_next": []},
+        "maturity_before": "EXPLORE", "maturity_after": "VALIDATE",
+        "memories": [],
+    }]
+    detail = __import__("app.bot.menu", fromlist=["format_ads_experiment_detail"]).format_ads_experiment_detail(
+        state["history"][0], title="Москва 365"
+    )
+    state["history"].append({
+        "experiment_id": "exp-12-internal", "experiment_seq": 12,
+        "status_label": "✅ Победа", "campaign_name": "Основная", "hypothesis": "Площадка снижает CPA",
+        "started_at": None, "completed_at": None, "delta": {}, "evaluation_status": "SUCCESS",
+        "learned_memories": [{"claim": "Площадка снижает CPA", "status": "SUPPORTED"}],
+        "next_experiment_seqs": [13], "memories": [],
+    })
+    listing = format_ads_history_screen(state, title="Москва 365")
+    assert "🧠 MaxiBot выучил:" in listing and "↓ Повлияло на следующий тест" in listing
+    assert "Почему MaxiBot выбрал этот эксперимент" in detail
+    assert "🧠 Использованные знания:" in detail
+    assert "Эксперимент #12" in detail and "Площадка снижает CPA" in detail
+    assert "🚫 Не стали повторять:" in detail and "эксперименты #7, #9" in detail.lower()
+    # The display must expose only human experiment numbers, never technical IDs.
+    assert "exp-13-internal" not in detail
+
+
 def test_campaign_screen_toggle_only_changes_analysis_state():
     from app.bot.menu import format_ads_campaigns_screen
 

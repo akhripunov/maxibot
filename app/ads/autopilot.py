@@ -20,11 +20,47 @@ from app.core.config import settings
 from app.db.models import AdsAccount, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsCreative, AdsEntity, AdsPromotionCampaignLink, AdsRecommendation
 from app.ads.creative_experiment import assert_one_creative_variable, persist_creative_mapping, provider_lifecycle, measurement_start
 
+
+async def reserve_experiment_budget(db: AsyncSession, *, recommendation: AdsRecommendation,
+                                    object_type: str, object_id: str, campaign_id: str,
+                                    actual_spend: float, requested: float, monthly_limit: float) -> bool:
+    """Durable reservation under the canonical promotion-link row lock."""
+    link = await db.scalar(select(AdsPromotionCampaignLink).where(
+        AdsPromotionCampaignLink.object_type == object_type,
+        (AdsPromotionCampaignLink.channel_id == object_id if object_type == "CHANNEL" else AdsPromotionCampaignLink.bot_promotion_profile_id == object_id),
+        AdsPromotionCampaignLink.campaign_id == campaign_id,
+    ).with_for_update())
+    if not link:
+        return False
+    reserved = await db.scalar(select(func.coalesce(func.sum(AdsRecommendation.reserved_budget), 0)).where(
+        AdsRecommendation.reservation_status == "HELD",
+        AdsRecommendation.promotion_object_type == object_type,
+        AdsRecommendation.promotion_object_id == object_id,
+    ))
+    if float(actual_spend or 0) + float(reserved or 0) + max(0.0, float(requested or 0)) > float(monthly_limit):
+        return False
+    recommendation.reserved_budget = max(0.0, float(requested or 0))
+    recommendation.experiment_budget_cap = float(monthly_limit)
+    recommendation.reservation_status = "HELD"
+    await db.flush()
+    return True
+
+
+async def release_experiment_budget(db: AsyncSession, recommendation: AdsRecommendation, *, reason: str) -> None:
+    recommendation.reservation_status = "RELEASED"
+    recommendation.reserved_budget = 0
+    recommendation.maturity_reason = (recommendation.maturity_reason or "") + f"; reservation released: {reason}"
+    await db.flush()
+
 ADVISORY = "ADVISORY"
 AUTONOMOUS = "AUTONOMOUS"
 DEFAULT_MAX_TEST_SPEND = 1000.0
 DEFAULT_MAX_BUDGET_CHANGE_PERCENT = 10.0
 DEFAULT_MAX_PARALLEL_EXPERIMENTS = 1
+DEFAULT_TARGET_CPA_TOLERANCE = 0.20
+DEFAULT_STOP_LOSS_MULTIPLE = 1.5
+DEFAULT_MIN_EFFECT = 0.05
+DEFAULT_MIN_EVIDENCE = 10
 AUTOPILOT_ACTION_ALLOWLIST = frozenset({
     "EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "PAUSE_AD", "ENABLE_AD",
     "CREATE_CREATIVE_TEST", "CREATE_AD_TEST", "BOUNDED_BUDGET_REALLOCATION",
@@ -39,6 +75,12 @@ def default_autopilot_config() -> dict[str, Any]:
         "max_test_spend": DEFAULT_MAX_TEST_SPEND,
         "max_budget_change_percent": DEFAULT_MAX_BUDGET_CHANGE_PERCENT,
         "max_parallel_experiments": DEFAULT_MAX_PARALLEL_EXPERIMENTS,
+        "target_cpa_tolerance": DEFAULT_TARGET_CPA_TOLERANCE,
+        "stop_loss_multiple": DEFAULT_STOP_LOSS_MULTIPLE,
+        "min_effect": DEFAULT_MIN_EFFECT,
+        "min_evidence": DEFAULT_MIN_EVIDENCE,
+        "max_duration_hours": 168,
+        "cooldown_hours": 24,
         "allowed_actions": sorted(AUTOPILOT_ACTION_ALLOWLIST),
     }
 
@@ -82,7 +124,12 @@ class ExecutionResult:
 def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
                     active_experiments: int, monthly_spend: float = 0.0,
                     monthly_budget_limit: float | None = None,
-                    proposed_spend: float = 0.0, config: dict[str, Any] | None = None) -> GuardrailDecision:
+                    proposed_spend: float = 0.0, config: dict[str, Any] | None = None,
+                    target_cpa: float | None = None, actual_cpa: float | None = None,
+                    attribution_quality: str = "KNOWN", experiment_spend: float = 0.0,
+                    experiment_budget_cap: float | None = None, evidence_sufficient: bool = True,
+                    effect_size: float | None = None, provider_ready: bool = True,
+                    rollback_available: bool = True, max_duration_expired: bool = False) -> GuardrailDecision:
     config = {**default_autopilot_config(), **(config or {})}
     action_type = str(action_type or "").upper()
     mode = str(execution_mode or ADVISORY).upper()
@@ -95,6 +142,16 @@ def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
         return GuardrailDecision(False, "ACTION_NOT_ALLOWLISTED", action_type, mode)
     if trust != "GOOD":
         return GuardrailDecision(False, f"DATA_TRUST_{trust}", action_type, mode)
+    if not provider_ready:
+        return GuardrailDecision(False, "PROVIDER_NOT_READY", action_type, mode)
+    if not rollback_available:
+        return GuardrailDecision(False, "ROLLBACK_NOT_AVAILABLE", action_type, mode)
+    if max_duration_expired:
+        return GuardrailDecision(False, "MAX_DURATION_EXPIRED", action_type, mode)
+    if not evidence_sufficient:
+        return GuardrailDecision(False, "MINIMUM_EVIDENCE_NOT_MET", action_type, mode)
+    if str(attribution_quality).upper() == "UNKNOWN" and action_type in {"BOUNDED_BUDGET_REALLOCATION", "CREATE_AD_TEST", "CREATE_CREATIVE_TEST"}:
+        return GuardrailDecision(False, "ATTRIBUTION_UNKNOWN", action_type, mode)
     max_parallel = int(config.get("max_parallel_experiments") or DEFAULT_MAX_PARALLEL_EXPERIMENTS)
     if active_experiments >= max_parallel:
         return GuardrailDecision(False, "MAX_PARALLEL_EXPERIMENTS", action_type, mode)
@@ -103,6 +160,16 @@ def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
         return GuardrailDecision(False, "WEEKLY_BUDGET_LIMIT", action_type, mode)
     if proposed_spend > float(config.get("max_test_spend") or DEFAULT_MAX_TEST_SPEND):
         return GuardrailDecision(False, "MAX_TEST_SPEND", action_type, mode)
+    cap = experiment_budget_cap if experiment_budget_cap is not None else config.get("max_test_spend")
+    if cap is not None and experiment_spend + max(0.0, proposed_spend) > float(cap):
+        return GuardrailDecision(False, "EXPERIMENT_BUDGET_CAP", action_type, mode)
+    if target_cpa is not None and actual_cpa is not None:
+        tolerance = float(config.get("target_cpa_tolerance") or DEFAULT_TARGET_CPA_TOLERANCE)
+        stop_multiple = float(config.get("stop_loss_multiple") or DEFAULT_STOP_LOSS_MULTIPLE)
+        if actual_cpa > float(target_cpa) * stop_multiple:
+            return GuardrailDecision(False, "TARGET_CPA_STOP_LOSS", action_type, mode)
+        if effect_size is not None and abs(float(effect_size)) < float(config.get("min_effect") or DEFAULT_MIN_EFFECT):
+            return GuardrailDecision(False, "MINIMUM_EFFECT_NOT_MET", action_type, mode)
     return GuardrailDecision(True, "ALLOWLISTED_GUARDS_PASSED", action_type, mode)
 
 
@@ -281,13 +348,31 @@ async def execute_autonomous_action(
         reason = "CAMPAIGN_OR_ACCOUNT_NOT_FOUND"
         return ExecutionResult("DENIED", reason, {"status": "EXECUTION_DENIED", "reason": reason, "campaign_id": campaign_id})
     policy = await promotion_policy(db, object_type=object_type, object_id=object_id)
+    selected_link = next((item for item in await object_links(db, object_type=object_type, object_id=object_id)
+                          if item.campaign_id == campaign_id), None)
+    objective_target = float(selected_link.target_cpa) if selected_link and selected_link.target_cpa is not None else None
+    # Values supplied by the analysis are bounded inputs; missing critical
+    # values remain fail-closed in the Control Plane rather than inferred.
+    actual_cpa = target.get("actual_cpa") if isinstance(target, dict) else None
+    attribution_quality = str(target.get("attribution_quality") or "UNKNOWN") if isinstance(target, dict) else "UNKNOWN"
+    # Missing safety attestations are ambiguous and therefore fail closed.
+    evidence_sufficient = bool(target.get("evidence_sufficient", False)) if isinstance(target, dict) else False
+    provider_ready = bool(target.get("provider_ready", False)) if isinstance(target, dict) else False
+    rollback_available = bool(target.get("rollback_available", False)) if isinstance(target, dict) else False
     active_experiments = await active_experiment_count_for_scope(
         db, object_type=object_type, object_id=object_id, campaign_id=campaign_id
     )
     guard = validate_action(execution_mode=AUTONOMOUS, action_type=action_type,
                            data_trust=data_trust, active_experiments=active_experiments,
                            monthly_spend=monthly_spend,
-                           proposed_spend=proposed_spend, config=policy)
+                           proposed_spend=proposed_spend, config=policy,
+                           target_cpa=objective_target, actual_cpa=actual_cpa,
+                           attribution_quality=attribution_quality,
+                           experiment_spend=float(target.get("experiment_spend") or 0) if isinstance(target, dict) else 0,
+                           experiment_budget_cap=target.get("experiment_budget_cap") if isinstance(target, dict) else None,
+                           evidence_sufficient=evidence_sufficient, provider_ready=provider_ready,
+                           rollback_available=rollback_available,
+                           max_duration_expired=bool(target.get("max_duration_expired", False)) if isinstance(target, dict) else False)
     if not guard.allowed:
         evidence = {"status": "EXECUTION_DENIED", "reason": guard.reason,
                     "object_type": object_type, "object_id": object_id,
@@ -298,6 +383,24 @@ async def execute_autonomous_action(
             outcome.implementation_confirmed = "NO"
             outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
         return ExecutionResult("DENIED", guard.reason, evidence)
+    guardrail_evidence = {
+        "guardrail_decision_id": __import__("uuid").uuid4().hex,
+        "timestamp": datetime.now(timezone.utc).isoformat(), "rules_version": "autopilot-v2",
+        "inputs": {"target_cpa": objective_target, "monthly_budget": policy.get("monthly_budget_limit"), "actual_spend": monthly_spend, "reserved_budget": target.get("experiment_spend", 0), "experiment_cap": target.get("experiment_budget_cap"), "stop_loss": policy.get("stop_loss_multiple"), "data_trust": data_trust, "attribution_quality": attribution_quality, "campaign_scope": campaign_id, "provider_ready": provider_ready, "allowlist": action_type in AUTOPILOT_ACTION_ALLOWLIST, "rollback_available": rollback_available, "active_experiments": active_experiments},
+        "result": "ALLOW", "reasons": [guard.reason],
+    }
+    if outcome:
+        outcome.implementation_evidence_json = json.dumps({"guardrail": guardrail_evidence}, ensure_ascii=False)
+    if recommendation:
+        recommendation.guardrail_decision_json = json.dumps(guardrail_evidence, ensure_ascii=False)
+        monthly_limit = float(policy.get("monthly_budget_limit") or 0)
+        if proposed_spend and monthly_limit <= 0:
+            return ExecutionResult("DENIED", "BUDGET_LIMIT_REQUIRED", {"status": "EXECUTION_DENIED", "guardrail": guardrail_evidence})
+        if proposed_spend and not await reserve_experiment_budget(db, recommendation=recommendation, object_type=object_type, object_id=object_id, campaign_id=campaign_id, actual_spend=monthly_spend, requested=proposed_spend, monthly_limit=monthly_limit):
+            guardrail_evidence["result"] = "DENY"
+            guardrail_evidence["reasons"] = ["ATOMIC_BUDGET_RESERVATION_DENIED"]
+            recommendation.guardrail_decision_json = json.dumps(guardrail_evidence, ensure_ascii=False)
+            return ExecutionResult("DENIED", "ATOMIC_BUDGET_RESERVATION_DENIED", {"status": "EXECUTION_DENIED", "guardrail": guardrail_evidence})
     if provider_execute is None:
         reason = "PROVIDER_EXECUTOR_NOT_CONFIGURED"
         evidence = {"status": "EXECUTION_DENIED", "reason": reason,

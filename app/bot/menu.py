@@ -911,8 +911,17 @@ def format_ads_history_screen(state: dict, *, title: str, page: int = 0, page_si
             label = "CPA" if delta.get("actual_cpa_7d") else "Результат"
             suffix = " ₽" if label == "CPA" else ""
             lines.append(f"{label}: {_ru_number(metric['before'])}{suffix} → {_ru_number(metric['after'])}{suffix}")
+            lines.append(f"До: {_ru_number(metric['before'])}{suffix} · После: {_ru_number(metric['after'])}{suffix}")
+        if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
+            lines.append("Результат" + f": {item['evaluation_status']}")
         if item.get("evaluation_status") not in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
             lines.append("Статус: Данных пока недостаточно")
+        for learned in item.get("learned_memories") or []:
+            lines.extend(["", "🧠 MaxiBot выучил:", _owner_short_text(learned.get("claim")),
+                          f"Статус знания: {learned.get('status', 'UNKNOWN')}"])
+        next_seqs = item.get("next_experiment_seqs") or []
+        if next_seqs:
+            lines.extend(["", "↓ Повлияло на следующий тест", "Эксперимент(ы): " + ", ".join(f"#{seq}" for seq in next_seqs)])
     if not rows:
         lines.extend(["", "Экспериментов пока нет.", "После включения автопилота здесь появятся его проверки, изменения и результаты."])
     elif total_pages > 1:
@@ -940,6 +949,24 @@ def format_ads_experiment_detail(item: dict, *, title: str) -> str:
         lines.extend(["", "🔧 Что изменил автопилот", sanitize_ai_user_text(item["action"])])
     if item.get("rationale"):
         lines.extend(["", "🔍 Почему", _owner_short_text(item["rationale"])])
+    lines.extend(["", "Почему MaxiBot выбрал этот эксперимент:",
+                  _owner_short_text(item.get("why_selected"), "Источник решения не зафиксирован")])
+    used = item.get("influenced_by") or []
+    if used:
+        lines.extend(["", "🧠 Использованные знания:"])
+        for knowledge in used:
+            source = ", ".join(f"#{seq}" for seq in knowledge.get("source_experiments") or []) or "эксперимент без номера"
+            lines.extend([f"Эксперимент {source}", _owner_short_text(knowledge.get("claim")),
+                          f"Статус: {knowledge.get('status', 'UNKNOWN')}"])
+    avoided = item.get("avoided_due_to_memory") or []
+    if avoided:
+        lines.extend(["", "🚫 Не стали повторять:"])
+        for knowledge in avoided:
+            source = ", ".join(f"#{seq}" for seq in knowledge.get("source_experiments") or []) or "предыдущий тест"
+            lines.extend([_owner_short_text(knowledge.get("claim")),
+                          f"Почему: эксперименты {source} уже дали результат {knowledge.get('status', 'UNKNOWN')}."])
+    elif item.get("avoided_due_to_memory") is not None:
+        lines.extend(["", "🚫 Не стали повторять:", "Нет зафиксированных исключённых гипотез."])
     if item.get("started_at"):
         lines.extend(["", "📅 Запущен", item["started_at"].astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M")])
     if item.get("completed_at"):
@@ -949,8 +976,24 @@ def format_ads_experiment_detail(item: dict, *, title: str) -> str:
     if cpa.get("before") is not None or cpa.get("after") is not None:
         lines.extend(["", "ДО / ПОСЛЕ", f"CPA: {_ru_number(cpa.get('before')) if cpa.get('before') is not None else 'н/д'} ₽ → {_ru_number(cpa.get('after')) if cpa.get('after') is not None else 'н/д'} ₽"])
     lines.extend(["", "🏁 Результат", item.get("status_label") or "🟡 Идёт"])
-    for learning in item.get("memories") or []:
-        lines.extend(["", "🧠 Что узнал автопилот", _owner_short_text(learning)])
+    if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
+        lines.append("Результат" + f": {item['evaluation_status']}")
+    chain = item.get("learning_chain") or {}
+    learned = chain.get("learned") or []
+    if learned:
+        lines.extend(["", "🧠 Цепочка обучения"])
+        lines.append(f"#{item.get('experiment_seq')} {chain.get('result', 'PENDING')}")
+        for knowledge in learned:
+            lines.extend(["↓", _owner_short_text(knowledge.get("claim")), knowledge.get("status", "UNKNOWN")])
+        for seq in chain.get("used_in_next") or []:
+            lines.extend(["↓", f"использовано в анализе #{seq}"])
+    elif item.get("memories"):
+        for learning in item.get("memories") or []:
+            lines.extend(["", "🧠 Что узнал автопилот", _owner_short_text(learning)])
+    maturity_before = item.get("maturity_before")
+    maturity_after = item.get("maturity_after")
+    if maturity_before or maturity_after:
+        lines.extend(["", f"Зрелость гипотезы: {maturity_before or 'UNKNOWN'} → {maturity_after or 'UNKNOWN'}"])
     return "\n".join(lines)
 
 

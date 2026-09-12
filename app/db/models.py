@@ -1092,6 +1092,16 @@ class AdsRecommendation(Base):
     measurement_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
     control_variant_token: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     treatment_variant_token: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    hypothesis_key: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    maturity_before: Mapped[Optional[str]] = mapped_column(String(16))
+    maturity_after: Mapped[Optional[str]] = mapped_column(String(16))
+    maturity_reason: Mapped[Optional[str]] = mapped_column(Text)
+    influenced_by_memory_ids_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]", nullable=False)
+    avoided_due_to_memory_ids_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]", nullable=False)
+    experiment_budget_cap: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
+    reserved_budget: Mapped[Optional[float]] = mapped_column(Numeric(20, 6), default=0, server_default="0")
+    reservation_status: Mapped[str] = mapped_column(String(16), default="NONE", server_default="NONE", nullable=False, index=True)
+    guardrail_decision_json: Mapped[Optional[str]] = mapped_column(Text)
 
 
 class AdsMemory(Base):

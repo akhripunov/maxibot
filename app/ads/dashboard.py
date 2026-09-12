@@ -330,6 +330,47 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     memories_by_experiment: dict[str, list[AdsMemory]] = {}
     for memory in memory_rows:
         memories_by_experiment.setdefault(memory.experiment_id, []).append(memory)
+    memory_by_id = {memory.id: memory for memory in memory_rows}
+    evidence_rows = list((await db.scalars(select(AdsMemoryEvidence).where(
+        AdsMemoryEvidence.memory_id.in_(list(memory_by_id))
+    ))).all()) if memory_by_id else []
+    evidence_by_memory: dict[str, list[AdsMemoryEvidence]] = {}
+    for evidence in evidence_rows:
+        evidence_by_memory.setdefault(evidence.memory_id, []).append(evidence)
+    experiment_seq_by_id = {
+        item.experiment_id: item.experiment_seq for item in all_recommendations
+        if item.experiment_id and item.experiment_seq is not None
+    }
+
+    def _memory_ids(value: str | None) -> list[str]:
+        parsed = _json(value, [])
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+
+    def _memory_summary(memory: AdsMemory) -> dict[str, Any]:
+        # Technical IDs stay in the server-side projection only.  The bot
+        # formatter renders the claim/status and experiment numbers instead.
+        source_experiments = sorted({
+            experiment_seq_by_id.get(evidence.experiment_id)
+            for evidence in evidence_by_memory.get(memory.id, [])
+            if experiment_seq_by_id.get(evidence.experiment_id) is not None
+        })
+        return {
+            "claim": memory.content,
+            "status": str(memory.status or "UNKNOWN").upper(),
+            "confidence": str(memory.confidence or "UNKNOWN").upper(),
+            "source_experiments": source_experiments,
+            "evidence_count": len(evidence_by_memory.get(memory.id, [])),
+        }
+
+    memories_used_by_experiment: dict[str, list[int]] = {}
+    for recommendation_row in all_recommendations:
+        for memory_id in _memory_ids(recommendation_row.influenced_by_memory_ids_json):
+            memory = memory_by_id.get(memory_id)
+            if not memory or not memory.experiment_id:
+                continue
+            seq = recommendation_row.experiment_seq
+            if seq is not None:
+                memories_used_by_experiment.setdefault(memory.experiment_id, []).append(seq)
     creative_ids = {value for item in all_recommendations for value in (
         item.control_creative_id, item.treatment_creative_id, item.control_ad_entity_id, item.treatment_ad_entity_id
     ) if value}
@@ -348,6 +389,23 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         policy_payload = _json(item.policy_json, {})
         problem_payload = _json(item.problem_json, {})
         delta = _json(measured.observed_delta_json, {}) if measured else (_json(latest.observed_delta_json, {}) if latest else {})
+        own_memories = memories_by_experiment.get(item.experiment_id, [])
+        influenced_ids = _memory_ids(item.influenced_by_memory_ids_json)
+        avoided_ids = _memory_ids(item.avoided_due_to_memory_ids_json)
+        used_knowledge = [_memory_summary(memory) for memory in
+                          (memory_by_id[memory_id] for memory_id in influenced_ids if memory_id in memory_by_id)]
+        avoided_knowledge = [_memory_summary(memory) for memory in
+                             (memory_by_id[memory_id] for memory_id in avoided_ids if memory_id in memory_by_id)]
+        learned = [_memory_summary(memory) for memory in own_memories]
+        next_experiments = sorted(set(memories_used_by_experiment.get(item.experiment_id, [])))
+        result = str(measured.evaluation_status if measured else "PENDING").upper()
+        if used_knowledge:
+            why_selected = "На выбор повлияли сохранённые знания: " + "; ".join(
+                f"эксперимент #{seq}: {str(knowledge['claim'])[:240]}" for knowledge in used_knowledge
+                for seq in (knowledge["source_experiments"] or [None])
+            )
+        else:
+            why_selected = "Источник решения не зафиксирован"
         history.append({
             "experiment_id": item.experiment_id,
             "experiment_seq": item.experiment_seq,
@@ -371,7 +429,25 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             "after": _experiment_view(item, measured).get("after"),
             "rollback": bool(measured and measured.execution_status == "ROLLED_BACK"),
             "status_label": _experiment_status_label({"evaluation_status": measured.evaluation_status if measured else None, "experiment_status": item.experiment_status, "implementation_confirmed": measured.implementation_confirmed if measured else None}),
-            "memories": [memory.content for memory in memories_by_experiment.get(item.experiment_id, [])],
+            "memories": [memory.content for memory in own_memories],
+            "learned_memories": learned,
+            "memory_status": learned[0]["status"] if learned else None,
+            "memory_claim": learned[0]["claim"] if learned else None,
+            "influenced_by": used_knowledge,
+            "avoided_due_to_memory": avoided_knowledge,
+            "why_selected": why_selected,
+            "next_experiment_seqs": next_experiments,
+            "learning_chain": {
+                "result": result,
+                "learned": learned,
+                "used_in_next": next_experiments,
+                "maturity_before": item.maturity_before,
+                "maturity_after": item.maturity_after,
+                "maturity_reason": item.maturity_reason,
+            },
+            "maturity_before": item.maturity_before,
+            "maturity_after": item.maturity_after,
+            "maturity_reason": item.maturity_reason,
             "creative_kind": item.experiment_kind,
             "control_creative": creative_by_id.get(item.control_creative_id).title if creative_by_id.get(item.control_creative_id) else None,
             "treatment_creative": creative_by_id.get(item.treatment_creative_id).title if creative_by_id.get(item.treatment_creative_id) else None,
