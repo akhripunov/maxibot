@@ -89,7 +89,7 @@ async def set_objective(db: AsyncSession, *, object_type: str, object_id: str, t
 
 
 async def disable_objective(db: AsyncSession, *, object_type: str, object_id: str, campaign_id: str | None = None) -> list[AdsPromotionCampaignLink]:
-    links = await active_links(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id)
+    links = await object_links(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id)
     timestamp = datetime.now(timezone.utc)
     for link in links:
         link.objective_status = DISABLED

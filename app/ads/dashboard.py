@@ -84,8 +84,7 @@ def stage_for_state(
 
 
 def _objective(links: list[AdsPromotionCampaignLink], object_type: str) -> dict[str, Any]:
-    configured = [link for link in links if link.status == "ACTIVE"
-                  and link.objective_status == "ACTIVE" and link.objective_type
+    configured = [link for link in links if link.objective_status == "ACTIVE" and link.objective_type
                   and link.target_cpa is not None]
     primary_outcome = "max_subscriber" if object_type == "CHANNEL" else "bot_started"
     if not configured:
