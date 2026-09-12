@@ -115,7 +115,26 @@ def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     assert ads_campaign_selection_buttons(state, channel_id="channel-1")[0][0]["text"].startswith("◻️")
     assert "🎨 Креатив A" in format_ads_why_screen(state, title="Москва 365")
     assert "INCONCLUSIVE не считаются проверенным обучением" in format_ads_learning_screen(state, title="Москва 365")
-    assert "История появится" in format_ads_history_screen(state, title="Москва 365")
+    assert "Экспериментов пока нет." in format_ads_history_screen(state, title="Москва 365")
+
+
+def test_history_projection_is_bounded_and_exposes_safe_detail_chain():
+    state = _state()
+    state["history"] = [{
+        "experiment_id": "internal-id-must-not-render", "experiment_seq": 2,
+        "status_label": "✅ Победа", "campaign_name": "Основная",
+        "hypothesis": "Площадка улучшит CPA", "started_at": None,
+        "completed_at": None, "delta": {"actual_cpa_7d": {"before": 20, "after": 15}},
+        "evaluation_status": "SUCCESS", "objective": "userDidSubscribe",
+        "action": "EXCLUDE_PLACEMENT", "rationale": "Данные по площадке",
+        "memories": ["Площадка дала лучший CPA"],
+    }]
+    text = format_ads_history_screen(state, title="Москва 365")
+    assert "🧪 Эксперимент #2" in text
+    assert "✅ Победа" in text and "CPA: 20,00 ₽ → 15,00 ₽" in text
+    assert "internal-id-must-not-render" not in text
+    detail = __import__("app.bot.menu", fromlist=["format_ads_experiment_detail"]).format_ads_experiment_detail(state["history"][0], title="Москва 365")
+    assert "Что изменил автопилот" in detail and "Почему" in detail and "Что узнал автопилот" in detail
 
 
 def test_campaign_screen_toggle_only_changes_analysis_state():

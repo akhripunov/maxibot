@@ -828,6 +828,8 @@ class MaxBotRuntime:
             "ads_creatives": r"^ads_creatives:[0-9a-f-]{20,}$",
             "ads_learning": r"^ads_learning:[0-9a-f-]{20,}$",
             "ads_history": r"^ads_history:[0-9a-f-]{20,}$",
+            "ads_history_page": r"^ads_history_page:[0-9a-f-]{20,}:[0-9]+$",
+            "ads_history_detail": r"^ads_history_detail:[0-9a-f-]{20,}:[0-9a-f-]{20,}$",
             "ads_context": r"^ads_context:[0-9a-f-]{20,}$",
         }
         malformed_prefix = next((prefix for prefix in malformed_readonly_ads if action == prefix or action.startswith(prefix + ":")), None)
@@ -1223,7 +1225,7 @@ class MaxBotRuntime:
                     await db.commit()
                 await self._render(user_id, f"ads_objective:{object_type}:{object_id}")
                 return
-        elif action.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_recommendations:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:")):
+        elif action.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_recommendations:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:", "ads_bot_history_detail:")):
             if can_access_ads(str(user_id)) and action.split(":", 1)[1]:
                 await self._render(user_id, action)
                 return
@@ -1249,7 +1251,7 @@ class MaxBotRuntime:
             if ads_allowed:
                 await self._render(user_id, action, selected_id)
                 return
-            elif action.split(":", 1)[0] in {"ads_creatives", "ads_context", "ads_learning", "ads_history"}:
+            elif action.split(":", 1)[0] in {"ads_creatives", "ads_context", "ads_learning", "ads_history", "ads_history_page", "ads_history_detail"}:
                 # A visible dashboard can outlive a channel record/id refresh.
                 # Resolve the current owned channel before falling through to
                 # the generic unavailable screen.

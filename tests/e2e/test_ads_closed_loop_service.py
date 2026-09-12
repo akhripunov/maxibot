@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ads.memory import retrieve
 from app.ads.outcomes import ensure_outcome_checkpoints, mark_outcome_completed, record_implementation_evidence
-from app.ads.service import _active_experiment_exists, _assign_experiment_identity, _closed_loop_context, _context
+from app.ads.service import _active_experiment_exists, _assign_experiment_identity, _closed_loop_context, _context, _experiment_object_lock_key, _experiment_scope_lock_key
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsMemory, AdsMemoryEvidence, AdsRecommendation, Base
 
 
@@ -121,6 +121,25 @@ async def test_active_experiment_blocks_second_experiment_but_completed_allows_n
     active.experiment_status = "completed"
     await db.flush()
     assert not await _active_experiment_exists(db, object_type="BOT", object_id="bot-loop", campaign_id="campaign-loop")
+
+
+def test_experiment_lock_keys_are_stable_and_scope_separated():
+    first = _experiment_scope_lock_key(object_type="CHANNEL", object_id="object-1", campaign_id="campaign-1")
+    same = _experiment_scope_lock_key(object_type="CHANNEL", object_id="object-1", campaign_id="campaign-1")
+    other_campaign = _experiment_scope_lock_key(object_type="CHANNEL", object_id="object-1", campaign_id="campaign-2")
+    other_object = _experiment_object_lock_key(object_type="CHANNEL", object_id="object-2")
+    assert first == same
+    assert first != other_campaign
+    assert -2**63 <= first < 2**63
+    assert -2**63 <= other_object < 2**63
+
+
+def test_experiment_creation_source_locks_before_sequence_allocation():
+    source = open("app/ads/service.py", encoding="utf-8").read()
+    lock_pos = source.index("await _lock_experiment_scope(", source.index("async def _assign_experiment_identity"))
+    seq_pos = source.index("func.max(AdsRecommendation.experiment_seq)", lock_pos)
+    assert lock_pos < seq_pos
+    assert "pg_advisory_xact_lock" in source
 
 
 def test_enable_path_invokes_decision_runner_and_control_plane_is_write_gated():

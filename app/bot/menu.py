@@ -886,22 +886,65 @@ def format_ads_learning_screen(state: dict, *, title: str) -> str:
     return "\n".join(lines)
 
 
-def format_ads_history_screen(state: dict, *, title: str) -> str:
-    lines = ["🕘 История", "", title]
-    for item in state.get("history") or []:
-        created = item.get("created_at")
-        status = item.get("evaluation_status") or "PENDING"
-        implementation = "IMPLEMENTED" if item.get("implementation_status") == "YES" else "НЕ ПОДТВЕРЖДЕНО"
+def format_ads_history_screen(state: dict, *, title: str, page: int = 0, page_size: int = 5) -> str:
+    rows = state.get("history") or []
+    total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    lines = ["🕘 История экспериментов", "", title]
+    visible = rows[page * page_size:(page + 1) * page_size]
+    for item in visible:
         experiment = item.get("experiment_seq")
-        lines.extend(["", f"🧪 Эксперимент #{experiment}" if experiment is not None else "🧪 Эксперимент —",
-                      created.astimezone(MOSCOW).strftime("%d.%m") if created else "—",
-                      _owner_short_text(item.get("title")), implementation, status])
+        lines.extend(["", f"🧪 Эксперимент #{experiment} — {item.get('status_label') or '🟡 Запланирован'}"])
+        if item.get("campaign_name"):
+            lines.append(f"Кампания: {sanitize_ai_user_text(item['campaign_name'])}")
+        if item.get("hypothesis"):
+            lines.append(f"Гипотеза: {_owner_short_text(item['hypothesis'])}")
+        if item.get("started_at"):
+            lines.append(f"Запущен: {item['started_at'].astimezone(MOSCOW):%d.%m.%Y %H:%M}")
+        if item.get("completed_at"):
+            lines.append(f"Завершён: {item['completed_at'].astimezone(MOSCOW):%d.%m.%Y %H:%M}")
         delta = item.get("delta") or {}
-        cpa = delta.get("actual_cpa_7d") or {}
-        if cpa.get("before") is not None and cpa.get("after") is not None:
-            lines.append(f"CPA: {_ru_number(cpa['before'])} ₽ → {_ru_number(cpa['after'])} ₽")
-    if not state.get("history"):
-        lines.extend(["", "История появится после первой рекомендации."])
+        metric = delta.get("actual_cpa_7d") or delta.get("conversions_7d") or {}
+        if isinstance(metric, dict) and metric.get("before") is not None and metric.get("after") is not None:
+            label = "CPA" if delta.get("actual_cpa_7d") else "Результат"
+            suffix = " ₽" if label == "CPA" else ""
+            lines.append(f"{label}: {_ru_number(metric['before'])}{suffix} → {_ru_number(metric['after'])}{suffix}")
+        if item.get("evaluation_status") not in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
+            lines.append("Статус: Данных пока недостаточно")
+    if not rows:
+        lines.extend(["", "Экспериментов пока нет.", "После включения автопилота здесь появятся его проверки, изменения и результаты."])
+    elif total_pages > 1:
+        lines.extend(["", f"Страница: {page + 1} / {total_pages}"])
+    return "\n".join(lines)
+
+
+def format_ads_experiment_detail(item: dict, *, title: str) -> str:
+    lines = [f"🧪 Эксперимент #{item.get('experiment_seq')}", "", item.get("status_label") or "🟡 Запланирован"]
+    if item.get("campaign_name"):
+        lines.extend(["", "📊 Кампания", sanitize_ai_user_text(item["campaign_name"])])
+    if item.get("hypothesis"):
+        lines.extend(["", "💡 Гипотеза", _owner_short_text(item["hypothesis"])])
+    if item.get("objective"):
+        objective = item["objective"]
+        if isinstance(objective, dict):
+            objective = objective.get("type") or objective.get("mode")
+        if objective:
+            lines.extend(["", "🎯 Цель", sanitize_ai_user_text(objective)])
+    if item.get("action"):
+        lines.extend(["", "🔧 Что изменил автопилот", sanitize_ai_user_text(item["action"])])
+    if item.get("rationale"):
+        lines.extend(["", "🔍 Почему", _owner_short_text(item["rationale"])])
+    if item.get("started_at"):
+        lines.extend(["", "📅 Запущен", item["started_at"].astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M")])
+    if item.get("completed_at"):
+        lines.extend(["Завершён", item["completed_at"].astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M")])
+    delta = item.get("delta") or {}
+    cpa = delta.get("actual_cpa_7d") or {}
+    if cpa.get("before") is not None or cpa.get("after") is not None:
+        lines.extend(["", "ДО / ПОСЛЕ", f"CPA: {_ru_number(cpa.get('before')) if cpa.get('before') is not None else 'н/д'} ₽ → {_ru_number(cpa.get('after')) if cpa.get('after') is not None else 'н/д'} ₽"])
+    lines.extend(["", "🏁 Результат", item.get("status_label") or "🟡 Идёт"])
+    for learning in item.get("memories") or []:
+        lines.extend(["", "🧠 Что узнал автопилот", _owner_short_text(learning)])
     return "\n".join(lines)
 
 
@@ -1916,6 +1959,25 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         _, object_type, object_id, target = screen.split(":", 3)
         back = f"ads_objective:{object_type}:{object_id}"
         return (f"✅ Цель установлена: {target} ₽", buttons(("⬅️ Назад", back)))
+    if screen.startswith("ads_bot_history_detail:"):
+        _, bot_key, experiment_id = screen.split(":", 2)
+        if not bot_key or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        if bot_key == "system":
+            if not is_maxibot_owner(admin):
+                return await render_screen(db, admin, "promotion")
+            profile = await db.scalar(select(BotPromotionProfile).where(BotPromotionProfile.bot_key == "maxibot", BotPromotionProfile.bot_type == "SYSTEM"))
+        else:
+            profile = await db.scalar(select(BotPromotionProfile).join(BotConnection, BotConnection.id == BotPromotionProfile.bot_connection_id).where(
+                BotConnection.id == bot_key, BotConnection.owner_admin_id == admin.id, BotPromotionProfile.bot_type == "CUSTOMER"
+            ))
+        if not profile:
+            return await render_screen(db, admin, "promotion")
+        state = await build_ads_dashboard(db, object_type="BOT", object_id=profile.id)
+        item = next((row for row in state.get("history") or [] if row.get("experiment_id") == experiment_id), None)
+        if not item:
+            return await render_screen(db, admin, f"ads_bot_history:{bot_key}")
+        return format_ads_experiment_detail(item, title=profile.bot_key), buttons(("⬅️ История", f"ads_bot_history:{bot_key}"))
     if screen.startswith(("ads_bot_campaigns:", "ads_bot_creatives:", "ads_bot_context:", "ads_bot_learning:", "ads_bot_history:")):
         bot_key = screen.rsplit(":", 1)[1]
         if not bot_key or not can_access_ads(admin.external_id):
@@ -1941,6 +2003,11 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             "ads_bot_learning": format_ads_learning_screen,
             "ads_bot_history": format_ads_history_screen,
         }[prefix]
+        if prefix == "ads_bot_history":
+            history = state.get("history") or []
+            controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_bot_history_detail:{bot_key}:{item['experiment_id']}") for item in history[:5] if item.get("experiment_id")]
+            controls.append(("⬅️ AI Продвижение", f"ads_bot:{bot_key}"))
+            return format_ads_history_screen(state, title=title), buttons(*controls)
         return formatter(state, title=title), buttons(("⬅️ AI Продвижение", f"ads_bot:{bot_key}"))
     if screen.startswith("ads_bot:"):
         from app.ads.service import latest_bot_view
@@ -2100,6 +2167,32 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
         formatter = format_ads_creatives_screen if screen.startswith("ads_creatives:") else format_ads_learning_screen
         return formatter(state, title="Канал: " + channel.title), buttons(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+    if screen.startswith("ads_history_page:"):
+        _, channel_id_value, page_value = screen.split(":", 2)
+        channel = await db.scalar(select(Channel).where(Channel.id == channel_id_value, Channel.admin_id == admin.id))
+        if not channel or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
+        page = int(page_value)
+        rows = state.get("history") or []
+        total_pages = max(1, (len(rows) + 4) // 5)
+        controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_history_detail:{channel.id}:{item['experiment_id']}") for item in rows[page * 5:(page + 1) * 5] if item.get("experiment_id")]
+        if page > 0:
+            controls.append(("⬅️ Предыдущая", f"ads_history_page:{channel.id}:{page - 1}"))
+        if page + 1 < total_pages:
+            controls.append(("➡️ Следующая", f"ads_history_page:{channel.id}:{page + 1}"))
+        controls.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+        return format_ads_history_screen(state, title="Канал: " + channel.title, page=page), buttons(*controls)
+    if screen.startswith("ads_history_detail:"):
+        _, channel_id_value, experiment_id = screen.split(":", 2)
+        channel = await db.scalar(select(Channel).where(Channel.id == channel_id_value, Channel.admin_id == admin.id))
+        if not channel or not can_access_ads(admin.external_id):
+            return await render_screen(db, admin, "promotion")
+        state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
+        item = next((row for row in state.get("history") or [] if row.get("experiment_id") == experiment_id), None)
+        if not item:
+            return await render_screen(db, admin, f"ads_history:{channel.id}")
+        return format_ads_experiment_detail(item, title=channel.title), buttons(("⬅️ История", f"ads_history:{channel.id}"))
     if screen.startswith(("ads_context:", "ads_history:")):
         selected_id = screen.split(":", 1)[1]
         channel = await db.scalar(select(Channel).where(Channel.id == selected_id, Channel.admin_id == admin.id))
@@ -2107,6 +2200,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return await render_screen(db, admin, "promotion")
         state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
         formatter = format_ads_why_screen if screen.startswith("ads_context:") else format_ads_history_screen
+        if screen.startswith("ads_history:"):
+            rows = state.get("history") or []
+            controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_history_detail:{channel.id}:{item['experiment_id']}") for item in rows[:5] if item.get("experiment_id")]
+            if len(rows) > 5:
+                controls.append(("➡️ Следующая", f"ads_history_page:{channel.id}:1"))
+            controls.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))
+            return format_ads_history_screen(state, title="Канал: " + channel.title), buttons(*controls)
         return formatter(state, title="Канал: " + channel.title), buttons(("⬅️ AI Продвижение", f"ads:{channel.id}"))
     if screen.startswith("ads_context:") or screen.startswith("ads_history:") or screen.startswith("ads_recommendations:") or (screen.startswith("ads_memory:") and not screen.startswith("ads_memory_detail:")) or screen.startswith("ads_health:"):
         selected_id = screen.split(":", 1)[1]

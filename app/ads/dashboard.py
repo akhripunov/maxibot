@@ -154,6 +154,27 @@ def _experiment_view(recommendation: AdsRecommendation, outcome: AdsAiOutcome | 
     }
 
 
+def _experiment_status_label(item: dict[str, Any]) -> str:
+    evaluation = str(item.get("evaluation_status") or "").upper()
+    lifecycle = str(item.get("experiment_status") or "").lower()
+    if evaluation == "SUCCESS":
+        return "✅ Победа"
+    if evaluation == "FAIL":
+        return "❌ Неудача"
+    if evaluation == "INCONCLUSIVE":
+        return "⚪ Недостаточно данных"
+    if lifecycle in {"running", "executing", "evaluating", "rolling_back"} or item.get("implementation_confirmed") == "YES":
+        return "🟡 Идёт"
+    return "🟡 Запланирован"
+
+
+def _history_metric(delta: dict[str, Any], key: str) -> tuple[Any, Any] | None:
+    value = delta.get(key)
+    if isinstance(value, dict) and value.get("before") is not None and value.get("after") is not None:
+        return value["before"], value["after"]
+    return None
+
+
 async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: str) -> dict[str, Any]:
     """Build a bounded dashboard for one CHANNEL or BOT promotion object."""
     object_type = object_type.upper()
@@ -170,15 +191,24 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         and str(campaign_by_id[campaign_id].status or "").upper() not in INACTIVE_CAMPAIGN_STATES]
     active_ids = {campaign.id for campaign in active_campaigns}
 
+    # Current recommendation/analysis state is active-scope only, while
+    # experiment history must remain reconstructable after a campaign is
+    # suspended or unlinked.  Keep both bounded run sets separate.
+    scoped_ids = set(campaign_ids)
     runs = list((await db.scalars(select(AdsAiRun).where(
         *_scope(AdsAiRun, object_type, object_id), AdsAiRun.campaign_id.in_(active_ids))
         .order_by(AdsAiRun.created_at.desc()).limit(100))).all()) if active_ids else []
+    history_runs = list((await db.scalars(select(AdsAiRun).where(
+        *_scope(AdsAiRun, object_type, object_id), AdsAiRun.campaign_id.in_(scoped_ids))
+        .order_by(AdsAiRun.created_at.desc()).limit(200))).all()) if scoped_ids else []
     run_by_id = {run.id: run for run in runs}
+    history_run_by_id = {run.id: run for run in history_runs}
     running = any(run.status in RUNNING_AI_STATES for run in runs)
     all_recommendations = list((await db.scalars(select(AdsRecommendation).where(
-        AdsRecommendation.ai_run_id.in_(list(run_by_id)))
-        .order_by(AdsRecommendation.created_at.desc()).limit(100))).all()) if run_by_id else []
-    recommendations = [item for item in all_recommendations if item.status == "OPEN"]
+        AdsRecommendation.ai_run_id.in_(list(history_run_by_id)))
+        .order_by(AdsRecommendation.created_at.desc()).limit(100))).all()) if history_run_by_id else []
+    current_recommendations = [item for item in all_recommendations if item.ai_run_id in run_by_id]
+    recommendations = [item for item in current_recommendations if item.status == "OPEN"]
     recommendations.sort(key=lambda item: (_PRIORITY.get(str(item.priority or "").upper(), 9),
                                              -(item.created_at.timestamp() if item.created_at else 0)))
     recommendation = next((item for item in recommendations
@@ -293,24 +323,53 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         })
 
     history = []
-    for item in all_recommendations[:20]:
+    memory_rows = list((await db.scalars(select(AdsMemory).where(
+        *_scope(AdsMemory, object_type, object_id),
+        AdsMemory.experiment_id.is_not(None),
+    ).order_by(AdsMemory.updated_at.desc()).limit(100))).all())
+    memories_by_experiment: dict[str, list[AdsMemory]] = {}
+    for memory in memory_rows:
+        memories_by_experiment.setdefault(memory.experiment_id, []).append(memory)
+    for item in all_recommendations:
+        if not item.experiment_id:
+            continue
         measured = next((value for value in outcomes_by_recommendation.get(item.id, [])
                          if value.status == "COMPLETED"), None)
+        latest = next(iter(outcomes_by_recommendation.get(item.id, [])), None)
+        run = history_run_by_id.get(item.ai_run_id)
+        campaign = campaign_by_id.get(run.campaign_id) if run else None
+        policy_payload = _json(item.policy_json, {})
+        problem_payload = _json(item.problem_json, {})
+        delta = _json(measured.observed_delta_json, {}) if measured else (_json(latest.observed_delta_json, {}) if latest else {})
         history.append({
             "experiment_id": item.experiment_id,
             "experiment_seq": item.experiment_seq,
             "experiment_status": item.experiment_status,
             "created_at": item.created_at,
+            "started_at": item.created_at,
+            "completed_at": measured.completed_at if measured else None,
+            "campaign_id": run.campaign_id if run else None,
+            "campaign_name": campaign.name if campaign else None,
             "title": item.title,
+            "hypothesis": item.hypothesis or policy_payload.get("hypothesis") or item.rationale,
+            "rationale": item.rationale or problem_payload.get("summary"),
+            "action": policy_payload.get("action_type") or item.action_code,
+            "objective": problem_payload.get("objective") or policy_payload.get("objective"),
             "implementation_status": measured.implementation_confirmed if measured else "UNKNOWN",
             "evaluation_status": measured.evaluation_status if measured else "PENDING",
-            "delta": _json(measured.observed_delta_json, {}) if measured else {},
+            "delta": delta,
             "mode": "Autopilot" if _implementation_actor(measured) == "MAXIBOT" else "Recommendations",
             "executed_by": _implementation_actor(measured),
             "before": _experiment_view(item, measured).get("before"),
             "after": _experiment_view(item, measured).get("after"),
             "rollback": bool(measured and measured.execution_status == "ROLLED_BACK"),
+            "status_label": _experiment_status_label({"evaluation_status": measured.evaluation_status if measured else None, "experiment_status": item.experiment_status, "implementation_confirmed": measured.implementation_confirmed if measured else None}),
+            "memories": [memory.content for memory in memories_by_experiment.get(item.experiment_id, [])],
         })
+    history.sort(key=lambda row: (
+        0 if row["status_label"] == "🟡 Идёт" else 1,
+        -(row["created_at"].timestamp() if row.get("created_at") else 0),
+    ))
 
     experiment_rows = []
     for item in all_recommendations:

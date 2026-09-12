@@ -3,10 +3,11 @@ import json
 import asyncio
 import time
 import logging
+import hashlib
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.ads.facts import build_campaign_facts
 from app.ads.health import data_health, sufficiency
@@ -61,6 +62,14 @@ async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecom
     await db.flush()
     object_type = recommendation.promotion_object_type or "CHANNEL"
     object_id = recommendation.promotion_object_id or recommendation.channel_id
+    campaign_id = getattr(recommendation, "campaign_id", None)
+    if not campaign_id and recommendation.ai_run_id:
+        run = await db.get(AdsAiRun, recommendation.ai_run_id)
+        campaign_id = run.campaign_id if run else None
+    if object_id and campaign_id:
+        await _lock_experiment_scope(
+            db, object_type=object_type, object_id=object_id, campaign_id=campaign_id,
+        )
     highest = await db.scalar(select(func.max(AdsRecommendation.experiment_seq)).where(
         AdsRecommendation.promotion_object_type == object_type,
         AdsRecommendation.promotion_object_id == object_id,
@@ -71,6 +80,43 @@ async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecom
     await db.flush()
 
 
+def _experiment_scope_lock_key(*, object_type: str, object_id: str, campaign_id: str) -> int:
+    """Stable signed bigint key for a PostgreSQL transaction advisory lock."""
+    raw = f"MAXIBOT:EXPERIMENT:{object_type}:{object_id}:{campaign_id}".encode()
+    value = int.from_bytes(hashlib.sha256(raw).digest()[:8], "big", signed=False)
+    return value - (1 << 64) if value >= (1 << 63) else value
+
+
+def _experiment_object_lock_key(*, object_type: str, object_id: str) -> int:
+    """Stable lock key for the per-object experiment sequence allocator."""
+    raw = f"MAXIBOT:EXPERIMENT-SEQ:{object_type}:{object_id}".encode()
+    value = int.from_bytes(hashlib.sha256(raw).digest()[:8], "big", signed=False)
+    return value - (1 << 64) if value >= (1 << 63) else value
+
+
+async def _lock_experiment_scope(
+    db: AsyncSession, *, object_type: str, object_id: str, campaign_id: str,
+) -> None:
+    """Serialize experiment check, sequence assignment, and insert per scope.
+
+    PostgreSQL holds this lock until the surrounding transaction commits. SQLite
+    test databases do not implement advisory locks and retain their normal
+    single-writer transaction semantics.
+    """
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "postgresql":
+        # Acquire the campaign lock first (active-experiment isolation), then
+        # the object lock (the experiment_seq allocator is per object).  Every
+        # writer uses this order, so concurrent campaigns cannot duplicate a
+        # sequence and cannot deadlock one another.
+        await db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {
+            "lock_key": _experiment_scope_lock_key(
+                object_type=object_type, object_id=object_id, campaign_id=campaign_id,
+            )
+        })
+        await db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {
+            "lock_key": _experiment_object_lock_key(object_type=object_type, object_id=object_id),
+        })
 def _campaign_metadata(raw: dict[str, Any]) -> dict[str, Any]:
     return {key: raw.get(key) for key in (
         "Id", "Name", "Type", "State", "Status", "StatusPayment",
@@ -396,6 +442,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                     "evaluation_window": rec.get("evaluation_window"),
                     "rollback": rec.get("rollback"),
                     "execution_mode": "ADVISORY"}
+                await _lock_experiment_scope(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id)
                 if not await _active_experiment_exists(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id):
                     recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id)
                     db.add(recommendation); await _assign_experiment_identity(db, recommendation); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
@@ -653,10 +700,15 @@ async def persist_development_result(db: AsyncSession, *, channel_id: str, outpu
     verdict = policy(valid, context.get("DATA_SUFFICIENCY", "INSUFFICIENT")); ai.status, ai.validated_output_json, ai.policy_result_json, ai.validation_error, ai.completed_at = ("CODEX_COMPLETED" if worker else "COMPLETED"), json.dumps(valid, ensure_ascii=False), json.dumps(verdict), None, datetime.now(timezone.utc)
     rec = valid["recommendation"]
     recommendation_policy = {**verdict, "action_type": rec.get("autopilot_action_type") or rec.get("action_type") or (rec.get("action_code") if rec.get("action_code") in {"EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "PAUSE_AD", "ENABLE_AD", "CREATE_CREATIVE_TEST", "CREATE_AD_TEST", "BOUNDED_BUDGET_REALLOCATION"} else None), "action_target": rec.get("action_target"), "action_scope": "CAMPAIGN", "hypothesis": rec.get("hypothesis") or rec.get("reason"), "success_metric": rec.get("success_metric"), "minimum_sample": rec.get("minimum_sample"), "evaluation_window": rec.get("evaluation_window"), "rollback": rec.get("rollback"), "execution_mode": "ADVISORY"}
+    campaign_id = (context.get("CURRENT_CAMPAIGN") or {}).get("id")
+    if not campaign_id:
+        raise ValueError("EXPERIMENT_CAMPAIGN_SCOPE_REQUIRED")
+    await _lock_experiment_scope(db, object_type="CHANNEL", object_id=channel_id, campaign_id=campaign_id)
+    if await _active_experiment_exists(db, object_type="CHANNEL", object_id=channel_id, campaign_id=campaign_id):
+        return ai
     recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14))
     db.add(recommendation)
     await _assign_experiment_identity(db, recommendation)
     await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=ai.input_snapshot_id)
-    campaign_id = (context.get("CURRENT_CAMPAIGN") or {}).get("id")
     await create_candidates(db, channel_id=channel_id, campaign_id=campaign_id, ai_run_id=ai.id, snapshot_id=ai.input_snapshot_id, candidates=valid["memory_candidates"], known_evidence=evidence_ids)
     await db.commit(); return ai
