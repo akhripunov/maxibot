@@ -601,7 +601,7 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
         .join(AdsAccount, AdsCampaign.account_id == AdsAccount.id)
         .join(Channel, AdsAccount.admin_id == Channel.admin_id)
         .where(Channel.id == channel_id, AdsCampaign.state != "ARCHIVED")
-        .order_by(AdsCampaign.name)
+        .order_by(case((AdsCampaign.state == "ON", 0), else_=1), AdsCampaign.name)
     )).all())
     if matching_external_ids is not None:
         rows = [row for row in rows if row.external_id in matching_external_ids]
