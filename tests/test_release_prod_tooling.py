@@ -9,6 +9,79 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
 CURRENT_HEAD_MIGRATION = "0090_self_learning_loop_v2"
+IMAGE_PREFLIGHT = ROOT / "scripts" / "release_image_preflight.py"
+APPROVED_SHA = "a" * 40
+
+
+def _run_image_preflight(tmp_path, api="good", worker="good", platform="linux/amd64"):
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
+        "  image=\"$3\"\n"
+        "  case \"$image\" in\n"
+        f"    *api*) value={api!r};;\n"
+        f"    *worker*) value={worker!r};;\n"
+        "    *) value=missing;;\n"
+        "  esac\n"
+        "  case \"$value\" in\n"
+        f"    good) printf '%s|x|{APPROVED_SHA}|\\n' '" + platform + "' ;;\n"
+        "    stale) printf '%s|x|%s|\\n' 'linux/amd64' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ;;\n"
+        "    wrong_platform) printf '%s|x|%s|\\n' 'linux/arm64' '" + APPROVED_SHA + "' ;;\n"
+        "    missing) exit 1;;\n"
+        "  esac\n"
+        "  exit 0\n"
+        "fi\nexit 1\n"
+    )
+    docker.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{tmp_path}:{env['PATH']}"
+    return subprocess.run(
+        [sys.executable, str(IMAGE_PREFLIGHT), APPROVED_SHA, "candidate-api", "candidate-worker"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_prebuilt_exact_api_worker_images_are_ready(tmp_path):
+    result = _run_image_preflight(tmp_path)
+    assert result.returncode == 0
+    assert "IMAGE_READY=YES" in result.stdout
+    assert f"API_IMAGE_SHA={APPROVED_SHA}" in result.stdout
+    assert f"WORKER_IMAGE_SHA={APPROVED_SHA}" in result.stdout
+
+
+def test_prebuilt_image_missing_is_denied(tmp_path):
+    result = _run_image_preflight(tmp_path, api="missing")
+    assert result.returncode != 0
+    assert "image_inspect_failed" in result.stderr
+
+
+def test_prebuilt_stale_image_sha_is_denied(tmp_path):
+    result = _run_image_preflight(tmp_path, api="stale")
+    assert result.returncode != 0
+    assert "source_sha_mismatch" in result.stderr
+
+
+def test_prebuilt_api_worker_mismatch_is_denied(tmp_path):
+    result = _run_image_preflight(tmp_path, worker="stale")
+    assert result.returncode != 0
+    assert "source_sha_mismatch" in result.stderr
+
+
+def test_prebuilt_wrong_architecture_is_denied(tmp_path):
+    result = _run_image_preflight(tmp_path, platform="linux/arm64")
+    assert result.returncode != 0
+    assert "wrong_platform" in result.stderr
+
+
+def test_release_dry_run_has_prebuilt_image_gate():
+    source = SCRIPT.read_text()
+    assert "release_image_preflight.py" in source
+    assert "API_WORKER_IMAGE_PARITY PASS" in source
+    assert "RELEASE_READY YES" in source
+    assert "docker compose" not in source[source.index("if [[ \"$MODE\" == DRY_RUN ]]; then"):source.index("fi\n\n[[ \"${OWNER_APPROVED")]
 
 
 def test_release_entrypoint_is_valid_shell():

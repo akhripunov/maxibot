@@ -112,14 +112,70 @@ say HEALTH_READINESS_POLICY "bounded:${HEALTH_TIMEOUT_SECONDS}s/${HEALTH_POLL_IN
 
 if [[ "$MODE" == DRY_RUN ]]; then
   say TARGET_SHA_PROVEN YES
-  say IMAGE_READY NOT_BUILT
+  API_CANDIDATE_IMAGE=${API_CANDIDATE_IMAGE:-maxibot-vps-api:$TARGET_SHA}
+  WORKER_CANDIDATE_IMAGE=${WORKER_CANDIDATE_IMAGE:-maxibot-vps-api:$TARGET_SHA}
+  if ! IMAGE_PREFLIGHT=$(python3 "$ROOT_DIR/scripts/release_image_preflight.py" \
+    "$TARGET_SHA" "$API_CANDIDATE_IMAGE" "$WORKER_CANDIDATE_IMAGE" 2>&1); then
+    say IMAGE_READY NO
+    say API_WORKER_IMAGE_PARITY BLOCKED
+    say IMAGE_PREFLIGHT_REASON "$(printf '%s' "$IMAGE_PREFLIGHT" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+    say RELEASE_DIRECTORY_READY PLANNED_ONLY
+    say ENV_READY PRODUCTION_PREFLIGHT_REQUIRED
+    say COMPOSE_RESOLUTION_READY TEMPLATE_VALIDATED
+    say RUNTIME_SWITCH_READY NOT_EXECUTED
+    say ROLLBACK_READY METADATA_REQUIRED
+    say MIGRATION_ALLOWED NO
+    say SAFE_TO_RELEASE NO
+    say DRY_RUN_RESULT PASS
+    exit 0
+  fi
+  while IFS='=' read -r key value; do [[ -n "$key" ]] && say "$key" "$value"; done <<<"$IMAGE_PREFLIGHT"
+  say API_WORKER_IMAGE_PARITY PASS
   say RELEASE_DIRECTORY_READY PLANNED_ONLY
-  say ENV_READY PRODUCTION_PREFLIGHT_REQUIRED
   say COMPOSE_RESOLUTION_READY TEMPLATE_VALIDATED
   say RUNTIME_SWITCH_READY NOT_EXECUTED
-  say ROLLBACK_READY METADATA_REQUIRED
   say MIGRATION_ALLOWED NO
-  say SAFE_TO_RELEASE NO
+  # A dry-run may attest a prebuilt image and perform read-only production
+  # compatibility checks. It must never create a release directory, backup,
+  # migration, container, or runtime switch.
+  CANONICAL_PRODUCTION_HOST=135.106.166.46
+  PRODUCTION_HOST=${PRODUCTION_HOST:-${MAXIBOT_PRODUCTION_HOST:-$CANONICAL_PRODUCTION_HOST}}
+  PRODUCTION_SSH_KEY=${PRODUCTION_SSH_KEY:-${MAXIBOT_PRODUCTION_SSH_KEY:-/Users/akhripuniov/.ssh/maxibot_selectel_ed25519}}
+  PREFLIGHT_OK=1
+  if [[ "$PRODUCTION_HOST" != "$CANONICAL_PRODUCTION_HOST" || ! -r "$PRODUCTION_SSH_KEY" ]]; then
+    PREFLIGHT_OK=0
+  else
+    PREFLIGHT_TARGET="root@$PRODUCTION_HOST"
+    PREFLIGHT_SSH=(ssh -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 "$PREFLIGHT_TARGET")
+    if ! "${PREFLIGHT_SSH[@]}" true >/dev/null 2>&1; then
+      PREFLIGHT_OK=0
+    else
+      PROD_DB_HEAD=$("${PREFLIGHT_SSH[@]}" "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'" 2>/dev/null || true)
+      PROD_READY=$("${PREFLIGHT_SSH[@]}" "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"status\"])'" 2>/dev/null || true)
+      PROD_API_IMAGE=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'" 2>/dev/null || true)
+      PROD_WORKER_IMAGE=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}'" 2>/dev/null || true)
+      ROLLBACK_CONFIG=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'" 2>/dev/null || true)
+      PROD_WRITE_FLAGS=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}'" 2>/dev/null | grep -E '^(ADS_AUTOPILOT_ENABLED|ADS_WRITE_ACTIONS_ENABLED)=' || true)
+      if [[ "$PROD_DB_HEAD" != "$TARGET_MIGRATION" || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || -z "$ROLLBACK_CONFIG" || "$PROD_WRITE_FLAGS" == *"=true"* ]]; then
+        PREFLIGHT_OK=0
+      fi
+    fi
+  fi
+  if [[ "$PREFLIGHT_OK" == 1 ]]; then
+    say ENV_READY PASS
+    say DB_TARGET_COMPATIBILITY PASS
+    say ROLLBACK_READY PASS
+    say PRODUCTION_REHEARSAL PASS
+    say SAFE_TO_RELEASE YES
+    say RELEASE_READY YES
+  else
+    say ENV_READY PRODUCTION_PREFLIGHT_REQUIRED
+    say DB_TARGET_COMPATIBILITY BLOCKED
+    say ROLLBACK_READY METADATA_REQUIRED
+    say PRODUCTION_REHEARSAL BLOCKED
+    say SAFE_TO_RELEASE NO
+    say RELEASE_READY NO
+  fi
   say DRY_RUN_RESULT PASS
   exit 0
 fi
