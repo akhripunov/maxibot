@@ -14,6 +14,7 @@ from app.ads.providers.yandex import GRANULAR_REPORTS, YandexAdsProvider
 from app.ads.creative_storage import store_media_if_available
 from app.ads.creative_storage import MailCloudWebDav, media_key
 from app.ads.yandex_creative_media import archive_resolved_media, extract_media_references, resolve_media
+from app.core.config import settings
 from app.db.models import AdsAnalysisSnapshot, AdsCampaign, AdsCreative, AdsDailyAggregate, AdsEntity, AdsObservation, AdsReportRun
 
 WINDOWS = {"1d": 1, "3d": 3, "7d": 7}
