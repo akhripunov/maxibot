@@ -1735,6 +1735,14 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                         ("⬅️ AI Продвижение", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"),
                     ))
         authorized = [link for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
+        # Campaign selection is owned by the Campaigns screen.  When exactly
+        # one linked campaign is active there, reuse it directly instead of
+        # presenting a second, conflicting picker in the enable flow.
+        if action_name == "ads_autopilot_enable":
+            selected_links = [link for link in links if str(link.status or "").upper() == "ACTIVE"]
+            if len(selected_links) == 1:
+                campaign_id_from_route = selected_links[0].campaign_id
+                action_name = "ads_autopilot_enable_confirm"
         if action_name == "ads_autopilot_enable_confirm":
             link = next((item for item in links if item.campaign_id == campaign_id_from_route), None)
             if not link:
