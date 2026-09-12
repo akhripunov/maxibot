@@ -509,8 +509,10 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                         client = YandexDirectClient(token, client_login=client_login)
                         unified_client = YandexDirectClient(token, api_version="v501", client_login=client_login)
                 catalogs = [await client.get_campaigns()]
+                report_catalog: list[dict[str, Any]] = []
                 try:
-                    catalogs.append(await _report_campaign_catalog(client))
+                    report_catalog = await _report_campaign_catalog(client)
+                    catalogs.append(report_catalog)
                 except Exception:
                     catalogs.append([])
                 try:
@@ -556,6 +558,12 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
                         for ad in ads
                         if landing_url.rstrip("/") in json.dumps(ad, ensure_ascii=False)
                     }
+                    # Master campaigns (UC_TEXT) are report-visible but do
+                    # not expose their ads through the standard Ads service.
+                    # Keep those report-discovered campaign IDs in the
+                    # channel inventory instead of dropping them at the URL
+                    # scope filter.
+                    matching_external_ids.update(str(item.get("Id")) for item in report_catalog if item.get("Id"))
                     _CAMPAIGN_SCOPE_CACHE[channel_id] = (time.monotonic(), matching_external_ids)
                 await db.commit()
             finally:
