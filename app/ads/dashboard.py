@@ -379,7 +379,8 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     creative_by_id = {item.id: item for item in creative_rows}
     entity_by_id = {item.id: item for item in entity_rows}
     for item in all_recommendations:
-        if not item.experiment_id:
+        # Only canonical experiments belong in the user-facing history.
+        if not item.experiment_id or item.experiment_seq is None:
             continue
         measured = next((value for value in outcomes_by_recommendation.get(item.id, [])
                          if value.status == "COMPLETED"), None)
@@ -461,6 +462,8 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
 
     experiment_rows = []
     for item in all_recommendations:
+        if not item.experiment_id or item.experiment_seq is None:
+            continue
         measured = next((value for value in outcomes_by_recommendation.get(item.id, [])
                          if value.implementation_confirmed == "YES"), None)
         if measured:

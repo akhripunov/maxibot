@@ -887,10 +887,13 @@ def format_ads_learning_screen(state: dict, *, title: str) -> str:
 
 
 def format_ads_history_screen(state: dict, *, title: str, page: int = 0, page_size: int = 5) -> str:
-    rows = state.get("history") or []
+    # Legacy recommendations/outcomes stay persisted for audit but never
+    # become user-facing canonical experiments.
+    rows = [item for item in (state.get("history") or [])
+            if item.get("experiment_id") and item.get("experiment_seq") is not None]
     total_pages = max(1, (len(rows) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
-    lines = ["🕘 История экспериментов", "", title]
+    lines = ["🕘 История", "", title]
     visible = rows[page * page_size:(page + 1) * page_size]
     for item in visible:
         experiment = item.get("experiment_seq")
@@ -910,20 +913,22 @@ def format_ads_history_screen(state: dict, *, title: str, page: int = 0, page_si
         if isinstance(metric, dict) and metric.get("before") is not None and metric.get("after") is not None:
             label = "CPA" if delta.get("actual_cpa_7d") else "Результат"
             suffix = " ₽" if label == "CPA" else ""
-            lines.append(f"{label}: {_ru_number(metric['before'])}{suffix} → {_ru_number(metric['after'])}{suffix}")
             lines.append(f"До: {_ru_number(metric['before'])}{suffix} · После: {_ru_number(metric['after'])}{suffix}")
         if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
-            lines.append("Результат" + f": {item['evaluation_status']}")
+            result_labels = {"SUCCESS": "✅ Успешно", "FAIL": "❌ Не сработало", "INCONCLUSIVE": "⚪ Недостаточно данных"}
+            lines.append("Результат" + ": " + result_labels[item["evaluation_status"]])
         if item.get("evaluation_status") not in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
             lines.append("Статус: Данных пока недостаточно")
         for learned in item.get("learned_memories") or []:
             lines.extend(["", "🧠 MaxiBot выучил:", _owner_short_text(learned.get("claim")),
-                          f"Статус знания: {learned.get('status', 'UNKNOWN')}"])
+                          f"Статус знания: {_human_memory_status(learned.get('status'))}"])
         next_seqs = item.get("next_experiment_seqs") or []
         if next_seqs:
             lines.extend(["", "↓ Повлияло на следующий тест", "Эксперимент(ы): " + ", ".join(f"#{seq}" for seq in next_seqs)])
     if not rows:
-        lines.extend(["", "Экспериментов пока нет.", "После включения автопилота здесь появятся его проверки, изменения и результаты."])
+        lines.extend(["", "Экспериментов пока не было.",
+                      "После запуска Автопилота здесь появится история:",
+                      "что MaxiBot проверил, что изменил,", "какой получил результат и чему научился."])
     elif total_pages > 1:
         lines.extend(["", f"Страница: {page + 1} / {total_pages}"])
     return "\n".join(lines)
@@ -2054,7 +2059,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         }[prefix]
         if prefix == "ads_bot_history":
             history = state.get("history") or []
-            controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_bot_history_detail:{bot_key}:{item['experiment_id']}") for item in history[:5] if item.get("experiment_id")]
+            controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_bot_history_detail:{bot_key}:{item['experiment_id']}") for item in history[:5] if item.get("experiment_id") and item.get("experiment_seq") is not None]
             controls.append(("⬅️ AI Продвижение", f"ads_bot:{bot_key}"))
             return format_ads_history_screen(state, title=title), buttons(*controls)
         return formatter(state, title=title), buttons(("⬅️ AI Продвижение", f"ads_bot:{bot_key}"))
@@ -2223,9 +2228,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return await render_screen(db, admin, "promotion")
         state = await build_ads_dashboard(db, object_type="CHANNEL", object_id=channel.id)
         page = int(page_value)
-        rows = state.get("history") or []
+        rows = [item for item in (state.get("history") or [])
+                if item.get("experiment_id") and item.get("experiment_seq") is not None]
         total_pages = max(1, (len(rows) + 4) // 5)
-        controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_history_detail:{channel.id}:{item['experiment_id']}") for item in rows[page * 5:(page + 1) * 5] if item.get("experiment_id")]
+        controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_history_detail:{channel.id}:{item['experiment_id']}") for item in rows[page * 5:(page + 1) * 5]]
         if page > 0:
             controls.append(("⬅️ Предыдущая", f"ads_history_page:{channel.id}:{page - 1}"))
         if page + 1 < total_pages:
@@ -2251,7 +2257,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         formatter = format_ads_why_screen if screen.startswith("ads_context:") else format_ads_history_screen
         if screen.startswith("ads_history:"):
             rows = state.get("history") or []
-            controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_history_detail:{channel.id}:{item['experiment_id']}") for item in rows[:5] if item.get("experiment_id")]
+            controls = [(f"🔎 Подробнее · #{item['experiment_seq']}", f"ads_history_detail:{channel.id}:{item['experiment_id']}") for item in rows[:5] if item.get("experiment_id") and item.get("experiment_seq") is not None]
             if len(rows) > 5:
                 controls.append(("➡️ Следующая", f"ads_history_page:{channel.id}:1"))
             controls.append(("⬅️ AI Продвижение", f"ads:{channel.id}"))

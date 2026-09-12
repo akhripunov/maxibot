@@ -115,7 +115,9 @@ def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     assert ads_campaign_selection_buttons(state, channel_id="channel-1")[0][0]["text"].startswith("◻️")
     assert "🎨 Креатив A" in format_ads_why_screen(state, title="Москва 365")
     assert "INCONCLUSIVE не считаются проверенным обучением" in format_ads_learning_screen(state, title="Москва 365")
-    assert "Экспериментов пока нет." in format_ads_history_screen(state, title="Москва 365")
+    empty = format_ads_history_screen(state, title="Москва 365")
+    assert "Экспериментов пока не было." in empty
+    assert "После запуска Автопилота здесь появится история:" in empty
 
 
 def test_history_projection_is_bounded_and_exposes_safe_detail_chain():
@@ -131,12 +133,37 @@ def test_history_projection_is_bounded_and_exposes_safe_detail_chain():
     }]
     text = format_ads_history_screen(state, title="Москва 365")
     assert "🧪 Эксперимент #2" in text
-    assert "✅ Победа" in text and "CPA: 20,00 ₽ → 15,00 ₽" in text
+    assert "✅ Победа" in text and "До: 20,00 ₽ · После: 15,00 ₽" in text
+    assert "CPA: 20,00 ₽ → 15,00 ₽" not in text
     assert "internal-id-must-not-render" not in text
     detail = __import__("app.bot.menu", fromlist=["format_ads_experiment_detail"]).format_ads_experiment_detail(state["history"][0], title="Москва 365")
     assert "Что изменил автопилот" in detail and "Почему" in detail and "Что узнал автопилот" in detail
 
 
+def test_history_excludes_legacy_rows_and_never_renders_none():
+    state = _state()
+    state["history"] = [
+        {"experiment_id": "legacy-id", "experiment_seq": None, "title": "Старая проверка"},
+        {"experiment_id": None, "experiment_seq": None, "title": "Рекомендация"},
+    ]
+    text = format_ads_history_screen(state, title="Москва 365")
+    assert "Экспериментов пока не было." in text
+    assert "Эксперимент #None" not in text
+    assert "Старая проверка" not in text
+
+
+def test_history_mixed_rows_renders_only_canonical_experiment():
+    state = _state()
+    state["history"] = [
+        {"experiment_id": "legacy-id", "experiment_seq": None, "title": "Старая проверка"},
+        {"experiment_id": "canonical-id", "experiment_seq": 1, "title": "Новый тест",
+         "status_label": "✅ Успешно", "evaluation_status": "SUCCESS"},
+    ]
+    text = format_ads_history_screen(state, title="Москва 365")
+    assert "🧪 Эксперимент #1" in text
+    assert "Старая проверка" not in text
+    assert "Эксперимент #None" not in text
+    assert "SUCCESS" not in text
 def test_history_learning_chain_renders_persisted_causality_without_raw_memory_ids():
     state = _state()
     state["history"] = [{
