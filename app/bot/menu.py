@@ -1611,13 +1611,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             policy = await promotion_policy(db, object_type=object_type, object_id=object_id)
             limit = policy.get("weekly_budget_limit") if policy.get("weekly_budget_limit") is not None else policy.get("monthly_budget_limit")
             limit_text = f"{limit:.0f} ₽ / неделю" if limit is not None else "не задан"
-            rows = []
-            rows.append([("💰 Установить бюджет", f"ads_budget_input:{object_type}:{object_id}")])
-            rows.append([{"text": "⬅️ AI Продвижение", "callback_data": f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"}])
             return ("💰 Бюджет автопилота\n\n"
                     f"Текущий недельный бюджет: {limit_text}\n"
                     "Это внутренний недельный предел MaxiBot, а не изменение бюджета в Яндекс.Директе.\nMaxiBot не выйдет за установленную сумму.",
-                    rows)
+                    buttons(
+                        ("💰 Установить бюджет", f"ads_budget_input:{object_type}:{object_id}"),
+                        ("⬅️ AI Продвижение", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"),
+                    ))
         authorized = [link for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
         if action_name == "ads_autopilot_enable_confirm":
             link = next((item for item in links if item.campaign_id == campaign_id_from_route), None)
