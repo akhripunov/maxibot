@@ -2230,7 +2230,11 @@ class MaxBotRuntime:
                         )
                         await db.commit()
                     target_value = links[0].target_cpa if links else message.text.strip()
-                    await self._render(admin_id, f"ads_objective_saved:{object_type}:{object_id}:{target_value:g}")
+                    await self.client.send_message(
+                        admin_id,
+                        f"✅ Цель установлена: {target_value:g} ₽",
+                        buttons=[[{"text": "⬅️ Назад", "callback_data": f"ads_objective:{object_type}:{object_id}"}]],
+                    )
                 except ValueError:
                     self._ads_objective_pending[str(admin_id)] = objective_pending
                     await self._render(admin_id, f"ads_objective_input:{object_type}:{object_id}")
