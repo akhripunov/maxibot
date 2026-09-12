@@ -1910,8 +1910,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return ("\n".join(lines), buttons(*controls))
     if screen.startswith("ads_objective_input:"):
         _, object_type, object_id = screen.split(":", 2)
-        back = f"ads_objective:{object_type}:{object_id}"
-        return ("🎯 Введите целевую стоимость в рублях одним сообщением.\n\nНапример: 20", buttons(("⬅️ Назад", back)))
+        return ("🎯 Введите целевую стоимость в рублях одним сообщением.\n\nНапример: 20", buttons())
     if screen.startswith("ads_objective_saved:"):
         _, object_type, object_id, target = screen.split(":", 3)
         back = f"ads_objective:{object_type}:{object_id}"
@@ -4207,6 +4206,31 @@ class MenuRepository:
             admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
             return admin.service_message_id if admin else None
 
+    async def set_ads_objective_pending(self, external_id: str, object_type: str, object_id: str, campaign_id: str | None) -> None:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
+            if admin:
+                admin.pending_ads_object_type = object_type
+                admin.pending_ads_object_id = object_id
+                admin.pending_ads_campaign_id = campaign_id
+                await db.commit()
+
+    async def ads_objective_pending(self, external_id: str) -> tuple[str, str, str | None] | None:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
+            if not admin or not admin.pending_ads_object_type or not admin.pending_ads_object_id:
+                return None
+            return (admin.pending_ads_object_type, admin.pending_ads_object_id, admin.pending_ads_campaign_id)
+
+    async def clear_ads_objective_pending(self, external_id: str) -> None:
+        async with self.session_factory() as db:
+            admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
+            if admin:
+                admin.pending_ads_object_type = None
+                admin.pending_ads_object_id = None
+                admin.pending_ads_campaign_id = None
+                await db.commit()
+
     async def messages_ui_ids(self, external_id: str) -> tuple[str | None, str | None]:
         async with self.session_factory() as db:
             admin = await db.scalar(select(Admin).where(Admin.external_id == external_id))
@@ -4510,6 +4534,9 @@ class MenuRepository:
                 admin.pending_traffic_channel_id = None
                 admin.custom_bot_state = None
                 admin.pending_custom_bot_id = None
+                admin.pending_ads_object_type = None
+                admin.pending_ads_object_id = None
+                admin.pending_ads_campaign_id = None
                 await db.commit()
 
     async def has_conversation_user(self, external_id: str) -> bool:

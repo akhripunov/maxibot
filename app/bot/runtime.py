@@ -1210,7 +1210,9 @@ class MaxBotRuntime:
             if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
                 if object_type == "CHANNEL" and not await self.repo.channel_owned(user_id, object_id):
                     return
-                self._ads_objective_pending[str(user_id)] = (object_type, object_id, None if campaign_scope == "all" else campaign_scope)
+                pending = (object_type, object_id, None if campaign_scope == "all" else campaign_scope)
+                self._ads_objective_pending[str(user_id)] = pending
+                await self.repo.set_ads_objective_pending(str(user_id), *pending)
                 await self._render(user_id, f"ads_objective_input:{object_type}:{object_id}")
                 return
         elif action.startswith("ads_objective_disable:"):
@@ -2216,6 +2218,8 @@ class MaxBotRuntime:
                     await self._render(admin_id, f"ads_budget_input:{object_type}:{object_id}{suffix}")
                 return
             objective_pending = self._ads_objective_pending.pop(str(admin_id), None)
+            if objective_pending is None:
+                objective_pending = await self.repo.ads_objective_pending(str(admin_id))
             if objective_pending:
                 object_type, object_id, campaign_id = objective_pending
                 try:
@@ -2235,8 +2239,10 @@ class MaxBotRuntime:
                         f"✅ Цель установлена: {target_value:g} ₽",
                         buttons=[[{"text": "⬅️ Назад", "callback_data": f"ads_objective:{object_type}:{object_id}"}]],
                     )
+                    await self.repo.clear_ads_objective_pending(str(admin_id))
                 except ValueError:
                     self._ads_objective_pending[str(admin_id)] = objective_pending
+                    await self.repo.set_ads_objective_pending(str(admin_id), *objective_pending)
                     await self._render(admin_id, f"ads_objective_input:{object_type}:{object_id}")
                 return
             custom_state, pending_bot_id = await self.repo.custom_bot_state(admin_id)

@@ -35,6 +35,12 @@ class Admin(Base):
     pending_free_trial: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     custom_bot_state: Mapped[Optional[str]]=mapped_column(String(32))
     pending_custom_bot_id: Mapped[Optional[str]]=mapped_column(String(36))
+    # Durable context for the one-message AI objective input flow.  Keeping
+    # this in the admin row lets a worker restart between the button tap and
+    # the owner's numeric reply without losing the target object.
+    pending_ads_object_type: Mapped[Optional[str]] = mapped_column(String(16))
+    pending_ads_object_id: Mapped[Optional[str]] = mapped_column(String(128))
+    pending_ads_campaign_id: Mapped[Optional[str]] = mapped_column(String(128))
     channels=relationship("Channel", back_populates="admin", cascade="all, delete-orphan")
 
 class WebAuthnCredential(Base):
