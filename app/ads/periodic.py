@@ -74,10 +74,29 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
         .where(AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
         .distinct().limit(limit)
     )).all())
+    # A campaign resumed in Direct can still be cached as SUSPENDED/OFF in
+    # MaxiBot.  Keep a linked stale campaign in the read-only entity refresh
+    # queue so the provider state can converge before the state gate below is
+    # used for performance collection.  This avoids a state-refresh deadlock.
+    stale_linked = list((await db.scalars(
+        select(AdsCampaign)
+        .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
+        .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
+        .where(
+            AdsAccount.provider == "YANDEX_DIRECT",
+            AdsAccount.status == "CONNECTED",
+            AdsCampaign.state != "ON",
+        ).distinct().limit(limit)
+    )).all())
+    seen_campaign_ids = {campaign.id for campaign in rows}
+    rows.extend(campaign for campaign in stale_linked if campaign.id not in seen_campaign_ids)
     created = 0
     for campaign in rows:
-        collection_types = ["CAMPAIGN", "GRANULAR", "ENTITY_CONFIG"]
-        if settings.ads_collection_search_query_enabled:
+        # Stale linked campaigns receive only a provider metadata refresh.
+        # Performance/granular collection remains fail-closed until the fresh
+        # provider state is ON.
+        collection_types = ["ENTITY_CONFIG"] if campaign.state != "ON" else ["CAMPAIGN", "GRANULAR", "ENTITY_CONFIG"]
+        if campaign.state == "ON" and settings.ads_collection_search_query_enabled:
             collection_types.append("SEARCH_QUERY")
         for collection_type in collection_types:
             scheduled = _slot_time(now, campaign.id, collection_type)
@@ -174,6 +193,20 @@ async def collect_entity_configuration(db: AsyncSession, run: AdsCollectionRun) 
     provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login)
     try:
         campaigns = await provider.campaigns([int(campaign.external_id)])
+        provider_campaign = next(
+            (row for row in campaigns.rows if str(row.get("Id") or "") == str(campaign.external_id)),
+            None,
+        )
+        if provider_campaign is not None:
+            # This is a read-only provider refresh.  The campaign becomes
+            # eligible for the next performance slot only after Direct reports
+            # State=ON; no provider mutation is ever attempted here.
+            campaign.name = str(provider_campaign.get("Name") or campaign.name)
+            campaign.state = provider_campaign.get("State")
+            campaign.status = provider_campaign.get("Status")
+            campaign.raw_json = json.dumps(_campaign_metadata(provider_campaign), ensure_ascii=False)
+        else:
+            campaign.state = "UNKNOWN"
         ads_report = await provider.ads([int(campaign.external_id)])
         campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
         for raw in _entity_config_rows(ads_report):
@@ -224,7 +257,7 @@ async def process_periodic_collection(session_factory) -> int:
             # remains available and the scheduler will resume after the state
             # returns to ON.
             campaign = await db.get(AdsCampaign, run.campaign_id) if run.campaign_id else None
-            if run.trigger == "PERIODIC" and (not campaign or campaign.state != "ON"):
+            if run.trigger == "PERIODIC" and run.collection_type != "ENTITY_CONFIG" and (not campaign or campaign.state != "ON"):
                 run.status = "SKIPPED"
                 run.error_code = "CAMPAIGN_NOT_ACTIVE"
                 run.completed_at = datetime.now(timezone.utc)
