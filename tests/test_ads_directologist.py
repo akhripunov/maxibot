@@ -8,6 +8,7 @@ from app.ads.directologist import (
     comparative_metrics,
     confidence,
     root_cause_status,
+    freshness_hours_from_timestamp,
 )
 from app.ads.directologist import _channel_campaign_match
 
@@ -60,6 +61,15 @@ def test_trend_and_confidence_fail_closed_for_small_samples():
     result = confidence(clicks=9, confirmed_outcomes=1, freshness_hours=None, attribution_coverage=None, root_cause_proven=False, windows_ready=False)
     assert result["level"] == "INSUFFICIENT"
     assert result["reasons"]
+
+
+def test_freshness_is_deterministic_and_unknown_without_persisted_report():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+    assert freshness_hours_from_timestamp(datetime(2026, 9, 13, 10, 0, tzinfo=timezone.utc), now=now) == 2.0
+    assert freshness_hours_from_timestamp(datetime(2026, 9, 10, 10, 0, tzinfo=timezone.utc), now=now) == 74.0
+    assert freshness_hours_from_timestamp(None, now=now) is None
 
 
 def test_root_cause_is_not_invented_without_sufficient_evidence():

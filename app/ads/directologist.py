@@ -12,12 +12,12 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.models import (
-    AdsCampaign, AdsDailyAggregate, AdsPromotionCampaignLink, BotConversion,
+    AdsCampaign, AdsDailyAggregate, AdsPromotionCampaignLink, AdsReportRun, BotConversion,
     BotPromotionProfile,
     BotTrafficVisit, TrafficMembership, TrafficVisit,
 )
@@ -26,6 +26,34 @@ from app.ads.platform import outcome_type_for
 
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 WINDOW_DAYS = 7
+
+
+def freshness_hours_from_timestamp(latest_fetched_at: datetime | None, *, now: datetime | None = None) -> float | None:
+    """Return deterministic age of the latest persisted provider report.
+
+    ``None`` is deliberately preserved when no successful provider observation
+    exists; readiness must never manufacture freshness from the current clock.
+    """
+    if latest_fetched_at is None:
+        return None
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    fetched = latest_fetched_at
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    return max(0.0, (reference - fetched).total_seconds() / 3600.0)
+
+
+async def campaign_freshness_hours(db: AsyncSession, *, campaign: AdsCampaign, now: datetime | None = None) -> float | None:
+    """Read freshness from the latest successful campaign performance report."""
+    latest = await db.scalar(select(func.max(AdsReportRun.fetched_at)).where(
+        AdsReportRun.provider == "YANDEX_DIRECT",
+        AdsReportRun.report_type == "CAMPAIGN_PERFORMANCE_REPORT",
+        AdsReportRun.campaign_provider_id == campaign.external_id,
+        AdsReportRun.status == "SUCCESS",
+    ))
+    return freshness_hours_from_timestamp(latest, now=now)
 
 
 def comparison_windows(*, today: date, campaign_start: date | None = None) -> dict[str, Any]:
@@ -273,7 +301,7 @@ def finalize_decision_pack(pack: dict[str, Any], findings: dict[str, Any]) -> di
     pack["confidence"] = confidence(
         clicks=pack.get("metrics", {}).get("current", {}).get("clicks"),
         confirmed_outcomes=pack.get("metrics", {}).get("current", {}).get("confirmed_outcomes"),
-        freshness_hours=None,
+        freshness_hours=pack.get("freshness_hours"),
         attribution_coverage=pack.get("outcomes", {}).get("attribution_coverage"),
         root_cause_proven=pack["root_cause"]["status"] == "ROOT_CAUSE_FOUND",
         windows_ready=pack.get("metrics", {}).get("status") == "READY",
@@ -304,7 +332,8 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
     metrics["confirmed_outcome_kpi"] = outcomes.get("outcome_type", "UNKNOWN")
     trend = classify_trend(current=current.get("provider_cpa"), baseline=metrics["baseline"].get("provider_cpa"), metric="provider_cpa", clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"))
     attribution = outcomes.get("attribution_coverage")
-    confidence_pack = confidence(clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"), freshness_hours=None, attribution_coverage=attribution, root_cause_proven=False, windows_ready=metrics["status"] == "READY")
+    freshness_hours = await campaign_freshness_hours(db, campaign=campaign)
+    confidence_pack = confidence(clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"), freshness_hours=freshness_hours, attribution_coverage=attribution, root_cause_proven=False, windows_ready=metrics["status"] == "READY")
     return {
         "version": "directologist_v1",
         "object_type": outcomes["object_type"],
@@ -313,6 +342,7 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
         "metrics": metrics,
         "outcomes": {key: value for key, value in outcomes.items() if key != "rows"},
         "trend": {"state": trend, "metric": "provider_cpa", "source": "provider signal; not confirmed MaxiBot CPA"},
+        "freshness_hours": freshness_hours,
         "root_cause": root_cause_status(contributors=[], sufficient=False),
         "confidence": confidence_pack,
         "data_health": {"status": "LIMITED" if confidence_pack["level"] in {"LOW", "INSUFFICIENT"} else "HEALTHY", "reasons": confidence_pack["reasons"]},
@@ -326,5 +356,6 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
             "V2-DIRECTOLOGISTCURRENT": {"source": "ADS_DIRECTOLOGIST", "scope": "current_window", "status": metrics["status"]},
             "V2-DIRECTOLOGISTBASELINE": {"source": "ADS_DIRECTOLOGIST", "scope": "baseline_window", "status": metrics["status"]},
             "V2-DIRECTOLOGISTOUTCOMES": {"source": outcomes["source_of_truth"], "scope": "confirmed_outcomes", "quality_counts": outcomes["quality_counts"]},
+            "V2-DIRECTOLOGISTFRESHNESS": {"source": "ads_report_runs.fetched_at", "report_type": "CAMPAIGN_PERFORMANCE_REPORT", "status": "KNOWN" if freshness_hours is not None else "UNKNOWN", "hours": freshness_hours},
         },
     }

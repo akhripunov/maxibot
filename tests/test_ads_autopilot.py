@@ -11,6 +11,7 @@ from app.ads.autopilot import (
     assess_provider_capabilities,
     store_provider_capability_assessment,
     stored_provider_capabilities,
+    budget_experiment_readiness,
 )
 
 
@@ -116,6 +117,51 @@ def test_unknown_campaign_state_can_have_partial_child_capabilities_without_budg
     assert assessment["provider_manageability"] == "PARTIAL"
     assert set(assessment["verified_capabilities"]) == {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST", "ENABLE_AD", "PAUSE_AD"}
     assert "BOUNDED_BUDGET_REALLOCATION" not in assessment["verified_capabilities"]
+
+
+def test_suspended_campaign_can_attest_campaign_level_budget_without_child_objects():
+    assessment = assess_provider_capabilities(
+        campaign_id="714373352",
+        campaign_state="SUSPENDED",
+        budget_state_visible=True,
+    )
+    assert assessment["verified_capabilities"] == ["BOUNDED_BUDGET_REALLOCATION"]
+
+
+def test_budget_readiness_does_not_inherit_two_week_trend_gate():
+    result = budget_experiment_readiness(
+        data_trust="GOOD", direct_auth=True, business_attribution=True,
+        attribution_coverage=0.9, freshness_hours=2, clicks=12,
+        exact_outcomes=3, spend=50, budget_capability_verified=True,
+        baseline_ready=True, stop_loss_ready=True,
+        one_active_experiment_guard=True, trend_windows_ready=False,
+    )
+    assert result["ready"] is True
+    assert result["requires_14_days"] is False
+
+
+def test_budget_readiness_fails_closed_for_stale_unknown_and_small_samples():
+    stale = budget_experiment_readiness(
+        data_trust="GOOD", direct_auth=True, business_attribution=True,
+        attribution_coverage=0.9, freshness_hours=49, clicks=12,
+        exact_outcomes=3, spend=50, budget_capability_verified=True,
+        baseline_ready=True, stop_loss_ready=True, one_active_experiment_guard=True,
+    )
+    unknown = budget_experiment_readiness(
+        data_trust="GOOD", direct_auth=True, business_attribution=True,
+        attribution_coverage=0.9, freshness_hours=None, clicks=12,
+        exact_outcomes=3, spend=50, budget_capability_verified=True,
+        baseline_ready=True, stop_loss_ready=True, one_active_experiment_guard=True,
+    )
+    small = budget_experiment_readiness(
+        data_trust="GOOD", direct_auth=True, business_attribution=True,
+        attribution_coverage=0.9, freshness_hours=2, clicks=9,
+        exact_outcomes=2, spend=0, budget_capability_verified=True,
+        baseline_ready=True, stop_loss_ready=True, one_active_experiment_guard=True,
+    )
+    assert stale["ready"] is False and "FRESHNESS_UNKNOWN_OR_OVER_48H" in stale["blockers"]
+    assert unknown["ready"] is False and "FRESHNESS_UNKNOWN_OR_OVER_48H" in unknown["blockers"]
+    assert small["ready"] is False and {"MIN_CLICKS_NOT_MET", "MIN_EXACT_OUTCOMES_NOT_MET", "MIN_SPEND_NOT_MET"}.issubset(small["blockers"])
 
 
 def test_child_capability_scope_rejects_cross_campaign_objects():

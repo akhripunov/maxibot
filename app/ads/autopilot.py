@@ -72,6 +72,55 @@ _AD_ACTIONS = frozenset({"PAUSE_AD", "ENABLE_AD"})
 _CREATIVE_ACTIONS = frozenset({"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"})
 
 
+def budget_experiment_readiness(*, data_trust: str | None, direct_auth: bool | None,
+                                business_attribution: bool | None,
+                                attribution_coverage: float | None,
+                                freshness_hours: float | None,
+                                clicks: float | None, exact_outcomes: int | None,
+                                spend: float | None, budget_capability_verified: bool,
+                                baseline_ready: bool, stop_loss_ready: bool,
+                                one_active_experiment_guard: bool,
+                                trend_windows_ready: bool | None = None) -> dict[str, Any]:
+    """Evaluate campaign-level budget readiness without inheriting trend gates.
+
+    The optional trend flag is intentionally ignored: two complete comparison
+    windows are required for trend conclusions, not for a bounded budget
+    experiment whose decision evidence is otherwise complete.
+    """
+    blockers: list[str] = []
+    if str(data_trust or "UNKNOWN").upper() != "GOOD":
+        blockers.append("DATA_TRUST_NOT_GOOD")
+    if direct_auth is not True:
+        blockers.append("DIRECT_AUTH_NOT_CONFIRMED")
+    if business_attribution is not True:
+        blockers.append("BUSINESS_ATTRIBUTION_NOT_CONFIRMED")
+    if attribution_coverage is None or float(attribution_coverage) < 0.8:
+        blockers.append("ATTRIBUTION_COVERAGE_BELOW_0_8")
+    if freshness_hours is None or float(freshness_hours) > 48:
+        blockers.append("FRESHNESS_UNKNOWN_OR_OVER_48H")
+    if clicks is None or float(clicks) < 10:
+        blockers.append("MIN_CLICKS_NOT_MET")
+    if exact_outcomes is None or int(exact_outcomes) < 3:
+        blockers.append("MIN_EXACT_OUTCOMES_NOT_MET")
+    if spend is None or float(spend) <= 0:
+        blockers.append("MIN_SPEND_NOT_MET")
+    if not budget_capability_verified:
+        blockers.append("BUDGET_CAPABILITY_NOT_VERIFIED")
+    if not baseline_ready:
+        blockers.append("BASELINE_NOT_READY")
+    if not stop_loss_ready:
+        blockers.append("STOP_LOSS_NOT_READY")
+    if not one_active_experiment_guard:
+        blockers.append("ONE_ACTIVE_EXPERIMENT_GUARD_FAILED")
+    return {
+        "ready": not blockers,
+        "blockers": blockers,
+        "requires_14_days": False,
+        "trend_windows_ready": trend_windows_ready,
+        "thresholds": {"min_clicks": 10, "min_exact_outcomes": 3, "min_spend": ">0", "freshness_hours": "<=48", "attribution_coverage": ">=0.8"},
+    }
+
+
 def assess_provider_capabilities(*, campaign_id: str | int, campaign_state: str | None,
                                  adgroups: list[dict[str, Any]] | None = None,
                                  ads: list[dict[str, Any]] | None = None,
@@ -108,7 +157,10 @@ def assess_provider_capabilities(*, campaign_id: str | int, campaign_state: str 
     # corresponding exact campaign object is not independently readable.
     if str(campaign_state or "").upper() == "ON" and placement_state_visible:
         capabilities.extend(["EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT"])
-    if str(campaign_state or "").upper() == "ON" and budget_state_visible:
+    # Budget is a campaign-level capability and can be attested while a
+    # campaign is suspended. Execution remains separately blocked by provider
+    # readiness/state until the campaign is active; UNKNOWN is still denied.
+    if str(campaign_state or "").upper() in {"ON", "SUSPENDED"} and budget_state_visible:
         capabilities.append("BOUNDED_BUDGET_REALLOCATION")
     capabilities = sorted(set(capabilities))
     manageability = "FULL" if {"EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "BOUNDED_BUDGET_REALLOCATION"}.issubset(capabilities) else "PARTIAL" if capabilities else "NONE"
