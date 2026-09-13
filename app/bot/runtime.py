@@ -1084,6 +1084,12 @@ class MaxBotRuntime:
             if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
                 await self._render(user_id, f"ads_autopilot_enable_confirm:{object_type}:{object_id}:{campaign_id}")
                 return
+        elif action.startswith(("ads_autopilot_preflight_retry:", "ads_autopilot_preflight_details:")):
+            _, object_type, object_id, campaign_id = action.split(":", 3)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                # Rendering performs a fresh read-only provider preflight.
+                await self._render(user_id, f"{action}")
+                return
         elif action.startswith("ads_autopilot_enable_confirm_apply:"):
             _, object_type, object_id, campaign_id = action.split(":", 3)
             if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
