@@ -27,6 +27,7 @@ from app.security_tokens import decrypt_token
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 MAX_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
+_last_inventory_sync_at: datetime | None = None
 
 
 def _entity_config_rows(report) -> list[dict]:
@@ -142,16 +143,89 @@ async def _health(db: AsyncSession, campaign: AdsCampaign, *, status: str, reaso
             db.add(AdsDataHealth(channel_id=channel_id, status=status, reasons_json=json.dumps({"periodic_collection": reason, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)))
 
 
+async def sync_account_inventory(db: AsyncSession) -> int:
+    """Discover all campaigns in connected Yandex accounts, read-only.
+
+    Inventory discovery is account-scoped rather than promotion-scoped.  A
+    campaign may therefore be collected before an owner links it to a CHANNEL
+    or BOT promotion.  OAuth remains tenant-bound to the AdsAccount owner.
+    """
+    from app.ads.providers.yandex import YandexAdsProvider
+
+    accounts = list((await db.scalars(select(AdsAccount).where(
+        AdsAccount.provider == "YANDEX_DIRECT",
+        AdsAccount.status == "CONNECTED",
+    ))).all())
+    discovered = 0
+    for account in accounts:
+        admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == account.admin_id))
+        channel = await db.scalar(select(Channel).where(Channel.admin_id == account.admin_id).order_by(Channel.id).limit(1))
+        if not admin_external_id or not channel:
+            continue
+        encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db)
+        if not encrypted:
+            continue
+        provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login or account.external_account_id)
+        try:
+            report = await provider.campaigns()
+        except Exception:
+            logger.exception("ADS_ACCOUNT_INVENTORY_SYNC_FAILED account_id=%s", account.id)
+            continue
+        finally:
+            await provider.close()
+        for raw in _entity_config_rows(report):
+            external_id = str(raw.get("Id") or "")
+            if not external_id:
+                continue
+            campaign = await db.scalar(select(AdsCampaign).where(
+                AdsCampaign.account_id == account.id,
+                AdsCampaign.external_id == external_id,
+            ))
+            if not campaign:
+                campaign = AdsCampaign(
+                    account_id=account.id,
+                    ads_account_id=account.id,
+                    external_id=external_id,
+                    external_campaign_id=external_id,
+                    name=str(raw.get("Name") or external_id),
+                )
+                db.add(campaign)
+                await db.flush()
+                discovered += 1
+            campaign.name = str(raw.get("Name") or campaign.name or external_id)
+            campaign.state = raw.get("State")
+            campaign.status = raw.get("Status")
+            campaign.campaign_type = raw.get("Type")
+            campaign.external_campaign_id = external_id
+            campaign.raw_json = json.dumps({
+                key: raw.get(key)
+                for key in ("Id", "Name", "Type", "State", "Status", "StatusPayment", "StartDate", "EndDate")
+            }, ensure_ascii=False)
+            campaign.provider_metadata_json = campaign.raw_json
+            campaign.metadata_updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return discovered
+
+
 async def _collection_context(db: AsyncSession, run: AdsCollectionRun):
     campaign = await db.get(AdsCampaign, run.campaign_id)
     if not campaign:
         raise ValueError("COLLECTION_CAMPAIGN_NOT_FOUND")
+    campaign_account = await db.get(AdsAccount, campaign.account_id)
+    if not campaign_account:
+        raise ValueError("COLLECTION_ACCOUNT_NOT_FOUND")
     # Any durable link supplies the owning object/token for read-only
     # collection. ACTIVE/INACTIVE is reserved for analysis/autopilot scope.
     link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.campaign_id == campaign.id))
     channel = await db.get(Channel, link.channel_id) if link and link.object_type == "CHANNEL" and link.channel_id else None
     admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
     encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
+    if not encrypted and admin_external_id:
+        # Account-wide collection does not require a promotion link.  Resolve
+        # the owner's existing channel only as the durable OAuth token store.
+        token_channel = await db.scalar(select(Channel).where(Channel.admin_id == campaign_account.admin_id).order_by(Channel.id).limit(1))
+        if token_channel:
+            encrypted = await get_encrypted_token(str(admin_external_id), token_channel.id, db=db)
     if link and link.object_type == "BOT" and link.bot_promotion_profile_id:
         profile = await db.get(BotPromotionProfile, link.bot_promotion_profile_id)
         encrypted = profile.yandex_oauth_token_encrypted if profile else None
@@ -245,6 +319,12 @@ async def process_periodic_collection(session_factory) -> int:
     async with session_factory() as db:
         if settings.ads_retention_enabled:
             await run_retention(db)
+        global _last_inventory_sync_at
+        now = datetime.now(timezone.utc)
+        inventory_interval = max(1, settings.ads_collection_campaign_interval_minutes) * 60
+        if _last_inventory_sync_at is None or (now - _last_inventory_sync_at).total_seconds() >= inventory_interval:
+            await sync_account_inventory(db)
+            _last_inventory_sync_at = now
         created = await ensure_due_slots(db)
         due = await claim_due_slots(db)
         ids = [run.id for run in due]
