@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.db.base import Base
 from app.db.session import engine, get_session
-from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, BotConnection, AdsAiRun, SubscriptionOrder
+from app.db.models import Admin, Channel, Conversation, Message, BlockedUser, LandingPage, TrafficVisit, TrafficProfile, TrafficEvent, MaxIdentityLink, TrafficSubscription, TrafficMembership, TrafficAttributionCandidate, OfflineConversion, SystemPromotionProfile, BotPromotionProfile, BotTrafficVisit, BotMaxIdentityLink, BotTrafficEvent, BotConversion, BotConnection, AdsAiRun, SubscriptionOrder, AdsAccount
 from app.domain.services import WELCOME, SENT, editable_welcome, render_channel_welcome_message, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
@@ -2156,7 +2156,31 @@ async def yandex_oauth_callback(code: str | None = None, state: str | None = Non
         stage = "metrica_setup"
         metrica_setup = await ensure_channel_setup(flow["admin"], flow["channel"], encrypted, channel.title)
         profile.yandex_counter_id = str(metrica_setup["counter_id"])
+        account = await db.scalar(select(AdsAccount).where(
+            AdsAccount.admin_id == channel.admin_id,
+            AdsAccount.provider == "YANDEX_DIRECT",
+        ))
+        if not account:
+            account = AdsAccount(
+                admin_id=channel.admin_id,
+                provider="YANDEX_DIRECT",
+                status="CONNECTED",
+                connection_status="CONNECTED",
+                external_account_id=(settings.yandex_direct_client_login or None),
+            )
+            db.add(account)
+        else:
+            account.status = "CONNECTED"
+            account.connection_status = "CONNECTED"
         await db.commit()
+        # OAuth success is the authoritative trigger for initial account-wide
+        # campaign discovery.  The channel already exists at this point;
+        # promotion links remain optional for ordinary data collection.
+        try:
+            from app.ads.periodic import sync_account_inventory
+            await sync_account_inventory(db)
+        except Exception:
+            logger.warning("YANDEX_ACCOUNT_INVENTORY_SYNC_AFTER_OAUTH_FAILED", exc_info=False)
     except Exception as exc:
         response = getattr(exc, "response", None)
         logger.warning(
