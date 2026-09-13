@@ -27,7 +27,7 @@ from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
 from app.core.config import settings
 from app.security import validate_max_init_data
-from app.integrations.yandex_oauth import authorize_url, combined_scope, configured, consume_state, create_bot_state, create_state, create_system_state, exchange_code, get_encrypted_token, save_bot_token, save_token, save_system_token
+from app.integrations.yandex_oauth import authorize_url, combined_scope, configured, consume_state, create_bot_state, create_state, create_system_state, direct_scope, exchange_code, get_encrypted_token, save_bot_token, save_token, save_system_token
 from app.integrations.yandex_metrica import ensure_channel_setup, ensure_system_setup
 from app.integrations.yandex_direct import YandexDirectAPIError, YandexDirectClient
 from app.db.models import now as model_now
@@ -2070,7 +2070,7 @@ async def yandex_oauth_start(admin_id: str, channel_id: str, db: AsyncSession = 
     channel = await db.scalar(select(Channel).where(Channel.id == channel_id, Channel.admin_id == admin.id if admin else False))
     if not admin or not channel:
         raise HTTPException(404, "channel not found")
-    return RedirectResponse(authorize_url(await create_state(admin.external_id, channel.id)), status_code=302)
+    return RedirectResponse(authorize_url(await create_state(admin.external_id, channel.id, service="metrica")), status_code=302)
 
 
 @app.get("/oauth/yandex/direct/start")
@@ -2082,8 +2082,8 @@ async def yandex_direct_oauth_start(admin_id: str, channel_id: str, db: AsyncSes
     channel = await db.scalar(select(Channel).where(Channel.id == channel_id, Channel.admin_id == admin.id if admin else False))
     if not admin or not channel:
         raise HTTPException(404, "channel not found")
-    state = await create_state(admin.external_id, channel.id)
-    return RedirectResponse(authorize_url(state, scopes=combined_scope()), status_code=302)
+    state = await create_state(admin.external_id, channel.id, service="direct")
+    return RedirectResponse(authorize_url(state, scopes=direct_scope()), status_code=302)
 
 
 @app.get("/oauth/yandex/system/start")
@@ -2145,40 +2145,48 @@ async def yandex_oauth_callback(code: str | None = None, state: str | None = Non
         channel = await db.get(Channel, flow["channel"])
         if not channel:
             raise ValueError("channel unavailable")
+        oauth_service = flow.get("service") or "metrica"
         profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == flow["channel"]))
-        if not profile:
-            profile = TrafficProfile(channel_id=flow["channel"], yandex_enabled=True, attribution_window_hours=settings.traffic_attribution_window_hours, conversion_policy=settings.traffic_conversion_policy)
-            db.add(profile)
-            await db.flush()
+        if oauth_service == "metrica":
+            if not profile:
+                profile = TrafficProfile(channel_id=flow["channel"], yandex_enabled=True, attribution_window_hours=settings.traffic_attribution_window_hours, conversion_policy=settings.traffic_conversion_policy)
+                db.add(profile)
+                await db.flush()
+            else:
+                profile.yandex_enabled = True
+        elif not profile:
+            raise ValueError("traffic profile unavailable for Direct OAuth connection")
+        encrypted = await save_token(flow["admin"], flow["channel"], payload, db=db, service=oauth_service)
+        if oauth_service == "metrica":
+            stage = "metrica_setup"
+            metrica_setup = await ensure_channel_setup(flow["admin"], flow["channel"], encrypted, channel.title)
+            profile.yandex_counter_id = str(metrica_setup["counter_id"])
         else:
-            profile.yandex_enabled = True
-        encrypted = await save_token(flow["admin"], flow["channel"], payload, db=db)
-        stage = "metrica_setup"
-        metrica_setup = await ensure_channel_setup(flow["admin"], flow["channel"], encrypted, channel.title)
-        profile.yandex_counter_id = str(metrica_setup["counter_id"])
-        account = await db.scalar(select(AdsAccount).where(
-            AdsAccount.admin_id == channel.admin_id,
-            AdsAccount.provider == "YANDEX_DIRECT",
-        ))
-        if not account:
-            account = AdsAccount(
-                admin_id=channel.admin_id,
-                provider="YANDEX_DIRECT",
-                status="CONNECTED",
-                connection_status="CONNECTED",
-                external_account_id=(settings.yandex_direct_client_login or None),
-            )
-            db.add(account)
-        else:
-            account.status = "CONNECTED"
-            account.connection_status = "CONNECTED"
+            stage = "direct_account_setup"
+            account = await db.scalar(select(AdsAccount).where(
+                AdsAccount.admin_id == channel.admin_id,
+                AdsAccount.provider == "YANDEX_DIRECT",
+            ))
+            if not account:
+                account = AdsAccount(
+                    admin_id=channel.admin_id,
+                    provider="YANDEX_DIRECT",
+                    status="CONNECTED",
+                    connection_status="CONNECTED",
+                    external_account_id=(settings.yandex_direct_client_login or None),
+                )
+                db.add(account)
+            else:
+                account.status = "CONNECTED"
+                account.connection_status = "CONNECTED"
         await db.commit()
         # OAuth success is the authoritative trigger for initial account-wide
         # campaign discovery.  The channel already exists at this point;
         # promotion links remain optional for ordinary data collection.
         try:
             from app.ads.periodic import sync_account_inventory
-            await sync_account_inventory(db)
+            if oauth_service == "direct":
+                await sync_account_inventory(db)
         except Exception:
             logger.warning("YANDEX_ACCOUNT_INVENTORY_SYNC_AFTER_OAUTH_FAILED", exc_info=False)
     except Exception as exc:
@@ -2190,6 +2198,8 @@ async def yandex_oauth_callback(code: str | None = None, state: str | None = Non
             getattr(response, "status_code", None),
         )
         return HTMLResponse("<h1>Не удалось подключить Яндекс Метрику</h1><p>Проверьте права приложения и повторите попытку.</p>", status_code=502)
+    if flow.get("service") == "direct":
+        return HTMLResponse("<h1>Яндекс.Директ подключён</h1><p>Доступ к рекламному аккаунту сохранён.</p>")
     return HTMLResponse("<h1>Яндекс Метрика подключена</h1><p>Счётчик и цели привязаны к выбранному каналу.</p>")
 
 

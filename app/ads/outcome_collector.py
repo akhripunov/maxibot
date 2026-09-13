@@ -11,7 +11,7 @@ from app.ads.outcomes import backfill_missing_outcome_checkpoints, claim_due_out
 from app.ads.v2 import collect_yandex_v2
 from app.db.models import Admin, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsRecommendation, AdsAiOutcome, BotPromotionProfile, Channel
 from app.core.config import settings
-from app.integrations.yandex_oauth import get_encrypted_token
+from app.integrations.yandex_oauth import get_direct_encrypted_token
 from app.security_tokens import decrypt_token
 from app.traffic.analytics import traffic_stats_for_channels
 from app.ads.creative_experiment import creative_variant_metrics
@@ -60,7 +60,7 @@ async def collect_one_outcome(db: AsyncSession, outcome: AdsAiOutcome) -> None:
     channel = await db.get(Channel, recommendation.channel_id) if recommendation else None
     campaign = await db.get(AdsCampaign, ai.campaign_id) if ai and ai.campaign_id else None
     admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
-    encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
+    encrypted = await get_direct_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
     if not campaign or not encrypted:
         raise ValueError("OUTCOME_PROVIDER_CREDENTIALS_UNAVAILABLE")
     # Prefer a real periodic observation near the checkpoint.  The fallback
@@ -136,7 +136,7 @@ async def process_due_outcomes(session_factory) -> int:
                     elif recommendation:
                         channel = await db.get(Channel, recommendation.channel_id)
                         external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
-                        encrypted = await get_encrypted_token(str(external_id), channel.id, db=db) if channel and external_id else None
+                        encrypted = await get_direct_encrypted_token(str(external_id), channel.id, db=db) if channel and external_id else None
                     if encrypted:
                         from app.ads.autopilot import rollback_autonomous_action
                         from app.ads.yandex_autopilot import yandex_autopilot_adapter

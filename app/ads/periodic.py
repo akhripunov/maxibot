@@ -20,7 +20,7 @@ from app.db.models import (
     Admin, AdsAccount, AdsCampaign, AdsDataHealth, AdsPromotionCampaignLink,
     AdsCollectionRun, BotPromotionProfile, Channel,
 )
-from app.integrations.yandex_oauth import get_encrypted_token
+from app.integrations.yandex_oauth import get_direct_encrypted_token
 from app.security_tokens import decrypt_token
 from app.security_tokens import decrypt_token
 
@@ -162,7 +162,7 @@ async def sync_account_inventory(db: AsyncSession) -> int:
         channel = await db.scalar(select(Channel).where(Channel.admin_id == account.admin_id).order_by(Channel.id).limit(1))
         if not admin_external_id or not channel:
             continue
-        encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db)
+        encrypted = await get_direct_encrypted_token(str(admin_external_id), channel.id, db=db)
         if not encrypted:
             continue
         provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login or account.external_account_id)
@@ -219,13 +219,13 @@ async def _collection_context(db: AsyncSession, run: AdsCollectionRun):
     link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.campaign_id == campaign.id))
     channel = await db.get(Channel, link.channel_id) if link and link.object_type == "CHANNEL" and link.channel_id else None
     admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id)) if channel else None
-    encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
+    encrypted = await get_direct_encrypted_token(str(admin_external_id), channel.id, db=db) if channel and admin_external_id else None
     if not encrypted and admin_external_id:
         # Account-wide collection does not require a promotion link.  Resolve
         # the owner's existing channel only as the durable OAuth token store.
         token_channel = await db.scalar(select(Channel).where(Channel.admin_id == campaign_account.admin_id).order_by(Channel.id).limit(1))
         if token_channel:
-            encrypted = await get_encrypted_token(str(admin_external_id), token_channel.id, db=db)
+            encrypted = await get_direct_encrypted_token(str(admin_external_id), token_channel.id, db=db)
     if link and link.object_type == "BOT" and link.bot_promotion_profile_id:
         profile = await db.get(BotPromotionProfile, link.bot_promotion_profile_id)
         encrypted = profile.yandex_oauth_token_encrypted if profile else None
@@ -510,7 +510,7 @@ async def trigger_autopilot_execution(session_factory) -> int:
             encrypted = None
             if object_type == "CHANNEL":
                 external_id = await db.scalar(select(Admin.external_id).join(Channel, Channel.admin_id == Admin.id).where(Channel.id == object_id))
-                encrypted = await get_encrypted_token(str(external_id), object_id, db=db) if external_id else None
+                encrypted = await get_direct_encrypted_token(str(external_id), object_id, db=db) if external_id else None
             else:
                 profile = await db.get(BotPromotionProfile, object_id)
                 encrypted = profile.yandex_oauth_token_encrypted if profile else None

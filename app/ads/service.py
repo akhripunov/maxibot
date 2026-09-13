@@ -22,7 +22,7 @@ from app.ads.objectives import evaluate_objective, objective_for_link
 from app.core.config import settings
 from app.db.models import Admin, AdsAccount, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCollectionRun, AdsDataHealth, AdsMemory, AdsObservation, AdsPromotionCampaignLink, AdsRecommendation, AdsAiOutcome, BotConnection, BotPromotionProfile, Channel, LandingPage, TrafficProfile
 from app.integrations.yandex_direct import YandexDirectClient
-from app.integrations.yandex_oauth import get_encrypted_token
+from app.integrations.yandex_oauth import get_direct_encrypted_token
 from app.security_tokens import decrypt_token
 from app.traffic.analytics import traffic_stats_for_channels
 
@@ -474,7 +474,7 @@ async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str
     run = AdsCollectionRun(provider="INTERNAL", channel_id=channel.id, collection_type="MANUAL_AI_SYNC", run_type="MANUAL_AI_SYNC", trigger="MANUAL", scheduled_at=datetime.now(timezone.utc), slot_key=f"manual-ai-sync:{channel.id}:{datetime.now(timezone.utc).isoformat()}"); db.add(run); await db.flush()
     profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel.id)); traffic = await traffic_stats_for_channels(db, [channel.id])
     mapped = await _mapped(db, channel.id)
-    encrypted = await get_encrypted_token(str(admin_external_id), channel.id, db=db); campaigns: list[AdsCampaign] = []; reports: dict[str, list[dict]] = {}; error = None
+    encrypted = await get_direct_encrypted_token(str(admin_external_id), channel.id, db=db); campaigns: list[AdsCampaign] = []; reports: dict[str, list[dict]] = {}; error = None
     report_date_to = datetime.now(timezone.utc).astimezone(MOSCOW).date(); report_date_from = report_date_to - timedelta(days=6); report_fetched_at = datetime.now(timezone.utc)
     if encrypted:
         try: campaigns, reports = await _direct_sync(db, account=await _account(db, channel.admin_id), encrypted=encrypted, report_campaign_ids=set(mapped))
@@ -567,7 +567,7 @@ async def campaigns_for_channel(db: AsyncSession, channel_id: str) -> list[tuple
         matching_external_ids = cached_scope[1]
     if channel:
         admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == channel.admin_id))
-        encrypted = await get_encrypted_token(str(admin_external_id), channel_id, db=db)
+        encrypted = await get_direct_encrypted_token(str(admin_external_id), channel_id, db=db)
         if encrypted and not cache_fresh:
             # Campaign discovery is read-only and must not request reports.
             # Report calls are rate limited and belong to explicit AI checks.

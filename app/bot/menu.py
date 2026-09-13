@@ -23,7 +23,7 @@ from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
 from app.traffic.deep_link import valid_max_target
-from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, system_connection_status
+from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, get_direct_encrypted_token, system_connection_status
 from app.integrations.yandex_direct import YandexDirectClient
 from app.integrations.yandex_metrica import channel_setup_status, ensure_channel_goals_for_existing_counter, YandexMetricaClient
 from app.security_tokens import decrypt_token
@@ -67,7 +67,7 @@ async def _fresh_campaign_provider_state(db: AsyncSession, admin: Admin, campaig
     """Read provider state before Autopilot confirmation; never write to Direct."""
     if object_type != "CHANNEL":
         return str(campaign.state or campaign.status or "").upper() or None
-    encrypted = await get_encrypted_token(admin.external_id, object_id, db=db)
+    encrypted = await get_direct_encrypted_token(admin.external_id, object_id, db=db)
     if not encrypted:
         return None
     try:

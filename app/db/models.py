@@ -203,6 +203,16 @@ class TrafficProfile(Base):
     # only a cache and must never be the sole record of an owner connection.
     yandex_oauth_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
     yandex_oauth_connected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # Service-scoped credentials. The legacy field above is retained only for
+    # backwards-compatible Metrica recovery and is never used by Direct.
+    yandex_metrica_oauth_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    yandex_metrica_oauth_connected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    yandex_metrica_oauth_client_fingerprint: Mapped[Optional[str]] = mapped_column(String(64))
+    yandex_metrica_oauth_scopes: Mapped[Optional[str]] = mapped_column(Text)
+    yandex_direct_oauth_token_encrypted: Mapped[Optional[str]] = mapped_column(Text)
+    yandex_direct_oauth_connected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    yandex_direct_oauth_client_fingerprint: Mapped[Optional[str]] = mapped_column(String(64))
+    yandex_direct_oauth_scopes: Mapped[Optional[str]] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     target_url: Mapped[Optional[str]] = mapped_column(String(2048))
     channel_mode: Mapped[str] = mapped_column(String(16), default="UNKNOWN", nullable=False)

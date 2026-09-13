@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import hashlib
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -56,11 +57,11 @@ def _redis() -> Redis:
     return Redis.from_url(settings.redis_url, decode_responses=True)
 
 
-async def create_state(admin_external_id: str, channel_id: str) -> str:
+async def create_state(admin_external_id: str, channel_id: str, *, service: str = "metrica") -> str:
     state = secrets.token_urlsafe(32)
     client = _redis()
     try:
-        await client.setex(f"yandex:oauth:state:{state}", 600, json.dumps({"admin": admin_external_id, "channel": channel_id}))
+        await client.setex(f"yandex:oauth:state:{state}", 600, json.dumps({"admin": admin_external_id, "channel": channel_id, "service": service}))
     finally:
         await client.aclose()
     return state
@@ -114,18 +115,36 @@ async def exchange_code(code: str) -> dict:
     token = payload.get("access_token")
     if not isinstance(token, str) or not token:
         raise ValueError("Yandex token response has no access token")
-    return {"access_token": token, "token_type": payload.get("token_type", "bearer")}
+    return {
+        "access_token": token,
+        "token_type": payload.get("token_type", "bearer"),
+        "scope": payload.get("scope"),
+    }
 
 
-async def save_token(admin_external_id: str, channel_id: str, token_payload: dict, *, db: AsyncSession) -> str:
-    """Persist an encrypted token durably; Redis is a best-effort cache only."""
+def _client_fingerprint() -> str:
+    return hashlib.sha256((settings.yandex_oauth_client_id or "").encode()).hexdigest()[:16]
+
+
+async def save_token(admin_external_id: str, channel_id: str, token_payload: dict, *, db: AsyncSession, service: str = "metrica") -> str:
+    """Persist a service-scoped encrypted token; Redis is only a cache."""
+    if service not in {"metrica", "direct"}:
+        raise ValueError("YANDEX_OAUTH_SERVICE_UNSUPPORTED")
     encrypted = encrypt_token(token_payload["access_token"])
     connected_at = datetime.now(timezone.utc)
     profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel_id))
     if not profile:
         raise ValueError("traffic profile unavailable for OAuth connection")
-    profile.yandex_oauth_token_encrypted = encrypted
-    profile.yandex_oauth_connected_at = connected_at
+    if service == "direct":
+        profile.yandex_direct_oauth_token_encrypted = encrypted
+        profile.yandex_direct_oauth_connected_at = connected_at
+        profile.yandex_direct_oauth_client_fingerprint = _client_fingerprint()
+        profile.yandex_direct_oauth_scopes = str(token_payload.get("scope") or combined_scope())
+    else:
+        profile.yandex_metrica_oauth_token_encrypted = encrypted
+        profile.yandex_metrica_oauth_connected_at = connected_at
+        profile.yandex_metrica_oauth_client_fingerprint = _client_fingerprint()
+        profile.yandex_metrica_oauth_scopes = str(token_payload.get("scope") or metrica_scope())
     value = {
         "token": encrypted,
         "token_type": token_payload.get("token_type", "bearer"),
@@ -133,7 +152,7 @@ async def save_token(admin_external_id: str, channel_id: str, token_payload: dic
     }
     client = _redis()
     try:
-        await client.set(f"yandex:oauth:token:{admin_external_id}:{channel_id}", json.dumps(value))
+        await client.set(f"yandex:oauth:{service}:token:{admin_external_id}:{channel_id}", json.dumps(value))
     except Exception:
         # A cache outage must not discard a successfully persisted connection.
         pass
@@ -185,9 +204,14 @@ async def system_connection_status(*, db: AsyncSession) -> dict | None:
 
 
 async def get_encrypted_token(admin_external_id: str, channel_id: str, *, db: AsyncSession | None = None) -> str | None:
+    """Backward-compatible Metrica credential accessor."""
+    return await get_metrica_encrypted_token(admin_external_id, channel_id, db=db)
+
+
+async def get_metrica_encrypted_token(admin_external_id: str, channel_id: str, *, db: AsyncSession | None = None) -> str | None:
     client = _redis()
     try:
-        raw = await client.get(f"yandex:oauth:token:{admin_external_id}:{channel_id}")
+        raw = await client.get(f"yandex:oauth:metrica:token:{admin_external_id}:{channel_id}")
         if raw:
             return json.loads(raw).get("token")
     except Exception:
@@ -202,18 +226,50 @@ async def get_encrypted_token(admin_external_id: str, channel_id: str, *, db: As
         .join(Admin, Admin.id == Channel.admin_id)
         .where(Channel.id == channel_id, Admin.external_id == admin_external_id)
     )
-    if not profile or not profile.yandex_oauth_token_encrypted:
+    encrypted = (profile.yandex_metrica_oauth_token_encrypted or profile.yandex_oauth_token_encrypted) if profile else None
+    if not encrypted:
         return None
-    encrypted = profile.yandex_oauth_token_encrypted
     # Validate the encrypted value before returning it and rebuild the cache
     # only after a successful durable fallback.
     decrypt_token(encrypted)
     client = _redis()
     try:
         await client.set(
-            f"yandex:oauth:token:{admin_external_id}:{channel_id}",
+            f"yandex:oauth:metrica:token:{admin_external_id}:{channel_id}",
             json.dumps({"token": encrypted, "connected_at": profile.yandex_oauth_connected_at.isoformat() if profile.yandex_oauth_connected_at else None}),
         )
+    except Exception:
+        pass
+    finally:
+        await client.aclose()
+    return encrypted
+
+
+async def get_direct_encrypted_token(admin_external_id: str, channel_id: str, *, db: AsyncSession | None = None) -> str | None:
+    """Return only the service-scoped Direct credential; never legacy fallback."""
+    client = _redis()
+    try:
+        raw = await client.get(f"yandex:oauth:direct:token:{admin_external_id}:{channel_id}")
+        if raw:
+            return json.loads(raw).get("token")
+    except Exception:
+        pass
+    finally:
+        await client.aclose()
+    if db is None:
+        return None
+    profile = await db.scalar(
+        select(TrafficProfile).join(Channel, Channel.id == TrafficProfile.channel_id).join(Admin, Admin.id == Channel.admin_id).where(
+            Channel.id == channel_id, Admin.external_id == admin_external_id,
+        )
+    )
+    if not profile or not profile.yandex_direct_oauth_token_encrypted:
+        return None
+    encrypted = profile.yandex_direct_oauth_token_encrypted
+    decrypt_token(encrypted)
+    client = _redis()
+    try:
+        await client.set(f"yandex:oauth:direct:token:{admin_external_id}:{channel_id}", json.dumps({"token": encrypted, "connected_at": profile.yandex_direct_oauth_connected_at.isoformat() if profile.yandex_direct_oauth_connected_at else None}))
     except Exception:
         pass
     finally:
