@@ -4,12 +4,15 @@ from app.ads.periodic import _slot_time
 from app.core.config import settings
 
 
-def test_periodic_slot_time_is_stable_and_spread_within_cadence_window():
-    now = datetime(2026, 9, 3, 7, 0, tzinfo=timezone.utc)
+def test_periodic_slot_time_is_stable_and_round_in_moscow_time():
+    now = datetime(2026, 9, 3, 7, 37, tzinfo=timezone.utc)
     first = _slot_time(now, "campaign-a", "CAMPAIGN")
     again = _slot_time(now, "campaign-a", "CAMPAIGN")
     assert first == again
-    assert 0 <= (first - first.replace(minute=0, second=0, microsecond=0)).total_seconds() < 3600
+    moscow = first.astimezone(__import__("zoneinfo").ZoneInfo("Europe/Moscow"))
+    assert moscow.minute == 0
+    assert moscow.second == 0
+    assert moscow.microsecond == 0
 
 
 def test_periodic_collection_is_fail_closed_by_default():

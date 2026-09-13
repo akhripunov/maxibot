@@ -6,7 +6,6 @@ so retries cannot create duplicate logical collection points.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -50,14 +49,15 @@ def _interval(collection_type: str) -> int:
 
 
 def _slot_time(now: datetime, campaign_id: str, collection_type: str) -> datetime:
-    """Return a deterministic cadence slot with stable intra-window jitter."""
+    """Return a cadence slot on a round Moscow-time boundary."""
     minutes = max(1, _interval(collection_type))
-    epoch = int(now.timestamp()) // (minutes * 60) * minutes * 60
-    base = datetime.fromtimestamp(epoch, timezone.utc)
-    # Spread campaigns through the window; this is deterministic across worker
-    # restarts and avoids an HH:00 burst.
-    jitter = int(hashlib.sha256(f"{campaign_id}:{collection_type}".encode()).hexdigest()[:8], 16) % max(1, minutes)
-    return base + timedelta(minutes=jitter)
+    local = now.astimezone(MOSCOW)
+    rounded = local.replace(
+        minute=(local.minute // minutes) * minutes,
+        second=0,
+        microsecond=0,
+    )
+    return rounded.astimezone(timezone.utc)
 
 
 async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, limit: int = 200) -> int:
