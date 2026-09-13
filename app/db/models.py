@@ -1119,6 +1119,9 @@ class AdsRecommendation(Base):
     reserved_budget: Mapped[Optional[float]] = mapped_column(Numeric(20, 6), default=0, server_default="0")
     reservation_status: Mapped[str] = mapped_column(String(16), default="NONE", server_default="NONE", nullable=False, index=True)
     guardrail_decision_json: Mapped[Optional[str]] = mapped_column(Text)
+    # Frozen deterministic evidence requirements for business experiments.
+    # Technical canaries intentionally leave this NULL.
+    evidence_policy_json: Mapped[Optional[str]] = mapped_column(Text)
 
 
 class AdsMemory(Base):

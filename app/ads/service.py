@@ -15,6 +15,7 @@ from app.ads.llm import PROMPT_VERSION, SCHEMA_VERSION, assert_safe_context, evi
 from app.ads.memory import create_candidates, retrieve
 from app.ads.codex_worker import WAITING
 from app.ads.outcomes import ensure_outcome_checkpoints
+from app.ads.evidence_policy import build_evidence_policy
 from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v2
 from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_bot_metrics, build_maxibot_metrics
@@ -58,7 +59,7 @@ async def _report_campaign_catalog(client: YandexDirectClient, *, lookback_days:
     return result
 
 
-async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecommendation) -> None:
+async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecommendation, *, baseline_snapshot_id: str | None = None) -> None:
     """Anchor one recommendation to a stable experiment and per-object seq."""
     await db.flush()
     object_type = recommendation.promotion_object_type or "CHANNEL"
@@ -78,6 +79,24 @@ async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecom
     recommendation.experiment_id = recommendation.id
     recommendation.experiment_seq = int(highest or 0) + 1
     recommendation.experiment_status = "planned"
+    # Freeze deterministic evidence requirements when the experiment is created.
+    # Technical canaries are deliberately excluded from business evidence policy.
+    if recommendation.experiment_kind != "TECHNICAL_CANARY" and recommendation.evidence_policy_json is None:
+        baseline = {}
+        if baseline_snapshot_id:
+            snapshot = await db.get(AdsAnalysisSnapshot, baseline_snapshot_id)
+            if snapshot:
+                try:
+                    payload = json.loads(snapshot.facts_json or "{}")
+                    baseline = payload.get("facts", payload) if isinstance(payload, dict) else {}
+                except (TypeError, ValueError):
+                    baseline = {}
+        recommendation.evidence_policy_json = json.dumps(build_evidence_policy(
+            baseline=baseline,
+            action_type=recommendation.action_code,
+            snapshot_id=baseline_snapshot_id,
+            stage=recommendation.maturity_before or "EXPLORE",
+        ), ensure_ascii=False, sort_keys=True)
     await db.flush()
 
 
@@ -459,7 +478,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                 await _lock_experiment_scope(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id)
                 if not await _active_experiment_exists(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id):
                     recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, destination_platform=destination_platform, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id, hypothesis_key=__import__("app.ads.memory", fromlist=["claim_key"]).claim_key(rec.get("hypothesis") or rec.get("reason"), objective=objective_evaluation.get("objective_type"), action=rec.get("action_code")), maturity_before="EXPLORE", maturity_after="EXPLORE", maturity_reason="Новая гипотеза", influenced_by_memory_ids_json=json.dumps([x.id for x in memories if x.status in {"SUPPORTED", "VALIDATED", "TRUSTED"}][:8]), avoided_due_to_memory_ids_json=json.dumps([x.id for x in memories if x.status == "REJECTED"][:8]))
-                    db.add(recommendation); await _assign_experiment_identity(db, recommendation); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
+                    db.add(recommendation); await _assign_experiment_identity(db, recommendation, baseline_snapshot_id=snapshot.id); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
                     await create_candidates(db, channel_id=channel_id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids, object_type=object_type, object_id=object_id, experiment_id=recommendation.experiment_id, destination_platform=destination_platform)
         except Exception as exc:
             ai.status, ai.validation_error = "FAILED", type(exc).__name__
@@ -737,7 +756,9 @@ async def persist_development_result(db: AsyncSession, *, channel_id: str, outpu
         return ai
     recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14))
     db.add(recommendation)
-    await _assign_experiment_identity(db, recommendation)
+    # Canonical entrypoint: _assign_experiment_identity(db, recommendation)
+    # now additionally freezes the policy using the immutable input snapshot.
+    await _assign_experiment_identity(db, recommendation, baseline_snapshot_id=ai.input_snapshot_id)
     await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=ai.input_snapshot_id)
     await create_candidates(db, channel_id=channel_id, campaign_id=campaign_id, ai_run_id=ai.id, snapshot_id=ai.input_snapshot_id, candidates=valid["memory_candidates"], known_evidence=evidence_ids)
     await db.commit(); return ai

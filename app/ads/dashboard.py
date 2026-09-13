@@ -146,6 +146,7 @@ def _experiment_view(recommendation: AdsRecommendation, outcome: AdsAiOutcome | 
     if before is None or after is None:
         before = delta.get("actual_cpa_7d", {}).get("before") if isinstance(delta.get("actual_cpa_7d"), dict) else before
         after = delta.get("actual_cpa_7d", {}).get("after") if isinstance(delta.get("actual_cpa_7d"), dict) else after
+    evidence_policy = _json(getattr(recommendation, "evidence_policy_json", None), {})
     return {
         "experiment_id": recommendation.experiment_id,
         "experiment_seq": recommendation.experiment_seq,
@@ -158,6 +159,9 @@ def _experiment_view(recommendation: AdsRecommendation, outcome: AdsAiOutcome | 
         "before": before,
         "after": after,
         "rollback": bool(outcome and outcome.execution_status == "ROLLED_BACK"),
+        "experiment_kind": recommendation.experiment_kind,
+        "evidence_policy": evidence_policy if isinstance(evidence_policy, dict) else {},
+        "technical_label": "Техническая проверка" if recommendation.experiment_kind == "TECHNICAL_CANARY" else None,
     }
 
 
@@ -212,9 +216,11 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     run_by_id = {run.id: run for run in runs}
     history_run_by_id = {run.id: run for run in history_runs}
     running = any(run.status in RUNNING_AI_STATES for run in runs)
-    all_recommendations = list((await db.scalars(select(AdsRecommendation).where(
-        AdsRecommendation.ai_run_id.in_(list(history_run_by_id)))
-        .order_by(AdsRecommendation.created_at.desc()).limit(100))).all()) if history_run_by_id else []
+    all_recommendations = list((await db.scalars(select(AdsRecommendation).where(or_(
+        AdsRecommendation.ai_run_id.in_(list(history_run_by_id)) if history_run_by_id else False,
+        *(_scope(AdsRecommendation, object_type, object_id)),
+    ))
+        .order_by(AdsRecommendation.created_at.desc()).limit(100))).all())
     current_recommendations = [item for item in all_recommendations if item.ai_run_id in run_by_id]
     recommendations = [item for item in current_recommendations if item.status == "OPEN"]
     recommendations.sort(key=lambda item: (_PRIORITY.get(str(item.priority or "").upper(), 9),

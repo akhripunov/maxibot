@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.ads.evidence_policy import evaluate_policy_state
 
 from app.db.models import AdsAiRun, AdsAiOutcome, AdsRecommendation
 
@@ -161,6 +162,32 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
     recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
     expected_impact = _json_object(outcome.expected_impact_json) or _json_object(recommendation.expected_impact_json if recommendation else None)
     criteria = evaluate_success_criteria(expected_impact=expected_impact, delta=delta)
+    policy = _json_object(recommendation.evidence_policy_json if recommendation else None)
+    policy_state = None
+    if policy:
+        created = outcome.created_at or datetime.now(timezone.utc)
+        elapsed = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 3600)
+        conversion_delta = delta.get("conversions_7d")
+        exact_outcomes = delta.get("exact_outcomes")
+        if exact_outcomes is None and isinstance(conversion_delta, dict):
+            exact_outcomes = conversion_delta.get("after")
+        policy_state = evaluate_policy_state(
+            policy=policy,
+            clicks=delta.get("clicks") or (delta.get("clicks_7d") or {}).get("after"),
+            exact_outcomes=exact_outcomes,
+            elapsed_hours=elapsed,
+            freshness_hours=delta.get("freshness_hours"),
+            attribution_coverage=delta.get("attribution_coverage"),
+            data_trust=delta.get("data_trust", "UNKNOWN"),
+            stop_loss=bool(delta.get("stop_loss_triggered")),
+        )
+        if policy_state in {"CONTINUE", "EARLY_STOP"}:
+            outcome.evaluation_status = policy_state
+            outcome.reason_json = json.dumps({"reason": "Frozen Evidence Policy has not reached a valid completion endpoint.", "policy_state": policy_state, "success_criteria_met": criteria}, ensure_ascii=False)
+            outcome.status = "PENDING" if policy_state == "CONTINUE" else "COMPLETED"
+            if policy_state == "CONTINUE":
+                await db.commit()
+                return
     outcome.expected_impact_json = json.dumps(expected_impact, ensure_ascii=False) if expected_impact else outcome.expected_impact_json
     outcome.expected_direction = str(expected_impact.get("direction") or expected_impact.get("expected_direction")) if expected_impact else outcome.expected_direction
     outcome.evaluation_status = classify_outcome(
@@ -173,7 +200,7 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
     outcome.observed_delta_json = json.dumps(delta, ensure_ascii=False)
     outcome.actual_metrics_json = json.dumps(delta, ensure_ascii=False)
     outcome.confidence = "LOW" if outcome.evaluation_status == "INCONCLUSIVE" else outcome.confidence
-    outcome.reason_json = json.dumps({"reason": "Критерий проверен по явно заданной гипотезе рекомендации." if criteria is not None else "Недостаточно implementation evidence или явного критерия успеха для детерминированной оценки.", "success_criteria_met": criteria}, ensure_ascii=False)
+    outcome.reason_json = json.dumps({"reason": "Критерий проверен по явно заданной гипотезе рекомендации." if criteria is not None else "Недостаточно implementation evidence или явного критерия успеха для детерминированной оценки.", "success_criteria_met": criteria, "policy_state": policy_state}, ensure_ascii=False)
     outcome.completed_at = datetime.now(timezone.utc)
     if recommendation:
         recommendation.experiment_status = "completed"
