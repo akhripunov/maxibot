@@ -41,13 +41,22 @@ def build_evidence_policy(*, baseline: dict[str, Any] | None, stage: str = "EXPL
     calculated = _sample_size(rate, mde) if rate is not None else None
     required_sample = max(int(hard_min_clicks), calculated or int(hard_min_clicks))
     required_outcomes = max(int(hard_min_outcomes), math.ceil((rate or 0) * required_sample))
+    traffic_rate = facts.get("eligible_clicks_per_day")
+    try:
+        traffic_rate = float(traffic_rate) if traffic_rate is not None else None
+    except (TypeError, ValueError):
+        traffic_rate = None
+    expected_days = (required_sample / traffic_rate) if traffic_rate and traffic_rate > 0 else None
+    min_duration = 24
+    max_duration = max(168, math.ceil(expected_days * 2 * 24)) if expected_days else 168
     policy = {
         "version": POLICY_VERSION, "experiment_type": experiment_type, "maturity_stage": stage,
         "primary_metric": primary_metric, "secondary_metrics": ["clicks", "spend", "business_cpa"],
         "baseline": {"clicks": clicks, "exact_outcomes": outcomes, "spend": spend, "conversion_rate": rate},
         "mde": {"relative": mde}, "alpha": ALPHA, "power": POWER,
         "required_sample": required_sample, "required_exact_outcomes": required_outcomes,
-        "min_duration_hours": 24, "max_duration_hours": 168, "conversion_delay_hours": 48,
+        "min_duration_hours": min_duration, "max_duration_hours": max_duration, "conversion_delay_hours": 48,
+        "conversion_delay_source": "OBSERVED" if facts.get("conversion_delay_hours") is not None else "FALLBACK",
         "required_data_trust": "GOOD", "min_attribution_coverage": MIN_ATTRIBUTION_COVERAGE, "max_freshness_hours": MAX_FRESHNESS_HOURS,
         "evaluation_checkpoints": [0.50, 0.75, 1.00],
         "stopping_rule": {"method": "FIXED_HORIZON_V1", "early_stop_only": ["STOP_LOSS", "DATA_TRUST", "SCOPE"]},

@@ -29,3 +29,9 @@ def test_unknown_freshness_and_max_duration_fail_closed():
     assert evaluate_policy_state(policy=policy, clicks=100, exact_outcomes=10, elapsed_hours=24, freshness_hours=None, attribution_coverage=1.0, data_trust="GOOD") == "EARLY_STOP"
     assert evaluate_policy_state(policy=policy, clicks=100, exact_outcomes=10, elapsed_hours=169, freshness_hours=1, attribution_coverage=1.0, data_trust="GOOD") == "INCONCLUSIVE"
     assert evaluate_policy_state(policy=policy, clicks=100, exact_outcomes=10, elapsed_hours=24, freshness_hours=1, attribution_coverage=1.0, data_trust="GOOD", stop_loss=True) == "EARLY_STOP"
+
+
+def test_duration_is_derived_from_observed_traffic_rate():
+    policy = build_evidence_policy(baseline={"clicks": 100, "exact_subscribers": 10, "eligible_clicks_per_day": 5})
+    assert policy["max_duration_hours"] > 168
+    assert policy["conversion_delay_source"] == "FALLBACK"
