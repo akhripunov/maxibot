@@ -1841,12 +1841,6 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 controls.insert(0, ("↻ Проверить ещё раз", f"ads_autopilot_preflight_retry:{object_type}:{object_id}:{campaign_id_from_route}"))
                 controls.insert(1, ("🔍 Технические детали", f"ads_autopilot_preflight_details:{object_type}:{object_id}:{campaign_id_from_route}"))
             else:
-                # Keep a forward path visible even when the provider campaign
-                # is currently stopped.  Clicking it re-enters this same
-                # confirmation renderer and performs a fresh read-only
-                # preflight; it cannot enable Autopilot until the provider
-                # state is confirmed ACTIVE/ON.
-                controls.insert(0, ("🚀 Включить автопилот", f"ads_autopilot_enable:{object_type}:{object_id}"))
                 controls.insert(0, ("🔧 Исправить настройку", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
             return confirmation, buttons(*controls)
         if action_name == "ads_autopilot_enable":
