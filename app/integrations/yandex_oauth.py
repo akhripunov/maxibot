@@ -127,7 +127,7 @@ def _client_fingerprint() -> str:
 
 
 async def save_token(admin_external_id: str, channel_id: str, token_payload: dict, *, db: AsyncSession, service: str = "metrica") -> str:
-    """Persist a service-scoped encrypted token; Redis is only a cache."""
+    """Persist a service-scoped encrypted token; Redis is a best-effort cache only."""
     if service not in {"metrica", "direct"}:
         raise ValueError("YANDEX_OAUTH_SERVICE_UNSUPPORTED")
     encrypted = encrypt_token(token_payload["access_token"])

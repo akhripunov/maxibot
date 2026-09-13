@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY docker/max-certs/*.crt /usr/local/share/ca-certificates/

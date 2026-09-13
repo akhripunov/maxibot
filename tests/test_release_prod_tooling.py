@@ -9,7 +9,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
 PRODUCTION_HEAD_MIGRATION = "0090_self_learning_loop_v2"
-CANDIDATE_HEAD_MIGRATION = "0091_generic_promotion_platform"
+CANDIDATE_HEAD_MIGRATION = "0092_split_yandex_oauth_credentials"
+CANDIDATE_PARENT_MIGRATION = "0091_generic_promotion_platform"
 IMAGE_PREFLIGHT = ROOT / "scripts" / "release_image_preflight.py"
 APPROVED_SHA = "a" * 40
 
@@ -238,7 +239,7 @@ def test_release_parser_handles_real_merge_tuple_and_candidate_head_path():
     result = _run_release(CANDIDATE_HEAD_MIGRATION)
     assert result.returncode == 0, result.stderr
     assert f"TARGET_MIGRATION={CANDIDATE_HEAD_MIGRATION}" in result.stdout
-    assert f"TARGET_DOWN_REVISION={PRODUCTION_HEAD_MIGRATION}" in result.stdout
+    assert f"TARGET_DOWN_REVISION={CANDIDATE_PARENT_MIGRATION}" in result.stdout
 
 
 def test_release_parser_rejects_invalid_omitted_and_unreachable_targets():

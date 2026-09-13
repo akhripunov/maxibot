@@ -15,22 +15,22 @@ def _run(current, target):
 
 
 def test_pending_migration_rehearses_without_production_mutation():
-    result = _run("0090_self_learning_loop_v2", "0091_generic_promotion_platform")
+    result = _run("0090_self_learning_loop_v2", "0092_split_yandex_oauth_credentials")
     assert result.returncode == 0, result.stderr
     assert "MIGRATION_REHEARSAL=PASS" in result.stdout
-    assert "PATH=0090_self_learning_loop_v2->0091_generic_promotion_platform" in result.stdout
+    assert "PATH=0090_self_learning_loop_v2->0091_generic_promotion_platform->0092_split_yandex_oauth_credentials" in result.stdout
     assert "ADS_TABLE_COUNT=16" in result.stdout
     assert "BACKFILL=MAX" in result.stdout
 
 
 def test_same_head_rehearsal_is_allowed():
-    result = _run("0091_generic_promotion_platform", "0091_generic_promotion_platform")
+    result = _run("0092_split_yandex_oauth_credentials", "0092_split_yandex_oauth_credentials")
     assert result.returncode == 0, result.stderr
-    assert "PATH=0091_generic_promotion_platform" in result.stdout
+    assert "PATH=0092_split_yandex_oauth_credentials" in result.stdout
 
 
 def test_unrelated_production_head_is_fail_closed():
-    result = _run("unrelated-production-head", "0091_generic_promotion_platform")
+    result = _run("unrelated-production-head", "0092_split_yandex_oauth_credentials")
     assert result.returncode != 0
     assert "MIGRATION_REHEARSAL=BLOCKED" in result.stderr
 

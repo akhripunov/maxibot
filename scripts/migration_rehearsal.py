@@ -82,6 +82,7 @@ def _rehearse_migration(sha: str, target: str) -> None:
             break
     if migration_file is None:
         raise RuntimeError("target migration file not found")
+    migration_text = migration_file[1]
     with tempfile.TemporaryDirectory(prefix="maxibot-migration-") as directory:
         from sqlalchemy import create_engine, text
         engine = create_engine(f"sqlite:///{Path(directory) / 'rehearsal.sqlite'}")
@@ -93,9 +94,11 @@ def _rehearse_migration(sha: str, target: str) -> None:
             "ads_ai_runs", "ads_recommendations", "ads_memories", "ads_data_health",
         ):
             db.execute(text(f'INSERT INTO "{table}" (id) VALUES (1)'))
+        if 'op.add_column("traffic_profiles"' in migration_text:
+            db.execute(text("CREATE TABLE traffic_profiles (id INTEGER PRIMARY KEY, channel_id VARCHAR(255))"))
         db.commit()
         path = Path(directory) / "candidate_migration.py"
-        path.write_text(migration_file[1])
+        path.write_text(migration_text)
         spec = importlib.util.spec_from_file_location("candidate_migration", path)
         module = importlib.util.module_from_spec(spec)
         assert spec and spec.loader
@@ -105,13 +108,24 @@ def _rehearse_migration(sha: str, target: str) -> None:
         context = MigrationContext.configure(db)
         with Operations.context(context):
             module.upgrade()
-        for table in (
-            "ads_promotion_campaign_links", "ads_collection_runs", "ads_analysis_snapshots",
-            "ads_ai_runs", "ads_recommendations", "ads_memories", "ads_data_health",
-        ):
-            value = db.execute(text(f'SELECT destination_platform FROM "{table}" WHERE id=1')).fetchone()[0]
-            if value != "MAX":
-                raise RuntimeError(f"backfill invalid for {table}: {value!r}")
+        if "destination_platform" in migration_text:
+            for table in (
+                "ads_promotion_campaign_links", "ads_collection_runs", "ads_analysis_snapshots",
+                "ads_ai_runs", "ads_recommendations", "ads_memories", "ads_data_health",
+            ):
+                value = db.execute(text(f'SELECT destination_platform FROM "{table}" WHERE id=1')).fetchone()[0]
+                if value != "MAX":
+                    raise RuntimeError(f"backfill invalid for {table}: {value!r}")
+        if 'op.add_column("traffic_profiles"' in migration_text:
+            columns = {row[1] for row in db.execute(text("PRAGMA table_info(traffic_profiles)"))}
+            required = {
+                "yandex_metrica_oauth_token_encrypted", "yandex_metrica_oauth_connected_at",
+                "yandex_metrica_oauth_client_fingerprint", "yandex_metrica_oauth_scopes",
+                "yandex_direct_oauth_token_encrypted", "yandex_direct_oauth_connected_at",
+                "yandex_direct_oauth_client_fingerprint", "yandex_direct_oauth_scopes",
+            }
+            if not required.issubset(columns):
+                raise RuntimeError(f"OAuth split columns missing: {sorted(required - columns)}")
         count = db.execute(text("SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'ads_%'")).fetchone()[0]
         if count != len(ADS_TABLES):
             raise RuntimeError(f"ADS table count changed: {count}")
