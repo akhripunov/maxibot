@@ -32,8 +32,8 @@ def test_yandex_screen_offers_reconnect_after_a_real_connection():
     assert "if oauth_configured:" in yandex_screen
 
 
-def test_yandex_direct_oauth_is_not_exposed_in_the_menu():
+def test_yandex_direct_oauth_is_the_channel_menu_flow():
     yandex_screen = MENU_SOURCE[MENU_SOURCE.index('if screen.startswith("promotion_yandex:")'):MENU_SOURCE.index('if screen.startswith("promotion_settings:")')]
     assert "🔐 Подключить Яндекс Директ" not in yandex_screen
-    assert "yandex_direct_oauth_url(admin.external_id, selected_id)" not in yandex_screen
-    assert "/oauth/yandex/direct/start" in MENU_SOURCE
+    assert 'yandex_direct_oauth_url(admin.external_id, selected_id)' in yandex_screen
+    assert 'Авторизоваться в Яндекс.Директ' in yandex_screen

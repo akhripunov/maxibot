@@ -2474,19 +2474,17 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         text = yandex_connection_instructions()
         if status_data:
             if oauth_configured:
-                state = await create_state(admin.external_id, selected_id)
                 return (
                     text,
                     [
-                        [{"text": "Авторизоваться в Яндекс", "type": "link", "url": authorize_url(state)}],
+                        [{"text": "Авторизоваться в Яндекс.Директ", "type": "link", "url": yandex_direct_oauth_url(admin.external_id, selected_id)}],
                         [{"text": "⬅️ Назад", "callback_data": f"promotion_channel:{channel.id}"}],
                     ],
                 )
             return (text, buttons(("⬅️ Назад", f"promotion_channel:{channel.id}")))
         if oauth_configured:
-            state = await create_state(admin.external_id, selected_id)
             return (text,
-                    [[{"text": "Авторизоваться в Яндекс", "type": "link", "url": authorize_url(state)}],
+                    [[{"text": "Авторизоваться в Яндекс.Директ", "type": "link", "url": yandex_direct_oauth_url(admin.external_id, selected_id)}],
                      [{"text": "⬅️ Назад", "callback_data": f"promotion_channel:{channel.id}"}]])
         logger.warning("YANDEX_OAUTH_UI_UNAVAILABLE channel_id=%s", channel.id)
         return (
