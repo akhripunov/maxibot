@@ -9,8 +9,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
 PRODUCTION_HEAD_MIGRATION = "0090_self_learning_loop_v2"
-CANDIDATE_HEAD_MIGRATION = "0092_split_yandex_oauth_credentials"
-CANDIDATE_PARENT_MIGRATION = "0091_generic_promotion_platform"
+CANDIDATE_HEAD_MIGRATION = "0093_experiment_evidence_policy_v1"
+CANDIDATE_PARENT_MIGRATION = "0092_split_yandex_oauth_credentials"
 IMAGE_PREFLIGHT = ROOT / "scripts" / "release_image_preflight.py"
 APPROVED_SHA = "a" * 40
 
