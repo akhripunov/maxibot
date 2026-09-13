@@ -86,8 +86,6 @@ def test_autopilot_confirmation_fails_closed_without_confirmed_provider_state():
     assert "Включить автопилот" in section
 
 
-
-
 def test_unknown_provider_preflight_offers_retry_and_details_instead_of_fix_settings():
     source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
     section = source[source.index('if action_name == "ads_autopilot_enable_confirm":'):source.index('if action_name == "ads_autopilot_enable":', source.index('if action_name == "ads_autopilot_enable_confirm":'))]
