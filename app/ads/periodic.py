@@ -204,7 +204,10 @@ async def collect_entity_configuration(db: AsyncSession, run: AdsCollectionRun) 
             campaign.name = str(provider_campaign.get("Name") or campaign.name)
             campaign.state = provider_campaign.get("State")
             campaign.status = provider_campaign.get("Status")
-            campaign.raw_json = json.dumps(_campaign_metadata(provider_campaign), ensure_ascii=False)
+            campaign.raw_json = json.dumps({
+                key: provider_campaign.get(key)
+                for key in ("Id", "Name", "Type", "State", "Status", "StatusPayment", "StartDate", "EndDate")
+            }, ensure_ascii=False)
         else:
             campaign.state = "UNKNOWN"
         ads_report = await provider.ads([int(campaign.external_id)])
