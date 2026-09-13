@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from datetime import datetime, timezone
+import json
 from typing import Any
 
 from app.integrations.yandex_direct import YandexDirectClient
@@ -60,6 +62,68 @@ def _pay_for_conversion(campaign: dict[str, Any]) -> dict[str, Any] | None:
     return network.get("PayForConversion") if isinstance(network.get("PayForConversion"), dict) else {}
 
 
+def _network_strategy(campaign: dict[str, Any]) -> tuple[str, dict[str, Any], str] | None:
+    """Return explicit strategy, mutable settings object and budget field."""
+    network = (((campaign.get("TextCampaign") or {}).get("BiddingStrategy") or {}).get("Network") or {})
+    kind = str(network.get("BiddingStrategyType") or "").upper()
+    if kind == "PAY_FOR_CONVERSION" and isinstance(network.get("PayForConversion"), dict):
+        return kind, network["PayForConversion"], "PayForConversion.WeeklySpendLimit"
+    if kind == "WB_MAXIMUM_CONVERSION_RATE" and isinstance(network.get("WbMaximumConversionRate"), dict):
+        return kind, network["WbMaximumConversionRate"], "WbMaximumConversionRate.WeeklySpendLimit"
+    if campaign.get("DailyBudget") is not None:
+        return "DAILY_BUDGET", campaign, "DailyBudget"
+    return None
+
+
+def budget_capability_attestation(campaign: dict[str, Any]) -> dict[str, Any]:
+    """Attest only an independently readable campaign-level budget primitive."""
+    route = _network_strategy(campaign)
+    if route:
+        strategy, budget, field = route
+        if strategy in {"PAY_FOR_CONVERSION", "WB_MAXIMUM_CONVERSION_RATE"} and budget.get("WeeklySpendLimit") is not None:
+            return {"verified": True, "strategy": strategy, "budget_field": field, "current_value_micros": budget["WeeklySpendLimit"]}
+        if strategy == "DAILY_BUDGET":
+            daily = campaign.get("DailyBudget") or {}
+            if isinstance(daily, dict) and daily.get("Amount") is not None:
+                return {"verified": True, "strategy": strategy, "budget_field": field, "current_value_micros": daily["Amount"]}
+    return {"verified": False, "reason": "UNSUPPORTED_OR_UNREADABLE_BUDGET_STRATEGY"}
+
+
+def record_strategy_observation(campaign: Any, provider_campaign: dict[str, Any], *, observed_at: datetime | None = None) -> dict[str, Any]:
+    """Append a provider strategy observation to existing campaign metadata."""
+    observed = observed_at or datetime.now(timezone.utc)
+    attestation = budget_capability_attestation(provider_campaign)
+    strategy = _network_strategy(provider_campaign)
+    if strategy:
+        strategy_name, settings, field = strategy
+        observation = {
+            "observed_at": observed.isoformat(),
+            "provider_campaign_id": str(provider_campaign.get("Id") or campaign.external_id),
+            "strategy_type": strategy_name,
+            "budget_field": field,
+            "budget_value_micros": settings.get("WeeklySpendLimit") if strategy_name != "DAILY_BUDGET" else (provider_campaign.get("DailyBudget") or {}).get("Amount"),
+            "budget_type": settings.get("BudgetType") if strategy_name != "DAILY_BUDGET" else None,
+            "goal_id": settings.get("GoalId") if strategy_name != "DAILY_BUDGET" else None,
+        }
+    else:
+        observation = {"observed_at": observed.isoformat(), "provider_campaign_id": str(provider_campaign.get("Id") or campaign.external_id), "strategy_type": None, "budget_field": None, "budget_value_micros": None, "budget_type": None, "goal_id": None}
+    try:
+        metadata = json.loads(campaign.provider_metadata_json or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    history = metadata.setdefault("strategy_observations", [])
+    if not isinstance(history, list):
+        history = []
+        metadata["strategy_observations"] = history
+    history.append(observation)
+    metadata["latest_strategy_observation"] = observation
+    campaign.provider_metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    campaign.metadata_updated_at = observed
+    return {"observation": observation, "attestation": attestation}
+
+
 class YandexAutopilotAdapter:
     """Concrete Yandex Direct V1 action adapter with verified rollback data."""
 
@@ -109,15 +173,22 @@ class YandexAutopilotAdapter:
             return {"rollback_action": "RESTORE_EXCLUDED_SITES", "provider_response": response, "verified_after_state": {"campaign": after}}
         if action == "BOUNDED_BUDGET_REALLOCATION":
             budget = (before.get("campaign") or {}).get("DailyBudget")
-            pay = _pay_for_conversion(before.get("campaign") or {})
-            if pay is not None:
-                previous = pay.get("WeeklySpendLimit")
-                payload = {"Id": campaign_id, "TextCampaign": {"BiddingStrategy": {"Network": {"BiddingStrategyType": "PAY_FOR_CONVERSION", "PayForConversion": {"WeeklySpendLimit": previous}}}}}
+            route = _network_strategy(before.get("campaign") or {})
+            if route and route[0] in {"PAY_FOR_CONVERSION", "WB_MAXIMUM_CONVERSION_RATE"}:
+                strategy_name, settings, _ = route
+                previous = settings.get("WeeklySpendLimit")
+                if previous is None:
+                    raise ProviderVerificationError("ROLLBACK_BUDGET_FIELD_UNAVAILABLE")
+                key = "PayForConversion" if strategy_name == "PAY_FOR_CONVERSION" else "WbMaximumConversionRate"
+                restored = deepcopy(settings)
+                restored["WeeklySpendLimit"] = previous
+                payload = {"Id": campaign_id, "TextCampaign": {"BiddingStrategy": {"Network": {"BiddingStrategyType": strategy_name, key: restored}}}}
                 response = await self.client.mutate("campaigns", method="update", params={"Campaigns": [payload]})
                 after = await self._campaign(campaign_id)
-                if ((_pay_for_conversion(after) or {}).get("WeeklySpendLimit") != previous):
+                after_route = _network_strategy(after)
+                if not after_route or after_route[0] != strategy_name or after_route[1].get("WeeklySpendLimit") != previous:
                     raise ProviderVerificationError("ROLLBACK_BUDGET_NOT_VERIFIED")
-                return {"rollback_action": "RESTORE_WEEKLY_SPEND_LIMIT", "provider_response": response, "verified_after_state": {"campaign": after}}
+                return {"rollback_action": f"RESTORE_{key.upper()}_WEEKLY_SPEND_LIMIT", "provider_response": response, "verified_after_state": {"campaign": after}}
             response = await self.client.mutate("campaigns", method="update", params={"Campaigns": [{"Id": campaign_id, "DailyBudget": budget}]})
             after = await self._campaign(campaign_id)
             if after.get("DailyBudget") != budget:
@@ -173,23 +244,45 @@ class YandexAutopilotAdapter:
 
     async def _budget(self, campaign_id: int, target: dict[str, Any]) -> dict[str, Any]:
         before = await self._campaign(campaign_id)
-        pay = _pay_for_conversion(before)
-        if pay is not None:
+        expected_strategy = str(target.get("expected_strategy_type") or "").upper()
+        observed_network = (((before.get("TextCampaign") or {}).get("BiddingStrategy") or {}).get("Network") or {})
+        observed_strategy = str(observed_network.get("BiddingStrategyType") or "").upper()
+        if expected_strategy and expected_strategy != observed_strategy:
+            raise ProviderVerificationError("PROVIDER_CONFIG_DRIFT")
+        route = _network_strategy(before)
+        if route and route[0] in {"PAY_FOR_CONVERSION", "WB_MAXIMUM_CONVERSION_RATE"}:
+            strategy_name, current_settings, _ = route
             amount = _micros(target.get("weekly_budget_amount"), "WEEKLY_BUDGET_AMOUNT")
-            cpa = pay.get("Cpa")
-            if cpa is not None and amount < int(cpa) * 20:
+            cpa = current_settings.get("Cpa")
+            if strategy_name == "PAY_FOR_CONVERSION" and cpa is not None and amount < int(cpa) * 20:
                 raise ValueError("WEEKLY_BUDGET_BELOW_CPA_MINIMUM")
+            expected_field = str(target.get("expected_budget_field") or "")
+            expected_current = target.get("expected_current_weekly_budget_micros")
+            actual_field = f"TextCampaign.BiddingStrategy.Network.{strategy_name.title().replace('_', '')}.WeeklySpendLimit"
+            if expected_strategy and expected_strategy != strategy_name:
+                raise ProviderVerificationError("PROVIDER_CONFIG_DRIFT")
+            if expected_field and expected_field not in {actual_field, f"{strategy_name}.WeeklySpendLimit"}:
+                raise ProviderVerificationError("PROVIDER_CONFIG_DRIFT")
+            current_amount = current_settings.get("WeeklySpendLimit")
+            if expected_current is not None and int(expected_current) != int(current_amount or -1):
+                raise ProviderVerificationError("PROVIDER_CONFIG_DRIFT")
+            if current_amount is None:
+                raise ProviderVerificationError("BUDGET_FIELD_UNAVAILABLE")
+            max_change = target.get("max_budget_change_percent")
+            if max_change is not None and abs(amount - int(current_amount)) / int(current_amount) * 100 > float(max_change):
+                raise ValueError("BUDGET_CHANGE_EXCEEDS_BOUND")
             strategy = deepcopy((before.get("TextCampaign") or {}).get("BiddingStrategy") or {})
             network = strategy.setdefault("Network", {})
-            current = deepcopy(network.get("PayForConversion") or {})
+            key = "PayForConversion" if strategy_name == "PAY_FOR_CONVERSION" else "WbMaximumConversionRate"
+            current = deepcopy(network.get(key) or {})
             current["WeeklySpendLimit"] = amount
-            network["BiddingStrategyType"] = "PAY_FOR_CONVERSION"
-            network["PayForConversion"] = current
+            network["BiddingStrategyType"] = strategy_name
+            network[key] = current
             payload = {"Id": campaign_id, "TextCampaign": {"BiddingStrategy": strategy}}
             response = await self.client.mutate("campaigns", method="update", params={"Campaigns": [payload]})
             after = await self._campaign(campaign_id)
-            after_pay = _pay_for_conversion(after)
-            if not after_pay or after_pay.get("WeeklySpendLimit") != amount:
+            after_route = _network_strategy(after)
+            if not after_route or after_route[0] != strategy_name or after_route[1].get("WeeklySpendLimit") != amount:
                 raise ProviderVerificationError("BUDGET_NOT_VERIFIED")
             return {"before_state": {"campaign": before}, "requested_mutation": {"resource": "campaigns", "method": "update", "weekly_spend_limit": amount}, "provider_response": response, "verified_after_state": {"campaign": after}}
         amount = _id(target.get("daily_budget_amount"), "DAILY_BUDGET_AMOUNT")

@@ -19,6 +19,7 @@ from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v
 from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_bot_metrics, build_maxibot_metrics
 from app.ads.objectives import evaluate_objective, objective_for_link
+from app.ads.yandex_autopilot import record_strategy_observation
 from app.core.config import settings
 from app.db.models import Admin, AdsAccount, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCollectionRun, AdsDataHealth, AdsMemory, AdsObservation, AdsPromotionCampaignLink, AdsRecommendation, AdsAiOutcome, BotConnection, BotPromotionProfile, Channel, LandingPage, TrafficProfile
 from app.integrations.yandex_direct import YandexDirectClient
@@ -186,6 +187,8 @@ async def _direct_sync(db: AsyncSession, *, account: AdsAccount, encrypted: str,
                 campaign.provider_metadata_json = metadata_json
                 campaign.config_hash = metadata_hash
                 campaign.metadata_updated_at = datetime.now(timezone.utc)
+            if isinstance(raw.get("TextCampaign"), dict):
+                record_strategy_observation(campaign, raw, observed_at=datetime.now(timezone.utc))
         await db.flush()
         campaigns = list((await db.scalars(select(AdsCampaign).where(AdsCampaign.account_id == account.id))).all())
         # Statistics are owned by ADS Data Layer V2. This flow only discovers

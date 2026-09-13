@@ -1,6 +1,6 @@
 import pytest
 
-from app.ads.yandex_autopilot import YandexAutopilotAdapter
+from app.ads.yandex_autopilot import YandexAutopilotAdapter, budget_capability_attestation, record_strategy_observation
 
 
 class FakeDirect:
@@ -80,6 +80,71 @@ class PayForConversionDirect(FakeDirect):
                 self.campaign["TextCampaign"] = update["TextCampaign"]
             return {}
         return await super().mutate(resource, method=method, params=params)
+
+
+class WbMaximumConversionRateDirect(PayForConversionDirect):
+    def __init__(self):
+        super().__init__()
+        self.campaign["TextCampaign"]["BiddingStrategy"]["Network"] = {
+            "BiddingStrategyType": "WB_MAXIMUM_CONVERSION_RATE",
+            "WbMaximumConversionRate": {"GoalId": 597228669, "WeeklySpendLimit": 2_000_000_000, "BudgetType": "WEEKLY_BUDGET", "BidCeiling": None},
+            "Search": {"BiddingStrategyType": "SERVING_OFF"},
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount,micros", [(2020, 2_020_000_000), (1800, 1_800_000_000)])
+async def test_wb_maximum_conversion_rate_uses_strategy_specific_weekly_budget(amount, micros):
+    direct = WbMaximumConversionRateDirect()
+    result = await YandexAutopilotAdapter(direct).execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+        "target": {"weekly_budget_amount": amount, "expected_strategy_type": "WB_MAXIMUM_CONVERSION_RATE", "expected_current_weekly_budget_micros": 2_000_000_000}})
+    network = result["verified_after_state"]["campaign"]["TextCampaign"]["BiddingStrategy"]["Network"]
+    assert network["WbMaximumConversionRate"]["WeeklySpendLimit"] == micros
+    assert network["WbMaximumConversionRate"]["GoalId"] == 597228669
+    assert network["Search"]["BiddingStrategyType"] == "SERVING_OFF"
+
+
+@pytest.mark.asyncio
+async def test_wb_budget_rollback_restores_exact_weekly_limit():
+    direct = WbMaximumConversionRateDirect()
+    adapter = YandexAutopilotAdapter(direct)
+    result = await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101, "target": {"weekly_budget_amount": 2020}})
+    rollback = await adapter.rollback({"action_type": "BOUNDED_BUDGET_REALLOCATION", "target": {"provider_campaign_id": 101}, "before_state": result["before_state"]})
+    assert rollback["verified_after_state"]["campaign"]["TextCampaign"]["BiddingStrategy"]["Network"]["WbMaximumConversionRate"]["WeeklySpendLimit"] == 2_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_wb_budget_change_over_bound_is_denied():
+    with pytest.raises(ValueError, match="BUDGET_CHANGE_EXCEEDS_BOUND"):
+        await YandexAutopilotAdapter(WbMaximumConversionRateDirect()).execute({
+            "action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+            "target": {"weekly_budget_amount": 2300, "max_budget_change_percent": 10},
+        })
+
+
+@pytest.mark.asyncio
+async def test_strategy_drift_fails_closed_before_wb_write():
+    direct = WbMaximumConversionRateDirect()
+    direct.campaign["TextCampaign"]["BiddingStrategy"]["Network"]["BiddingStrategyType"] = "PAY_FOR_CONVERSION"
+    with pytest.raises(Exception, match="PROVIDER_CONFIG_DRIFT"):
+        await YandexAutopilotAdapter(direct).execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+            "target": {"weekly_budget_amount": 2020, "expected_strategy_type": "WB_MAXIMUM_CONVERSION_RATE"}})
+
+
+def test_wb_budget_capability_and_strategy_observation_use_existing_metadata():
+    provider = WbMaximumConversionRateDirect().campaign
+    attestation = budget_capability_attestation(provider)
+    assert attestation["verified"] is True
+    assert attestation["budget_field"].endswith("WbMaximumConversionRate.WeeklySpendLimit")
+    from types import SimpleNamespace
+    campaign = SimpleNamespace(external_id="101", provider_metadata_json="{}", metadata_updated_at=None)
+    result = record_strategy_observation(campaign, provider)
+    assert result["observation"]["strategy_type"] == "WB_MAXIMUM_CONVERSION_RATE"
+    assert "strategy_observations" in campaign.provider_metadata_json
+
+
+def test_unsupported_strategy_is_not_attested():
+    assert budget_capability_attestation({"Id": 1, "DailyBudget": None, "TextCampaign": {"BiddingStrategy": {"Network": {"BiddingStrategyType": "UNKNOWN"}}}})["verified"] is False
 
 
 @pytest.mark.asyncio

@@ -126,6 +126,7 @@ class YandexDirectClient:
             "campaigns",
             selection=selection,
             fields=("Id", "Name", "Type", "State", "Status", "StatusPayment", "StartDate", "EndDate"),
+            extra_params={"TextCampaignFieldNames": ["BiddingStrategy", "Settings"]},
         )
 
     async def get_campaign(self, campaign_id: int) -> dict[str, Any] | None:
