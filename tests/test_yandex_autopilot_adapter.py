@@ -137,10 +137,30 @@ def test_wb_budget_capability_and_strategy_observation_use_existing_metadata():
     assert attestation["verified"] is True
     assert attestation["budget_field"].endswith("WbMaximumConversionRate.WeeklySpendLimit")
     from types import SimpleNamespace
-    campaign = SimpleNamespace(external_id="101", provider_metadata_json="{}", metadata_updated_at=None)
+    campaign = SimpleNamespace(external_id="101", provider_metadata_json="{}", metadata_updated_at=None,
+                               strategy_type=None, budget_type=None, weekly_budget=None,
+                               daily_budget=None, currency=None)
     result = record_strategy_observation(campaign, provider)
     assert result["observation"]["strategy_type"] == "WB_MAXIMUM_CONVERSION_RATE"
     assert "strategy_observations" in campaign.provider_metadata_json
+    assert campaign.strategy_type == "WB_MAXIMUM_CONVERSION_RATE"
+    assert campaign.budget_type == "WEEKLY_BUDGET"
+    assert float(campaign.weekly_budget) == 2000.0
+    assert campaign.daily_budget is None
+
+
+def test_provider_campaign_budget_is_separate_from_autopilot_test_spend():
+    from app.ads.autopilot import default_autopilot_config
+    from types import SimpleNamespace
+    provider = WbMaximumConversionRateDirect().campaign
+    campaign = SimpleNamespace(external_id="101", provider_metadata_json="{}", metadata_updated_at=None,
+                               strategy_type=None, budget_type=None, weekly_budget=None,
+                               daily_budget=None, currency=None)
+    record_strategy_observation(campaign, provider)
+    config = default_autopilot_config()
+    assert float(campaign.weekly_budget) == 2000.0
+    assert config["max_test_spend"] == 1000.0
+    assert float(campaign.weekly_budget) != config["max_test_spend"]
 
 
 def test_unsupported_strategy_is_not_attested():

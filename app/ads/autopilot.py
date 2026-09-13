@@ -341,9 +341,14 @@ async def promotion_policy(db: AsyncSession, *, object_type: str, object_id: str
     mode = AUTONOMOUS if authorized else ADVISORY
     source = next((link for link in links if link.campaign_id in authorized), links[0])
     config = parse_config(source.autopilot_config_json)
+    campaign = await db.get(AdsCampaign, source.campaign_id)
     capability = "READY" if settings.ads_autopilot_enabled and settings.ads_write_actions_enabled else "DISABLED"
     return {"execution_mode": mode, **config, "active_links": len(links),
             "authorized_campaign_ids": authorized,
+            "campaign_budget_type": campaign.budget_type if campaign else None,
+            "campaign_weekly_budget": float(campaign.weekly_budget) if campaign and campaign.weekly_budget is not None else None,
+            "campaign_daily_budget": float(campaign.daily_budget) if campaign and campaign.daily_budget is not None else None,
+            "campaign_budget_source": "provider_sync" if campaign and (campaign.weekly_budget is not None or campaign.daily_budget is not None) else None,
             "write_scope": "CAMPAIGN_SCOPED", "execution_capability": capability}
 
 

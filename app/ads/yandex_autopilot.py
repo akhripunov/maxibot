@@ -96,6 +96,21 @@ def record_strategy_observation(campaign: Any, provider_campaign: dict[str, Any]
     strategy = _network_strategy(provider_campaign)
     if strategy:
         strategy_name, settings, field = strategy
+        # Keep the provider's operational budget separate from MaxiBot's
+        # promotion guardrails (max_test_spend / experiment cap).  These
+        # normalized columns are the source consumed by analysis; the raw
+        # provider payload remains available in metadata for audit.
+        campaign.strategy_type = strategy_name
+        campaign.budget_type = settings.get("BudgetType")
+        weekly_micros = settings.get("WeeklySpendLimit")
+        if strategy_name in {"PAY_FOR_CONVERSION", "WB_MAXIMUM_CONVERSION_RATE"} and weekly_micros is not None:
+            campaign.weekly_budget = (Decimal(str(weekly_micros)) / Decimal("1000000")).quantize(Decimal("0.000001"))
+            campaign.daily_budget = None
+        elif strategy_name == "DAILY_BUDGET":
+            daily = provider_campaign.get("DailyBudget") or {}
+            campaign.daily_budget = (Decimal(str(daily.get("Amount"))) / Decimal("1000000")).quantize(Decimal("0.000001")) if daily.get("Amount") is not None else None
+            campaign.weekly_budget = None
+        campaign.currency = str(settings.get("Currency") or provider_campaign.get("Currency") or "RUB")
         observation = {
             "observed_at": observed.isoformat(),
             "provider_campaign_id": str(provider_campaign.get("Id") or campaign.external_id),
@@ -106,6 +121,12 @@ def record_strategy_observation(campaign: Any, provider_campaign: dict[str, Any]
             "goal_id": settings.get("GoalId") if strategy_name != "DAILY_BUDGET" else None,
         }
     else:
+        # A successful provider reread that no longer exposes a supported
+        # budget primitive must not leave an old campaign budget usable.
+        campaign.strategy_type = None
+        campaign.budget_type = None
+        campaign.weekly_budget = None
+        campaign.daily_budget = None
         observation = {"observed_at": observed.isoformat(), "provider_campaign_id": str(provider_campaign.get("Id") or campaign.external_id), "strategy_type": None, "budget_field": None, "budget_value_micros": None, "budget_type": None, "goal_id": None}
     try:
         metadata = json.loads(campaign.provider_metadata_json or "{}")

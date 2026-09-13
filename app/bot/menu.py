@@ -755,10 +755,13 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
     confirmed = state.get("confirmed_business_outcomes")
     execution_mode = str(state.get("execution_mode") or "ADVISORY").upper()
     autopilot = state.get("autopilot") or {}
+    campaign_budget = autopilot.get("campaign_weekly_budget")
     budget_limit = autopilot.get("weekly_budget_limit") if autopilot.get("weekly_budget_limit") is not None else autopilot.get("monthly_budget_limit")
     lines = [
         "🤖 AI Продвижение", "", f"{'Канал' if object_type == 'CHANNEL' else 'Бот'}: {title}",
-        f"Цель: {objective_name}", f"🎯 Target CPA: {target_text}", f"💰 Лимит: {budget_limit:.0f} ₽ / неделю" if budget_limit is not None else "💰 Лимит: пока не задан",
+        f"Цель: {objective_name}", f"🎯 Target CPA: {target_text}",
+        f"💰 Бюджет кампании: {campaign_budget:.0f} ₽ / неделю" if campaign_budget is not None else "💰 Бюджет кампании: пока не синхронизирован",
+        f"Лимит автопилота: {budget_limit:.0f} ₽ / неделю" if budget_limit is not None else "Лимит автопилота: пока не задан",
         f"Фактический CPA: {actual_text}", f"{outcome_label}: {confirmed if confirmed is not None else 'пока нет данных'}", "",
     ]
     lines.append("🚀 Автопилот включён" if execution_mode == "AUTONOMOUS" else "🚀 Автопилот выключен")
@@ -1748,16 +1751,19 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         ))).all()} if links else {}
         if action_name == "ads_budget_input":
             if not links:
-                return "💰 Лимит автопилота\n\nНет связанных кампаний.", buttons(("⬅️ Назад", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
-            return ("💰 Лимит автопилота\n\nВведите недельный бюджет в рублях одним сообщением.\n"
-                    "Например: 1000\n\nMaxiBot не выйдет за этот внутренний лимит и не изменяет бюджет в Яндекс.Директе.", buttons())
+                return "💰 Лимит эксперимента\n\nНет связанных кампаний.", buttons(("⬅️ Назад", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
+            return ("💰 Лимит эксперимента\n\nВведите максимальный расход одного теста в рублях одним сообщением.\n"
+                    "Например: 1000\n\nЭто guardrail MaxiBot и не изменяет бюджет кампании в Яндекс.Директе.", buttons())
         if action_name == "ads_budget":
             policy = await promotion_policy(db, object_type=object_type, object_id=object_id)
-            limit = policy.get("weekly_budget_limit") if policy.get("weekly_budget_limit") is not None else policy.get("monthly_budget_limit")
-            limit_text = f"{limit:.0f} ₽ / неделю" if limit is not None else "не задан"
-            return ("💰 Бюджет автопилота\n\n"
-                    f"Текущий недельный бюджет: {limit_text}\n"
-                    "Это внутренний недельный предел MaxiBot, а не изменение бюджета в Яндекс.Директе.\nMaxiBot не выйдет за установленную сумму.",
+            campaign_budget = policy.get("campaign_weekly_budget")
+            experiment_cap = policy.get("max_test_spend")
+            campaign_text = f"{campaign_budget:.0f} ₽ / неделю" if campaign_budget is not None else "не синхронизирован"
+            cap_text = f"{experiment_cap:.0f} ₽" if experiment_cap is not None else "не задан"
+            return ("💰 Бюджет кампании и лимит эксперимента\n\n"
+                    f"Бюджет кампании из Яндекс.Директа: {campaign_text}\n"
+                    f"Максимальный расход одного теста: {cap_text}\n"
+                    "Это разные значения: бюджет кампании синхронизируется с провайдером, лимит эксперимента ограничивает риск MaxiBot.",
                     buttons(
                         ("💰 Установить бюджет", f"ads_budget_input:{object_type}:{object_id}"),
                         ("⬅️ AI Продвижение", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"),
@@ -1781,7 +1787,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             campaign = campaigns.get(link.campaign_id)
             title = campaign.name if campaign else link.campaign_id
             config = parse_config(link.autopilot_config_json)
-            budget = config.get("weekly_budget_limit") if config.get("weekly_budget_limit") is not None else config.get("monthly_budget_limit")
+            budget = campaign.weekly_budget if campaign and campaign.weekly_budget is not None else campaign.daily_budget if campaign else None
             target = link.target_cpa
             # The provider read below is always fresh and read-only.
             provider_state = await _fresh_campaign_provider_state(
@@ -1812,7 +1818,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 "🎯 Цель\n"
                 + (f"Target CPA: {float(target):g} ₽\n" if target is not None else "Target CPA: не задан\n")
                 + "\n💰 Бюджет\n"
-                + (f"{float(budget):g} ₽ / неделю\n" if budget is not None else "не задан\n")
+                + (f"{float(budget):g} ₽ / неделю\n" if budget is not None and campaign.weekly_budget is not None else f"{float(budget):g} ₽ / день\n" if budget is not None else "не синхронизирован\n")
                 + f"\n📊 Кампания\n{provider_label}\n\n"
                 "Что сможет делать MaxiBot:\n"
                 "✓ создавать и тестировать объявления\n✓ тестировать креативы\n"

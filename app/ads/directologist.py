@@ -334,6 +334,12 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
     attribution = outcomes.get("attribution_coverage")
     freshness_hours = await campaign_freshness_hours(db, campaign=campaign)
     confidence_pack = confidence(clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"), freshness_hours=freshness_hours, attribution_coverage=attribution, root_cause_proven=False, windows_ready=metrics["status"] == "READY")
+    campaign_budget = {
+        "type": campaign.budget_type,
+        "weekly_rub": float(campaign.weekly_budget) if campaign.weekly_budget is not None else None,
+        "daily_rub": float(campaign.daily_budget) if campaign.daily_budget is not None else None,
+        "source": "provider_sync" if campaign.weekly_budget is not None or campaign.daily_budget is not None else "UNKNOWN",
+    }
     return {
         "version": "directologist_v1",
         "object_type": outcomes["object_type"],
@@ -343,6 +349,7 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
         "outcomes": {key: value for key, value in outcomes.items() if key != "rows"},
         "trend": {"state": trend, "metric": "provider_cpa", "source": "provider signal; not confirmed MaxiBot CPA"},
         "freshness_hours": freshness_hours,
+        "campaign_budget": campaign_budget,
         "root_cause": root_cause_status(contributors=[], sufficient=False),
         "confidence": confidence_pack,
         "data_health": {"status": "LIMITED" if confidence_pack["level"] in {"LOW", "INSUFFICIENT"} else "HEALTHY", "reasons": confidence_pack["reasons"]},
