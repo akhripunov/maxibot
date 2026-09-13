@@ -1731,7 +1731,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 channel = await db.get(Channel, trial.activated_channel_id) if trial.activated_channel_id else None
                 return free_trial_active_text(channel.title if channel else "Канал удалён", trial.trial_end_at), buttons(("⬅️ Назад", "subscription"))
             return free_trial_used_text(), buttons(("💳 Выбрать тариф", "subscription"), ("⬅️ Назад", "subscription"))
-    if screen.startswith(("ads_autopilot_enable:", "ads_autopilot_enable_confirm:", "ads_autopilot_disable:", "ads_budget:", "ads_budget_input:")):
+    if screen.startswith(("ads_autopilot_enable:", "ads_autopilot_enable_confirm:", "ads_autopilot_preflight_retry:", "ads_autopilot_preflight_details:", "ads_autopilot_disable:", "ads_budget:", "ads_budget_input:")):
         if not can_access_ads(admin.external_id):
             return await render_screen(db, admin, "promotion")
         parts = screen.split(":")
@@ -1771,6 +1771,13 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             if len(selected_links) == 1:
                 campaign_id_from_route = selected_links[0].campaign_id
                 action_name = "ads_autopilot_enable_confirm"
+        if action_name in {"ads_autopilot_preflight_retry", "ads_autopilot_preflight_details"}:
+            # Retry and technical-details actions stay on the same confirmation
+            # renderer.  The provider read below is always fresh and read-only.
+            action_name = "ads_autopilot_enable_confirm"
+            show_preflight_details = parts[0] == "ads_autopilot_preflight_details"
+        else:
+            show_preflight_details = False
         if action_name == "ads_autopilot_enable_confirm":
             link = next((item for item in links if item.campaign_id == campaign_id_from_route), None)
             if not link:
@@ -1797,7 +1804,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             if provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:
                 blocked_reason = "⚠️ Кампания остановлена в Яндекс.Директе."
             elif not provider_ready:
-                blocked_reason = "⚠️ Не удалось получить состояние кампании из Яндекс.Директа."
+                if not await get_encrypted_token(admin.external_id, object_id, db=db):
+                    blocked_reason = "⚠️ Не удалось проверить кампанию: доступ к Яндекс.Директу не подключён."
+                else:
+                    blocked_reason = "⚠️ Не удалось подтвердить состояние: Яндекс.Директ не вернул данные кампании."
             elif missing:
                 blocked_reason = "⚠️ " + ("Target CPA не задан." if "задать цену за цель" in missing else "Бюджет не задан.")
             else:
@@ -1822,10 +1832,21 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 + (f"Максимальное изменение бюджета: {float(config['max_budget_change_percent']):g}%\n" if config.get("max_budget_change_percent") is not None else "")
                 + (f"\n{blocked_reason}" if blocked_reason else "\nПосле включения MaxiBot сам начнёт искать первый безопасный эксперимент.")
             )
+            if show_preflight_details and not provider_ready:
+                confirmation += "\n\n🔍 Технические детали\nПроверка выполняется только на чтение; изменения в Яндекс.Директе не выполняются."
             controls = [("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}")]
             if eligible:
                 controls.insert(0, ("✅ Включить автопилот", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"))
+            elif not provider_ready:
+                controls.insert(0, ("↻ Проверить ещё раз", f"ads_autopilot_preflight_retry:{object_type}:{object_id}:{campaign_id_from_route}"))
+                controls.insert(1, ("🔍 Технические детали", f"ads_autopilot_preflight_details:{object_type}:{object_id}:{campaign_id_from_route}"))
             else:
+                # Keep a forward path visible even when the provider campaign
+                # is currently stopped.  Clicking it re-enters this same
+                # confirmation renderer and performs a fresh read-only
+                # preflight; it cannot enable Autopilot until the provider
+                # state is confirmed ACTIVE/ON.
+                controls.insert(0, ("🚀 Включить автопилот", f"ads_autopilot_enable:{object_type}:{object_id}"))
                 controls.insert(0, ("🔧 Исправить настройку", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
             return confirmation, buttons(*controls)
         if action_name == "ads_autopilot_enable":
