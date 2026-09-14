@@ -531,6 +531,21 @@ class MaxBotRuntime:
         # Claim before the first await. This covers bot_started followed by
         # message_created(/start), retries, and duplicate poller deliveries.
         if not self._claim_start(str(user_id), channel_code):
+            # A plain /start is also a user-facing "open menu" command.  If
+            # MAX redelivers that command after the home launch, refresh the
+            # menu instead of making the tap look inert.  Keep the
+            # bot_started(payload) -> message_created(/start) pair suppressed
+            # so one deep-link still creates only one logical launch.
+            has_recent_payload_start = any(
+                key.startswith(f"start:{user_id}:") and key != f"start:{user_id}:home"
+                for key in self._recent_start_keys
+            )
+            if update.update_type == "message_created" and not start_payloads and not has_recent_payload_start:
+                await self.repo.reset_navigation(user_id, preserve_service_message=True)
+                self._user_channels.pop(str(user_id), None)
+                await self._render(user_id, "home", force_new=True)
+                logger.warning("MAX duplicate home start rerendered")
+                return
             logger.info("MAX duplicate start ignored")
             return
         # A PoC traffic startapp is an opaque visitor token, not a channel
@@ -1087,6 +1102,11 @@ class MaxBotRuntime:
             _, object_type, object_id, campaign_id = action.split(":", 3)
             if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
                 await self._render(user_id, f"ads_autopilot_enable_confirm:{object_type}:{object_id}:{campaign_id}")
+                return
+        elif action.startswith(("ads_autopilot_preflight_retry:", "ads_autopilot_preflight_details:")):
+            _, object_type, object_id, campaign_id = action.split(":", 3)
+            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+                await self._render(user_id, f"{action}")
                 return
         elif action.startswith("ads_autopilot_enable_confirm_apply:"):
             _, object_type, object_id, campaign_id = action.split(":", 3)

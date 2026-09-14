@@ -286,6 +286,16 @@ def test_normal_start_replaces_old_service_panel_with_fresh_bottom_copy():
     assert 'message_id = await self._render(user_id, first_screen, force_new=True)' in source
 
 
+def test_duplicate_plain_start_rerenders_menu_but_payload_pair_stays_deduplicated():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
+    start_section = source[source.index("    async def _start("):source.index("    async def _callback(")]
+    assert 'update.update_type == "message_created"' in start_section
+    assert 'not start_payloads and not has_recent_payload_start' in start_section
+    assert 'await self._render(user_id, "home", force_new=True)' in start_section
+
+
 def test_normal_start_preserves_id_until_atomic_panel_replacement():
     from pathlib import Path
 
