@@ -1835,6 +1835,11 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             controls = [("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}")]
             if eligible:
                 controls.insert(0, ("✅ Включить автопилот", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"))
+            elif provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:
+                # A confirmed inactive campaign has a concrete, user-fixable
+                # condition.  Keep the historical continuation button here;
+                # retry/details are reserved for UNKNOWN/provider failures.
+                controls.insert(0, ("🔧 Исправить настройку", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
             elif not provider_ready:
                 retry_action = f"ads_autopilot_preflight_retry:{object_type}:{object_id}:{campaign_id_from_route}"
                 details_action = f"ads_autopilot_preflight_details:{object_type}:{object_id}:{campaign_id_from_route}"

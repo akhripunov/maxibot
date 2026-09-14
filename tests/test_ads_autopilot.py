@@ -98,6 +98,14 @@ def test_unknown_provider_preflight_offers_retry_and_details_instead_of_fix_sett
     assert "🔧 Исправить настройку" not in unknown_controls
 
 
+def test_confirmed_inactive_provider_state_restores_fix_settings_continuation():
+    source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
+    section = source[source.index('if action_name == "ads_autopilot_enable_confirm":'):source.index('if action_name == "ads_autopilot_enable":', source.index('if action_name == "ads_autopilot_enable_confirm":'))]
+    inactive_branch = section[section.index("elif provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:"):section.index("elif not provider_ready:", section.index("elif provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:"))]
+    assert '"🔧 Исправить настройку"' in inactive_branch
+    assert '"↻ Проверить ещё раз"' not in inactive_branch
+
+
 def test_preflight_retry_is_read_only_and_returns_to_confirmation_renderer():
     source = (Path(__file__).resolve().parents[1] / "app/bot/runtime.py").read_text()
     assert 'action.startswith(("ads_autopilot_preflight_retry:", "ads_autopilot_preflight_details:"))' in source
