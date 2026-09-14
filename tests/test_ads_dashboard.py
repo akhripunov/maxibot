@@ -11,6 +11,13 @@ from app.bot.menu import (
 )
 
 
+def test_dashboard_query_imports_sqlalchemy_or_for_object_scoped_recommendations():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "ads" / "dashboard.py").read_text()
+    assert "from sqlalchemy import or_, select" in source
+
+
 def test_business_cpa_fails_closed_for_unknown_or_zero_outcomes():
     assert business_cpa(spend=148, confirmed_outcomes=43) == 148 / 43
     assert business_cpa(spend=148, confirmed_outcomes=0) is None
