@@ -221,6 +221,14 @@ async def confirmed_outcome_summary(
             visit = await db.get(TrafficVisit, membership.attributed_visit_id) if membership.attributed_visit_id else None
             yclid = visit.yclid if visit else None
             campaign_match = _channel_campaign_match(visit, campaign.external_id)
+            # Campaign-scoped readiness must never dilute coverage with every
+            # membership of the channel.  A membership is eligible only when
+            # its attributed visit deterministically matches this campaign's
+            # external id via the canonical UTM matcher (or metadata fallback).
+            # Unmatched channel traffic belongs to another campaign/organic
+            # journey and is intentionally excluded from this denominator.
+            if campaign_match is not True:
+                continue
             quality = attribution_quality(has_yclid=bool(yclid), campaign_match=campaign_match, deterministic_link=True)
             rows.append({"id": membership.id, "type": "CHANNEL", "platform": destination_platform, "outcome_type": outcome_type, "has_yclid": bool(yclid), "quality": quality, "source": "TrafficMembership", "dedupe_key": f"{membership.channel_id}:{membership.max_user_id}"})
     deduped = {row["dedupe_key"]: row for row in rows}
@@ -237,6 +245,9 @@ async def confirmed_outcome_summary(
         },
         "confirmed_total": len(deduped),
         "attributed_outcomes": len(attributed),
+        "eligible_campaign_journeys": len(deduped),
+        "campaign_matched_yclid": sum(bool(row["has_yclid"]) for row in deduped.values()),
+        "campaign_matched_identities": len({row["dedupe_key"] for row in deduped.values()}),
         "unattributed_outcomes": sum(row["quality"] == "UNATTRIBUTED" for row in deduped.values()),
         "unresolved_count": sum(row["quality"] == "UNRESOLVED" for row in deduped.values()),
         "attribution_coverage": len(attributed) / len(deduped) if deduped else None,

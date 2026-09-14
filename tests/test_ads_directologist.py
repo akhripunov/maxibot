@@ -56,6 +56,15 @@ def test_confirmed_channel_summary_uses_utm_matcher_for_single_campaign():
     assert 'TrafficMembership.attribution_status.in_(("EXACT", "HIGH"))' in source
 
 
+def test_campaign_coverage_excludes_unmatched_channel_memberships_from_denominator():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app/ads/directologist.py").read_text()
+    assert "if campaign_match is not True:" in source
+    assert '"eligible_campaign_journeys": len(deduped)' in source
+    assert '"campaign_matched_yclid"' in source
+
+
 def test_trend_and_confidence_fail_closed_for_small_samples():
     assert classify_trend(current=10, baseline=5, metric="provider_cpa", clicks=9, confirmed_outcomes=4) == "INSUFFICIENT_DATA"
     result = confidence(clicks=9, confirmed_outcomes=1, freshness_hours=None, attribution_coverage=None, root_cause_proven=False, windows_ready=False)
