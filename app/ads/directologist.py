@@ -259,9 +259,9 @@ async def confirmed_outcome_summary(
     }
 
 
-def confidence(*, clicks: float | None, confirmed_outcomes: int | None, freshness_hours: float | None, attribution_coverage: float | None, root_cause_proven: bool, windows_ready: bool) -> dict[str, Any]:
+def confidence(*, clicks: float | None, confirmed_outcomes: int | None, freshness_hours: float | None, attribution_coverage: float | None, root_cause_proven: bool, windows_ready: bool, trend_required: bool = False) -> dict[str, Any]:
     reasons: list[str] = []
-    if not windows_ready:
+    if trend_required and not windows_ready:
         reasons.append("сопоставимые полные окна недоступны")
     if clicks is None or clicks < 10:
         reasons.append("малый объём кликов")
@@ -274,12 +274,60 @@ def confidence(*, clicks: float | None, confirmed_outcomes: int | None, freshnes
     if not root_cause_proven:
         reasons.append("root cause не доказан")
     if reasons:
-        level = "INSUFFICIENT" if len(reasons) >= 3 or not windows_ready else "LOW"
+        level = "INSUFFICIENT" if len(reasons) >= 3 or (trend_required and not windows_ready) else "LOW"
     elif clicks >= 100 and confirmed_outcomes >= 10 and attribution_coverage >= 0.9 and (freshness_hours or 0) <= 24:
         level = "HIGH"
     else:
         level = "MEDIUM"
     return {"level": level, "reasons": reasons}
+
+
+def classify_decision(*, clicks: float | None, exact_outcomes: int | None,
+                      spend: float | None, freshness_hours: float | None,
+                      attribution_coverage: float | None,
+                      trend_windows_ready: bool,
+                      trend_required: bool = False) -> dict[str, Any]:
+    """Return an action-scoped shadow decision without forcing a hypothesis.
+
+    Completed comparison windows are evidence for trend-dependent hypotheses
+    only.  Current-state gates remain sufficient to evaluate non-trend
+    families; when they yield no proven action this function returns the
+    explicit ``NO_ACTION`` state instead of a global ``INSUFFICIENT_DATA``.
+    """
+    blockers: list[str] = []
+    if clicks is None or float(clicks) < 10:
+        blockers.append("MIN_CLICKS_NOT_MET")
+    if exact_outcomes is None or int(exact_outcomes) < 3:
+        blockers.append("MIN_EXACT_OUTCOMES_NOT_MET")
+    if spend is None or float(spend) <= 0:
+        blockers.append("MIN_SPEND_NOT_MET")
+    if freshness_hours is None or float(freshness_hours) > 48:
+        blockers.append("FRESHNESS_UNKNOWN_OR_OVER_48H")
+    if attribution_coverage is None or float(attribution_coverage) < 0.8:
+        blockers.append("ATTRIBUTION_COVERAGE_BELOW_0_8")
+    if trend_required and not trend_windows_ready:
+        blockers.append("TREND_WINDOWS_NOT_READY")
+    if blockers:
+        return {
+            "decision": "INSUFFICIENT_DATA",
+            "reason": ";".join(blockers),
+            "confidence": "LOW",
+            "candidate_hypothesis": None,
+            "candidate_action": None,
+            "trend_data_available": bool(trend_windows_ready),
+            "trend_dependent_hypotheses_available": bool(trend_windows_ready),
+            "non_trend_hypotheses_evaluated": False,
+        }
+    return {
+        "decision": "NO_ACTION",
+        "reason": "Текущие данные проходят action-scoped gates; доказанного non-trend действия нет.",
+        "confidence": "MEDIUM",
+        "candidate_hypothesis": None,
+        "candidate_action": None,
+        "trend_data_available": bool(trend_windows_ready),
+        "trend_dependent_hypotheses_available": bool(trend_windows_ready),
+        "non_trend_hypotheses_evaluated": True,
+    }
 
 
 def root_cause_status(*, contributors: list[dict[str, Any]], sufficient: bool) -> dict[str, Any]:
@@ -344,7 +392,13 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
     trend = classify_trend(current=current.get("provider_cpa"), baseline=metrics["baseline"].get("provider_cpa"), metric="provider_cpa", clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"))
     attribution = outcomes.get("attribution_coverage")
     freshness_hours = await campaign_freshness_hours(db, campaign=campaign)
-    confidence_pack = confidence(clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"), freshness_hours=freshness_hours, attribution_coverage=attribution, root_cause_proven=False, windows_ready=metrics["status"] == "READY")
+    confidence_pack = confidence(clicks=current.get("clicks"), confirmed_outcomes=current.get("confirmed_outcomes"), freshness_hours=freshness_hours, attribution_coverage=attribution, root_cause_proven=False, windows_ready=metrics["status"] == "READY", trend_required=False)
+    decision = classify_decision(
+        clicks=current.get("clicks"), exact_outcomes=current.get("confirmed_outcomes"),
+        spend=current.get("cost"), freshness_hours=freshness_hours,
+        attribution_coverage=attribution,
+        trend_windows_ready=metrics["status"] == "READY",
+    )
     campaign_budget = {
         "type": campaign.budget_type,
         "weekly_rub": float(campaign.weekly_budget) if campaign.weekly_budget is not None else None,
@@ -363,6 +417,7 @@ async def build_decision_pack(db: AsyncSession, *, campaign: AdsCampaign, daily_
         "campaign_budget": campaign_budget,
         "root_cause": root_cause_status(contributors=[], sufficient=False),
         "confidence": confidence_pack,
+        "decision": decision,
         "data_health": {"status": "LIMITED" if confidence_pack["level"] in {"LOW", "INSUFFICIENT"} else "HEALTHY", "reasons": confidence_pack["reasons"]},
         "retention_policy": {
             "observations_days": settings.ads_observations_retention_days,

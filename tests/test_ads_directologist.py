@@ -7,6 +7,7 @@ from app.ads.directologist import (
     comparison_windows,
     comparative_metrics,
     confidence,
+    classify_decision,
     root_cause_status,
     freshness_hours_from_timestamp,
 )
@@ -79,6 +80,46 @@ def test_freshness_is_deterministic_and_unknown_without_persisted_report():
     assert freshness_hours_from_timestamp(datetime(2026, 9, 13, 10, 0, tzinfo=timezone.utc), now=now) == 2.0
     assert freshness_hours_from_timestamp(datetime(2026, 9, 10, 10, 0, tzinfo=timezone.utc), now=now) == 74.0
     assert freshness_hours_from_timestamp(None, now=now) is None
+
+
+def test_missing_trend_windows_do_not_globally_block_non_trend_decision():
+    confidence_result = confidence(
+        clicks=10,
+        confirmed_outcomes=3,
+        freshness_hours=0.31,
+        attribution_coverage=1.0,
+        root_cause_proven=False,
+        windows_ready=False,
+    )
+    assert confidence_result["level"] != "INSUFFICIENT"
+    result = classify_decision(
+        clicks=10,
+        exact_outcomes=3,
+        spend=85.71,
+        freshness_hours=0.31,
+        attribution_coverage=1.0,
+        trend_windows_ready=False,
+    )
+    assert result["decision"] == "NO_ACTION"
+    assert result["trend_data_available"] is False
+    assert result["trend_dependent_hypotheses_available"] is False
+    assert result["non_trend_hypotheses_evaluated"] is True
+    assert result["candidate_action"] is None
+
+
+def test_trend_dependent_action_is_blocked_only_when_it_requires_trend_evidence():
+    result = classify_decision(
+        clicks=10,
+        exact_outcomes=3,
+        spend=85.71,
+        freshness_hours=0.31,
+        attribution_coverage=1.0,
+        trend_windows_ready=False,
+        trend_required=True,
+    )
+    assert result["decision"] == "INSUFFICIENT_DATA"
+    assert "TREND_WINDOWS_NOT_READY" in result["reason"]
+    assert result["candidate_action"] is None
 
 
 def test_root_cause_is_not_invented_without_sufficient_evidence():
