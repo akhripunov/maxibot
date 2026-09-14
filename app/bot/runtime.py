@@ -867,7 +867,11 @@ class MaxBotRuntime:
         if action in {"connect_channel", "about"}:
             await self.repo.mark_onboarding_seen(str(user_id))
         if update.callback_id:
-            if update.callback_id in self._recent_callback_ids and not action.startswith("ads_campaigns"):
+            # Navigation callbacks are idempotent: MAX can redeliver the same
+            # callback while the message replacement is still in flight. Do
+            # not let that transport retry make the visible AI Promotion
+            # button appear inert; rendering the same screen is harmless.
+            if update.callback_id in self._recent_callback_ids and not action.startswith(("ads_campaigns", "ads:", "ads_bot:")):
                 logger.info("MAX duplicate callback ignored callback_id=%s", update.callback_id)
                 await self.client.answer_callback(update.callback_id)
                 return
