@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     ads_write_actions_enabled: bool = Field(default=False, validation_alias="ADS_WRITE_ACTIONS_ENABLED")
     ads_autopilot_enabled: bool = Field(default=False, validation_alias="ADS_AUTOPILOT_ENABLED")
     ads_global_learning_enabled: bool = Field(default=False, validation_alias="ADS_GLOBAL_LEARNING_ENABLED")
+    # Experience-transfer/prior engine is shadow/read-only by default.  These
+    # flags cannot authorize provider writes or memory promotion on their own.
+    ads_prior_engine_enabled: bool = Field(default=False, validation_alias="ADS_PRIOR_ENGINE_ENABLED")
+    ads_prior_engine_shadow: bool = Field(default=False, validation_alias="ADS_PRIOR_ENGINE_SHADOW")
+    ads_cross_client_priors_enabled: bool = Field(default=False, validation_alias="ADS_CROSS_CLIENT_PRIORS_ENABLED")
+    ads_external_priors_enabled: bool = Field(default=False, validation_alias="ADS_EXTERNAL_PRIORS_ENABLED")
+    ads_prior_min_similarity: float = Field(default=0.75, ge=0.0, le=1.0, validation_alias="ADS_PRIOR_MIN_SIMILARITY")
     ads_background_analysis_enabled: bool = Field(default=False, validation_alias="ADS_BACKGROUND_ANALYSIS_ENABLED")
     # Periodic ADS collection is a separate read-only subsystem.  It is
     # fail-closed and never creates an AdsAiRun or invokes Codex.

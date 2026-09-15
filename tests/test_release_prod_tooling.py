@@ -9,8 +9,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "release_prod.sh"
 PRODUCTION_HEAD_MIGRATION = "0090_self_learning_loop_v2"
-CANDIDATE_HEAD_MIGRATION = "0095_ads_account_regional_ownership_v1"
-CANDIDATE_PARENT_MIGRATION = "0094_telegram_ads_service_identity"
+CANDIDATE_HEAD_MIGRATION = "0096_experience_transfer_prior_engine_v1"
+CANDIDATE_PARENT_MIGRATION = "0095_ads_account_regional_ownership_v1"
 IMAGE_PREFLIGHT = ROOT / "scripts" / "release_image_preflight.py"
 APPROVED_SHA = "a" * 40
 

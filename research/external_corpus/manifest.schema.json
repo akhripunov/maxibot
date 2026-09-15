@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "maxibot://external-corpus-manifest-v1",
+  "title": "MAXIBOT external prior manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "artifact_id", "content_hash", "scope", "schema_version"],
+  "properties": {
+    "version": {"const": 1},
+    "artifact_id": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "scope": {"const": "EXTERNAL"},
+    "schema_version": {"type": "string", "minLength": 1},
+    "license": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"}
+  }
+}

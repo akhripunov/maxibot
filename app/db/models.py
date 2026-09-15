@@ -885,6 +885,9 @@ class AdsAnalysisSnapshot(Base):
     period_from: Mapped[Optional[date]] = mapped_column(Date)
     period_to: Mapped[Optional[date]] = mapped_column(Date)
     facts_json: Mapped[str] = mapped_column(Text, nullable=False)
+    context_signature_json: Mapped[Optional[str]] = mapped_column(Text)
+    context_signature_hash: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    context_signature_version: Mapped[Optional[str]] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
@@ -1149,6 +1152,10 @@ class AdsRecommendation(Base):
     # Frozen deterministic evidence requirements for business experiments.
     # Technical canaries intentionally leave this NULL.
     evidence_policy_json: Mapped[Optional[str]] = mapped_column(Text)
+    context_signature_json: Mapped[Optional[str]] = mapped_column(Text)
+    context_signature_hash: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    prior_scores_json: Mapped[Optional[str]] = mapped_column(Text)
+    prior_artifact_version: Mapped[Optional[str]] = mapped_column(String(64))
 
 
 class AdsMemory(Base):
@@ -1167,6 +1174,19 @@ class AdsMemory(Base):
     campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="SET NULL"), index=True)
     source_type: Mapped[str] = mapped_column(String(32), default="AI_INFERENCE", nullable=False)
     confidence: Mapped[str] = mapped_column(String(16), default="LOW", nullable=False)
+    context_signature_json: Mapped[Optional[str]] = mapped_column(Text)
+    context_signature_hash: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    causal_strength: Mapped[Optional[str]] = mapped_column(String(16))
+    source_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    independent_context_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    inconclusive_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    effect_direction: Mapped[Optional[str]] = mapped_column(String(16))
+    effect_size: Mapped[Optional[float]] = mapped_column(Numeric(20, 8))
+    applicability_json: Mapped[Optional[str]] = mapped_column(Text)
+    prior_status: Mapped[Optional[str]] = mapped_column(String(24))
+    prior_artifact_version: Mapped[Optional[str]] = mapped_column(String(64))
     superseded_by: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_memories.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
@@ -1182,6 +1202,9 @@ class AdsMemoryEvidence(Base):
     snapshot_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_analysis_snapshots.id", ondelete="SET NULL"))
     ai_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_ai_runs.id", ondelete="SET NULL"))
     description: Mapped[Optional[str]] = mapped_column(Text)
+    context_signature_json: Mapped[Optional[str]] = mapped_column(Text)
+    context_signature_hash: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    causal_strength: Mapped[Optional[str]] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
