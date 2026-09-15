@@ -3,6 +3,7 @@ WORKDIR /app
 COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 COPY app ./app
+RUN mkdir -p /var/lib/maxibot/identities && chown -R 65532:65532 /var/lib/maxibot
 ARG RELEASE_SHA=UNKNOWN
 ENV MAXIBOT_COMMIT_SHA=${RELEASE_SHA} PYTHONUNBUFFERED=1
 LABEL org.maxibot.component=telegram-executor
