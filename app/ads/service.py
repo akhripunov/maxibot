@@ -21,6 +21,7 @@ from app.ads.context_budget import bound_ai_context
 from app.ads.attribution import build_bot_metrics, build_maxibot_metrics
 from app.ads.objectives import evaluate_objective, objective_for_link
 from app.ads.yandex_autopilot import record_strategy_observation
+from app.ads.prior_shadow import run_prior_shadow
 from app.core.config import settings
 from app.db.models import Admin, AdsAccount, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCollectionRun, AdsDataHealth, AdsMemory, AdsObservation, AdsPromotionCampaignLink, AdsRecommendation, AdsAiOutcome, BotConnection, BotPromotionProfile, Channel, LandingPage, TrafficProfile
 from app.integrations.yandex_direct import YandexDirectClient
@@ -421,6 +422,10 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     snapshot = AdsAnalysisSnapshot(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, campaign_id=campaign.id, source="MANUAL_CHECK", period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
     db.add(snapshot); await db.flush()
     snapshot.facts_json = json.dumps(facts, ensure_ascii=False)
+    # Optional deterministic Prior Engine shadow. This is strictly diagnostic;
+    # canonical analysis remains authoritative and failures are fail-open for
+    # the normal collection/decision path.
+    await run_prior_shadow(db=db, snapshot=snapshot, campaign=campaign, facts=facts)
     health_scope = AdsDataHealth.channel_id == channel_id if channel else (AdsDataHealth.promotion_object_type == object_type, AdsDataHealth.promotion_object_id == object_id)
     current_health = await db.scalar(select(AdsDataHealth).where(*((health_scope,) if not isinstance(health_scope, tuple) else health_scope)).order_by(AdsDataHealth.checked_at.desc()).limit(1))
     if current_health:

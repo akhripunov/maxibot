@@ -5,6 +5,7 @@ from app.ads.prior_engine import (
     rank_priors, replay, similarity,
 )
 from app.ads.external_priors import validate_manifest, verify_artifact_bytes
+from app.ads.prior_shadow import build_shadow_result
 import hashlib
 
 
@@ -101,3 +102,28 @@ def test_external_prior_requires_explicit_flag_and_tenant_verification():
     item = {"id": "x", "scope": "EXTERNAL", "tenant_id": None, "tenant_verified": True, "context_signature": sig, "evidence": [], "observed_at": datetime.now(timezone.utc).isoformat()}
     assert rank_priors([item], sig, tenant_id="t1") == []
     assert len(rank_priors([item], sig, tenant_id="t1", flags={"external": True})) == 1
+
+
+def test_shadow_zero_priors_is_generic_and_non_authoritative():
+    class Campaign:
+        id = "campaign-1"
+        channel_id = "channel-1"
+    result = build_shadow_result(
+        facts={"campaign": {"id": "campaign-1"}, "DIRECTOLOGIST": {"decision": "NO_ACTION"}},
+        campaign=Campaign(), memories=[], snapshot_id="snapshot-1", tenant_id="channel-1",
+    )
+    assert result["cold_start_source"] == "GENERIC"
+    assert result["similar_experiments"] == 0
+    assert result["shadow_top_candidate"] is None
+    assert result["shadow_prior_score"] == 0
+    assert result["canonical_vs_shadow"] == "SHADOW_NO_CANDIDATE"
+
+
+def test_shadow_comparison_is_deterministic_for_same_snapshot():
+    class Campaign:
+        id = "campaign-1"
+        channel_id = "channel-1"
+    facts = {"campaign": {"id": "campaign-1"}, "DIRECTOLOGIST": {"decision": "NO_ACTION"}}
+    a = build_shadow_result(facts=facts, campaign=Campaign(), memories=[], snapshot_id="snapshot-1", tenant_id="channel-1")
+    b = build_shadow_result(facts=facts, campaign=Campaign(), memories=[], snapshot_id="snapshot-1", tenant_id="channel-1")
+    assert a == b
