@@ -350,7 +350,7 @@ async def _active_experiment_exists(
                AdsRecommendation.experiment_status.in_(("executing", "running", "evaluating", "rolling_back")))
         .limit(1)))
 
-async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channel: Channel | None, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime, object_type: str = "CHANNEL", object_id: str | None = None, bot_id: str | None = None) -> AdsAiRun:
+async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channel: Channel | None, campaign: AdsCampaign, reports: dict[str, list[dict]], traffic: dict[str, Any], encrypted: str | None, error: str | None, report_date_from: date, report_date_to: date, report_fetched_at: datetime, object_type: str = "CHANNEL", object_id: str | None = None, bot_id: str | None = None, snapshot_source: str = "MANUAL_CHECK") -> AdsAiRun:
     channel_id = channel.id if channel else None
     object_id = object_id or channel_id
     link_scope = (AdsPromotionCampaignLink.channel_id == object_id) if object_type == "CHANNEL" else (
@@ -419,7 +419,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     }
     facts["report_trace"] = {"source": "ADS Data Layer V2", "source_fields": ["Date", "Impressions", "Clicks", "Cost", "Conversions"], "date_from": report_date_from.isoformat(), "date_to": report_date_to.isoformat(), "report_timezone": "Europe/Moscow", "aggregation": "deterministic V2 dataset; dimensions analyzed independently", "snapshot_timestamp_utc": snapshot_at.isoformat(), "freshness": "based on latest persisted V2 observations"}
     facts["current_day_quality"] = {"status": "POSSIBLY_INCOMPLETE_CURRENT_DAY", "window": "1d", "reason": "current calendar-day report values can be partial or delayed", "ai_guidance": "do not treat current-day zero cost/conversions as strong deterioration evidence; prefer confirmed 3d/7d data"}
-    snapshot = AdsAnalysisSnapshot(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, campaign_id=campaign.id, source="MANUAL_CHECK", period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
+    snapshot = AdsAnalysisSnapshot(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, campaign_id=campaign.id, source=snapshot_source, period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
     db.add(snapshot); await db.flush()
     snapshot.facts_json = json.dumps(facts, ensure_ascii=False)
     # Optional deterministic Prior Engine shadow. This is strictly diagnostic;
@@ -490,7 +490,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     ai.completed_at = datetime.now(timezone.utc)
     return ai
 
-async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str, ui_message_id: str | None = None) -> dict[str, Any]:
+async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str, ui_message_id: str | None = None, snapshot_source: str = "MANUAL_CHECK") -> dict[str, Any]:
     if not can_access_ads(admin_external_id): raise PermissionError("ADS access denied")
     channel = await db.scalar(select(Channel).join(Admin).where(Channel.id == channel_id, Admin.external_id == str(admin_external_id)))
     if not channel: raise PermissionError("channel is not owned")
@@ -511,7 +511,7 @@ async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str
         run.status, run.error_code, run.finished_at = "COMPLETED", error, datetime.now(timezone.utc)
         await db.commit()
         return {"campaign_count": 0, "ai_status": "SKIPPED"}
-    ai_runs = [await _run_campaign_check(db, run=run, channel=channel, campaign=item, reports=reports, traffic=traffic, encrypted=encrypted, error=error, report_date_from=report_date_from, report_date_to=report_date_to, report_fetched_at=report_fetched_at) for item in selected]
+    ai_runs = [await _run_campaign_check(db, run=run, channel=channel, campaign=item, reports=reports, traffic=traffic, encrypted=encrypted, error=error, report_date_from=report_date_from, report_date_to=report_date_to, report_fetched_at=report_fetched_at, snapshot_source=snapshot_source) for item in selected]
     for ai in ai_runs:
         ai.ui_admin_external_id = str(admin_external_id)
         ai.ui_message_id = ui_message_id

@@ -564,7 +564,40 @@ async def trigger_continuous_analysis(session_factory, *, now: datetime | None =
                     ).where(Channel.id == object_id))
                     if not external_id:
                         continue
-                    result = await run_check(db, admin_external_id=str(external_id), channel_id=object_id)
+                    # Periodic analysis reuses the canonical manual pipeline,
+                    # but marks the immutable snapshot with its real source.
+                    # This keeps manual/pre-experiment provenance distinct.
+                    result = await run_check(
+                        db,
+                        admin_external_id=str(external_id),
+                        channel_id=object_id,
+                        snapshot_source="PERIODIC_ANALYSIS",
+                    )
+                    # Link the completed campaign collection to the immutable
+                    # decision snapshot produced from that fresh cycle.  The
+                    # nullable existing field gives us durable provenance and
+                    # retry idempotency without a schema/table change.
+                    if result.get("ai_run_ids"):
+                        latest_collection = await db.scalar(
+                            select(AdsCollectionRun)
+                            .where(
+                                AdsCollectionRun.campaign_id.in_(
+                                    select(AdsAiRun.campaign_id).where(AdsAiRun.id.in_(result["ai_run_ids"]))
+                                ),
+                                AdsCollectionRun.collection_type == "CAMPAIGN",
+                                AdsCollectionRun.status == "COMPLETED",
+                            )
+                            .order_by(AdsCollectionRun.completed_at.desc())
+                            .limit(1)
+                        )
+                        if latest_collection and latest_collection.snapshot_id is None:
+                            snapshot_id = await db.scalar(
+                                select(AdsAiRun.input_snapshot_id)
+                                .where(AdsAiRun.id.in_(result["ai_run_ids"]), AdsAiRun.input_snapshot_id.is_not(None))
+                                .limit(1)
+                            )
+                            if snapshot_id:
+                                latest_collection.snapshot_id = snapshot_id
                 else:
                     profile = await db.get(BotPromotionProfile, object_id)
                     owner_id = (settings.maxibot_owner_user_id or "").strip()

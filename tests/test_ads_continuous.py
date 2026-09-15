@@ -30,3 +30,13 @@ def test_continuous_mode_is_wired_to_existing_periodic_collector_and_is_configur
     assert "await trigger_continuous_analysis(session_factory)" in source
     assert "ads_analysis_cadence_minutes" in config
     assert "ads_background_analysis_enabled" in source
+
+
+def test_periodic_analysis_preserves_snapshot_provenance_and_collection_link():
+    source = open("app/ads/periodic.py", encoding="utf-8").read()
+    service = open("app/ads/service.py", encoding="utf-8").read()
+    compose = open("docker-compose.vps.yml", encoding="utf-8").read()
+    assert 'snapshot_source="PERIODIC_ANALYSIS"' in source
+    assert "latest_collection.snapshot_id = snapshot_id" in source
+    assert 'source=snapshot_source' in service
+    assert 'ADS_BACKGROUND_ANALYSIS_ENABLED: "true"' in compose
