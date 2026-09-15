@@ -6,7 +6,7 @@ on:
       - "executor-candidate-*"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -73,17 +73,44 @@ jobs:
           import json, os
           from datetime import datetime, timezone
           out = {
+              "schema": "MAXIBOT_TELEGRAM_EXECUTOR_RELEASE_MANIFEST_V1",
               "source_sha": os.environ["SOURCE_SHA"],
               "image_ref": f"{os.environ['IMAGE']}:{os.environ['SOURCE_SHA']}",
               "image_digest": os.environ["DIGEST"],
               "platform": "linux/amd64",
               "protocol_version": 1,
               "build_timestamp": datetime.now(timezone.utc).isoformat(),
+              "github_run_id": os.environ["GITHUB_RUN_ID"],
+              "remote_verified": True,
           }
           with open("telegram-executor-release-manifest.json", "w", encoding="utf-8") as handle:
               json.dump(out, handle, indent=2, sort_keys=True)
               handle.write("\n")
           PY
+
+      - name: Publish immutable verification ref
+        run: |
+          set -euo pipefail
+          REF="refs/maxibot/executor-verified/$SOURCE_SHA"
+          if git ls-remote --exit-code origin "$REF" >/dev/null 2>&1; then
+            echo "verification ref already exists; refusing overwrite" >&2
+            exit 1
+          fi
+          tmp_manifest="$(mktemp)"
+          cp telegram-executor-release-manifest.json "$tmp_manifest"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --orphan "verification-$SOURCE_SHA"
+          git rm -rf . >/dev/null 2>&1 || true
+          cp "$tmp_manifest" telegram-executor-release-manifest.json
+          git add telegram-executor-release-manifest.json
+          git commit -m "ci: attest telegram executor $SOURCE_SHA"
+          git push origin "HEAD:$REF"
+          test "$(git ls-remote origin "$REF" | awk '{print $1}' | head -1)" != ""
+          test "$(python -c 'import json; print(json.load(open("telegram-executor-release-manifest.json"))["source_sha"])')" = "$SOURCE_SHA"
+          echo "CI_VERIFICATION_REF=$REF" >> "$GITHUB_STEP_SUMMARY"
+          echo "CI_VERIFICATION_REF_EXISTS=YES" >> "$GITHUB_STEP_SUMMARY"
+          echo "CI_VERIFICATION_MANIFEST_MATCH=PASS" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload release manifest
         uses: actions/upload-artifact@v4
