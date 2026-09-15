@@ -251,7 +251,7 @@ async def collect_yandex_v2(db: AsyncSession, *, token: str, campaign: AdsCampai
     provider = YandexAdsProvider(token, client_login=settings.yandex_direct_client_login)
     fields = ("Date", "CampaignId", "CampaignName", "Impressions", "Clicks", "Cost", "Conversions")
     request_hash = hashlib.sha256(json.dumps({"campaign": campaign.external_id, "from": date_from.isoformat(), "to": date_to.isoformat(), "fields": fields}, sort_keys=True).encode()).hexdigest()
-    report_run = AdsReportRun(provider="YANDEX_DIRECT", report_type="CAMPAIGN_PERFORMANCE_REPORT", campaign_provider_id=campaign.external_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(fields), request_hash=request_hash, fetched_at=fetched_at, row_count=len(report_rows), parser_version="v1", status="SUCCESS", freshness_caveat="current calendar day may be incomplete or delayed")
+    report_run = AdsReportRun(provider="YANDEX_DIRECT", ads_account_id=campaign.account_id, report_type="CAMPAIGN_PERFORMANCE_REPORT", campaign_provider_id=campaign.external_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(fields), request_hash=request_hash, fetched_at=fetched_at, row_count=len(report_rows), parser_version="v1", status="SUCCESS", freshness_caveat="current calendar day may be incomplete or delayed")
     db.add(report_run)
     await db.flush()
     campaign_entity = await _entity(db, provider="YANDEX_DIRECT", entity_type="CAMPAIGN", provider_entity_id=campaign.external_id, parent_id=None, display_name=campaign.name, status=campaign.status, metadata={"state": campaign.state}, campaign_id=campaign.id)
@@ -280,7 +280,7 @@ async def collect_yandex_v2(db: AsyncSession, *, token: str, campaign: AdsCampai
         return {"entities": {"campaigns": 1, "ad_groups": 0, "ads": 0, "creatives": 0}, "dimensions": {"placements": "NOT_SUPPORTED", "targeting": "NOT_SUPPORTED", "devices": "NOT_SUPPORTED", "regions": "NOT_SUPPORTED", "time": "NOT_SUPPORTED"}, "report_runs": 1, "missing_data": ["AD_GROUPS", "PLACEMENTS", "TARGETING", "DEVICES", "REGIONS", "TIME"], "ai_context": {"rows_available": len(report_rows), "rows_included": min(len(report_rows), 50), "truncated": len(report_rows) > 50, "selection": "campaign metrics only"}}
     try:
         ads_report = await provider.ads([int(campaign.external_id)])
-        ads_report_run = AdsReportRun(provider="YANDEX_DIRECT", report_type="ADS", campaign_provider_id=campaign.external_id, timezone="Europe/Moscow", requested_fields_json=json.dumps(ads_report.requested_fields), fetched_at=ads_report.fetched_at or fetched_at, row_count=len(ads_report.rows), parser_version="v1", status=ads_report.status, error_code=ads_report.error_code)
+        ads_report_run = AdsReportRun(provider="YANDEX_DIRECT", ads_account_id=campaign.account_id, report_type="ADS", campaign_provider_id=campaign.external_id, timezone="Europe/Moscow", requested_fields_json=json.dumps(ads_report.requested_fields), fetched_at=ads_report.fetched_at or fetched_at, row_count=len(ads_report.rows), parser_version="v1", status=ads_report.status, error_code=ads_report.error_code)
         db.add(ads_report_run)
         await db.flush()
         for raw in ads_report.rows:
@@ -341,7 +341,7 @@ async def collect_granular_yandex_v2(db: AsyncSession, *, token: str, campaign: 
             spec = GRANULAR_REPORTS[dimension]
             try:
                 report = await provider.granular_report(dimension, int(campaign.external_id), date_from=date_from, date_to=date_to)
-                report_run = AdsReportRun(provider="YANDEX_DIRECT", report_type=report.report_type, campaign_provider_id=campaign.external_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(report.requested_fields), request_hash=hashlib.sha256(f"{collection_run_id}|{dimension}".encode()).hexdigest(), fetched_at=report.fetched_at or fetched_at, row_count=len(report.rows), parser_version="v1", status=report.status, error_code=report.error_code, freshness_caveat=report.freshness_caveat)
+                report_run = AdsReportRun(provider="YANDEX_DIRECT", ads_account_id=campaign.account_id, report_type=report.report_type, campaign_provider_id=campaign.external_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(report.requested_fields), request_hash=hashlib.sha256(f"{collection_run_id}|{dimension}".encode()).hexdigest(), fetched_at=report.fetched_at or fetched_at, row_count=len(report.rows), parser_version="v1", status=report.status, error_code=report.error_code, freshness_caveat=report.freshness_caveat)
                 db.add(report_run)
                 await db.flush()
                 results["reports"][dimension] = {"report_type": report.report_type, "rows": len(report.rows), "accepted": True, "provider_report_id": report.provider_report_id}
@@ -372,7 +372,7 @@ async def collect_granular_yandex_v2(db: AsyncSession, *, token: str, campaign: 
                 for (entity_id, dimension_value, day), values in daily.items():
                     await _upsert_daily_aggregate(db, campaign_id=campaign.id, entity_id=entity_id, dimension_type=dimension, dimension_value=dimension_value, aggregate_date=day, values=values, source_ids=[report_run.id], source_from=report.fetched_at or fetched_at, source_to=report.fetched_at or fetched_at)
             except Exception as exc:
-                failed_run = AdsReportRun(provider="YANDEX_DIRECT", report_type=spec["report_type"], campaign_provider_id=campaign.external_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(spec["fields"]), request_hash=hashlib.sha256(f"{collection_run_id}|{dimension}".encode()).hexdigest(), fetched_at=datetime.now(timezone.utc), row_count=0, parser_version="v1", status="FAILED", error_code=type(exc).__name__)
+                failed_run = AdsReportRun(provider="YANDEX_DIRECT", ads_account_id=campaign.account_id, report_type=spec["report_type"], campaign_provider_id=campaign.external_id, date_from=date_from, date_to=date_to, timezone="Europe/Moscow", requested_fields_json=json.dumps(spec["fields"]), request_hash=hashlib.sha256(f"{collection_run_id}|{dimension}".encode()).hexdigest(), fetched_at=datetime.now(timezone.utc), row_count=0, parser_version="v1", status="FAILED", error_code=type(exc).__name__)
                 db.add(failed_run)
                 results["errors"].append({"dimension": dimension, "error_code": type(exc).__name__})
                 results["reports"][dimension] = {"accepted": False, "error_code": type(exc).__name__}

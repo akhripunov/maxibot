@@ -20,6 +20,11 @@ from app.ads.storage_health import diagnostics as ads_storage_diagnostics
 from app.db.models import (
     Admin,
     AdsAiRun,
+    AdsAccount,
+    AdsCampaign,
+    AdsCollectionRun,
+    AdsDataHealth,
+    TelegramAdsServiceIdentity,
     AdsMemory,
     AdsAnalysisSnapshot,
     BotConnection,
@@ -452,6 +457,38 @@ async def admin_overview(
         },
         "definitions": canonical_metric_definitions(),
     }
+
+
+@router.get("/telegram-ads")
+async def admin_telegram_ads(
+    _: str = Depends(require_web_admin),
+    db: AsyncSession = Depends(get_session),
+):
+    """Read-only Telegram Ads connection/inventory health; secrets excluded."""
+    accounts = list((await db.scalars(select(AdsAccount).where(AdsAccount.provider == "TELEGRAM_ADS").order_by(AdsAccount.updated_at.desc()))).all())
+    items = []
+    for account in accounts:
+        identity = await db.get(TelegramAdsServiceIdentity, account.telegram_service_identity_id) if account.telegram_service_identity_id else None
+        ad_count = await db.scalar(select(func.count()).select_from(AdsCampaign).where(AdsCampaign.account_id == account.id))
+        latest_run = await db.scalar(select(AdsCollectionRun).where(AdsCollectionRun.account_id == account.id).order_by(AdsCollectionRun.completed_at.desc()).limit(1))
+        latest_health = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.promotion_object_id == account.id).order_by(AdsDataHealth.checked_at.desc()).limit(1))
+        items.append({
+            "provider": "Telegram Ads",
+            "organization": account.display_name,
+            "external_account_id": account.external_account_id,
+            "service_identity_id": identity.id if identity else None,
+            "connection_status": account.status,
+            "storage_region": account.storage_region or "RU",
+            "execution_region": account.execution_region or "RU",
+            "session_status": identity.status if identity else "UNKNOWN",
+            "last_owner_verification": identity.last_verified_at.isoformat() if identity and identity.last_verified_at else None,
+            "last_collection": latest_run.completed_at.isoformat() if latest_run and latest_run.completed_at else None,
+            "ads_count": int(ad_count or 0),
+            "data_health": latest_health.status if latest_health else "UNKNOWN",
+            "writes": "DISABLED",
+            "autopilot": "DISABLED",
+        })
+    return {"read_only": True, "items": items}
 
 
 @router.get("/clients")

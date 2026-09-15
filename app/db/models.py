@@ -763,6 +763,25 @@ class SupportTicketMessage(Base):
 
 # AI promotion V1.  These records intentionally keep a durable, inspectable
 # history and contain no OAuth tokens, raw user data, or Direct write intents.
+class TelegramAdsServiceIdentity(Base):
+    """Shared MAXIBOT Telegram Ads service-user session.
+
+    One encrypted session is owned by the service identity and may be bound
+    to multiple organization accounts.  Organization rows never duplicate
+    the authenticated cookie material.
+    """
+    __tablename__ = "telegram_ads_service_identities"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    identity_key: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    encrypted_session: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="CONNECTED", nullable=False, index=True)
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_owner_assertion: Mapped[Optional[str]] = mapped_column(String(255))
+    session_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
 class AdsAccount(Base):
     __tablename__ = "ads_accounts"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
@@ -773,10 +792,16 @@ class AdsAccount(Base):
     display_name: Mapped[Optional[str]] = mapped_column(String(255))
     connection_status: Mapped[Optional[str]] = mapped_column(String(24), index=True)
     provider_metadata_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    telegram_service_identity_id: Mapped[Optional[str]] = mapped_column(ForeignKey("telegram_ads_service_identities.id", ondelete="SET NULL"), index=True)
     metadata_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # Regional ownership is explicit and provider-neutral.  Existing accounts
+    # default to the current RU storage/execution cell; provider type never
+    # selects a region implicitly.
+    storage_region: Mapped[str] = mapped_column(String(16), default="RU", server_default="RU", nullable=False, index=True)
+    execution_region: Mapped[str] = mapped_column(String(16), default="RU", server_default="RU", nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
-    __table_args__ = (UniqueConstraint("admin_id", "provider", name="uq_ads_account_provider"),)
+    __table_args__ = (UniqueConstraint("admin_id", "provider", "external_account_id", name="uq_ads_account_provider_external"),)
 
 
 class AdsCampaign(Base):
@@ -921,6 +946,7 @@ class AdsEntity(Base):
 class AdsReportRun(Base):
     __tablename__ = "ads_report_runs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    ads_account_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_accounts.id", ondelete="SET NULL"), index=True)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     report_type: Mapped[str] = mapped_column(String(128), nullable=False)
     campaign_provider_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
@@ -943,6 +969,7 @@ class AdsCollectionRun(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     account_id: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    ads_account_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_accounts.id", ondelete="SET NULL"), index=True)
     campaign_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_campaigns.id", ondelete="CASCADE"), index=True)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     destination_platform: Mapped[Optional[str]] = mapped_column(String(24), default="MAX", index=True)
@@ -1161,6 +1188,7 @@ class AdsMemoryEvidence(Base):
 class AdsDataHealth(Base):
     __tablename__ = "ads_data_health"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    ads_account_id: Mapped[Optional[str]] = mapped_column(ForeignKey("ads_accounts.id", ondelete="SET NULL"), index=True)
     channel_id: Mapped[Optional[str]] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     promotion_object_type: Mapped[Optional[str]] = mapped_column(String(16), index=True)
     promotion_object_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)

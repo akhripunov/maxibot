@@ -14,16 +14,35 @@ from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2, enrich_periodic_ad_media
+from app.ads.telegram_collection import persist_telegram_report
+from app.ads.regional import assert_execution_supported
 from app.ads.storage_governance import run_retention
 from app.core.config import settings
 from app.db.models import (
     Admin, AdsAccount, AdsCampaign, AdsDataHealth, AdsPromotionCampaignLink,
-    AdsCollectionRun, BotPromotionProfile, Channel,
+    AdsCollectionRun, AdsCreative, BotPromotionProfile, Channel,
 )
 from app.integrations.yandex_oauth import get_direct_encrypted_token
 from app.security_tokens import decrypt_token
-from app.security_tokens import decrypt_token
 
+
+async def _upsert_telegram_creative(db: AsyncSession, *, campaign: AdsCampaign, raw: dict) -> None:
+    """Persist only observed Telegram creative fields; missing stays NULL."""
+    from app.ads.telegram_normalization import normalize_creative
+    normalized = normalize_creative(raw)
+    if not normalized.get("content_hash"):
+        return
+    external_id = str(raw.get("Id") or "").strip()
+    if not external_id:
+        return
+    creative = await db.scalar(select(AdsCreative).where(AdsCreative.campaign_id == campaign.id, AdsCreative.external_creative_id == external_id))
+    values = dict(campaign_id=campaign.id, external_creative_id=external_id, title=normalized.get("title"), body=normalized.get("body"), href=normalized.get("href"), display_url=normalized.get("display_url"), image_ref=normalized.get("image_ref"), provider_state=normalized.get("provider_state"), provider_metadata_json=normalized["provider_metadata_json"], content_hash=normalized["content_hash"], metadata_updated_at=datetime.now(timezone.utc), last_seen_at=datetime.now(timezone.utc))
+    if creative is None:
+        db.add(AdsCreative(**values))
+    else:
+        for key, value in values.items():
+            if key != "campaign_id":
+                setattr(creative, key, value)
 MOSCOW = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
 MAX_ATTEMPTS = 3
 logger = logging.getLogger(__name__)
@@ -72,7 +91,7 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
         # campaigns retain history but must not receive fresh slots. The
         # promotion link is deliberately not part of this predicate: its
         # status controls analysis/autopilot scope, not data collection.
-        .where(AdsAccount.provider == "YANDEX_DIRECT", AdsAccount.status == "CONNECTED", AdsCampaign.state == "ON")
+        .where(AdsAccount.provider.in_(("YANDEX_DIRECT", "TELEGRAM_ADS")), AdsAccount.status == "CONNECTED", or_(AdsCampaign.state == "ON", AdsCampaign.state.is_(None)))
         .distinct().limit(limit)
     )).all())
     # A campaign resumed in Direct can still be cached as SUSPENDED/OFF in
@@ -84,7 +103,7 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
         .join(AdsAccount, AdsAccount.id == AdsCampaign.account_id)
         .join(AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCampaign.id)
         .where(
-            AdsAccount.provider == "YANDEX_DIRECT",
+            AdsAccount.provider.in_(("YANDEX_DIRECT", "TELEGRAM_ADS")),
             AdsAccount.status == "CONNECTED",
             AdsCampaign.state != "ON",
         ).distinct().limit(limit)
@@ -96,8 +115,14 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
         # Stale linked campaigns receive only a provider metadata refresh.
         # Performance/granular collection remains fail-closed until the fresh
         # provider state is ON.
-        collection_types = ["ENTITY_CONFIG"] if campaign.state != "ON" else ["CAMPAIGN", "GRANULAR", "ENTITY_CONFIG"]
-        if campaign.state == "ON" and settings.ads_collection_search_query_enabled:
+        account_provider = await db.scalar(select(AdsAccount.provider).where(AdsAccount.id == campaign.account_id))
+        if account_provider == "TELEGRAM_ADS":
+            # Telegram self-serve exposes campaign/ad stats through one
+            # account-scoped report; do not manufacture Yandex granular slots.
+            collection_types = ["CAMPAIGN"] if campaign.state in ("ON", None) else ["ENTITY_CONFIG"]
+        else:
+            collection_types = ["ENTITY_CONFIG"] if campaign.state != "ON" else ["CAMPAIGN", "GRANULAR", "ENTITY_CONFIG"]
+        if account_provider == "YANDEX_DIRECT" and campaign.state == "ON" and settings.ads_collection_search_query_enabled:
             collection_types.append("SEARCH_QUERY")
         for collection_type in collection_types:
             scheduled = _slot_time(now, campaign.id, collection_type)
@@ -105,10 +130,11 @@ async def ensure_due_slots(db: AsyncSession, *, now: datetime | None = None, lim
             # the next scheduler tick, keeping the table bounded.
             if scheduled > now:
                 continue
-            key = f"YANDEX_DIRECT:{campaign.account_id}:{campaign.id}:{collection_type}:{scheduled.isoformat()}:v1"
+            provider_name = "TELEGRAM_ADS" if (campaign.account_id and await db.scalar(select(AdsAccount.provider).where(AdsAccount.id == campaign.account_id)) == "TELEGRAM_ADS") else "YANDEX_DIRECT"
+            key = f"{provider_name}:{campaign.account_id}:{campaign.id}:{collection_type}:{scheduled.isoformat()}:v1"
             exists = await db.scalar(select(AdsCollectionRun.id).where(AdsCollectionRun.slot_key == key))
             if not exists:
-                db.add(AdsCollectionRun(provider="YANDEX_DIRECT", account_id=campaign.account_id, campaign_id=campaign.id, collection_type=collection_type, run_type={"CAMPAIGN": "PERIODIC_CAMPAIGN", "GRANULAR": "PERIODIC_GRANULAR", "ENTITY_CONFIG": "ENTITY_SYNC", "SEARCH_QUERY": "PERIODIC_SEARCH_QUERY"}[collection_type], trigger="PERIODIC", scheduled_at=scheduled, slot_key=key))
+                db.add(AdsCollectionRun(provider=provider_name, account_id=campaign.account_id, ads_account_id=campaign.account_id, campaign_id=campaign.id, destination_platform="TELEGRAM_ADS" if provider_name == "TELEGRAM_ADS" else "MAX", collection_type=collection_type, run_type={"CAMPAIGN": "PERIODIC_CAMPAIGN", "GRANULAR": "PERIODIC_GRANULAR", "ENTITY_CONFIG": "ENTITY_SYNC", "SEARCH_QUERY": "PERIODIC_SEARCH_QUERY"}[collection_type], trigger="PERIODIC", scheduled_at=scheduled, slot_key=key))
                 created += 1
     await db.commit()
     return created
@@ -132,6 +158,7 @@ async def claim_due_slots(db: AsyncSession, *, now: datetime | None = None, limi
 
 
 async def _health(db: AsyncSession, campaign: AdsCampaign, *, status: str, reason: str) -> None:
+    account_id = campaign.account_id
     links = list((await db.scalars(select(AdsPromotionCampaignLink.channel_id).where(AdsPromotionCampaignLink.campaign_id == campaign.id, AdsPromotionCampaignLink.object_type == "CHANNEL", AdsPromotionCampaignLink.channel_id.is_not(None)))).all())
     for channel_id in links:
         current = await db.scalar(select(AdsDataHealth).where(AdsDataHealth.channel_id == channel_id).order_by(AdsDataHealth.checked_at.desc()).limit(1))
@@ -140,7 +167,7 @@ async def _health(db: AsyncSession, campaign: AdsCampaign, *, status: str, reaso
             current.reasons_json = json.dumps({"periodic_collection": reason, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)
             current.checked_at = datetime.now(timezone.utc)
         else:
-            db.add(AdsDataHealth(channel_id=channel_id, status=status, reasons_json=json.dumps({"periodic_collection": reason, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)))
+            db.add(AdsDataHealth(ads_account_id=account_id, channel_id=channel_id, status=status, reasons_json=json.dumps({"periodic_collection": reason, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)))
 
 
 async def sync_account_inventory(db: AsyncSession) -> int:
@@ -151,21 +178,47 @@ async def sync_account_inventory(db: AsyncSession) -> int:
     or BOT promotion.  OAuth remains tenant-bound to the AdsAccount owner.
     """
     from app.ads.providers.yandex import YandexAdsProvider
+    from app.ads.providers.telegram import TelegramAdsOwnerContext, TelegramAdsProvider, decrypt_session_cookies
+    from app.ads.telegram_identity import load_service_identity
 
     accounts = list((await db.scalars(select(AdsAccount).where(
-        AdsAccount.provider == "YANDEX_DIRECT",
+        AdsAccount.provider.in_(("YANDEX_DIRECT", "TELEGRAM_ADS")),
         AdsAccount.status == "CONNECTED",
     ))).all())
     discovered = 0
     for account in accounts:
+        try:
+            assert_execution_supported(account)
+        except Exception as exc:
+            logger.warning("ADS_ACCOUNT_EXECUTION_REGION_UNAVAILABLE account_id=%s error=%s", account.id, type(exc).__name__)
+            continue
         admin_external_id = await db.scalar(select(Admin.external_id).where(Admin.id == account.admin_id))
         channel = await db.scalar(select(Channel).where(Channel.admin_id == account.admin_id).order_by(Channel.id).limit(1))
-        if not admin_external_id or not channel:
+        if not admin_external_id or (account.provider == "YANDEX_DIRECT" and not channel):
             continue
-        encrypted = await get_direct_encrypted_token(str(admin_external_id), channel.id, db=db)
-        if not encrypted:
+        encrypted = await get_direct_encrypted_token(str(admin_external_id), channel.id, db=db) if account.provider == "YANDEX_DIRECT" else None
+        provider = None
+        if account.provider == "YANDEX_DIRECT":
+            if not encrypted:
+                continue
+            provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login or account.external_account_id)
+        elif account.provider == "TELEGRAM_ADS":
+            try:
+                cookies = None
+                if account.telegram_service_identity_id:
+                    cookies = await load_service_identity(db, identity_id=account.telegram_service_identity_id)
+                if cookies is None:
+                    metadata = json.loads(account.provider_metadata_json or "{}")
+                    ciphertext = metadata.get("session_ciphertext")
+                    cookies = decrypt_session_cookies(str(ciphertext)) if ciphertext else None
+                if not cookies:
+                    continue
+            except Exception:
+                logger.warning("TELEGRAM_ADS_SESSION_UNAVAILABLE account_id=%s", account.id)
+                continue
+            provider = TelegramAdsProvider(TelegramAdsOwnerContext(str(account.external_account_id or ""), account.display_name, cookies))
+        else:
             continue
-        provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login or account.external_account_id)
         try:
             report = await provider.campaigns()
         except Exception:
@@ -188,12 +241,13 @@ async def sync_account_inventory(db: AsyncSession) -> int:
                     external_id=external_id,
                     external_campaign_id=external_id,
                     name=str(raw.get("Name") or external_id),
+                    campaign_type=str(raw.get("Type") or "TELEGRAM_AD") if account.provider == "TELEGRAM_ADS" else None,
                 )
                 db.add(campaign)
                 await db.flush()
                 discovered += 1
             campaign.name = str(raw.get("Name") or campaign.name or external_id)
-            campaign.state = raw.get("State")
+            campaign.state = raw.get("State") or ("ON" if account.provider == "TELEGRAM_ADS" else None)
             campaign.status = raw.get("Status")
             campaign.campaign_type = raw.get("Type")
             campaign.external_campaign_id = external_id
@@ -203,6 +257,8 @@ async def sync_account_inventory(db: AsyncSession) -> int:
             }, ensure_ascii=False)
             campaign.provider_metadata_json = campaign.raw_json
             campaign.metadata_updated_at = datetime.now(timezone.utc)
+            if account.provider == "TELEGRAM_ADS":
+                await _upsert_telegram_creative(db, campaign=campaign, raw=raw)
     await db.commit()
     return discovered
 
@@ -214,6 +270,7 @@ async def _collection_context(db: AsyncSession, run: AdsCollectionRun):
     campaign_account = await db.get(AdsAccount, campaign.account_id)
     if not campaign_account:
         raise ValueError("COLLECTION_ACCOUNT_NOT_FOUND")
+    assert_execution_supported(campaign_account)
     # Any durable link supplies the owning object/token for read-only
     # collection. ACTIVE/INACTIVE is reserved for analysis/autopilot scope.
     link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.campaign_id == campaign.id))
@@ -236,6 +293,33 @@ async def _collection_context(db: AsyncSession, run: AdsCollectionRun):
 
 
 async def collect_campaign_slot(db: AsyncSession, run: AdsCollectionRun) -> None:
+    campaign_row = await db.get(AdsCampaign, run.campaign_id)
+    account = await db.get(AdsAccount, run.ads_account_id or (campaign_row.account_id if campaign_row else None))
+    if account:
+        assert_execution_supported(account)
+    if account and campaign_row and account.provider == "TELEGRAM_ADS":
+        from app.ads.providers.telegram import TelegramAdsOwnerContext, TelegramAdsProvider, decrypt_session_cookies
+        from app.ads.telegram_identity import load_service_identity
+        cookies = None
+        if account.telegram_service_identity_id:
+            cookies = await load_service_identity(db, identity_id=account.telegram_service_identity_id)
+        if cookies is None:
+            metadata = json.loads(account.provider_metadata_json or "{}")
+            ciphertext = metadata.get("session_ciphertext")
+            if ciphertext:
+                cookies = decrypt_session_cookies(str(ciphertext))
+        if not cookies:
+            raise ValueError("TELEGRAM_ADS_SESSION_UNAVAILABLE")
+        provider = TelegramAdsProvider(TelegramAdsOwnerContext(str(account.external_account_id or ""), account.display_name, cookies))
+        today = datetime.now(timezone.utc).astimezone(MOSCOW).date()
+        date_from = today - timedelta(days=6)
+        try:
+            report = await provider.campaign_performance(str(campaign_row.external_id), date_from=date_from, date_to=today)
+        finally:
+            await provider.close()
+        result = await persist_telegram_report(db, account=account, campaign=campaign_row, collection_run=run, rows=report.rows, date_from=date_from, date_to=today, fetched_at=report.fetched_at or datetime.now(timezone.utc))
+        run.summary_json = json.dumps(result, sort_keys=True)
+        return
     campaign, channel, encrypted, today = await _collection_context(db, run)
     date_from = today - timedelta(days=6)
     from app.ads.providers.yandex import YandexAdsProvider
@@ -263,6 +347,8 @@ async def collect_granular_slot(db: AsyncSession, run: AdsCollectionRun) -> None
 
 async def collect_entity_configuration(db: AsyncSession, run: AdsCollectionRun) -> None:
     campaign, channel, encrypted, _ = await _collection_context(db, run)
+    account = await db.get(AdsAccount, campaign.account_id)
+    assert_execution_supported(account)
     from app.ads.providers.yandex import YandexAdsProvider
     provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login)
     try:
@@ -354,6 +440,18 @@ async def process_periodic_collection(session_factory) -> int:
                 run.status = "RETRYABLE_FAILED" if run.attempts < MAX_ATTEMPTS else "FAILED"
                 run.error_code = type(exc).__name__
                 run.next_retry_at = datetime.now(timezone.utc) + timedelta(minutes=min(60, 5 * run.attempts)) if run.status == "RETRYABLE_FAILED" else None
+                if campaign:
+                    account = await db.get(AdsAccount, campaign.account_id)
+                    if account and account.provider == "TELEGRAM_ADS":
+                        health = await db.scalar(select(AdsDataHealth).where(
+                            AdsDataHealth.promotion_object_id == account.id,
+                            AdsDataHealth.destination_platform == "TELEGRAM_ADS",
+                        ).order_by(AdsDataHealth.checked_at.desc()).limit(1))
+                        reason = json.dumps({"periodic_collection": type(exc).__name__, "retention_mode": "CURRENT_STATE"}, ensure_ascii=False)
+                        if health:
+                            health.status, health.reasons_json, health.checked_at = "DEGRADED", reason, datetime.now(timezone.utc)
+                        else:
+                            db.add(AdsDataHealth(ads_account_id=account.id, promotion_object_id=account.id, promotion_object_type="ACCOUNT", destination_platform="TELEGRAM_ADS", status="DEGRADED", reasons_json=reason))
                 await db.commit()
     await trigger_continuous_analysis(session_factory)
     await trigger_autopilot_execution(session_factory)

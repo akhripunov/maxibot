@@ -88,7 +88,19 @@ def _rehearse_migration(sha: str, target: str) -> None:
         engine = create_engine(f"sqlite:///{Path(directory) / 'rehearsal.sqlite'}")
         db = engine.connect()
         for table in ADS_TABLES:
-            db.execute(text(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY)'))
+            if table == "ads_accounts":
+                db.execute(text('CREATE TABLE "ads_accounts" (id INTEGER PRIMARY KEY, admin_id VARCHAR(36), provider VARCHAR(32) NOT NULL, external_account_id VARCHAR(128), CONSTRAINT uq_ads_account_provider UNIQUE (admin_id, provider))'))
+            elif table == "ads_campaigns":
+                db.execute(text('CREATE TABLE "ads_campaigns" (id INTEGER PRIMARY KEY, account_id INTEGER, external_id VARCHAR(128))'))
+            elif table == "ads_report_runs":
+                db.execute(text('CREATE TABLE "ads_report_runs" (id INTEGER PRIMARY KEY, campaign_provider_id VARCHAR(128))'))
+            elif table == "ads_collection_runs":
+                db.execute(text('CREATE TABLE "ads_collection_runs" (id INTEGER PRIMARY KEY, provider VARCHAR(32), account_id INTEGER, campaign_id INTEGER)'))
+            elif table == "ads_data_health":
+                db.execute(text('CREATE TABLE "ads_data_health" (id INTEGER PRIMARY KEY, channel_id INTEGER, promotion_object_id INTEGER, promotion_object_type VARCHAR(32), destination_platform VARCHAR(32))'))
+            else:
+                db.execute(text(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY)'))
+        db.execute(text('CREATE TABLE channels (id INTEGER PRIMARY KEY, admin_id VARCHAR(36))'))
         for table in (
             "ads_promotion_campaign_links", "ads_collection_runs", "ads_analysis_snapshots",
             "ads_ai_runs", "ads_recommendations", "ads_memories", "ads_data_health",
@@ -108,7 +120,7 @@ def _rehearse_migration(sha: str, target: str) -> None:
         context = MigrationContext.configure(db)
         with Operations.context(context):
             module.upgrade()
-        if "destination_platform" in migration_text:
+        if 'op.add_column("ads_promotion_campaign_links"' in migration_text and "destination_platform" in migration_text:
             for table in (
                 "ads_promotion_campaign_links", "ads_collection_runs", "ads_analysis_snapshots",
                 "ads_ai_runs", "ads_recommendations", "ads_memories", "ads_data_health",
