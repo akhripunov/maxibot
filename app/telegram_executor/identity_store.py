@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import base64
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,7 +46,7 @@ class IdentityStore:
         UUID(ref)
         return self.root / f"{ref}.identity"
 
-    def put(self, identity_ref: UUID | str, session: dict[str, str], *, allowed_owner_identifiers: list[str], format_version: int = 1) -> None:
+    def put(self, identity_ref: UUID | str, session: dict[str, str], *, allowed_owner_identifiers: list[str], format_version: int = 1, replace: bool = False) -> None:
         if not isinstance(session, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in session.items()):
             raise IdentityStoreError("IDENTITY_SESSION_INVALID")
         owners = sorted({str(x).strip() for x in allowed_owner_identifiers if str(x).strip()})
@@ -53,6 +55,8 @@ class IdentityStore:
         payload = {"identity_ref": str(identity_ref), "allowed_owner_identifiers": owners, "format_version": format_version, "updated_at": datetime.now(timezone.utc).isoformat(), "session": session}
         encrypted = self._fernet().encrypt(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
         target = self._path(identity_ref)
+        if target.exists() and not replace:
+            raise IdentityStoreError("IDENTITY_ALREADY_EXISTS")
         fd, tmp = tempfile.mkstemp(prefix=".identity-", dir=self.root)
         try:
             os.fchmod(fd, 0o600)
@@ -86,25 +90,48 @@ class IdentityStore:
 
 
 def export_sealed_bundle(store: IdentityStore, identity_ref: UUID | str, recipient_public_key_pem: bytes, *, expiry: datetime, allowed_owner_ids: list[str]) -> bytes:
-    payload = {"format": "MAXIBOT_TELEGRAM_IDENTITY_BUNDLE_V1", "identity_ref": str(identity_ref), "allowed_owner_identifiers": allowed_owner_ids, "expires_at": expiry.astimezone(timezone.utc).isoformat(), "session": store.get(identity_ref)["session"]}
+    created_at = datetime.now(timezone.utc)
     recipient = serialization.load_pem_public_key(recipient_public_key_pem)
+    recipient_key_id = hashlib.sha256(recipient.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+    payload = {"format_version": 1, "identity_ref": str(identity_ref), "allowed_owner_identifiers": allowed_owner_ids, "created_at": created_at.isoformat(), "expires_at": expiry.astimezone(timezone.utc).isoformat(), "recipient_key_id": recipient_key_id, "session": store.get(identity_ref)["session"]}
     plaintext = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    return recipient.encrypt(plaintext, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+    data_key = Fernet.generate_key()
+    sealed = Fernet(data_key).encrypt(plaintext)
+    wrapped_key = recipient.encrypt(data_key, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+    return json.dumps({"format": "MAXIBOT_TELEGRAM_IDENTITY_BUNDLE_V1", "format_version": 1, "recipient_key_id": recipient_key_id, "wrapped_key": base64.b64encode(wrapped_key).decode(), "sealed_payload": base64.b64encode(sealed).decode()}, separators=(",", ":")).encode()
 
 
-def import_sealed_bundle(store: IdentityStore, bundle: bytes, recipient_private_key_pem: bytes, *, now: datetime | None = None) -> UUID:
+def import_sealed_bundle(store: IdentityStore, bundle: bytes, recipient_private_key_pem: bytes, *, now: datetime | None = None, replace: bool = False) -> UUID:
     private = serialization.load_pem_private_key(recipient_private_key_pem, password=None)
     try:
-        raw = private.decrypt(bundle, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
-        payload = json.loads(raw)
+        envelope = json.loads(bundle)
+        wrapped_key = base64.b64decode(envelope["wrapped_key"], validate=True)
+        sealed = base64.b64decode(envelope["sealed_payload"], validate=True)
+        data_key = private.decrypt(wrapped_key, padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
+        payload = json.loads(Fernet(data_key).decrypt(sealed))
+        if envelope.get("format") != "MAXIBOT_TELEGRAM_IDENTITY_BUNDLE_V1" or envelope.get("format_version") != 1 or payload.get("format_version") != 1:
+            raise IdentityStoreError("IDENTITY_BUNDLE_VERSION_UNSUPPORTED")
+        public = private.public_key()
+        key_id = hashlib.sha256(public.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+        if envelope.get("recipient_key_id") != key_id or payload.get("recipient_key_id") != key_id:
+            raise IdentityStoreError("IDENTITY_BUNDLE_RECIPIENT_MISMATCH")
+        for field in ("identity_ref", "allowed_owner_identifiers", "created_at", "expires_at", "session"):
+            if field not in payload:
+                raise IdentityStoreError("IDENTITY_BUNDLE_MALFORMED")
         ref = UUID(payload["identity_ref"])
+        if not isinstance(payload["allowed_owner_identifiers"], list) or not payload["allowed_owner_identifiers"]:
+            raise IdentityStoreError("IDENTITY_BUNDLE_MALFORMED")
+        created = datetime.fromisoformat(payload["created_at"])
         expires = datetime.fromisoformat(payload["expires_at"])
+        if created.tzinfo is None or expires.tzinfo is None:
+            raise IdentityStoreError("IDENTITY_BUNDLE_MALFORMED")
+        if expires <= created:
+            raise IdentityStoreError("IDENTITY_BUNDLE_MALFORMED")
         if expires <= (now or datetime.now(timezone.utc)):
             raise IdentityStoreError("IDENTITY_BUNDLE_EXPIRED")
-        store.put(ref, payload["session"], allowed_owner_identifiers=payload["allowed_owner_identifiers"])
+        store.put(ref, payload["session"], allowed_owner_identifiers=payload["allowed_owner_identifiers"], replace=replace)
         return ref
     except IdentityStoreError:
         raise
     except Exception as exc:
         raise IdentityStoreError("IDENTITY_BUNDLE_INVALID") from exc
-
