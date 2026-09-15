@@ -1,0 +1,93 @@
+name: Telegram executor immutable image
+
+on:
+  push:
+    tags:
+      - "executor-candidate-*"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    if: startsWith(github.ref, 'refs/tags/executor-candidate-')
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/maxibot-telegram-executor
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Checkout exact tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push immutable executor image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/telegram-executor/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.SOURCE_SHA }}
+          build-args: |
+            RELEASE_SHA=${{ env.SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.source-sha=${{ env.SOURCE_SHA }}
+            org.maxibot.release.sha=${{ env.SOURCE_SHA }}
+
+      - name: Verify remote immutable artifact
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          docker pull "$IMAGE:$SOURCE_SHA"
+          docker buildx imagetools inspect "$IMAGE:$SOURCE_SHA" | tee /tmp/executor-manifest.txt
+          grep -q 'linux/amd64' /tmp/executor-manifest.txt
+          REMOTE_SHA="$(docker image inspect "$IMAGE:$SOURCE_SHA" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          test "$REMOTE_SHA" = "$SOURCE_SHA"
+          {
+            echo "## Telegram executor artifact"
+            echo "EXECUTOR_IMAGE_REMOTE_REF=$IMAGE:$SOURCE_SHA"
+            echo "EXECUTOR_IMAGE_DIGEST=$DIGEST"
+            echo "EXECUTOR_IMAGE_PLATFORM=linux/amd64"
+            echo "EXECUTOR_IMAGE_SOURCE_SHA=$SOURCE_SHA"
+            echo "EXECUTOR_IMAGE_REMOTE_VERIFIED=YES"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write non-secret release manifest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          out = {
+              "source_sha": os.environ["SOURCE_SHA"],
+              "image_ref": f"{os.environ['IMAGE']}:{os.environ['SOURCE_SHA']}",
+              "image_digest": os.environ["DIGEST"],
+              "platform": "linux/amd64",
+              "protocol_version": 1,
+              "build_timestamp": datetime.now(timezone.utc).isoformat(),
+          }
+          with open("telegram-executor-release-manifest.json", "w", encoding="utf-8") as handle:
+              json.dump(out, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-executor-${{ env.SOURCE_SHA }}
+          path: telegram-executor-release-manifest.json
+          if-no-files-found: error
