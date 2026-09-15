@@ -1,6 +1,6 @@
 import pytest
 
-from app.ads.regional import AdsRegionalError, assert_execution_supported, assert_storage_supported, resolve_ads_account_route
+from app.ads.regional import AdsRegionalError, assert_execution_supported, assert_storage_supported, assert_remote_execution_configured, resolve_ads_account_route
 from app.db.models import AdsAccount
 
 
@@ -15,6 +15,12 @@ def test_nonlocal_execution_fails_closed_without_ru_fallback():
     account = AdsAccount(id="a", admin_id="admin", provider="TELEGRAM_ADS", storage_region="RU", execution_region="EU")
     with pytest.raises(AdsRegionalError, match="EXECUTION_REGION_UNAVAILABLE"):
         assert_execution_supported(account)
+
+
+def test_eu_remote_requires_explicit_enabled_mtls_config():
+    account = AdsAccount(id="a", admin_id="admin", provider="TELEGRAM_ADS", storage_region="RU", execution_region="EU")
+    with pytest.raises(AdsRegionalError, match="REMOTE_EXECUTOR_NOT_READY"):
+        assert_remote_execution_configured(account, enabled=False, endpoint=None, ca_file=None, client_cert_file=None, client_key_file=None)
 
 
 def test_nonlocal_storage_fails_closed():

@@ -17,6 +17,16 @@ class AdsRegionalError(RuntimeError):
     """Typed fail-closed regional execution/storage error."""
 
 
+def assert_remote_execution_configured(account: Any, *, enabled: bool, endpoint: str | None, ca_file: str | None, client_cert_file: str | None, client_key_file: str | None) -> "AdsAccountRoute":
+    """Validate EU routing; an EU account never silently falls back to RU."""
+    route = resolve_ads_account_route(account)
+    if route.execution_region != "EU":
+        raise AdsRegionalError("EXECUTION_REGION_UNAVAILABLE")
+    if not enabled or not all((endpoint, ca_file, client_cert_file, client_key_file)):
+        raise AdsRegionalError("REMOTE_EXECUTOR_NOT_READY")
+    return route
+
+
 @dataclass(frozen=True)
 class AdsAccountRoute:
     account_id: str

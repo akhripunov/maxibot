@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, collect_yandex_v2, enrich_periodic_ad_media
 from app.ads.telegram_collection import persist_telegram_report
-from app.ads.regional import assert_execution_supported
+from app.ads.regional import assert_execution_supported, assert_remote_execution_configured
 from app.ads.storage_governance import run_retention
 from app.core.config import settings
 from app.db.models import (
@@ -188,7 +188,10 @@ async def sync_account_inventory(db: AsyncSession) -> int:
     discovered = 0
     for account in accounts:
         try:
-            assert_execution_supported(account)
+            if account.provider == "TELEGRAM_ADS" and str(getattr(account, "execution_region", "RU")).upper() == "EU":
+                assert_remote_execution_configured(account, enabled=settings.telegram_remote_execution_enabled, endpoint=settings.telegram_eu_executor_url, ca_file=settings.telegram_eu_ca_file, client_cert_file=settings.telegram_eu_client_cert_file, client_key_file=settings.telegram_eu_client_key_file)
+            else:
+                assert_execution_supported(account)
         except Exception as exc:
             logger.warning("ADS_ACCOUNT_EXECUTION_REGION_UNAVAILABLE account_id=%s error=%s", account.id, type(exc).__name__)
             continue
@@ -203,20 +206,27 @@ async def sync_account_inventory(db: AsyncSession) -> int:
                 continue
             provider = YandexAdsProvider(decrypt_token(encrypted), client_login=settings.yandex_direct_client_login or account.external_account_id)
         elif account.provider == "TELEGRAM_ADS":
-            try:
-                cookies = None
-                if account.telegram_service_identity_id:
-                    cookies = await load_service_identity(db, identity_id=account.telegram_service_identity_id)
-                if cookies is None:
-                    metadata = json.loads(account.provider_metadata_json or "{}")
-                    ciphertext = metadata.get("session_ciphertext")
-                    cookies = decrypt_session_cookies(str(ciphertext)) if ciphertext else None
-                if not cookies:
+            if str(getattr(account, "execution_region", "RU")).upper() == "EU":
+                if not account.telegram_service_identity_id:
+                    logger.warning("TELEGRAM_ADS_IDENTITY_NOT_PROVISIONED account_id=%s", account.id)
                     continue
-            except Exception:
-                logger.warning("TELEGRAM_ADS_SESSION_UNAVAILABLE account_id=%s", account.id)
-                continue
-            provider = TelegramAdsProvider(TelegramAdsOwnerContext(str(account.external_account_id or ""), account.display_name, cookies))
+                from app.ads.providers.telegram_remote import RemoteTelegramAdsProvider
+                provider = RemoteTelegramAdsProvider(account, identity_ref=account.telegram_service_identity_id, owner_identifier=str(account.external_account_id or ""), endpoint=settings.telegram_eu_executor_url or "", ca_file=settings.telegram_eu_ca_file or "", client_cert_file=settings.telegram_eu_client_cert_file or "", client_key_file=settings.telegram_eu_client_key_file or "", expected_sha=settings.maxibot_commit_sha)
+            else:
+                try:
+                    cookies = None
+                    if account.telegram_service_identity_id:
+                        cookies = await load_service_identity(db, identity_id=account.telegram_service_identity_id)
+                    if cookies is None:
+                        metadata = json.loads(account.provider_metadata_json or "{}")
+                        ciphertext = metadata.get("session_ciphertext")
+                        cookies = decrypt_session_cookies(str(ciphertext)) if ciphertext else None
+                    if not cookies:
+                        continue
+                except Exception:
+                    logger.warning("TELEGRAM_ADS_SESSION_UNAVAILABLE account_id=%s", account.id)
+                    continue
+                provider = TelegramAdsProvider(TelegramAdsOwnerContext(str(account.external_account_id or ""), account.display_name, cookies))
         else:
             continue
         try:
@@ -270,7 +280,10 @@ async def _collection_context(db: AsyncSession, run: AdsCollectionRun):
     campaign_account = await db.get(AdsAccount, campaign.account_id)
     if not campaign_account:
         raise ValueError("COLLECTION_ACCOUNT_NOT_FOUND")
-    assert_execution_supported(campaign_account)
+    if campaign_account.provider == "TELEGRAM_ADS" and str(getattr(campaign_account, "execution_region", "RU")).upper() == "EU":
+        assert_remote_execution_configured(campaign_account, enabled=settings.telegram_remote_execution_enabled, endpoint=settings.telegram_eu_executor_url, ca_file=settings.telegram_eu_ca_file, client_cert_file=settings.telegram_eu_client_cert_file, client_key_file=settings.telegram_eu_client_key_file)
+    else:
+        assert_execution_supported(campaign_account)
     # Any durable link supplies the owning object/token for read-only
     # collection. ACTIVE/INACTIVE is reserved for analysis/autopilot scope.
     link = await db.scalar(select(AdsPromotionCampaignLink).where(AdsPromotionCampaignLink.campaign_id == campaign.id))
@@ -296,21 +309,30 @@ async def collect_campaign_slot(db: AsyncSession, run: AdsCollectionRun) -> None
     campaign_row = await db.get(AdsCampaign, run.campaign_id)
     account = await db.get(AdsAccount, run.ads_account_id or (campaign_row.account_id if campaign_row else None))
     if account:
-        assert_execution_supported(account)
+        if account.provider == "TELEGRAM_ADS" and str(getattr(account, "execution_region", "RU")).upper() == "EU":
+            assert_remote_execution_configured(account, enabled=settings.telegram_remote_execution_enabled, endpoint=settings.telegram_eu_executor_url, ca_file=settings.telegram_eu_ca_file, client_cert_file=settings.telegram_eu_client_cert_file, client_key_file=settings.telegram_eu_client_key_file)
+        else:
+            assert_execution_supported(account)
     if account and campaign_row and account.provider == "TELEGRAM_ADS":
-        from app.ads.providers.telegram import TelegramAdsOwnerContext, TelegramAdsProvider, decrypt_session_cookies
-        from app.ads.telegram_identity import load_service_identity
-        cookies = None
-        if account.telegram_service_identity_id:
-            cookies = await load_service_identity(db, identity_id=account.telegram_service_identity_id)
-        if cookies is None:
-            metadata = json.loads(account.provider_metadata_json or "{}")
-            ciphertext = metadata.get("session_ciphertext")
-            if ciphertext:
-                cookies = decrypt_session_cookies(str(ciphertext))
-        if not cookies:
-            raise ValueError("TELEGRAM_ADS_SESSION_UNAVAILABLE")
-        provider = TelegramAdsProvider(TelegramAdsOwnerContext(str(account.external_account_id or ""), account.display_name, cookies))
+        if str(getattr(account, "execution_region", "RU")).upper() == "EU":
+            if not account.telegram_service_identity_id:
+                raise ValueError("IDENTITY_NOT_PROVISIONED")
+            from app.ads.providers.telegram_remote import RemoteTelegramAdsProvider
+            provider = RemoteTelegramAdsProvider(account, identity_ref=account.telegram_service_identity_id, owner_identifier=str(account.external_account_id or ""), endpoint=settings.telegram_eu_executor_url or "", ca_file=settings.telegram_eu_ca_file or "", client_cert_file=settings.telegram_eu_client_cert_file or "", client_key_file=settings.telegram_eu_client_key_file or "", expected_sha=settings.maxibot_commit_sha)
+        else:
+            from app.ads.providers.telegram import TelegramAdsOwnerContext, TelegramAdsProvider, decrypt_session_cookies
+            from app.ads.telegram_identity import load_service_identity
+            cookies = None
+            if account.telegram_service_identity_id:
+                cookies = await load_service_identity(db, identity_id=account.telegram_service_identity_id)
+            if cookies is None:
+                metadata = json.loads(account.provider_metadata_json or "{}")
+                ciphertext = metadata.get("session_ciphertext")
+                if ciphertext:
+                    cookies = decrypt_session_cookies(str(ciphertext))
+            if not cookies:
+                raise ValueError("TELEGRAM_ADS_SESSION_UNAVAILABLE")
+            provider = TelegramAdsProvider(TelegramAdsOwnerContext(str(account.external_account_id or ""), account.display_name, cookies))
         today = datetime.now(timezone.utc).astimezone(MOSCOW).date()
         date_from = today - timedelta(days=6)
         try:

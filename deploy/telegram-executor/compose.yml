@@ -1,0 +1,31 @@
+services:
+  telegram-executor:
+    image: ${TELEGRAM_EXECUTOR_IMAGE:?set immutable SHA image}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      EXECUTOR_REGION: EU
+      MAXIBOT_COMMIT_SHA: ${MAXIBOT_COMMIT_SHA:?set exact release SHA}
+      TELEGRAM_EXECUTOR_IDENTITY_DIR: /var/lib/maxibot/identities
+      TELEGRAM_EXECUTOR_MASTER_KEY_FILE: /run/secrets/telegram_executor_master_key
+      EXECUTOR_SERVER_CERT_FILE: /run/certs/server.crt
+      EXECUTOR_SERVER_KEY_FILE: /run/certs/server.key
+      EXECUTOR_CLIENT_CA_FILE: /run/certs/client-ca.crt
+    volumes:
+      - identity_store:/var/lib/maxibot/identities
+      - ./certs:/run/certs:ro
+    secrets: [telegram_executor_master_key]
+    command: ["uvicorn", "app.telegram_executor.main:app", "--host", "0.0.0.0", "--port", "8080", "--ssl-certfile", "/run/certs/server.crt", "--ssl-keyfile", "/run/certs/server.key", "--ssl-ca-certs", "/run/certs/client-ca.crt", "--ssl-cert-reqs", "2"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+volumes:
+  identity_store:
+    name: maxibot_telegram_identity_store
+secrets:
+  telegram_executor_master_key:
+    file: ./secrets/master_key

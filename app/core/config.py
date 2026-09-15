@@ -138,6 +138,13 @@ class Settings(BaseSettings):
     ads_ai_max_demographic_facts: int = Field(default=16, validation_alias="ADS_AI_MAX_DEMOGRAPHIC_FACTS")
     ads_ai_max_criteria_facts: int = Field(default=12, validation_alias="ADS_AI_MAX_CRITERIA_FACTS")
     ads_sync_interval_seconds: int = Field(default=900, validation_alias="ADS_SYNC_INTERVAL_SECONDS")
+    # B0 regional Telegram execution is deliberately disabled by default.
+    telegram_remote_execution_enabled: bool = Field(default=False, validation_alias="TELEGRAM_REMOTE_EXECUTION_ENABLED")
+    telegram_execution_protocol_version: int = Field(default=1, validation_alias="TELEGRAM_EXECUTION_PROTOCOL_VERSION")
+    telegram_eu_executor_url: str | None = Field(default=None, validation_alias="TELEGRAM_EU_EXECUTOR_URL")
+    telegram_eu_ca_file: str | None = Field(default=None, validation_alias="TELEGRAM_EU_CA_FILE")
+    telegram_eu_client_cert_file: str | None = Field(default=None, validation_alias="TELEGRAM_EU_CLIENT_CERT_FILE")
+    telegram_eu_client_key_file: str | None = Field(default=None, validation_alias="TELEGRAM_EU_CLIENT_KEY_FILE")
 
     @property
     def ads_hourly_retention_days(self) -> int:
