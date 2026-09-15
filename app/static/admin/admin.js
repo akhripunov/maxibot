@@ -205,6 +205,19 @@
     }
   }
 
+  async function loadTelegramAds() {
+    const node = document.querySelector('#telegram-ads-list');
+    if (!node) return;
+    try {
+      const data = await getJson('/telegram-ads');
+      const items = data.items || [];
+      if (!items.length) { node.textContent = 'Организации Telegram Ads пока не подключены.'; return; }
+      node.innerHTML = items.map(item => `<div class="admin-list-row"><strong>${qaValue(item.organization || 'Организация не указана')}</strong><small>Provider: Telegram Ads · ID: ${qaValue(item.external_account_id)} · Session: ${qaValue(item.session_status)} · Ads: ${qaValue(item.ads_count)} · Health: ${qaValue(item.data_health)} · Writes: DISABLED</small></div>`).join('');
+    } catch (error) {
+      node.textContent = 'Telegram Ads: данные недоступны.';
+    }
+  }
+
   async function loadOverview(epoch = null) {
     try {
       const [overview, week, today, usage, health] = await Promise.all([
@@ -293,6 +306,7 @@
     document.querySelectorAll('.side-link').forEach(item => item.classList.toggle('active', item === link));
     document.querySelectorAll('.page-section').forEach(section => section.classList.toggle('active-section', section.id === link.dataset.section));
     if (link.dataset.section === 'journey' && lastAuthState.authenticated) loadJourney();
+    if (link.dataset.section === 'telegram-ads' && lastAuthState.authenticated) loadTelegramAds();
   }));
   ['journey-type', 'journey-problem', 'journey-days', 'journey-source'].forEach(id => document.querySelector(`#${id}`)?.addEventListener('change', loadJourney));
   document.querySelector('#journey-object')?.addEventListener('change', () => globalThis.__journeyData && renderJourney(globalThis.__journeyData));

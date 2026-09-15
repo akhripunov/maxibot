@@ -88,7 +88,10 @@ def _rehearse_migration(sha: str, target: str) -> None:
         engine = create_engine(f"sqlite:///{Path(directory) / 'rehearsal.sqlite'}")
         db = engine.connect()
         for table in ADS_TABLES:
-            db.execute(text(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY)'))
+            if table == "ads_accounts":
+                db.execute(text('CREATE TABLE "ads_accounts" (id INTEGER PRIMARY KEY, admin_id VARCHAR(36), provider VARCHAR(32) NOT NULL, external_account_id VARCHAR(128), CONSTRAINT uq_ads_account_provider UNIQUE (admin_id, provider))'))
+            else:
+                db.execute(text(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY)'))
         for table in (
             "ads_promotion_campaign_links", "ads_collection_runs", "ads_analysis_snapshots",
             "ads_ai_runs", "ads_recommendations", "ads_memories", "ads_data_health",
