@@ -371,6 +371,8 @@ async def autopilot_enable_requirements(db: AsyncSession, *, object_type: str, o
     config = parse_config(selected.autopilot_config_json)
     if config.get("monthly_budget_limit") is None or float(config.get("monthly_budget_limit") or 0) <= 0:
         missing.append("задать бюджет автопилота")
+    if selected.experiment_budget_cap is None or float(selected.experiment_budget_cap) <= 0:
+        missing.append("задать лимит одного эксперимента")
     return missing
 
 
@@ -423,6 +425,24 @@ async def set_budget(db: AsyncSession, *, object_type: str, object_id: str, mont
         config["monthly_budget_limit"] = limit
         config["weekly_budget_limit"] = limit
         link.autopilot_config_json = json.dumps(config, ensure_ascii=False)
+        link.execution_updated_at = now
+    await db.flush()
+    return await promotion_policy(db, object_type=object_type, object_id=object_id)
+
+
+async def set_experiment_budget_cap(db: AsyncSession, *, object_type: str, object_id: str,
+                                    experiment_budget_cap: Any, campaign_id: str | None = None) -> dict[str, Any]:
+    """Persist the independent per-experiment cap for one exact linked campaign."""
+    cap = _positive(experiment_budget_cap, field="EXPERIMENT_BUDGET_CAP")
+    links = await object_links(db, object_type=object_type, object_id=object_id)
+    if not links:
+        raise ValueError("ACTIVE_PROMOTION_CAMPAIGN_NOT_FOUND")
+    selected = next((link for link in links if link.campaign_id == campaign_id), None) if campaign_id else None
+    if campaign_id and not selected:
+        raise ValueError("AUTOPILOT_CAMPAIGN_NOT_LINKED")
+    now = datetime.now(timezone.utc)
+    for link in ([selected] if selected is not None else links):
+        link.experiment_budget_cap = cap
         link.execution_updated_at = now
     await db.flush()
     return await promotion_policy(db, object_type=object_type, object_id=object_id)
