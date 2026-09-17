@@ -1757,7 +1757,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if action_name == "ads_budget":
             policy = await promotion_policy(db, object_type=object_type, object_id=object_id)
             campaign_budget = policy.get("campaign_weekly_budget")
-            experiment_cap = policy.get("max_test_spend")
+            experiment_cap = policy.get("experiment_budget_cap")
             campaign_text = f"{campaign_budget:.0f} ₽ / неделю" if campaign_budget is not None else "не синхронизирован"
             cap_text = f"{experiment_cap:.0f} ₽" if experiment_cap is not None else "не задан"
             return ("💰 Бюджет кампании и лимит эксперимента\n\n"
@@ -1787,6 +1787,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             campaign = campaigns.get(link.campaign_id)
             title = campaign.name if campaign else link.campaign_id
             config = parse_config(link.autopilot_config_json)
+            experiment_cap = float(link.experiment_budget_cap) if link.experiment_budget_cap is not None else None
             budget = campaign.weekly_budget if campaign and campaign.weekly_budget is not None else campaign.daily_budget if campaign else None
             target = link.target_cpa
             # The provider read below is always fresh and read-only.
@@ -1828,7 +1829,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 "• управляет только этой кампанией\n• остальные кампании остаются только для анализа\n"
                 "• одновременно не более одного эксперимента\n• каждое изменение проходит проверки безопасности\n"
                 "• стратегия и таргетинг в текущей версии не изменяются\n"
-                + (f"\nМаксимум на один тест: {float(config['max_test_spend']):g} ₽\n" if config.get("max_test_spend") is not None else "")
+                + (f"\nМаксимум на один тест: {experiment_cap:g} ₽\n" if experiment_cap is not None else "\nМаксимум на один тест: не задан — автономное выполнение заблокировано\n")
                 + (f"Максимальное изменение бюджета: {float(config['max_budget_change_percent']):g}%\n" if config.get("max_budget_change_percent") is not None else "")
                 + (f"\n{blocked_reason}" if blocked_reason else "\nПосле включения MaxiBot сам начнёт искать первый безопасный эксперимент.")
             )

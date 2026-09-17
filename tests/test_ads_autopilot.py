@@ -39,6 +39,71 @@ def test_autopilot_fails_closed_when_global_writes_are_off():
     assert decision.reason == "AUTOPILOT_GLOBAL_GUARD_DISABLED"
 
 
+def test_experiment_budget_cap_is_independent_from_max_test_spend():
+    """The broad promotion guardrail must not substitute for a per-test cap."""
+    from app.core.config import settings
+    original_autopilot = settings.ads_autopilot_enabled
+    original_writes = settings.ads_write_actions_enabled
+    settings.ads_autopilot_enabled = True
+    settings.ads_write_actions_enabled = True
+    try:
+        allowed = validate_action(
+            execution_mode=AUTONOMOUS,
+            action_type="BOUNDED_BUDGET_REALLOCATION",
+            data_trust="GOOD",
+            active_experiments=0,
+            config={"max_test_spend": 1000, "allowed_actions": ["BOUNDED_BUDGET_REALLOCATION"]},
+            experiment_budget_cap=100,
+            proposed_spend=100,
+        )
+        assert allowed.allowed
+        denied = validate_action(
+            execution_mode=AUTONOMOUS,
+            action_type="BOUNDED_BUDGET_REALLOCATION",
+            data_trust="GOOD",
+            active_experiments=0,
+            config={"max_test_spend": 1000, "allowed_actions": ["BOUNDED_BUDGET_REALLOCATION"]},
+            experiment_budget_cap=100,
+            experiment_spend=1,
+            proposed_spend=100,
+        )
+        assert denied.reason == "EXPERIMENT_BUDGET_CAP"
+    finally:
+        settings.ads_autopilot_enabled = original_autopilot
+        settings.ads_write_actions_enabled = original_writes
+
+
+def test_missing_experiment_budget_cap_fails_closed_even_below_max_test_spend():
+    from app.core.config import settings
+    original_autopilot = settings.ads_autopilot_enabled
+    original_writes = settings.ads_write_actions_enabled
+    settings.ads_autopilot_enabled = True
+    settings.ads_write_actions_enabled = True
+    try:
+        decision = validate_action(
+            execution_mode=AUTONOMOUS,
+            action_type="BOUNDED_BUDGET_REALLOCATION",
+            data_trust="GOOD",
+            active_experiments=0,
+            config={"max_test_spend": 1000, "allowed_actions": ["BOUNDED_BUDGET_REALLOCATION"]},
+            proposed_spend=100,
+        )
+        assert not decision.allowed
+        assert decision.reason == "EXPERIMENT_BUDGET_CAP_MISSING"
+    finally:
+        settings.ads_autopilot_enabled = original_autopilot
+        settings.ads_write_actions_enabled = original_writes
+
+
+def test_experiment_budget_cap_migration_is_additive_and_has_no_ads_table():
+    root = Path(__file__).resolve().parents[1]
+    migration = (root / "alembic/versions/0097_experiment_budget_cap_v1.py").read_text()
+    assert 'down_revision = "0096_experience_transfer_prior_engine_v1"' in migration
+    assert 'op.add_column("ads_promotion_campaign_links"' in migration
+    assert '"experiment_budget_cap"' in migration
+    assert "op.create_table" not in migration
+
+
 @pytest.mark.parametrize("action", ["CREATE_CAMPAIGN", "CHANGE_BID", "PAUSE_CAMPAIGN"])
 def test_future_provider_actions_are_not_v1_allowlisted(action, monkeypatch):
     from app.core.config import settings

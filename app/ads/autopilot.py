@@ -299,9 +299,6 @@ def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
         return GuardrailDecision(False, "WEEKLY_BUDGET_LIMIT", action_type, mode)
     if proposed_spend > float(config.get("max_test_spend") or DEFAULT_MAX_TEST_SPEND):
         return GuardrailDecision(False, "MAX_TEST_SPEND", action_type, mode)
-    cap = experiment_budget_cap if experiment_budget_cap is not None else config.get("max_test_spend")
-    if cap is not None and experiment_spend + max(0.0, proposed_spend) > float(cap):
-        return GuardrailDecision(False, "EXPERIMENT_BUDGET_CAP", action_type, mode)
     if target_cpa is not None and actual_cpa is not None:
         tolerance = float(config.get("target_cpa_tolerance") or DEFAULT_TARGET_CPA_TOLERANCE)
         stop_multiple = float(config.get("stop_loss_multiple") or DEFAULT_STOP_LOSS_MULTIPLE)
@@ -309,6 +306,12 @@ def validate_action(*, execution_mode: str, action_type: str, data_trust: str,
             return GuardrailDecision(False, "TARGET_CPA_STOP_LOSS", action_type, mode)
         if effect_size is not None and abs(float(effect_size)) < float(config.get("min_effect") or DEFAULT_MIN_EFFECT):
             return GuardrailDecision(False, "MINIMUM_EFFECT_NOT_MET", action_type, mode)
+    # Per-experiment cap is an independent persisted guardrail.  Never fall
+    # back to the broader max_test_spend for autonomous provider execution.
+    if experiment_budget_cap is None:
+        return GuardrailDecision(False, "EXPERIMENT_BUDGET_CAP_MISSING", action_type, mode)
+    if experiment_spend + max(0.0, proposed_spend) > float(experiment_budget_cap):
+        return GuardrailDecision(False, "EXPERIMENT_BUDGET_CAP", action_type, mode)
     return GuardrailDecision(True, "ALLOWLISTED_GUARDS_PASSED", action_type, mode)
 
 
@@ -345,6 +348,7 @@ async def promotion_policy(db: AsyncSession, *, object_type: str, object_id: str
     capability = "READY" if settings.ads_autopilot_enabled and settings.ads_write_actions_enabled else "DISABLED"
     return {"execution_mode": mode, **config, "active_links": len(links),
             "authorized_campaign_ids": authorized,
+            "experiment_budget_cap": float(source.experiment_budget_cap) if source.experiment_budget_cap is not None else None,
             "campaign_budget_type": campaign.budget_type if campaign else None,
             "campaign_weekly_budget": float(campaign.weekly_budget) if campaign and campaign.weekly_budget is not None else None,
             "campaign_daily_budget": float(campaign.daily_budget) if campaign and campaign.daily_budget is not None else None,
@@ -533,7 +537,7 @@ async def execute_autonomous_action(
                            target_cpa=objective_target, actual_cpa=actual_cpa,
                            attribution_quality=attribution_quality,
                            experiment_spend=float(target.get("experiment_spend") or 0) if isinstance(target, dict) else 0,
-                           experiment_budget_cap=target.get("experiment_budget_cap") if isinstance(target, dict) else None,
+                           experiment_budget_cap=(target.get("experiment_budget_cap") if isinstance(target, dict) and target.get("experiment_budget_cap") is not None else policy.get("experiment_budget_cap")),
                            evidence_sufficient=evidence_sufficient, provider_ready=provider_ready,
                            rollback_available=rollback_available,
                            verified_provider_capabilities=verified_provider_capabilities,

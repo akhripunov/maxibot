@@ -859,6 +859,9 @@ class AdsPromotionCampaignLink(Base):
     # deployment can never turn on provider writes implicitly.
     execution_mode: Mapped[str] = mapped_column(String(16), default="ADVISORY", server_default="ADVISORY", nullable=False, index=True)
     autopilot_config_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}", nullable=False)
+    # Independent per-experiment spend cap.  NULL is intentionally unsafe for
+    # autonomous execution and must be configured explicitly.
+    experiment_budget_cap: Mapped[Optional[float]] = mapped_column(Numeric(20, 6))
     execution_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
