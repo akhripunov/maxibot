@@ -18,7 +18,7 @@ RUN update-ca-certificates
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 COPY pyproject.toml .
-RUN pip install --no-cache-dir .[test]
+RUN pip install --no-cache-dir --timeout 120 --retries 10 .[test]
 COPY . .
 RUN { cat /etc/ssl/certs/ca-certificates.crt; printf '\\n'; \
     cat /usr/local/share/ca-certificates/rootca_ssl_rsa2022.crt; printf '\\n'; \
