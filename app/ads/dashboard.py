@@ -64,6 +64,19 @@ def business_cpa(*, spend: float | None, confirmed_outcomes: int | None) -> floa
     return float(spend) / confirmed_outcomes
 
 
+def _sum_active_campaign_spend(
+    campaign_spend: dict[str, tuple[float | None, Any] | None],
+    active_link_ids: set[str],
+) -> float | None:
+    """Sum known spend for linked campaigns, tolerating absent metric rows."""
+    values = [
+        record[0]
+        for campaign_id, record in campaign_spend.items()
+        if campaign_id in active_link_ids and record is not None and record[0] is not None
+    ]
+    return sum(values) if values else None
+
+
 def stage_for_state(
     *, recommendation: Any, outcome: Any, health: str, has_data: bool,
     learning_proven: bool, analysis_running: bool = False,
@@ -294,9 +307,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
         campaign_id: canonical_spend.get(campaign_id, snapshot_spend.get(campaign_id))
         for campaign_id in campaign_ids
     }
-    spend_values = [value for campaign_id, (value, _) in campaign_spend.items()
-                    if campaign_id in active_link_ids and value is not None]
-    spend = sum(spend_values) if spend_values else None
+    spend = _sum_active_campaign_spend(campaign_spend, active_link_ids)
     latest_payload = (metric_snapshots[0][1] if metric_snapshots else
                       (parsed_snapshots[0][1] if parsed_snapshots else {}))
     metrics = latest_payload.get("MAXIBOT_METRICS") or {}

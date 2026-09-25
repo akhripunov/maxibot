@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from app.ads.dashboard import business_cpa, stage_for_state
+from app.ads.dashboard import _sum_active_campaign_spend, business_cpa, stage_for_state
 from app.bot.menu import (
     format_ads_campaigns_screen,
     format_ads_history_screen,
@@ -44,6 +44,16 @@ def test_business_cpa_fails_closed_for_unknown_or_zero_outcomes():
     assert business_cpa(spend=148, confirmed_outcomes=43) == 148 / 43
     assert business_cpa(spend=148, confirmed_outcomes=0) is None
     assert business_cpa(spend=None, confirmed_outcomes=43) is None
+
+
+def test_dashboard_spend_ignores_active_campaigns_without_metric_rows():
+    assert _sum_active_campaign_spend({"campaign-1": None}, {"campaign-1"}) is None
+    assert _sum_active_campaign_spend({
+        "campaign-1": None,
+        "campaign-2": (85.71, None),
+        "campaign-3": (None, None),
+        "campaign-4": (500, None),
+    }, {"campaign-1", "campaign-2", "campaign-3"}) == 85.71
 
 
 def test_stage_mapping_uses_closed_loop_state():
