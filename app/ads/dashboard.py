@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCreative, AdsEntity,
     AdsDataHealth, AdsMemory, AdsMemoryEvidence, AdsPromotionCampaignLink,
-    AdsObservation, AdsRecommendation, TrafficMembership, TrafficVisit,
+    AdsDailyAggregate, AdsObservation, AdsRecommendation, TrafficMembership, TrafficVisit,
 )
 from app.ads.autopilot import promotion_policy
 from app.ads.platform import outcome_type_for
@@ -65,7 +65,7 @@ def business_cpa(*, spend: float | None, confirmed_outcomes: int | None) -> floa
 
 
 def _sum_active_campaign_spend(
-    campaign_spend: dict[str, tuple[float | None, Any] | None],
+    campaign_spend: dict[str, tuple[Any, ...] | None],
     active_link_ids: set[str],
 ) -> float | None:
     """Sum known spend for linked campaigns, tolerating absent metric rows."""
@@ -75,6 +75,24 @@ def _sum_active_campaign_spend(
         if campaign_id in active_link_ids and record is not None and record[0] is not None
     ]
     return sum(values) if values else None
+
+
+def _campaign_to_date_spend(rows: list[Any]) -> tuple[float | None, Any, Any]:
+    """Sum campaign-level canonical daily provider costs across its history."""
+    costs = [float(row.cost) for row in rows if row.cost is not None]
+    dates = [row.aggregate_date for row in rows if row.aggregate_date is not None]
+    return (sum(costs) if costs else None,
+            min(dates) if dates else None,
+            max(dates) if dates else None)
+
+
+def _count_campaign_exact_memberships(rows: list[tuple[Any, str | None]], external_id: str) -> int:
+    """Count only EXACT memberships whose attributed visit matches this campaign."""
+    return sum(
+        1 for membership, utm_campaign in rows
+        if membership.attribution_status == "EXACT"
+        and campaign_matches(utm_campaign, external_id)
+    )
 
 
 def stage_for_state(
@@ -275,38 +293,27 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             ).order_by(AdsAnalysisSnapshot.created_at.desc()).limit(1))
         if snapshot:
             metric_snapshots.append((snapshot, _json(snapshot.facts_json, {})))
-    # ADS Data Layer campaign observations are canonical and are collected
-    # independently of analysis snapshots. Prefer the newest 7d campaign
-    # observation, which carries both cost and the exact period cutoff.
-    canonical_spend: dict[str, tuple[float | None, Any]] = {}
-    snapshot_spend: dict[str, tuple[float | None, Any]] = {}
+    # User-facing business totals are campaign-to-date. Use canonical daily
+    # campaign aggregates (one campaign dimension row per day), independently
+    # of snapshots and provider delivery state. Rolling observations remain
+    # available to Decision Engine analysis elsewhere.
+    canonical_spend: dict[str, tuple[float | None, Any, Any]] = {}
     for campaign in campaigns:
-        observation = await db.scalar(select(AdsObservation).join(
-            AdsEntity, AdsEntity.id == AdsObservation.entity_id
-        ).where(
+        campaign_entity_id = await db.scalar(select(AdsEntity.id).where(
             AdsEntity.campaign_id == campaign.id,
-            AdsObservation.dimension_type == "CAMPAIGN",
-            AdsObservation.dimension_value == campaign.external_id,
-            AdsObservation.window == "7d",
-        ).order_by(AdsObservation.created_at.desc()).limit(1))
-        if observation:
-            canonical_spend[campaign.id] = (
-                float(observation.cost) if observation.cost is not None else None,
-                observation.date_to,
-            )
-        snapshot = next((item for item, _ in metric_snapshots
-                         if item.campaign_id == campaign.id), None)
-        if snapshot:
-            payload = next((data for item, data in metric_snapshots if item.id == snapshot.id), {})
-            facts = payload.get("facts") or {} if isinstance(payload, dict) else {}
-            snapshot_spend[campaign.id] = (
-                float(facts["cost_7d"]) if facts.get("cost_7d") is not None else None,
-                snapshot.period_to,
-            )
-    campaign_spend = {
-        campaign_id: canonical_spend.get(campaign_id, snapshot_spend.get(campaign_id))
-        for campaign_id in campaign_ids
-    }
+            AdsEntity.provider == "YANDEX_DIRECT",
+            AdsEntity.entity_type == "CAMPAIGN",
+        ).order_by(AdsEntity.first_seen_at).limit(1))
+        daily_rows = list((await db.scalars(select(AdsDailyAggregate).where(
+            AdsDailyAggregate.provider == "YANDEX_DIRECT",
+            AdsDailyAggregate.campaign_id == campaign.id,
+            AdsDailyAggregate.entity_id == campaign_entity_id,
+            AdsDailyAggregate.dimension_type == "CAMPAIGN",
+            AdsDailyAggregate.dimension_value == campaign.external_id,
+        ).order_by(AdsDailyAggregate.aggregate_date))).all()) if campaign_entity_id else []
+        if lifetime_spend is not None:
+            canonical_spend[campaign.id] = (lifetime_spend, period_from, period_to)
+    campaign_spend = {campaign_id: canonical_spend.get(campaign_id) for campaign_id in campaign_ids}
     spend = _sum_active_campaign_spend(campaign_spend, active_link_ids)
     latest_payload = (metric_snapshots[0][1] if metric_snapshots else
                       (parsed_snapshots[0][1] if parsed_snapshots else {}))
@@ -322,33 +329,24 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     # the UI scoped to the campaign currently being displayed.
     exact_campaign_ids = [link.campaign_id for link in links
                           if link.status == "ACTIVE" and link.campaign_id in campaign_by_id]
-    exact_period_to = None
     if object_type == "CHANNEL" and len(exact_campaign_ids) == 1:
         campaign = campaign_by_id[exact_campaign_ids[0]]
-        spend_record = campaign_spend.get(campaign.id)
-        exact_period_to = spend_record[1] if spend_record else None
-        if exact_period_to:
-            # Membership evidence is canonical and can arrive before the first
-            # analysis snapshot. The outcome window must share cost_7d's cutoff.
-            from app.ads.attribution import window_bounds
-            start, end = window_bounds(end_date=exact_period_to, window="7d")
-            memberships = list((await db.scalars(select(TrafficMembership).join(
-                TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id
-            ).where(
-                TrafficMembership.channel_id == object_id,
-                TrafficMembership.attribution_status == "EXACT",
-                TrafficMembership.joined_at >= start,
-                TrafficMembership.joined_at < end,
-            ))).all())
-            matched_exact = 0
-            for membership in memberships:
-                visit = await db.get(TrafficVisit, membership.attributed_visit_id)
-                if visit and campaign_matches(visit.utm_campaign, campaign.external_id):
-                    matched_exact += 1
-            # Retain the existing qualified-subscriber display as a fallback
-            # when there are no campaign-attributed EXACT outcomes.
-            if matched_exact:
-                confirmed = matched_exact
+        # This is a lifetime summary. Do not bound it by now()-7d or the last
+        # provider observation: a paused campaign retains its historical result.
+        exact_rows = list((await db.execute(select(
+            TrafficMembership, TrafficVisit.utm_campaign
+        ).join(
+            TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id
+        ).where(
+            TrafficMembership.channel_id == object_id,
+            TrafficMembership.attribution_status == "EXACT",
+            TrafficVisit.channel_id == object_id,
+        ))).all())
+        matched_exact = _count_campaign_exact_memberships(exact_rows, campaign.external_id)
+        # Keep the existing subscriber metric as fallback when no exact
+        # campaign-attributed outcome is available.
+        if matched_exact:
+            confirmed = matched_exact
     if object_type == "CHANNEL" and len(exact_campaign_ids) != 1:
         # A single business CPA cannot combine campaign outcomes from different
         # periods. Keep subscriber reporting, but fail closed for CPA.

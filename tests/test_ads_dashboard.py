@@ -1,6 +1,15 @@
 from types import SimpleNamespace
 
-from app.ads.dashboard import _sum_active_campaign_spend, business_cpa, stage_for_state
+from datetime import date, datetime, timezone
+from math import isclose
+
+from app.ads.dashboard import (
+    _campaign_to_date_spend,
+    _count_campaign_exact_memberships,
+    _sum_active_campaign_spend,
+    business_cpa,
+    stage_for_state,
+)
 from app.bot.menu import (
     format_ads_campaigns_screen,
     format_ads_history_screen,
@@ -18,26 +27,63 @@ def test_dashboard_query_imports_sqlalchemy_or_for_object_scoped_recommendations
     assert "from sqlalchemy import or_, select" in source
 
 
-def test_exact_campaign_memberships_do_not_require_an_ads_snapshot():
+def test_exact_campaign_memberships_do_not_require_a_snapshot_or_rolling_window():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "ads" / "dashboard.py").read_text()
     exact_metrics = source.split("exact_campaign_ids =", 1)[1].split("campaign_mapping =", 1)[0]
     assert "len(exact_campaign_ids) == 1" in exact_metrics
     assert "and metric_snapshots" not in exact_metrics
-    assert "exact_period_to = spend_record[1]" in exact_metrics
-    assert 'window_bounds(end_date=exact_period_to, window="7d")' in exact_metrics
+    assert "AdsAnalysisSnapshot" not in exact_metrics
+    assert 'TrafficMembership.attribution_status == "EXACT"' in exact_metrics
+    assert "campaign_matches" not in exact_metrics  # delegated to tested campaign-scoped helper
+    assert "now()-7d" in exact_metrics
 
 
-def test_business_spend_uses_campaign_attribution_observation_without_snapshot():
+def test_business_spend_uses_campaign_lifetime_daily_aggregates():
     from pathlib import Path
 
     source = (Path(__file__).parents[1] / "app" / "ads" / "dashboard.py").read_text()
-    spend_query = source.split("canonical_spend:", 1)[1].split("confirmed = window.get", 1)[0]
-    assert "AdsObservation.window == \"7d\"" in spend_query
-    assert "AdsEntity.campaign_id == campaign.id" in spend_query
-    assert "observation.date_to" in spend_query
-    assert "snapshot_spend" in spend_query  # backward-compatible fallback
+    spend_query = source.split("canonical_spend:", 1)[1].split("latest_payload =", 1)[0]
+    assert "AdsDailyAggregate.aggregate_date" in spend_query
+    assert "AdsDailyAggregate.dimension_type == \"CAMPAIGN\"" in spend_query
+    assert "AdsDailyAggregate.dimension_value == campaign.external_id" in spend_query
+    assert "AdsObservation.window == \"7d\"" not in spend_query
+    assert "snapshot_spend" not in spend_query
+
+
+def test_campaign_to_date_totals_survive_empty_recent_window_after_pause():
+    # These canonical daily rows are older than seven days; no recent rows are
+    # needed for the accumulated UI summary to retain its history.
+    rows = [
+        SimpleNamespace(cost=40.0, aggregate_date=date(2026, 9, 1)),
+        SimpleNamespace(cost=45.71, aggregate_date=date(2026, 9, 10)),
+    ]
+    spend, period_from, period_to = _campaign_to_date_spend(rows)
+    memberships = [
+        (SimpleNamespace(attribution_status="EXACT", joined_at=datetime(2026, 9, 1, tzinfo=timezone.utc)), "714373352"),
+        (SimpleNamespace(attribution_status="EXACT", joined_at=datetime(2026, 9, 10, tzinfo=timezone.utc)), "x.714373352.variant"),
+        (SimpleNamespace(attribution_status="EXACT", joined_at=datetime(2026, 9, 11, tzinfo=timezone.utc)), "714373352"),
+        (SimpleNamespace(attribution_status="EXACT"), "another-campaign"),
+        (SimpleNamespace(attribution_status="MODELED"), "714373352"),
+    ]
+    outcomes = _count_campaign_exact_memberships(memberships, "714373352")
+    assert isclose(spend, 85.71)
+    assert (period_from, period_to) == (date(2026, 9, 1), date(2026, 9, 10))
+    assert outcomes == 3
+    assert isclose(business_cpa(spend=spend, confirmed_outcomes=outcomes), 28.57)
+
+
+def test_lifetime_spend_does_not_hardcode_campaign_values_or_sum_unrelated_rows():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "ads" / "dashboard.py").read_text()
+    assert "714373352" not in source
+    records = {
+        "linked": (12.5, date(2026, 1, 1), date(2026, 1, 2)),
+        "unrelated": (999.0, date(2026, 1, 1), date(2026, 1, 2)),
+    }
+    assert _sum_active_campaign_spend(records, {"linked"}) == 12.5
 
 
 def test_business_cpa_fails_closed_for_unknown_or_zero_outcomes():
