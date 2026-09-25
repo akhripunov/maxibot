@@ -311,6 +311,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             AdsDailyAggregate.dimension_type == "CAMPAIGN",
             AdsDailyAggregate.dimension_value == campaign.external_id,
         ).order_by(AdsDailyAggregate.aggregate_date))).all()) if campaign_entity_id else []
+        lifetime_spend, period_from, period_to = _campaign_to_date_spend(daily_rows)
         if lifetime_spend is not None:
             canonical_spend[campaign.id] = (lifetime_spend, period_from, period_to)
     campaign_spend = {campaign_id: canonical_spend.get(campaign_id) for campaign_id in campaign_ids}

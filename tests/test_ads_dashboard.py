@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from datetime import date, datetime, timezone
 from math import isclose
+import pytest
 
 from app.ads.dashboard import (
     _campaign_to_date_spend,
@@ -90,6 +91,84 @@ def test_business_cpa_fails_closed_for_unknown_or_zero_outcomes():
     assert business_cpa(spend=148, confirmed_outcomes=43) == 148 / 43
     assert business_cpa(spend=148, confirmed_outcomes=0) is None
     assert business_cpa(spend=None, confirmed_outcomes=43) is None
+
+
+@pytest.mark.asyncio
+async def test_dashboard_render_handles_paused_campaign_lifetime_metrics(monkeypatch):
+    """Exercise the same full dashboard projection used by the AI Promotion button."""
+    from datetime import date, timedelta
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.ads.dashboard import build_ads_dashboard
+    from app.db.models import (
+        Admin, AdsAccount, AdsCampaign, AdsDailyAggregate, AdsEntity,
+        AdsPromotionCampaignLink, Channel, LandingPage, TrafficMembership,
+        TrafficVisit, Base,
+    )
+
+    async def empty_metrics(*args, **kwargs):
+        return {"7d": {"qualified_memberships": 0}, "campaign_specific": None}
+
+    monkeypatch.setattr("app.ads.attribution.build_maxibot_metrics", empty_metrics)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as db:
+            admin = Admin(external_id="admin-dashboard-regression")
+            db.add(admin)
+            await db.flush()
+            channel = Channel(admin_id=admin.id, external_id="channel-dashboard-regression",
+                              title="Regression", public_slug="dashboard-regression")
+            db.add(channel)
+            account = AdsAccount(admin_id=admin.id, external_account_id="account-regression")
+            db.add(account)
+            await db.flush()
+            campaign = AdsCampaign(account_id=account.id, external_id="campaign-regression",
+                                   name="Paused campaign", state="SUSPENDED", status="SUSPENDED")
+            db.add(campaign)
+            await db.flush()
+            db.add(AdsPromotionCampaignLink(object_type="CHANNEL", channel_id=channel.id,
+                                            campaign_id=campaign.id, status="ACTIVE"))
+            entity = AdsEntity(provider="YANDEX_DIRECT", entity_type="CAMPAIGN",
+                               provider_entity_id=campaign.external_id, campaign_id=campaign.id)
+            db.add(entity)
+            landing = LandingPage(channel_id=channel.id, public_id="dashboard-regression",
+                                  title="Regression", description="Regression")
+            db.add(landing)
+            await db.flush()
+            db.add_all([
+                AdsDailyAggregate(provider="YANDEX_DIRECT", campaign_id=campaign.id,
+                                  entity_id=entity.id, dimension_type="CAMPAIGN",
+                                  dimension_value=campaign.external_id,
+                                  aggregate_date=date.today() - timedelta(days=20), cost=60),
+                AdsDailyAggregate(provider="YANDEX_DIRECT", campaign_id=campaign.id,
+                                  entity_id=entity.id, dimension_type="CAMPAIGN",
+                                  dimension_value=campaign.external_id,
+                                  aggregate_date=date.today() - timedelta(days=10), cost=30),
+            ])
+            for idx in range(2):
+                visit = TrafficVisit(visit_token=f"dashboard-regression-{idx}",
+                                     landing_page_id=landing.id, channel_id=channel.id,
+                                     utm_campaign="campaign-regression",
+                                     landing_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+                db.add(visit)
+                await db.flush()
+                db.add(TrafficMembership(channel_id=channel.id, max_user_id=f"user-{idx}",
+                                         attributed_visit_id=visit.id,
+                                         attribution_status="EXACT",
+                                         joined_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+            await db.commit()
+
+            dashboard = await build_ads_dashboard(
+                db, object_type="CHANNEL", object_id=channel.id,
+            )
+            assert dashboard["confirmed_business_outcomes"] == 2
+            assert dashboard["actual_business_cpa"] == 45
+    finally:
+        await engine.dispose()
 
 
 def test_dashboard_spend_ignores_active_campaigns_without_metric_rows():
