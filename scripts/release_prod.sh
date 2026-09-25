@@ -265,7 +265,7 @@ PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"
 SSH_CONTROL_DIR=$(mktemp -d /private/tmp/mb.XXXXXX)
 chmod 700 "$SSH_CONTROL_DIR"
 SSH_CONTROL_PATH="$SSH_CONTROL_DIR/%C"
-SSH_OPTIONS=(-i "$PRODUCTION_SSH_KEY" -o BatchMode=yes -o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist=120)
+SSH_OPTIONS=(-i "$PRODUCTION_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 -o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist=120)
 SSH=(ssh "${SSH_OPTIONS[@]}" "$PRODUCTION_TARGET")
 SCP=(scp "${SSH_OPTIONS[@]}")
 WORK=
@@ -278,9 +278,16 @@ trap cleanup_release EXIT
 remote() { "${SSH[@]}" "$@"; }
 say RELEASE_SSH_USER "$PRODUCTION_SSH_USER"
 say CANONICAL_TARGET "$PRODUCTION_TARGET"
-if ! "${SSH[@]}" true; then
-  die "SSH preflight failed for $PRODUCTION_TARGET"
-fi
+SSH_PREFLIGHT_OK=0
+for attempt in 1 2 3; do
+  if "${SSH[@]}" true; then
+    SSH_PREFLIGHT_OK=1
+    say SSH_PREFLIGHT_ATTEMPTS "$attempt"
+    break
+  fi
+  [[ "$attempt" == 3 ]] || sleep 5
+done
+[[ "$SSH_PREFLIGHT_OK" == 1 ]] || die "SSH preflight failed after three authenticated attempts for $PRODUCTION_TARGET"
 say SSH_PREFLIGHT PASS
 # Resolve the live production provenance before creating the remote release
 # context.  A candidate is compatible only when its migration parent is the
