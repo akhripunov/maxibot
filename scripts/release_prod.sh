@@ -144,31 +144,92 @@ if [[ "$MODE" == DRY_RUN ]]; then
   PREFLIGHT_OK=1
   if [[ "$PRODUCTION_HOST" != "$CANONICAL_PRODUCTION_HOST" || ! -r "$PRODUCTION_SSH_KEY" ]]; then
     PREFLIGHT_OK=0
+    if [[ "$PRODUCTION_HOST" != "$CANONICAL_PRODUCTION_HOST" ]]; then
+      say SSH_REMOTE_PREFLIGHT BLOCKED_NONCANONICAL_HOST
+    else
+      say SSH_REMOTE_PREFLIGHT BLOCKED_SSH_KEY_UNREADABLE
+    fi
   else
     PREFLIGHT_TARGET="root@$PRODUCTION_HOST"
     PREFLIGHT_SSH=(ssh -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 "$PREFLIGHT_TARGET")
-    if ! "${PREFLIGHT_SSH[@]}" true >/dev/null 2>&1; then
-      PREFLIGHT_OK=0
-    else
-      PROD_DB_HEAD=$("${PREFLIGHT_SSH[@]}" "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'" 2>/dev/null || true)
-      PROD_READY=$("${PREFLIGHT_SSH[@]}" "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"status\"])'" 2>/dev/null || true)
-      PROD_API_IMAGE=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'" 2>/dev/null || true)
-      PROD_WORKER_IMAGE=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}'" 2>/dev/null || true)
-      ROLLBACK_CONFIG=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'" 2>/dev/null || true)
-      PROD_WRITE_FLAGS=$("${PREFLIGHT_SSH[@]}" "docker inspect maxibot-vps-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}'" 2>/dev/null | grep -E '^(ADS_AUTOPILOT_ENABLED|ADS_WRITE_ACTIONS_ENABLED)=' || true)
+    PROD_DB_HEAD=
+    PROD_READY=
+    PROD_API_IMAGE=
+    PROD_WORKER_IMAGE=
+    ROLLBACK_CONFIG=
+    PROD_WRITE_FLAGS=
+    # Keep the read-only production checks in one authenticated SSH session.
+    # Repeated handshakes made the old preflight intermittently lose the SSH
+    # banner and hid which check had failed behind a generic BLOCKED result.
+    if PREFLIGHT_OUTPUT=$("${PREFLIGHT_SSH[@]}" 'bash -s' 2>&1 <<'REMOTE_PREFLIGHT'
+set -u
+
+check_value() {
+  key=$1
+  shift
+  if value=$("$@" 2>/dev/null); then
+    value=${value//$'\n'/,}
+    printf '%s=%s\n' "$key" "$value"
+  else
+    printf '%s=ERROR\n' "$key"
+  fi
+}
+
+check_value PROD_DB_HEAD docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'
+check_value PROD_READY docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready"))["status"])'
+check_value PROD_API_IMAGE docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'
+check_value PROD_WORKER_IMAGE docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}'
+check_value ROLLBACK_CONFIG docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
+
+if env_output=$(docker inspect maxibot-vps-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null); then
+  write_flags=$(printf '%s\n' "$env_output" | grep -E '^(ADS_AUTOPILOT_ENABLED|ADS_WRITE_ACTIONS_ENABLED)=' | paste -sd, - || true)
+  printf 'PROD_WRITE_FLAGS=%s\n' "$write_flags"
+else
+  printf 'PROD_WRITE_FLAGS=ERROR\n'
+fi
+unset env_output
+REMOTE_PREFLIGHT
+    ); then
+      say SSH_REMOTE_PREFLIGHT PASS
+      PREFLIGHT_ERRORS=
+      while IFS='=' read -r key value; do
+        case "$key" in
+          PROD_DB_HEAD) PROD_DB_HEAD=$value ;;
+          PROD_READY) PROD_READY=$value ;;
+          PROD_API_IMAGE) PROD_API_IMAGE=$value ;;
+          PROD_WORKER_IMAGE) PROD_WORKER_IMAGE=$value ;;
+          ROLLBACK_CONFIG) ROLLBACK_CONFIG=$value ;;
+          PROD_WRITE_FLAGS) PROD_WRITE_FLAGS=$value ;;
+          *) continue ;;
+        esac
+        if [[ "$value" == ERROR ]]; then
+          PREFLIGHT_ERRORS="${PREFLIGHT_ERRORS:+$PREFLIGHT_ERRORS,}$key"
+          continue
+        fi
+        say "$key" "$value"
+      done <<< "$PREFLIGHT_OUTPUT"
+      if [[ -n "$PREFLIGHT_ERRORS" ]]; then
+        say PRODUCTION_PREFLIGHT_FAILED_CHECKS "$PREFLIGHT_ERRORS"
+        PREFLIGHT_OK=0
+      fi
       DB_REHEARSAL_OK=0
       if [[ "$PROD_DB_HEAD" == "$TARGET_MIGRATION" ]]; then
         DB_REHEARSAL_OK=1
         say MIGRATION_REHEARSAL "PASS (already at target)"
-      elif MIGRATION_REHEARSAL=$(python3 "$ROOT_DIR/scripts/migration_rehearsal.py" "$TARGET_SHA" "$PROD_DB_HEAD" "$TARGET_MIGRATION" 2>&1); then
+      elif [[ "$PROD_DB_HEAD" != ERROR && -n "$PROD_DB_HEAD" ]] && MIGRATION_REHEARSAL=$(python3 "$ROOT_DIR/scripts/migration_rehearsal.py" "$TARGET_SHA" "$PROD_DB_HEAD" "$TARGET_MIGRATION" 2>&1); then
         DB_REHEARSAL_OK=1
         say MIGRATION_REHEARSAL "$MIGRATION_REHEARSAL"
       else
-        say MIGRATION_REHEARSAL "BLOCKED $(printf '%s' "$MIGRATION_REHEARSAL" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+        say MIGRATION_REHEARSAL "BLOCKED (production DB head unavailable or rehearsal failed)"
       fi
-      if [[ "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || -z "$ROLLBACK_CONFIG" || "$PROD_WRITE_FLAGS" == *"=true"* ]]; then
+      if [[ "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" == ERROR || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || "$PROD_WORKER_IMAGE" == ERROR || -z "$ROLLBACK_CONFIG" || "$ROLLBACK_CONFIG" == ERROR || "$PROD_WRITE_FLAGS" == ERROR || "$PROD_WRITE_FLAGS" != *"ADS_AUTOPILOT_ENABLED=false"* || "$PROD_WRITE_FLAGS" != *"ADS_WRITE_ACTIONS_ENABLED=false"* ]]; then
         PREFLIGHT_OK=0
       fi
+    else
+      PREFLIGHT_OK=0
+      SSH_FAILURE_DETAIL=$(printf '%s' "$PREFLIGHT_OUTPUT" | tr '\n' ' ' | sed -E 's/(root@)[^[:space:]]+/\1<production-host>/g' | cut -c1-240)
+      say SSH_REMOTE_PREFLIGHT FAIL
+      [[ -z "$SSH_FAILURE_DETAIL" ]] || say SSH_FAILURE_DETAIL "$SSH_FAILURE_DETAIL"
     fi
   fi
   if [[ "$PREFLIGHT_OK" == 1 ]]; then
@@ -201,8 +262,19 @@ PRODUCTION_ROOT=${PRODUCTION_ROOT:-${MAXIBOT_PRODUCTION_ROOT:-/opt/maxibot}}
 
 PRODUCTION_SSH_USER=root
 PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"
-SSH=(ssh -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes "$PRODUCTION_TARGET")
-SCP=(scp -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes)
+SSH_CONTROL_DIR=$(mktemp -d /private/tmp/mb.XXXXXX)
+chmod 700 "$SSH_CONTROL_DIR"
+SSH_CONTROL_PATH="$SSH_CONTROL_DIR/%C"
+SSH_OPTIONS=(-i "$PRODUCTION_SSH_KEY" -o BatchMode=yes -o ControlMaster=auto -o ControlPath="$SSH_CONTROL_PATH" -o ControlPersist=120)
+SSH=(ssh "${SSH_OPTIONS[@]}" "$PRODUCTION_TARGET")
+SCP=(scp "${SSH_OPTIONS[@]}")
+WORK=
+cleanup_release() {
+  [[ -z "$WORK" ]] || rm -rf -- "$WORK"
+  ssh -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes -o ControlPath="$SSH_CONTROL_PATH" -O exit "$PRODUCTION_TARGET" >/dev/null 2>&1 || true
+  rm -rf -- "$SSH_CONTROL_DIR"
+}
+trap cleanup_release EXIT
 remote() { "${SSH[@]}" "$@"; }
 say RELEASE_SSH_USER "$PRODUCTION_SSH_USER"
 say CANONICAL_TARGET "$PRODUCTION_TARGET"
@@ -295,7 +367,6 @@ else
 fi
 say PRODUCTION_BASELINE_COMPATIBILITY PASS
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
 git archive --format=tar "$TARGET_SHA" | tar -x -C "$WORK"
 
 # macOS may leave AppleDouble/resource-fork metadata in a release context.

@@ -86,6 +86,86 @@ def test_release_dry_run_has_prebuilt_image_gate():
     assert "docker compose" not in source[source.index("if [[ \"$MODE\" == DRY_RUN ]]; then"):source.index("fi\n\n[[ \"${OWNER_APPROVED")]
 
 
+def test_production_dry_run_uses_one_ssh_session_and_names_failed_checks():
+    source = SCRIPT.read_text()
+    dry_run = source[source.index('if [[ "$MODE" == DRY_RUN ]]; then'):source.index('fi\n\n[[ "${OWNER_APPROVED')]
+    assert '"${PREFLIGHT_SSH[@]}" \'bash -s\'' in dry_run
+    assert "REMOTE_PREFLIGHT" in dry_run
+    assert "SSH_REMOTE_PREFLIGHT PASS" in dry_run
+    assert "SSH_REMOTE_PREFLIGHT FAIL" in dry_run
+    assert "PRODUCTION_PREFLIGHT_FAILED_CHECKS" in dry_run
+    assert 'ADS_AUTOPILOT_ENABLED=false' in dry_run
+    assert 'ADS_WRITE_ACTIONS_ENABLED=false' in dry_run
+    assert "true >/dev/null 2>&1" not in dry_run
+
+
+def test_release_dry_run_collects_production_preflight_in_one_ssh_session(tmp_path):
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
+        "  printf 'linux/amd64|%s||%s\\n' \"$FAKE_IMAGE_SHA\" \"$FAKE_IMAGE_SHA\"\n"
+        "elif [ \"$1\" = exec ] && [ \"$2\" = maxibot-vps-db-1 ]; then\n"
+        f"  printf '%s\\n' {CANDIDATE_HEAD_MIGRATION!r}\n"
+        "elif [ \"$1\" = exec ] && [ \"$2\" = maxibot-vps-api-1 ]; then\n"
+        "  printf 'ready\\n'\n"
+        "elif [ \"$1\" = inspect ]; then\n"
+        "  case \"$*\" in\n"
+        "    *'range .Config.Env'*) printf 'ADS_AUTOPILOT_ENABLED=false\\nADS_WRITE_ACTIONS_ENABLED=false\\n' ;;\n"
+        "    *'project.config_files'*) printf '/opt/maxibot/releases/previous/docker-compose.vps.yml\\n' ;;\n"
+        "    *) printf 'maxibot-vps-api:previous\\n' ;;\n"
+        "  esac\n"
+        "else\n"
+        "  exit 2\n"
+        "fi\n"
+    )
+    docker.chmod(0o755)
+    ssh = tmp_path / "ssh"
+    ssh.write_text(
+        "#!/bin/sh\n"
+        "printf 'call\\n' >> \"$SSH_COUNTER\"\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    -i|-o) shift 2 ;;\n"
+        "    root@*) shift; break ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "[ \"$1\" = 'bash -s' ] || exit 2\n"
+        "exec /bin/bash -s\n"
+    )
+    ssh.chmod(0o755)
+    key = tmp_path / "ssh-key"
+    key.write_text("fake test key")
+    counter = tmp_path / "ssh-calls"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{tmp_path}:{env['PATH']}",
+            "TARGET_MIGRATION": CANDIDATE_HEAD_MIGRATION,
+            "PRODUCTION_HOST": "135.106.166.46",
+            "PRODUCTION_SSH_KEY": str(key),
+            "FAKE_IMAGE_SHA": sha,
+            "SSH_COUNTER": str(counter),
+        }
+    )
+    result = subprocess.run(
+        [str(SCRIPT), sha, "--dry-run"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "SSH_REMOTE_PREFLIGHT=PASS" in result.stdout, (
+        result.stdout + result.stderr + (counter.read_text() if counter.exists() else "SSH_NOT_CALLED")
+    )
+    assert "PRODUCTION_REHEARSAL=PASS" in result.stdout
+    assert "RELEASE_READY=YES" in result.stdout
+    assert counter.read_text().splitlines() == ["call"]
+
+
 def test_release_entrypoint_is_valid_shell():
     result = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -126,6 +206,9 @@ def test_release_tooling_contains_required_safety_gates():
         "CANONICAL_PRODUCTION_HOST=135.106.166.46",
         "PRODUCTION_SSH_USER=root",
         'PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"',
+        'ControlMaster=auto',
+        'ControlPath="$SSH_CONTROL_PATH"',
+        'ControlPersist=120',
         '"${SSH[@]}" true',
         "SSH_PREFLIGHT PASS",
         "docker inspect --format '{{.State.Status}}'",
