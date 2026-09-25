@@ -250,7 +250,9 @@ def test_production_ssh_target_is_explicit_and_canonical():
     assert 'PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"' in source
     assert '"${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"' in source
     assert '[[ "$PRODUCTION_HOST" == "$CANONICAL_PRODUCTION_HOST" ]]' in source
-    assert 'if ! "${SSH[@]}" true; then' in source
+    assert 'for attempt in 1 2 3; do' in source
+    assert 'if "${SSH[@]}" true; then' in source
+    assert 'ConnectTimeout=10' in source
     assert "SSH_PREFLIGHT PASS" in source
 
 
