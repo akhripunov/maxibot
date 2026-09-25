@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCreative, AdsEntity,
     AdsDataHealth, AdsMemory, AdsMemoryEvidence, AdsPromotionCampaignLink,
-    AdsRecommendation, TrafficMembership, TrafficVisit,
+    AdsObservation, AdsRecommendation, TrafficMembership, TrafficVisit,
 )
 from app.ads.autopilot import promotion_policy
 from app.ads.platform import outcome_type_for
@@ -262,10 +262,41 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             ).order_by(AdsAnalysisSnapshot.created_at.desc()).limit(1))
         if snapshot:
             metric_snapshots.append((snapshot, _json(snapshot.facts_json, {})))
-    spend_values = [(payload.get("facts") or {}).get("cost_7d")
-                    for _, payload in metric_snapshots if isinstance(payload, dict)]
-    spend = (sum(float(value) for value in spend_values if value is not None)
-             if any(value is not None for value in spend_values) else None)
+    # ADS Data Layer campaign observations are canonical and are collected
+    # independently of analysis snapshots. Prefer the newest 7d campaign
+    # observation, which carries both cost and the exact period cutoff.
+    canonical_spend: dict[str, tuple[float | None, Any]] = {}
+    snapshot_spend: dict[str, tuple[float | None, Any]] = {}
+    for campaign in campaigns:
+        observation = await db.scalar(select(AdsObservation).join(
+            AdsEntity, AdsEntity.id == AdsObservation.entity_id
+        ).where(
+            AdsEntity.campaign_id == campaign.id,
+            AdsObservation.dimension_type == "CAMPAIGN",
+            AdsObservation.dimension_value == campaign.external_id,
+            AdsObservation.window == "7d",
+        ).order_by(AdsObservation.created_at.desc()).limit(1))
+        if observation:
+            canonical_spend[campaign.id] = (
+                float(observation.cost) if observation.cost is not None else None,
+                observation.date_to,
+            )
+        snapshot = next((item for item, _ in metric_snapshots
+                         if item.campaign_id == campaign.id), None)
+        if snapshot:
+            payload = next((data for item, data in metric_snapshots if item.id == snapshot.id), {})
+            facts = payload.get("facts") or {} if isinstance(payload, dict) else {}
+            snapshot_spend[campaign.id] = (
+                float(facts["cost_7d"]) if facts.get("cost_7d") is not None else None,
+                snapshot.period_to,
+            )
+    campaign_spend = {
+        campaign_id: canonical_spend.get(campaign_id, snapshot_spend.get(campaign_id))
+        for campaign_id in campaign_ids
+    }
+    spend_values = [value for campaign_id, (value, _) in campaign_spend.items()
+                    if campaign_id in active_link_ids and value is not None]
+    spend = sum(spend_values) if spend_values else None
     latest_payload = (metric_snapshots[0][1] if metric_snapshots else
                       (parsed_snapshots[0][1] if parsed_snapshots else {}))
     metrics = latest_payload.get("MAXIBOT_METRICS") or {}
@@ -278,12 +309,18 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     # membership population rather than channel-wide qualified totals or
     # provider Direct conversions.  UTM matching is deterministic and keeps
     # the UI scoped to the campaign currently being displayed.
-    if object_type == "CHANNEL" and len(campaigns) == 1 and metric_snapshots:
-        campaign = campaigns[0]
-        snapshot = metric_snapshots[0][0]
-        if snapshot.period_to:
+    exact_campaign_ids = [link.campaign_id for link in links
+                          if link.status == "ACTIVE" and link.campaign_id in campaign_by_id]
+    exact_period_to = None
+    if object_type == "CHANNEL" and len(exact_campaign_ids) == 1:
+        campaign = campaign_by_id[exact_campaign_ids[0]]
+        spend_record = campaign_spend.get(campaign.id)
+        exact_period_to = spend_record[1] if spend_record else None
+        if exact_period_to:
+            # Membership evidence is canonical and can arrive before the first
+            # analysis snapshot. The outcome window must share cost_7d's cutoff.
             from app.ads.attribution import window_bounds
-            start, end = window_bounds(end_date=snapshot.period_to, window="7d")
+            start, end = window_bounds(end_date=exact_period_to, window="7d")
             memberships = list((await db.scalars(select(TrafficMembership).join(
                 TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id
             ).where(
@@ -297,7 +334,14 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
                 visit = await db.get(TrafficVisit, membership.attributed_visit_id)
                 if visit and campaign_matches(visit.utm_campaign, campaign.external_id):
                     matched_exact += 1
-            confirmed = matched_exact
+            # Retain the existing qualified-subscriber display as a fallback
+            # when there are no campaign-attributed EXACT outcomes.
+            if matched_exact:
+                confirmed = matched_exact
+    if object_type == "CHANNEL" and len(exact_campaign_ids) != 1:
+        # A single business CPA cannot combine campaign outcomes from different
+        # periods. Keep subscriber reporting, but fail closed for CPA.
+        spend = None
     campaign_mapping = metrics.get("campaign_specific") if isinstance(metrics, dict) else None
     # Mapping scope is determined by active promotion links, not provider
     # delivery state. A linked campaign may have a transient/unknown provider

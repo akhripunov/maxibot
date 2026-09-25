@@ -18,6 +18,28 @@ def test_dashboard_query_imports_sqlalchemy_or_for_object_scoped_recommendations
     assert "from sqlalchemy import or_, select" in source
 
 
+def test_exact_campaign_memberships_do_not_require_an_ads_snapshot():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "ads" / "dashboard.py").read_text()
+    exact_metrics = source.split("exact_campaign_ids =", 1)[1].split("campaign_mapping =", 1)[0]
+    assert "len(exact_campaign_ids) == 1" in exact_metrics
+    assert "and metric_snapshots" not in exact_metrics
+    assert "exact_period_to = spend_record[1]" in exact_metrics
+    assert 'window_bounds(end_date=exact_period_to, window="7d")' in exact_metrics
+
+
+def test_business_spend_uses_campaign_attribution_observation_without_snapshot():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[1] / "app" / "ads" / "dashboard.py").read_text()
+    spend_query = source.split("canonical_spend:", 1)[1].split("confirmed = window.get", 1)[0]
+    assert "AdsObservation.window == \"7d\"" in spend_query
+    assert "AdsEntity.campaign_id == campaign.id" in spend_query
+    assert "observation.date_to" in spend_query
+    assert "snapshot_spend" in spend_query  # backward-compatible fallback
+
+
 def test_business_cpa_fails_closed_for_unknown_or_zero_outcomes():
     assert business_cpa(spend=148, confirmed_outcomes=43) == 148 / 43
     assert business_cpa(spend=148, confirmed_outcomes=0) is None
