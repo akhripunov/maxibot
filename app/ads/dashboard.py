@@ -15,10 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsCampaign, AdsCreative, AdsEntity,
     AdsDataHealth, AdsMemory, AdsMemoryEvidence, AdsPromotionCampaignLink,
-    AdsRecommendation,
+    AdsRecommendation, TrafficMembership, TrafficVisit,
 )
 from app.ads.autopilot import promotion_policy
 from app.ads.platform import outcome_type_for
+from app.traffic.funnel_reporting import campaign_matches
 
 INACTIVE_CAMPAIGN_STATES = {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
 RUNNING_AI_STATES = {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
@@ -246,17 +247,57 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             snapshots.append(snapshot)
     snapshots.sort(key=lambda item: item.created_at, reverse=True)
     parsed_snapshots = [(snapshot, _json(snapshot.facts_json, {})) for snapshot in snapshots]
+    # The object-level screen must keep showing the last canonical campaign
+    # evidence even when the provider campaign is currently suspended.  The
+    # active-only snapshot set above remains authoritative for current
+    # recommendations; these metric snapshots are read-only display inputs.
+    metric_snapshots: list[tuple[AdsAnalysisSnapshot, dict[str, Any]]] = []
+    for campaign in campaigns:
+        snapshot = next((item for item, _ in parsed_snapshots if item.campaign_id == campaign.id), None)
+        if snapshot is None:
+            snapshot = await db.scalar(select(AdsAnalysisSnapshot).where(
+                AdsAnalysisSnapshot.campaign_id == campaign.id,
+                AdsAnalysisSnapshot.source != "PERIODIC_GRANULAR",
+                *_scope(AdsAnalysisSnapshot, object_type, object_id),
+            ).order_by(AdsAnalysisSnapshot.created_at.desc()).limit(1))
+        if snapshot:
+            metric_snapshots.append((snapshot, _json(snapshot.facts_json, {})))
     spend_values = [(payload.get("facts") or {}).get("cost_7d")
-                    for _, payload in parsed_snapshots if isinstance(payload, dict)]
+                    for _, payload in metric_snapshots if isinstance(payload, dict)]
     spend = (sum(float(value) for value in spend_values if value is not None)
              if any(value is not None for value in spend_values) else None)
-    latest_payload = parsed_snapshots[0][1] if parsed_snapshots else {}
+    latest_payload = (metric_snapshots[0][1] if metric_snapshots else
+                      (parsed_snapshots[0][1] if parsed_snapshots else {}))
     metrics = latest_payload.get("MAXIBOT_METRICS") or {}
     window = metrics.get("7d") or {}
     confirmed = window.get("qualified_memberships")
     if confirmed is None:
         confirmed = window.get("qualified_outcomes")
     confirmed = int(confirmed) if confirmed is not None else None
+    # For a single linked CHANNEL campaign, use the canonical exact
+    # membership population rather than channel-wide qualified totals or
+    # provider Direct conversions.  UTM matching is deterministic and keeps
+    # the UI scoped to the campaign currently being displayed.
+    if object_type == "CHANNEL" and len(campaigns) == 1 and metric_snapshots:
+        campaign = campaigns[0]
+        snapshot = metric_snapshots[0][0]
+        if snapshot.period_to:
+            from app.ads.attribution import window_bounds
+            start, end = window_bounds(end_date=snapshot.period_to, window="7d")
+            memberships = list((await db.scalars(select(TrafficMembership).join(
+                TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id
+            ).where(
+                TrafficMembership.channel_id == object_id,
+                TrafficMembership.attribution_status == "EXACT",
+                TrafficMembership.joined_at >= start,
+                TrafficMembership.joined_at < end,
+            ))).all())
+            matched_exact = 0
+            for membership in memberships:
+                visit = await db.get(TrafficVisit, membership.attributed_visit_id)
+                if visit and campaign_matches(visit.utm_campaign, campaign.external_id):
+                    matched_exact += 1
+            confirmed = matched_exact
     campaign_mapping = metrics.get("campaign_specific") if isinstance(metrics, dict) else None
     # Mapping scope is determined by active promotion links, not provider
     # delivery state. A linked campaign may have a transient/unknown provider

@@ -59,6 +59,22 @@ def test_unified_screen_has_single_action_and_read_only_navigation():
     assert "Проверить рекламу" not in labels and "Рекомендации" not in labels
 
 
+def test_unified_screen_renders_canonical_exact_subscribers_and_business_cpa():
+    state = {
+        "object": {"type": "CHANNEL", "id": "channel-1"},
+        "objective": {"type": "max_subscriber"}, "target_cpa": 20,
+        "currency": "RUB", "actual_business_cpa": 85.71 / 3,
+        "confirmed_business_outcomes": 3, "creative_summary": {"active": 0, "attention": 0},
+        "current_stage": "ANALYSIS", "analysis_running": False,
+        "data_trust": "HEALTHY", "active_campaigns": [],
+        "learning_state": {"status": "EXPLORE", "verified_count": 0},
+        "memories": [], "memory_evidence_counts": {}, "history": [], "creatives": [],
+    }
+    text = format_ads_unified_dashboard(state, title="Москва 365")
+    assert "Фактический CPA: 28,57 ₽" in text
+    assert "Подтверждённых подписчиков: 3" in text
+
+
 def _state(stage="ANALYSIS", *, root=None, outcome=None, proven=False):
     return {
         "object": {"type": "CHANNEL", "id": "channel-1"},

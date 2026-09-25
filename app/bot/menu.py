@@ -751,7 +751,7 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
     target = state.get("target_cpa")
     actual = state.get("actual_business_cpa")
     target_text = f"{target:.0f} {currency_label}" if target is not None else "не задан"
-    actual_text = f"{actual:.0f} {currency_label}" if actual is not None else "пока не рассчитан"
+    actual_text = f"{_ru_number(actual)} {currency_label}" if actual is not None else "пока не рассчитан"
     confirmed = state.get("confirmed_business_outcomes")
     execution_mode = str(state.get("execution_mode") or "ADVISORY").upper()
     autopilot = state.get("autopilot") or {}
