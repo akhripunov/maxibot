@@ -18,7 +18,7 @@ from app.ads.outcomes import ensure_outcome_checkpoints
 from app.ads.evidence_policy import build_evidence_policy
 from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v2
 from app.ads.context_budget import bound_ai_context
-from app.ads.attribution import build_bot_metrics, build_maxibot_metrics
+from app.ads.attribution import build_bot_metrics, build_maxibot_metrics, campaign_attribution_confidence
 from app.ads.objectives import evaluate_objective, objective_for_link
 from app.ads.yandex_autopilot import record_strategy_observation
 from app.ads.prior_shadow import run_prior_shadow
@@ -416,11 +416,25 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     snapshot_at = datetime.now(timezone.utc)
     v2_cutoff = datetime.fromisoformat(dataset["data_cutoff"])
     fact_context = fact_set.context(report_date_from=report_date_from, report_date_to=report_date_to, report_fetched_at=v2_cutoff, snapshot_at=snapshot_at)
+    campaign_mapping = maxibot_metrics.get("campaign_specific") or {}
+    campaign_specific_fact = {
+        **campaign_mapping,
+        "metric": "MAXIBOT_CAMPAIGN_SPECIFIC_MEMBERSHIPS",
+        "population": "TrafficMembership EXACT/HIGH linked to attributed TrafficVisit",
+        "matching_source": "TrafficVisit.utm_campaign via campaign_matches",
+        "window": "7d",
+    }
+    # Publish one explicit canonical field and a citable evidence record.
+    # Per-window MAXIBOT_METRICS entries remain channel-wide by design.
+    fact_context["campaign_specific_attribution"] = campaign_specific_fact
+    fact_context["evidence"]["MAXIBOT_CAMPAIGN_SPECIFIC_MEMBERSHIPS"] = {
+        "name": "campaign_specific_attribution",
+        **campaign_specific_fact,
+    }
     # Register the stable semantic MaxiBot metric ID before the final facts
     # envelope is assembled; the provider may cite this field directly.
     evidence_ids = evidence_registry({"FACTS": {**fact_context, "MAXIBOT_QUALIFIED_MEMBERSHIP_RATE": True, "V2_ANALYSIS": dataset}})
     suff, missing = sufficiency(mapped_campaigns=1, report_days=int(dataset["data_quality"].get("history_days", 0)), conversions=fact_set.conversion_sample, attribution_available=bool(traffic.get("visits")), direct_available=bool(dataset["data_quality"].get("rows_loaded")))
-    campaign_mapping = maxibot_metrics.get("campaign_specific") or {}
     campaign_mapping_supported = bool(campaign_mapping.get("supported"))
     health = data_health(direct_available=bool(dataset["data_quality"].get("rows_loaded")), mapped_campaigns=1, attribution_available=bool(traffic.get("visits")), snapshot_fresh=bool(dataset["data_quality"].get("rows_loaded")), ai_available=bool(provider_from_settings()), memory_db_available=True, unmatched_attribution=0 if campaign_mapping_supported else int(traffic.get("UNATTRIBUTED", 0)))
     # Keep one canonical copy of trend features in FACTS.TRENDS.  V2_ANALYSIS
@@ -441,7 +455,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     membership_rate = fact_set.maxibot_qualified_membership_rate
     facts["confidence_axes"] = {
         "performance_confidence": "HIGH" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 10 and dataset["campaign_summary"]["metrics"].get("clicks", 0) >= 100 else "MEDIUM" if fact_set.conversion_sample is not None and fact_set.conversion_sample >= 3 else "LOW",
-        "attribution_confidence": "INSUFFICIENT" if membership_rate is None else "LOW" if membership_rate < 0.10 else "MEDIUM" if membership_rate < 0.50 else "HIGH",
+        "attribution_confidence": campaign_attribution_confidence(campaign_mapping),
         "attribution_semantics": "результаты сопоставлены с рекламной кампанией по UTM; это не membership rate" if campaign_mapping_supported else "сопоставление с конкретной кампанией пока не подтверждено; это не membership rate",
         "campaign_specific_matching": True if campaign_mapping_supported else "UNKNOWN",
     }
@@ -504,7 +518,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
             assert_safe_context(context)
             output = await provider.analyze_campaign(context)
             ai.raw_structured_output_json = json.dumps(output, ensure_ascii=False)
-            valid, invalid = validate_output(output, evidence_ids)
+            valid, invalid = validate_output(output, evidence_ids, context=context)
             if not valid: ai.status, ai.validation_error = "SCHEMA_INVALID", invalid
             else:
                 verdict = policy(valid, suff)
@@ -782,7 +796,7 @@ async def persist_development_result(db: AsyncSession, *, channel_id: str, outpu
     if not ai or not ai.safe_context_json or not ai.input_snapshot_id: raise ValueError("manual sync is required first")
     context = json.loads(ai.safe_context_json); assert_safe_context(context)
     evidence_ids = evidence_registry(context)
-    valid, error = validate_output(output, evidence_ids)
+    valid, error = validate_output(output, evidence_ids, context=context)
     if worker:
         ai.provider, ai.model, ai.is_test = "CODEX_WORKER", "CODEX_CLI", True
     else:

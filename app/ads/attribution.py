@@ -23,6 +23,21 @@ def window_bounds(*, end_date: date, window: str) -> tuple[datetime, datetime]:
     return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
 
+def campaign_attribution_confidence(campaign_specific: dict[str, Any]) -> str:
+    """Classify confidence from campaign-scoped match coverage, never channel rate."""
+    if not campaign_specific.get("supported"):
+        return "INSUFFICIENT"
+    try:
+        coverage = float(campaign_specific.get("coverage"))
+    except (TypeError, ValueError):
+        return "INSUFFICIENT"
+    if coverage < 0.10:
+        return "LOW"
+    if coverage < 0.50:
+        return "MEDIUM"
+    return "HIGH"
+
+
 async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: date, windows: tuple[str, ...] = ("1d", "3d", "7d", "30d")) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for window in windows:
