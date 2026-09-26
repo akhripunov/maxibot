@@ -112,6 +112,49 @@ async def test_first_experiment_identity_needs_no_preexisting_open_recommendatio
 
 
 @pytest.mark.asyncio
+async def test_business_experiment_sequence_ignores_technical_and_recommendation_rows(db):
+    ai = AdsAiRun(id="ai-sequence", promotion_object_type="BOT", promotion_object_id="bot-sequence", campaign_id="campaign-sequence")
+    implemented = AdsRecommendation(
+        id="rec-business-1", ai_run_id=ai.id, promotion_object_type="BOT", promotion_object_id="bot-sequence",
+        experiment_id="business-1", experiment_seq=1, experiment_status="completed", title="Executed business test",
+    )
+    technical = AdsRecommendation(
+        id="rec-technical", promotion_object_type="BOT", promotion_object_id="bot-sequence",
+        experiment_id="canary", experiment_seq=100, experiment_kind="TECHNICAL_CANARY", title="Canary",
+    )
+    recommendations = [
+        AdsRecommendation(id=f"rec-hold-{n}", ai_run_id=ai.id, promotion_object_type="BOT",
+                          promotion_object_id="bot-sequence", experiment_id=f"hold-{n}",
+                          experiment_seq=2, action_code="HOLD", title="Recommendation only")
+        for n in range(2)
+    ]
+    next_ai = AdsAiRun(id="ai-sequence-next", promotion_object_type="BOT", promotion_object_id="bot-sequence", campaign_id="campaign-sequence")
+    next_recommendation = AdsRecommendation(
+        id="rec-business-next", ai_run_id=next_ai.id, promotion_object_type="BOT",
+        promotion_object_id="bot-sequence", title="Next executed test",
+    )
+    db.add_all([ai, next_ai, implemented, technical, *recommendations, next_recommendation])
+    await db.flush()
+    db.add_all([
+        AdsAiOutcome(recommendation_id=implemented.id, experiment_id=implemented.experiment_id,
+                     horizon="7d", due_at=datetime.now(timezone.utc), implementation_confirmed="YES",
+                     execution_status="IMPLEMENTED"),
+        AdsAiOutcome(recommendation_id=technical.id, experiment_id=technical.experiment_id,
+                     horizon="7d", due_at=datetime.now(timezone.utc), implementation_confirmed="YES",
+                     execution_status="ROLLED_BACK"),
+        *(AdsAiOutcome(recommendation_id=item.id, experiment_id=item.experiment_id,
+                       horizon="7d", due_at=datetime.now(timezone.utc), implementation_confirmed="UNKNOWN",
+                       execution_status="RECOMMENDATION_ONLY") for item in recommendations),
+    ])
+    await db.flush()
+
+    await _assign_experiment_identity(db, next_recommendation)
+
+    assert next_recommendation.experiment_seq == 2
+    assert next_recommendation.experiment_id == next_recommendation.id
+
+
+@pytest.mark.asyncio
 async def test_active_experiment_blocks_second_experiment_but_completed_allows_next(db):
     ai = AdsAiRun(id="ai-active", promotion_object_type="BOT", promotion_object_id="bot-loop", campaign_id="campaign-loop")
     active = AdsRecommendation(id="rec-active", ai_run_id=ai.id, promotion_object_type="BOT", promotion_object_id="bot-loop", title="active", experiment_status="running")
@@ -151,5 +194,6 @@ def test_enable_path_invokes_decision_runner_and_control_plane_is_write_gated():
     assert "await run_check(db" in runtime and "await run_bot_check(db" in runtime
     assert "await trigger_autopilot_execution(session_factory)" in periodic
     assert "execute_autonomous_action(" in periodic
-    assert "_assign_experiment_identity(db, recommendation)" in service
+    assert "_assign_experiment_identity(db, recommendation)" not in service
+    assert "assign_business_experiment_identity" in periodic or "assign_business_experiment_identity" in open("app/ads/autopilot.py", encoding="utf-8").read()
     assert "ads_write_actions_enabled" in periodic

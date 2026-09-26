@@ -7,7 +7,7 @@ import hashlib
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
-from sqlalchemy import case, func, or_, select, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.ads.facts import build_campaign_facts
 from app.ads.health import data_health, sufficiency
@@ -61,22 +61,48 @@ async def _report_campaign_catalog(client: YandexDirectClient, *, lookback_days:
 
 
 async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecommendation, *, baseline_snapshot_id: str | None = None) -> None:
-    """Anchor one recommendation to a stable experiment and per-object seq."""
+    """Anchor an implemented business experiment to a stable per-object sequence."""
     await db.flush()
-    object_type = recommendation.promotion_object_type or "CHANNEL"
-    object_id = recommendation.promotion_object_id or recommendation.channel_id
+    linked_run = await db.get(AdsAiRun, recommendation.ai_run_id) if recommendation.ai_run_id else None
+    object_type = recommendation.promotion_object_type or (linked_run.promotion_object_type if linked_run else None) or "CHANNEL"
+    object_id = recommendation.promotion_object_id or recommendation.channel_id or (linked_run.promotion_object_id if linked_run else None)
     campaign_id = getattr(recommendation, "campaign_id", None)
-    if not campaign_id and recommendation.ai_run_id:
-        run = await db.get(AdsAiRun, recommendation.ai_run_id)
-        campaign_id = run.campaign_id if run else None
+    if not campaign_id and linked_run:
+        campaign_id = linked_run.campaign_id
     if object_id and campaign_id:
         await _lock_experiment_scope(
             db, object_type=object_type, object_id=object_id, campaign_id=campaign_id,
         )
-    highest = await db.scalar(select(func.max(AdsRecommendation.experiment_seq)).where(
-        AdsRecommendation.promotion_object_type == object_type,
-        AdsRecommendation.promotion_object_id == object_id,
-    ))
+    actual_execution = AdsAiOutcome.recommendation_id == AdsRecommendation.id
+    sequence_scope = (
+        or_(
+            and_(AdsRecommendation.promotion_object_type == "CHANNEL",
+                 AdsRecommendation.promotion_object_id == object_id),
+            and_(AdsRecommendation.promotion_object_type.is_(None),
+                 AdsRecommendation.promotion_object_id.is_(None),
+                 AdsRecommendation.channel_id == object_id),
+        ) if object_type == "CHANNEL" else or_(
+            and_(AdsRecommendation.promotion_object_type == object_type,
+                 AdsRecommendation.promotion_object_id == object_id),
+            and_(AdsRecommendation.promotion_object_type.is_(None),
+                 AdsRecommendation.promotion_object_id.is_(None),
+                 AdsAiRun.promotion_object_type == object_type,
+                 AdsAiRun.promotion_object_id == object_id),
+        )
+    )
+    highest = await db.scalar(
+        select(func.max(AdsRecommendation.experiment_seq))
+        .join(AdsAiOutcome, actual_execution)
+        .outerjoin(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
+        .where(
+            sequence_scope,
+            AdsRecommendation.experiment_seq.is_not(None),
+            or_(AdsRecommendation.experiment_kind.is_(None),
+                ~AdsRecommendation.experiment_kind.ilike("TECHNICAL%")),
+            AdsAiOutcome.implementation_confirmed == "YES",
+            AdsAiOutcome.execution_status.in_(("IMPLEMENTED", "FINALIZED", "ROLLED_BACK")),
+        )
+    )
     recommendation.experiment_id = recommendation.id
     recommendation.experiment_seq = int(highest or 0) + 1
     recommendation.experiment_status = "planned"
@@ -483,7 +509,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
                 await _lock_experiment_scope(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id)
                 if not await _active_experiment_exists(db, object_type=object_type, object_id=object_id, campaign_id=campaign.id):
                     recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, destination_platform=destination_platform, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([x["evidence_id"] for x in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), problem_json=json.dumps({"diagnosis_code": valid["diagnosis_code"], "summary": valid["summary"], "objective": objective_evaluation}, ensure_ascii=False), root_cause_json=json.dumps(dataset.get("DIRECTOLOGIST", {}).get("root_cause"), ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14), promotion_object_type=object_type, promotion_object_id=object_id, hypothesis_key=__import__("app.ads.memory", fromlist=["claim_key"]).claim_key(rec.get("hypothesis") or rec.get("reason"), objective=objective_evaluation.get("objective_type"), action=rec.get("action_code")), maturity_before="EXPLORE", maturity_after="EXPLORE", maturity_reason="Новая гипотеза", influenced_by_memory_ids_json=json.dumps([x.id for x in memories if x.status in {"SUPPORTED", "VALIDATED", "TRUSTED"}][:8]), avoided_due_to_memory_ids_json=json.dumps([x.id for x in memories if x.status == "REJECTED"][:8]))
-                    db.add(recommendation); await _assign_experiment_identity(db, recommendation, baseline_snapshot_id=snapshot.id); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
+                    db.add(recommendation); await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=snapshot.id)
                     await create_candidates(db, channel_id=channel_id, campaign_id=campaign.id, ai_run_id=ai.id, snapshot_id=snapshot.id, candidates=valid["memory_candidates"], known_evidence=evidence_ids, object_type=object_type, object_id=object_id, experiment_id=recommendation.experiment_id, destination_platform=destination_platform)
         except Exception as exc:
             ai.status, ai.validation_error = "FAILED", type(exc).__name__
@@ -759,11 +785,10 @@ async def persist_development_result(db: AsyncSession, *, channel_id: str, outpu
     await _lock_experiment_scope(db, object_type="CHANNEL", object_id=channel_id, campaign_id=campaign_id)
     if await _active_experiment_exists(db, object_type="CHANNEL", object_id=channel_id, campaign_id=campaign_id):
         return ai
-    recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14))
+    recommendation = AdsRecommendation(channel_id=channel_id, ai_run_id=ai.id, promotion_object_type=ai.promotion_object_type, promotion_object_id=ai.promotion_object_id, destination_platform=ai.destination_platform, status="OPEN" if verdict["displayable"] else "HIDDEN", priority=verdict["risk_level"], title=valid["summary"][:512], rationale=rec.get("reason"), evidence_ids_json=json.dumps([row["evidence_id"] for row in valid["evidence"]]), action_code=rec["action_code"], confidence=valid["confidence"], data_sufficiency=valid["data_sufficiency"], policy_json=json.dumps(recommendation_policy, ensure_ascii=False), hypothesis=rec.get("hypothesis") or rec.get("reason"), expected_impact_json=json.dumps(rec.get("expected_impact"), ensure_ascii=False), evaluation_window_days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14, evaluation_at=datetime.now(timezone.utc) + timedelta(days=7 if valid["data_sufficiency"] == "SUFFICIENT" else 14))
     db.add(recommendation)
-    # Canonical entrypoint: _assign_experiment_identity(db, recommendation)
-    # now additionally freezes the policy using the immutable input snapshot.
-    await _assign_experiment_identity(db, recommendation, baseline_snapshot_id=ai.input_snapshot_id)
+    # A recommendation is not an experiment. Identity and sequence are
+    # allocated only when implementation evidence confirms an actual change.
     await ensure_outcome_checkpoints(db, recommendation, baseline_snapshot_id=ai.input_snapshot_id)
     await create_candidates(db, channel_id=channel_id, campaign_id=campaign_id, ai_run_id=ai.id, snapshot_id=ai.input_snapshot_id, candidates=valid["memory_candidates"], known_evidence=evidence_ids)
     await db.commit(); return ai

@@ -640,6 +640,11 @@ async def execute_autonomous_action(
             outcome.implementation_confirmed = "NO"
             outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
         return ExecutionResult("DENIED", reason, evidence)
+    experiment_recommendation = None
+    if outcome:
+        from app.ads.outcomes import assign_business_experiment_identity
+        experiment_recommendation = await assign_business_experiment_identity(db, outcome)
+        experiment_recommendation.experiment_status = "executing"
     if outcome:
         recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
         if recommendation:
@@ -720,6 +725,15 @@ async def execute_autonomous_action(
             outcome.execution_status = "FAILED"
             outcome.implementation_confirmed = "NO"
             outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
+            if experiment_recommendation:
+                experiment_recommendation.experiment_id = None
+                experiment_recommendation.experiment_seq = None
+                experiment_recommendation.experiment_status = "completed"
+                siblings = list((await db.scalars(select(AdsAiOutcome).where(
+                    AdsAiOutcome.recommendation_id == experiment_recommendation.id
+                ))).all())
+                for sibling in siblings:
+                    sibling.experiment_id = None
         return ExecutionResult("FAILED", type(exc).__name__, evidence)
     evidence = {**request, "status": "IMPLEMENTED", **(response or {}),
                 "executed_at": datetime.now(timezone.utc).isoformat()}
@@ -741,7 +755,12 @@ async def execute_autonomous_action(
                             treatment.ad_entity_id = entity.id
                             treatment.external_creative_id = str((response.get("verified_after_state") or {}).get("ad", {}).get("CreativeId") or "") or None
             recommendation.measurement_started_at = measurement_start(recommendation.provider_lifecycle)
-            recommendation.experiment_status = "running" if recommendation.provider_lifecycle == "ACTIVE" else "planned"
+            recommendation.experiment_status = (
+                "planned"
+                if action_type in {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"}
+                and recommendation.provider_lifecycle != "ACTIVE"
+                else "running"
+            )
         outcome.execution_status = "IMPLEMENTED"
         outcome.implementation_confirmed = "YES"
         outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)

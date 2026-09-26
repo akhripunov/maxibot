@@ -68,15 +68,44 @@ async def record_implementation_evidence(db: AsyncSession, outcome: AdsAiOutcome
     if confirmed not in {"YES", "NO", "UNKNOWN"}:
         raise ValueError("IMPLEMENTATION_CONFIRMATION_INVALID")
     import json
+    if confirmed == "YES" and execution_status in {"IMPLEMENTED", "FINALIZED", "ROLLED_BACK"}:
+        await assign_business_experiment_identity(db, outcome)
     # Advisory recommendations share the same outcome loop, but their change
     # was made by the owner rather than by the provider control plane.
-    rows = [{**row, "executed_by": row.get("executed_by", "HUMAN")} for row in rows]
+    rows = [{**row, "executed_by": row.get("executed_by", "HUMAN"),
+             "executed_at": row.get("executed_at") or datetime.now(timezone.utc).isoformat()}
+            for row in rows]
     outcome.implementation_confirmed = confirmed
     outcome.implementation_evidence_json = json.dumps(rows, ensure_ascii=False, sort_keys=True)
     outcome.execution_status = execution_status
     outcome.evaluation_status = "READY" if confirmed == "YES" else "INCONCLUSIVE"
     outcome.error_code = None
     await db.commit()
+
+
+async def assign_business_experiment_identity(db: AsyncSession, outcome: AdsAiOutcome) -> AdsRecommendation:
+    """Create experiment identity only for an action that is actually executed."""
+    recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
+    if recommendation is None:
+        raise ValueError("EXPERIMENT_RECOMMENDATION_NOT_FOUND")
+    already_implemented = await db.scalar(select(AdsAiOutcome.id).where(
+        AdsAiOutcome.recommendation_id == recommendation.id,
+        AdsAiOutcome.implementation_confirmed == "YES",
+        AdsAiOutcome.execution_status.in_(("IMPLEMENTED", "FINALIZED", "ROLLED_BACK")),
+    ).limit(1))
+    ai = await db.get(AdsAiRun, recommendation.ai_run_id) if recommendation.ai_run_id else None
+    if not already_implemented or not recommendation.experiment_id or recommendation.experiment_seq is None:
+        from app.ads.service import _assign_experiment_identity
+        await _assign_experiment_identity(
+            db, recommendation,
+            baseline_snapshot_id=ai.input_snapshot_id if ai else None,
+        )
+    siblings = list((await db.scalars(
+        select(AdsAiOutcome).where(AdsAiOutcome.recommendation_id == recommendation.id)
+    )).all())
+    for sibling in siblings:
+        sibling.experiment_id = recommendation.experiment_id
+    return recommendation
 
 
 async def ensure_outcome_checkpoints(
@@ -166,6 +195,8 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
     policy_state = None
     if policy:
         created = outcome.created_at or datetime.now(timezone.utc)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
         elapsed = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 3600)
         conversion_delta = delta.get("conversions_7d")
         exact_outcomes = delta.get("exact_outcomes")

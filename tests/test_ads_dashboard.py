@@ -7,6 +7,8 @@ import pytest
 from app.ads.dashboard import (
     _campaign_to_date_spend,
     _count_campaign_exact_memberships,
+    _experiment_status_label,
+    _is_user_history_business_experiment,
     _sum_active_campaign_spend,
     business_cpa,
     stage_for_state,
@@ -162,6 +164,35 @@ async def test_dashboard_render_handles_paused_campaign_lifetime_metrics(monkeyp
                 execution_status="ROLLED_BACK", implementation_confirmed="YES",
                 evaluation_status="TECHNICAL_PASS",
             ))
+            rec_only = AdsRecommendation(
+                ai_run_id=canary_run.id, channel_id=channel.id,
+                promotion_object_type="CHANNEL", promotion_object_id=channel.id,
+                experiment_id="legacy-recommendation", experiment_seq=2,
+                experiment_status="completed", status="OPEN", title="Old HOLD recommendation",
+                action_code="HOLD", data_sufficiency="INSUFFICIENT",
+            )
+            actual = AdsRecommendation(
+                ai_run_id=canary_run.id, channel_id=channel.id,
+                promotion_object_type="CHANNEL", promotion_object_id=channel.id,
+                experiment_id="actual-business-experiment", experiment_seq=1,
+                experiment_status="completed", status="OPEN", title="Implemented test",
+                action_code="EXCLUDE_PLACEMENT", data_sufficiency="SUFFICIENT",
+            )
+            db.add_all([rec_only, actual])
+            await db.flush()
+            db.add(AdsAiOutcome(
+                recommendation_id=rec_only.id, experiment_id=rec_only.experiment_id,
+                horizon="7d", due_at=datetime.now(timezone.utc), status="COMPLETED",
+                execution_status="RECOMMENDATION_ONLY", implementation_confirmed="UNKNOWN",
+                evaluation_status="INCONCLUSIVE",
+            ))
+            db.add(AdsAiOutcome(
+                recommendation_id=actual.id, experiment_id=actual.experiment_id,
+                horizon="7d", due_at=datetime.now(timezone.utc), status="COMPLETED",
+                execution_status="IMPLEMENTED", implementation_confirmed="YES",
+                evaluation_status="INCONCLUSIVE", completed_at=datetime.now(timezone.utc),
+                implementation_evidence_json='{"executed_at":"2026-01-02T03:04:05+00:00"}',
+            ))
             db.add_all([
                 AdsDailyAggregate(provider="YANDEX_DIRECT", campaign_id=campaign.id,
                                   entity_id=entity.id, dimension_type="CAMPAIGN",
@@ -191,10 +222,14 @@ async def test_dashboard_render_handles_paused_campaign_lifetime_metrics(monkeyp
             assert dashboard["confirmed_business_outcomes"] == 2
             assert dashboard["actual_business_cpa"] == 45
             assert dashboard["current_experiment"] is None
-            assert dashboard["last_completed_experiment"] is None
-            assert dashboard["learning_summary"]["total_experiments"] == 0
-            assert any(item["experiment_id"] == "da163e5d-7b97-4fb6-84f6-42901b288236"
-                       for item in dashboard["history"])
+            assert dashboard["last_completed_experiment"]["experiment_id"] == "actual-business-experiment"
+            assert dashboard["learning_summary"]["total_experiments"] == 1
+            assert [item["experiment_id"] for item in dashboard["history"]] == ["actual-business-experiment"]
+            actual_history = dashboard["history"][0]
+            assert actual_history["status_label"] == "⚪ Завершён"
+            assert actual_history["evaluation_status"] == "INCONCLUSIVE"
+            assert actual_history["started_at"] == datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+            assert await db.get(AdsRecommendation, canary.id) is not None
     finally:
         await engine.dispose()
 
@@ -226,6 +261,30 @@ def test_current_experiment_requires_live_business_lifecycle_and_nonterminal_exe
         outcome = SimpleNamespace(implementation_confirmed="YES", execution_status=execution,
                                   evaluation_status=evaluation)
         assert not _is_current_business_experiment(recommendation, outcome), (kind, lifecycle, execution, evaluation)
+
+
+def test_user_history_requires_business_type_and_confirmed_execution():
+    outcome = SimpleNamespace(implementation_confirmed="YES", execution_status="IMPLEMENTED")
+    actual = SimpleNamespace(experiment_kind=None, experiment_id="e1", experiment_seq=1)
+    technical = SimpleNamespace(experiment_kind="TECHNICAL_CANARY", experiment_id="e2", experiment_seq=2)
+    recommendation = SimpleNamespace(experiment_kind=None, experiment_id="e3", experiment_seq=3)
+    assert _is_user_history_business_experiment(actual, [outcome])
+    assert not _is_user_history_business_experiment(technical, [outcome])
+    assert not _is_user_history_business_experiment(recommendation, [
+        SimpleNamespace(implementation_confirmed="UNKNOWN", execution_status="RECOMMENDATION_ONLY")
+    ])
+
+
+def test_experiment_history_lifecycle_is_separate_from_inconclusive_evaluation():
+    completed = {"experiment_status": "completed", "execution_status": "IMPLEMENTED",
+                 "evaluation_status": "INCONCLUSIVE", "implementation_confirmed": "YES"}
+    active = {"experiment_status": "running", "execution_status": "IMPLEMENTED",
+              "evaluation_status": "PENDING", "implementation_confirmed": "YES"}
+    rolled_back = {"experiment_status": "rolled_back", "execution_status": "ROLLED_BACK",
+                   "evaluation_status": "INCONCLUSIVE", "implementation_confirmed": "YES"}
+    assert _experiment_status_label(completed) == "⚪ Завершён"
+    assert _experiment_status_label(active) == "🟡 Идёт"
+    assert _experiment_status_label(rolled_back) == "↩️ Откат выполнен"
 
 
 def test_dashboard_spend_ignores_active_campaigns_without_metric_rows():
@@ -369,8 +428,8 @@ def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     assert "🎨 Креатив A" in format_ads_why_screen(state, title="Москва 365")
     assert "Пока знаний нет." in format_ads_learning_screen(state, title="Москва 365")
     empty = format_ads_history_screen(state, title="Москва 365")
-    assert "Экспериментов пока не было." in empty
-    assert "После запуска Автопилота здесь появится история:" in empty
+    assert "Реальных бизнес-экспериментов пока не было." in empty
+    assert "Рекомендации и технические проверки здесь не отображаются." in empty
 
 
 def test_history_projection_is_bounded_and_exposes_safe_detail_chain():
@@ -400,7 +459,7 @@ def test_history_excludes_legacy_rows_and_never_renders_none():
         {"experiment_id": None, "experiment_seq": None, "title": "Рекомендация"},
     ]
     text = format_ads_history_screen(state, title="Москва 365")
-    assert "Экспериментов пока не было." in text
+    assert "Реальных бизнес-экспериментов пока не было." in text
     assert "Эксперимент #None" not in text
     assert "Старая проверка" not in text
 

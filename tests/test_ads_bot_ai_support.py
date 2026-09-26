@@ -49,7 +49,11 @@ def test_objective_screen_uses_client_copy_and_only_install_back_controls():
     assert '("⬅️ Назад", back)' in menu
     assert '"✏️ Изменить цель"' not in menu
     assert '"🚫 Отключить цель"' not in menu
-    assert '"Результат: ' not in menu
+    objective_screen = menu[
+        menu.index('if screen.startswith("ads_objective:"):'):
+        menu.index('if screen.startswith("ads_objective_input:"):')
+    ]
+    assert '"Результат: ' not in objective_screen
     assert '"Цель применяется только к выбранным активным кампаниям."' not in menu
 
 

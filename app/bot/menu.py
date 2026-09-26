@@ -972,8 +972,10 @@ def format_ads_history_screen(state: dict, *, title: str, page: int = 0, page_si
         if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
             result_labels = {"SUCCESS": "✅ Успешно", "FAIL": "❌ Не сработало", "INCONCLUSIVE": "⚪ Недостаточно данных"}
             lines.append("Результат" + ": " + result_labels[item["evaluation_status"]])
-        if item.get("evaluation_status") not in {"SUCCESS", "FAIL", "INCONCLUSIVE"}:
-            lines.append("Статус: Данных пока недостаточно")
+        elif item.get("evaluation_status") == "PENDING":
+            lines.append("Результат: оценка продолжается")
+        else:
+            lines.append("Результат: ещё не оценён")
         for learned in item.get("learned_memories") or []:
             lines.extend(["", "🧠 MaxiBot выучил:", _owner_short_text(learned.get("claim")),
                           f"Статус знания: {_human_memory_status(learned.get('status'))}"])
@@ -981,9 +983,8 @@ def format_ads_history_screen(state: dict, *, title: str, page: int = 0, page_si
         if next_seqs:
             lines.extend(["", "↓ Повлияло на следующий тест", "Эксперимент(ы): " + ", ".join(f"#{seq}" for seq in next_seqs)])
     if not rows:
-        lines.extend(["", "Экспериментов пока не было.",
-                      "После запуска Автопилота здесь появится история:",
-                      "что MaxiBot проверил, что изменил,", "какой получил результат и чему научился."])
+        lines.extend(["", "Реальных бизнес-экспериментов пока не было.",
+                      "Рекомендации и технические проверки здесь не отображаются."])
     elif total_pages > 1:
         lines.extend(["", f"Страница: {page + 1} / {total_pages}"])
     return "\n".join(lines)

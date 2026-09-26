@@ -208,23 +208,54 @@ def _experiment_view(recommendation: AdsRecommendation, outcome: AdsAiOutcome | 
 
 
 def _experiment_status_label(item: dict[str, Any]) -> str:
-    evaluation = str(item.get("evaluation_status") or "").upper()
-    lifecycle = str(item.get("experiment_status") or "").lower()
-    if evaluation == "SUCCESS":
-        return "✅ Победа"
-    if evaluation == "FAIL":
-        return "❌ Неудача"
-    if evaluation == "INCONCLUSIVE":
-        return "⚪ Недостаточно данных"
-    if lifecycle in {"running", "executing", "evaluating", "rolling_back"} or item.get("implementation_confirmed") == "YES":
+    lifecycle = str(item.get("experiment_status") or "").strip().upper()
+    execution = str(item.get("execution_status") or "").strip().upper()
+    if lifecycle in {"ROLLED_BACK", "CANCELLED", "CANCELED", "ABORTED", "EXPIRED"} or execution == "ROLLED_BACK":
+        return "↩️ Откат выполнен"
+    if lifecycle in {"COMPLETED", "FINALIZED", "FAILED", "PROVIDER_REJECTED"} or execution in {"FINALIZED", "FAILED", "PROVIDER_REJECTED"}:
+        return "⚪ Завершён"
+    if lifecycle in {"RUNNING", "EXECUTING", "EVALUATING", "ROLLING_BACK"} or execution == "IMPLEMENTED":
         return "🟡 Идёт"
-    return "🟡 Запланирован"
+    return "⚪ Не начат"
 
 
 def _is_business_experiment(recommendation: AdsRecommendation) -> bool:
     """Technical canaries belong to verification history, not business UI slots."""
     kind = str(recommendation.experiment_kind or "").strip().upper()
     return not kind.startswith("TECHNICAL")
+
+
+def _is_user_history_business_experiment(
+    recommendation: AdsRecommendation, outcomes: list[AdsAiOutcome],
+) -> bool:
+    """User history contains executed business tests, never planned recommendations."""
+    if not _is_business_experiment(recommendation):
+        return False
+    if not recommendation.experiment_id or recommendation.experiment_seq is None:
+        return False
+    return any(
+        str(outcome.implementation_confirmed or "").upper() == "YES"
+        and str(outcome.execution_status or "").upper()
+        in {"IMPLEMENTED", "FINALIZED", "ROLLED_BACK"}
+        for outcome in outcomes
+    )
+
+
+def _implementation_started_at(outcome: AdsAiOutcome | None, fallback: datetime | None) -> datetime | None:
+    """Prefer execution evidence over the earlier recommendation timestamp."""
+    try:
+        evidence = json.loads(outcome.implementation_evidence_json or "{}") if outcome else {}
+    except (TypeError, ValueError):
+        evidence = {}
+    for item in (evidence if isinstance(evidence, list) else [evidence]):
+        raw = item.get("executed_at") if isinstance(item, dict) else None
+        if raw:
+            try:
+                value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+    return fallback
 
 
 def _is_current_business_experiment(
@@ -531,12 +562,15 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
     creative_by_id = {item.id: item for item in creative_rows}
     entity_by_id = {item.id: item for item in entity_rows}
     for item in all_recommendations:
-        # Only canonical experiments belong in the user-facing history.
-        if not item.experiment_id or item.experiment_seq is None:
+        item_outcomes = outcomes_by_recommendation.get(item.id, [])
+        # The recommendation row receives an experiment identity only after
+        # implementation. Keep old canaries and advisory checkpoints out of
+        # user-facing business experiment history.
+        if not _is_user_history_business_experiment(item, item_outcomes):
             continue
-        measured = next((value for value in outcomes_by_recommendation.get(item.id, [])
+        measured = next((value for value in item_outcomes
                          if value.status == "COMPLETED"), None)
-        latest = next(iter(outcomes_by_recommendation.get(item.id, [])), None)
+        latest = next(iter(item_outcomes), None)
         run = history_run_by_id.get(item.ai_run_id)
         campaign = campaign_by_id.get(run.campaign_id) if run else None
         policy_payload = _json(item.policy_json, {})
@@ -564,7 +598,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             "experiment_seq": item.experiment_seq,
             "experiment_status": item.experiment_status,
             "created_at": item.created_at,
-            "started_at": item.created_at,
+            "started_at": _implementation_started_at(measured or latest, item.created_at),
             "completed_at": measured.completed_at if measured else None,
             "campaign_id": run.campaign_id if run else None,
             "campaign_name": campaign.name if campaign else None,
@@ -581,7 +615,7 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             "before": _experiment_view(item, measured).get("before"),
             "after": _experiment_view(item, measured).get("after"),
             "rollback": bool(measured and measured.execution_status == "ROLLED_BACK"),
-            "status_label": _experiment_status_label({"evaluation_status": measured.evaluation_status if measured else None, "experiment_status": item.experiment_status, "implementation_confirmed": measured.implementation_confirmed if measured else None}),
+            "status_label": _experiment_status_label({"evaluation_status": measured.evaluation_status if measured else None, "experiment_status": item.experiment_status, "execution_status": measured.execution_status if measured else (latest.execution_status if latest else None), "implementation_confirmed": measured.implementation_confirmed if measured else None}),
             "memories": [memory.content for memory in own_memories],
             "learned_memories": learned,
             "memory_status": learned[0]["status"] if learned else None,
@@ -608,18 +642,18 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
             "provider_lifecycle": item.provider_lifecycle,
         })
     history.sort(key=lambda row: (
-        0 if row["status_label"] == "🟡 Идёт" else 1,
-        -(row["created_at"].timestamp() if row.get("created_at") else 0),
+        -(row["experiment_seq"] or 0),
+        -(row["started_at"].timestamp() if row.get("started_at") else 0),
     ))
 
     experiment_rows = []
     for item in all_recommendations:
-        if not item.experiment_id or item.experiment_seq is None:
+        item_outcomes = outcomes_by_recommendation.get(item.id, [])
+        if not _is_user_history_business_experiment(item, item_outcomes):
             continue
-        measured = next((value for value in outcomes_by_recommendation.get(item.id, [])
-                         if value.implementation_confirmed == "YES"), None)
-        if measured:
-            experiment_rows.append(_experiment_view(item, measured))
+        measured = next((value for value in item_outcomes if value.status == "COMPLETED"), None)
+        latest = next(iter(item_outcomes), None)
+        experiment_rows.append(_experiment_view(item, measured or latest))
     active_experiment = next((
         _experiment_view(item, candidate_outcome)
         for item in all_recommendations
