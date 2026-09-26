@@ -262,10 +262,18 @@ async def test_concurrent_claim_lease_allows_exactly_one_provider_write(tmp_path
 
         async def worker():
             async with sessions() as session:
-                return await _claim_apply_lease(session, outcome_id, expected_state="CLAIMED")
+                acquired = await _claim_apply_lease(session, outcome_id, expected_state="CLAIMED")
+                if acquired:
+                    await fake_provider_write()
+                return acquired
+
+        provider_write_count = 0
+
+        async def fake_provider_write():
+            nonlocal provider_write_count
+            provider_write_count += 1
 
         winners = await asyncio.gather(worker(), worker())
-        provider_write_count = sum(1 for winner in winners if winner)
         assert sum(winners) == 1
         assert provider_write_count == 1
     finally:

@@ -62,6 +62,22 @@ async def test_provider_success_with_lost_confirmation_reconciles_without_retry(
 
 
 @pytest.mark.asyncio
+async def test_duplicate_prepared_apply_is_read_only_after_first_provider_mutation():
+    direct = FakeDirect()
+    adapter = YandexAutopilotAdapter(direct)
+    prepared = await adapter.prepare({
+        "action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+        "target": {"daily_budget_amount": 2_000_000},
+    })
+    await adapter.apply_prepared(prepared)
+    assert direct.mutation_count == 1
+
+    retry = await adapter.apply_prepared(prepared)
+    assert retry["already_applied"] is True
+    assert direct.mutation_count == 1
+
+
+@pytest.mark.asyncio
 async def test_create_ad_reconciliation_fails_closed_when_provider_result_is_ambiguous():
     adapter = YandexAutopilotAdapter(FakeDirect())
     prepared = await adapter.prepare({
