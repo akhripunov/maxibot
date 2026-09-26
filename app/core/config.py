@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     ads_codex_worker_poll_seconds: int = Field(default=15, validation_alias="ADS_CODEX_WORKER_POLL_SECONDS")
     ads_codex_worker_lease_seconds: int = Field(default=300, validation_alias="ADS_CODEX_WORKER_LEASE_SECONDS")
     ads_codex_worker_max_retries: int = Field(default=3, validation_alias="ADS_CODEX_WORKER_MAX_RETRIES")
+    ads_codex_run_wait_timeout_minutes: int = Field(default=360, ge=1, validation_alias="ADS_CODEX_RUN_WAIT_TIMEOUT_MINUTES")
     ads_codex_execution_timeout_seconds: int = Field(default=120, validation_alias="ADS_CODEX_EXECUTION_TIMEOUT_SECONDS")
     ads_ai_context_max_bytes: int = Field(default=75000, validation_alias="ADS_AI_CONTEXT_MAX_BYTES")
     ads_ai_evidence_max_entries: int = Field(default=120, validation_alias="ADS_AI_EVIDENCE_MAX_ENTRIES")

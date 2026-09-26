@@ -13,7 +13,7 @@ from app.ads.facts import build_campaign_facts
 from app.ads.health import data_health, sufficiency
 from app.ads.llm import PROMPT_VERSION, SCHEMA_VERSION, assert_safe_context, evidence_registry, policy, provider_from_settings, validate_output
 from app.ads.memory import create_candidates, retrieve
-from app.ads.codex_worker import WAITING
+from app.ads.codex_worker import WAITING, expire_stale_pending_run
 from app.ads.outcomes import ensure_outcome_checkpoints
 from app.ads.evidence_policy import build_evidence_policy
 from app.ads.analysis import build_v2_analysis_dataset, campaign_fact_set_from_v2
@@ -295,10 +295,21 @@ async def _lock_object_and_pending_runs(
     scope = (AdsAiRun.channel_id == object_id,) if object_type == "CHANNEL" else (
         AdsAiRun.promotion_object_type == "BOT", AdsAiRun.promotion_object_id == object_id,
     )
-    return list((await db.scalars(
+    pending = list((await db.scalars(
         select(AdsAiRun).where(*scope, AdsAiRun.status.in_(_PENDING_AI_STATES))
-        .order_by(AdsAiRun.created_at.desc())
+        .order_by(AdsAiRun.created_at.desc()).with_for_update(skip_locked=True)
     )).all())
+    now = datetime.now(timezone.utc)
+    active = []
+    expired = False
+    for item in pending:
+        if expire_stale_pending_run(item, now=now):
+            expired = True
+        else:
+            active.append(item)
+    if expired:
+        await db.flush()
+    return active
 
 def _context(campaign: AdsCampaign | None, facts: dict[str, Any], suff: str, missing: list[str], memories: list[AdsMemory]) -> dict[str, Any]:
     def view(x: AdsMemory) -> dict[str, Any]:

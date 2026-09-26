@@ -17,6 +17,7 @@ from app.ads.v2 import _entity, _upsert_creative, collect_granular_yandex_v2, co
 from app.ads.telegram_collection import persist_telegram_report
 from app.ads.regional import assert_execution_supported, assert_remote_execution_configured
 from app.ads.storage_governance import run_retention
+from app.ads.codex_worker import expire_stale_pending_run
 from app.core.config import settings
 from app.db.models import (
     Admin, AdsAccount, AdsCampaign, AdsDataHealth, AdsPromotionCampaignLink,
@@ -529,10 +530,21 @@ async def trigger_continuous_analysis(session_factory, *, now: datetime | None =
             )
             latest = await db.scalar(select(AdsAiRun).where(*ai_scope)
                                      .order_by(AdsAiRun.created_at.desc()).limit(1))
-            pending = await db.scalar(select(AdsAiRun.id).where(
+            pending_runs = list((await db.scalars(select(AdsAiRun).where(
                 *ai_scope, AdsAiRun.status.in_(("WAITING_FOR_CODEX", "CODEX_PROCESSING"))
-            ).limit(1))
-            if pending:
+            ).order_by(AdsAiRun.created_at.desc()).with_for_update(skip_locked=True))).all())
+            active_pending = []
+            expired = False
+            for pending_run in pending_runs:
+                if expire_stale_pending_run(pending_run, now=now):
+                    expired = True
+                else:
+                    active_pending.append(pending_run)
+            if expired:
+                # Commit the terminal transition before the new analysis call;
+                # the old audit row remains, but no longer blocks fresh input.
+                await db.commit()
+            if active_pending:
                 continue
             latest_data = await db.scalar(select(func.max(AdsCollectionRun.completed_at)).join(
                 AdsPromotionCampaignLink, AdsPromotionCampaignLink.campaign_id == AdsCollectionRun.campaign_id

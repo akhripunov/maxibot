@@ -34,6 +34,36 @@ async def claim_next_codex_run(db: AsyncSession, worker_id: str, worker_release_
 def lease_active(run: AdsAiRun, lease_id: str) -> bool:
     return run.status==PROCESSING and bool(run.lease_id) and secrets.compare_digest(run.lease_id,lease_id) and bool(run.lease_expires_at and run.lease_expires_at>datetime.now(timezone.utc))
 
+def pending_run_is_stale(run: AdsAiRun, *, now: datetime | None = None) -> bool:
+    """Bound how long an orphaned Codex run can suppress newer analysis.
+
+    A live processing lease is honored even when its run is old. Waiting runs
+    have no owner/lease, so they expire after the configured analysis cadence.
+    """
+    now = now or datetime.now(timezone.utc)
+    if run.status not in {WAITING, PROCESSING} or not run.created_at:
+        return False
+    if run.status == PROCESSING and run.lease_expires_at and run.lease_expires_at > now:
+        return False
+    timeout = timedelta(minutes=max(1, settings.ads_codex_run_wait_timeout_minutes))
+    created_at = run.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return now - created_at >= timeout
+
+def expire_stale_pending_run(run: AdsAiRun, *, now: datetime | None = None) -> bool:
+    """Mark an unclaimed or expired Codex run terminal without deleting audit."""
+    now = now or datetime.now(timezone.utc)
+    if not pending_run_is_stale(run, now=now):
+        return False
+    run.status = FAILED
+    run.validation_error = "CODEX_RUN_TIMEOUT"
+    run.completed_at = now
+    run.worker_id = None
+    run.lease_id = None
+    run.lease_expires_at = None
+    return True
+
 async def fail_claimed_run(db: AsyncSession, run: AdsAiRun, *, retryable: bool, error_code: str, diagnostics: dict | None = None) -> None:
     if diagnostics is not None:
         import json
