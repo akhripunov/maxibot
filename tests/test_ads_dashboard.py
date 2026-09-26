@@ -102,9 +102,9 @@ async def test_dashboard_render_handles_paused_campaign_lifetime_metrics(monkeyp
 
     from app.ads.dashboard import build_ads_dashboard
     from app.db.models import (
-        Admin, AdsAccount, AdsCampaign, AdsDailyAggregate, AdsEntity,
-        AdsPromotionCampaignLink, Channel, LandingPage, TrafficMembership,
-        TrafficVisit, Base,
+        Admin, AdsAccount, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsDailyAggregate, AdsEntity,
+        AdsRecommendation, AdsPromotionCampaignLink, Channel, LandingPage,
+        TrafficMembership, TrafficVisit, Base,
     )
 
     async def empty_metrics(*args, **kwargs):
@@ -139,6 +139,29 @@ async def test_dashboard_render_handles_paused_campaign_lifetime_metrics(monkeyp
                                   title="Regression", description="Regression")
             db.add(landing)
             await db.flush()
+            canary_run = AdsAiRun(channel_id=channel.id, promotion_object_type="CHANNEL",
+                                  promotion_object_id=channel.id, campaign_id=campaign.id,
+                                  status="COMPLETED")
+            db.add(canary_run)
+            await db.flush()
+            canary = AdsRecommendation(
+                ai_run_id=canary_run.id, channel_id=channel.id,
+                promotion_object_type="CHANNEL", promotion_object_id=channel.id,
+                experiment_id="da163e5d-7b97-4fb6-84f6-42901b288236", experiment_seq=1,
+                experiment_kind="TECHNICAL_CANARY", experiment_status="completed",
+                status="OPEN", title="Technical canary: weekly budget apply and rollback",
+                hypothesis="Provider accepts a bounded weekly budget update and exact rollback without strategy drift.",
+                action_code="BOUNDED_BUDGET_REALLOCATION", data_sufficiency="SUFFICIENT",
+                provider_lifecycle="ROLLED_BACK",
+            )
+            db.add(canary)
+            await db.flush()
+            db.add(AdsAiOutcome(
+                recommendation_id=canary.id, experiment_id=canary.experiment_id,
+                horizon="7d", due_at=datetime.now(timezone.utc), status="COMPLETED",
+                execution_status="ROLLED_BACK", implementation_confirmed="YES",
+                evaluation_status="TECHNICAL_PASS",
+            ))
             db.add_all([
                 AdsDailyAggregate(provider="YANDEX_DIRECT", campaign_id=campaign.id,
                                   entity_id=entity.id, dimension_type="CAMPAIGN",
@@ -167,8 +190,42 @@ async def test_dashboard_render_handles_paused_campaign_lifetime_metrics(monkeyp
             )
             assert dashboard["confirmed_business_outcomes"] == 2
             assert dashboard["actual_business_cpa"] == 45
+            assert dashboard["current_experiment"] is None
+            assert dashboard["last_completed_experiment"] is None
+            assert dashboard["learning_summary"]["total_experiments"] == 0
+            assert any(item["experiment_id"] == "da163e5d-7b97-4fb6-84f6-42901b288236"
+                       for item in dashboard["history"])
     finally:
         await engine.dispose()
+
+
+def test_current_experiment_requires_live_business_lifecycle_and_nonterminal_execution():
+    from app.ads.dashboard import _is_current_business_experiment
+
+    business = SimpleNamespace(experiment_kind="STANDARD", experiment_status="running")
+    implemented = SimpleNamespace(
+        implementation_confirmed="YES", execution_status="IMPLEMENTED", evaluation_status="PENDING",
+    )
+    assert _is_current_business_experiment(business, implemented)
+
+    # Terminal lifecycle states, outcomes, and technical experiment types are
+    # historical regardless of a still-open recommendation row.
+    terminal_cases = [
+        ("TECHNICAL_CANARY", "completed", "ROLLED_BACK", "TECHNICAL_PASS"),
+        ("STANDARD", "completed", "IMPLEMENTED", "PENDING"),
+        ("STANDARD", "rolled_back", "ROLLED_BACK", "PENDING"),
+        ("STANDARD", "running", "ROLLED_BACK", "PENDING"),
+        ("STANDARD", "evaluating", "IMPLEMENTED", "INCONCLUSIVE"),
+        ("STANDARD", "evaluating", "IMPLEMENTED", "TECHNICAL_PASS"),
+        ("STANDARD", "evaluating", "IMPLEMENTED", "EARLY_STOP"),
+        ("STANDARD", "evaluating", "PROVIDER_REJECTED", "PROVIDER_REJECTED"),
+        ("STANDARD", "planned", "IMPLEMENTED", "PENDING"),
+    ]
+    for kind, lifecycle, execution, evaluation in terminal_cases:
+        recommendation = SimpleNamespace(experiment_kind=kind, experiment_status=lifecycle)
+        outcome = SimpleNamespace(implementation_confirmed="YES", execution_status=execution,
+                                  evaluation_status=evaluation)
+        assert not _is_current_business_experiment(recommendation, outcome), (kind, lifecycle, execution, evaluation)
 
 
 def test_dashboard_spend_ignores_active_campaigns_without_metric_rows():

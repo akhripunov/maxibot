@@ -24,6 +24,16 @@ from app.traffic.funnel_reporting import campaign_matches
 INACTIVE_CAMPAIGN_STATES = {"ARCHIVED", "SUSPENDED", "DISABLED", "OFF", "ENDED"}
 RUNNING_AI_STATES = {"WAITING_FOR_CODEX", "CODEX_PROCESSING"}
 VERIFIED_MEMORY_STATES = {"SUPPORTED", "VALIDATED", "TRUSTED", "REJECTED", "STALE", "SUPERSEDED"}
+ACTIVE_EXPERIMENT_STATES = {"EXECUTING", "RUNNING", "EVALUATING", "ROLLING_BACK"}
+TERMINAL_EXPERIMENT_EVALUATIONS = {
+    "SUCCESS", "FAIL", "INCONCLUSIVE", "TECHNICAL_PASS", "TECHNICAL_FAIL",
+    "EARLY_STOP", "PROVIDER_REJECTED", "COMPLETED", "CANCELLED", "CANCELED",
+    "ABORTED", "EXPIRED", "ROLLED_BACK",
+}
+TERMINAL_EXPERIMENT_EXECUTIONS = {
+    "FINALIZED", "ROLLED_BACK", "FAILED", "PROVIDER_REJECTED", "DENIED",
+    "RECOMMENDATION_ONLY", "CANCELLED", "CANCELED", "ABORTED", "EXPIRED",
+}
 _PRIORITY = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 _ROOT_CAUSE_ICONS = {
     "PLACEMENT": "📍 Площадка", "CREATIVE": "🎨 Креатив",
@@ -209,6 +219,38 @@ def _experiment_status_label(item: dict[str, Any]) -> str:
     if lifecycle in {"running", "executing", "evaluating", "rolling_back"} or item.get("implementation_confirmed") == "YES":
         return "🟡 Идёт"
     return "🟡 Запланирован"
+
+
+def _is_business_experiment(recommendation: AdsRecommendation) -> bool:
+    """Technical canaries belong to verification history, not business UI slots."""
+    kind = str(recommendation.experiment_kind or "").strip().upper()
+    return not kind.startswith("TECHNICAL")
+
+
+def _is_current_business_experiment(
+    recommendation: AdsRecommendation, outcome: AdsAiOutcome | None,
+) -> bool:
+    """Only implemented business experiments in a live lifecycle phase are current.
+
+    The allowlist is aligned with the canonical active-experiment guard in
+    ``service.py``/``autopilot.py``. This makes every other lifecycle value
+    historical by default, including completed canaries and unknown future
+    terminal states.
+    """
+    if not _is_business_experiment(recommendation) or outcome is None:
+        return False
+    lifecycle = str(recommendation.experiment_status or "").strip().upper()
+    if lifecycle not in ACTIVE_EXPERIMENT_STATES:
+        return False
+    if str(outcome.implementation_confirmed or "").strip().upper() != "YES":
+        return False
+    execution = str(outcome.execution_status or "").strip().upper()
+    evaluation = str(outcome.evaluation_status or "").strip().upper()
+    if execution in TERMINAL_EXPERIMENT_EXECUTIONS:
+        return False
+    if evaluation in TERMINAL_EXPERIMENT_EVALUATIONS:
+        return False
+    return True
 
 
 def _history_metric(delta: dict[str, Any], key: str) -> tuple[Any, Any] | None:
@@ -578,10 +620,24 @@ async def build_ads_dashboard(db: AsyncSession, *, object_type: str, object_id: 
                          if value.implementation_confirmed == "YES"), None)
         if measured:
             experiment_rows.append(_experiment_view(item, measured))
-    active_experiment = next((item for item in experiment_rows if item.get("evaluation_status") not in {"SUCCESS", "FAIL"}), None)
-    completed_experiment = next((item for item in experiment_rows if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}), None)
-    total_experiments = len(experiment_rows)
-    successful_experiments = sum(item.get("evaluation_status") == "SUCCESS" for item in experiment_rows)
+    active_experiment = next((
+        _experiment_view(item, candidate_outcome)
+        for item in all_recommendations
+        for candidate_outcome in outcomes_by_recommendation.get(item.id, [])
+        if item.experiment_id
+        and item.experiment_seq is not None
+        and _is_current_business_experiment(item, candidate_outcome)
+    ), None)
+    business_experiment_rows = [
+        item for item in experiment_rows
+        if not str(item.get("experiment_kind") or "").upper().startswith("TECHNICAL")
+    ]
+    completed_experiment = next((
+        item for item in business_experiment_rows
+        if item.get("evaluation_status") in {"SUCCESS", "FAIL", "INCONCLUSIVE"}
+    ), None)
+    total_experiments = len(business_experiment_rows)
+    successful_experiments = sum(item.get("evaluation_status") == "SUCCESS" for item in business_experiment_rows)
 
     knowledge = []
     maturity_by_experiment = {item.experiment_id: item.maturity_after for item in all_recommendations if item.experiment_id}
