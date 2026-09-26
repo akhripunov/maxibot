@@ -13,8 +13,8 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.bot.menu import MenuRepository, is_maxibot_owner, official_bot_added_diagnostics
-from app.db.models import Admin, AdsAiOutcome, AdsAiRun, AdsRecommendation, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
+from app.bot.menu import MenuRepository, is_maxibot_owner, official_bot_added_diagnostics, _fresh_campaign_provider_state
+from app.db.models import Admin, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsRecommendation, BotPromotionProfile, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
 from app.daily_reports import send_due_daily_reports
@@ -22,7 +22,7 @@ from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMa
 from app.security_tokens import decrypt_token, encrypt_token
 from app.ads.service import can_access_ads, run_bot_check, run_check, toggle_campaign_link
 from app.ads.objectives import set_objective, disable_objective
-from app.ads.autopilot import AUTONOMOUS, ADVISORY, active_links, set_budget, set_mode
+from app.ads.autopilot import AUTONOMOUS, ADVISORY, active_links, autopilot_enable_requirements, set_budget, set_mode
 from app.ads.outcomes import record_implementation_evidence
 from app.ads.events import ADS_AI_RUN_EVENTS, parse_ai_run_event
 from app.integrations.robokassa import amount_for_months, configured as robokassa_configured
@@ -1110,17 +1110,58 @@ class MaxBotRuntime:
                 return
         elif action.startswith("ads_autopilot_enable_confirm_apply:"):
             _, object_type, object_id, campaign_id = action.split(":", 3)
-            if can_access_ads(str(user_id)) and object_type in {"CHANNEL", "BOT"}:
+            if object_type in {"CHANNEL", "BOT"}:
                 async with self.session_factory() as db:
-                    try:
-                        await set_mode(db, object_type=object_type, object_id=object_id, mode=AUTONOMOUS, campaign_id=campaign_id)
-                        await db.commit()
-                    except ValueError as exc:
+                    admin = await db.scalar(select(Admin).where(Admin.external_id == str(user_id)))
+                    reason = None
+                    if not admin or not can_access_ads(str(user_id)):
+                        reason = "Доступ владельца не подтверждён."
+                    elif object_type == "CHANNEL":
+                        owned = await db.scalar(select(Channel.id).where(Channel.id == object_id, Channel.admin_id == admin.id))
+                        if not owned:
+                            reason = "Канал не принадлежит текущему владельцу."
+                    else:
+                        profile = await db.get(BotPromotionProfile, object_id)
+                        if not profile:
+                            reason = "Профиль бота не найден."
+                        elif profile.bot_type == "SYSTEM":
+                            if not is_maxibot_owner(admin):
+                                reason = "Нет доступа к системному боту."
+                        elif profile.owner_admin_id != admin.id:
+                            reason = "Бот не принадлежит текущему владельцу."
+                    links = await active_links(db, object_type=object_type, object_id=object_id) if reason is None else []
+                    link = next((item for item in links if item.campaign_id == campaign_id), None)
+                    if reason is None and not link:
+                        reason = "Кампания не связана с этим объектом или связь не активна."
+                    campaign = await db.get(AdsCampaign, campaign_id) if link else None
+                    if reason is None and (not campaign or campaign.id != link.campaign_id):
+                        reason = "Кампания не найдена."
+                    if reason is None:
+                        missing = await autopilot_enable_requirements(db, object_type=object_type,
+                            object_id=object_id, campaign_id=campaign_id)
+                        if missing:
+                            reason = "Не выполнены требования: " + ", ".join(missing)
+                    if reason is None:
+                        provider_state = await _fresh_campaign_provider_state(
+                            db, admin, campaign, object_type=object_type, object_id=object_id,
+                        )
+                        provider_state = str(provider_state or "UNKNOWN").upper()
+                        if provider_state not in {"ON", "SUSPENDED"}:
+                            reason = "Не удалось подтвердить допустимое состояние кампании в Яндекс.Директе."
+                    if reason is None:
+                        try:
+                            await set_mode(db, object_type=object_type, object_id=object_id,
+                                           mode=AUTONOMOUS, campaign_id=campaign_id)
+                            await db.commit()
+                        except ValueError as exc:
+                            await db.rollback()
+                            reason = str(exc).replace("AUTOPILOT_PREREQUISITES_MISSING:", "").replace("_", " ").strip()
+                    else:
                         await db.rollback()
-                        reason = str(exc).replace("AUTOPILOT_PREREQUISITES_MISSING:", "").replace("_", " ").strip()
-                        await self.client.send_message(user_id, f"⚠️ Автопилот не включён.\nПричина: {reason}")
-                        await self._render(user_id, f"ads_autopilot_enable:{object_type}:{object_id}")
-                        return
+                if reason:
+                    await self.client.send_message(user_id, f"⚠️ Автопилот не включён.\nПричина: {reason}")
+                    await self._render(user_id, f"ads_autopilot_enable:{object_type}:{object_id}")
+                    return
                 try:
                     if object_type == "CHANNEL":
                         async with self.session_factory() as db:

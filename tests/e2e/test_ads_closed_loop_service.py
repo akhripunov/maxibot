@@ -146,7 +146,8 @@ def test_enable_path_invokes_decision_runner_and_control_plane_is_write_gated():
     runtime = open("app/bot/runtime.py", encoding="utf-8").read()
     periodic = open("app/ads/periodic.py", encoding="utf-8").read()
     service = open("app/ads/service.py", encoding="utf-8").read()
-    assert 'set_mode(db, object_type=object_type, object_id=object_id, mode=AUTONOMOUS' in runtime
+    assert "await set_mode(db, object_type=object_type, object_id=object_id," in runtime
+    assert "mode=AUTONOMOUS, campaign_id=campaign_id" in runtime
     assert "await run_check(db" in runtime and "await run_bot_check(db" in runtime
     assert "await trigger_autopilot_execution(session_factory)" in periodic
     assert "execute_autonomous_action(" in periodic

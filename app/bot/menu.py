@@ -65,9 +65,11 @@ _AI_BARE_DOMAIN_RE = re.compile(r"(?<![\w@])(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:/[^\s
 async def _fresh_campaign_provider_state(db: AsyncSession, admin: Admin, campaign: AdsCampaign,
                                           *, object_type: str, object_id: str) -> str | None:
     """Read provider state before Autopilot confirmation; never write to Direct."""
-    if object_type != "CHANNEL":
-        return str(campaign.state or campaign.status or "").upper() or None
-    encrypted = await get_direct_encrypted_token(admin.external_id, object_id, db=db)
+    if object_type == "CHANNEL":
+        encrypted = await get_direct_encrypted_token(admin.external_id, object_id, db=db)
+    else:
+        profile = await db.get(BotPromotionProfile, object_id)
+        encrypted = profile.yandex_oauth_token_encrypted if profile else None
     if not encrypted:
         return None
     try:
@@ -775,7 +777,12 @@ def format_ads_unified_dashboard(state: dict, *, title: str) -> str:
             "Выбранные кампании: " + (", ".join(selected_campaigns) if selected_campaigns else "не выбраны")
         )
     if execution_mode == "AUTONOMOUS":
-        if str(autopilot.get("execution_capability") or "READY") != "READY":
+        lines.append("Системный автопилот: " + ("включён" if autopilot.get("ads_autopilot_enabled") else "выключен"))
+        lines.append("Запись в Директ: " + ("разрешена системой" if autopilot.get("ads_write_actions_enabled") else "выключена"))
+        campaign_state = str(autopilot.get("campaign_state") or "UNKNOWN").upper()
+        if campaign_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:
+            lines.extend(["⏸ Выполнение приостановлено: кампания остановлена.", "Автопилот продолжит анализ без provider-write."])
+        elif str(autopilot.get("execution_capability") or "READY") != "READY":
             lines.extend(["⚠️ Выполнение изменений временно отключено системой.", "MaxiBot продолжает анализ без provider-write."])
         experiment = state.get("current_experiment")
         if experiment:
@@ -1798,16 +1805,16 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             missing = await autopilot_enable_requirements(
                 db, object_type=object_type, object_id=object_id, campaign_id=campaign_id_from_route,
             )
-            provider_ready = provider_state == "ON"
-            eligible = provider_ready and not missing
+            provider_known = provider_state in {"ON", "SUSPENDED"}
+            eligible = provider_known and not missing
             provider_label = {
                 "ON": "🟢 Кампания активна",
                 "SUSPENDED": "⚪ Кампания остановлена",
                 "OFF": "⚪ Кампания остановлена",
             }.get(provider_state, "⏳ Не удалось подтвердить состояние кампании")
-            if provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:
-                blocked_reason = "⚠️ Кампания остановлена в Яндекс.Директе."
-            elif not provider_ready:
+            if provider_state == "SUSPENDED":
+                blocked_reason = "⏸ Автопилот будет включён, но выполнение действий начнётся только после запуска кампании."
+            elif not provider_known:
                 blocked_reason = "⚠️ Не удалось получить состояние кампании из Яндекс.Директа."
             elif missing:
                 blocked_reason = "⚠️ " + ("Target CPA не задан." if "задать цену за цель" in missing else "Бюджет не задан.")
@@ -1829,19 +1836,15 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 "• управляет только этой кампанией\n• остальные кампании остаются только для анализа\n"
                 "• одновременно не более одного эксперимента\n• каждое изменение проходит проверки безопасности\n"
                 "• стратегия и таргетинг в текущей версии не изменяются\n"
+                + f"\nРежим кампании: AUTONOMOUS после подтверждения\nСистемный автопилот: {'ON' if settings.ads_autopilot_enabled else 'OFF'}\nЗапись в Директ: {'ON' if settings.ads_write_actions_enabled else 'OFF'}\n"
                 + (f"\nМаксимум на один тест: {experiment_cap:g} ₽\n" if experiment_cap is not None else "\nМаксимум на один тест: не задан — автономное выполнение заблокировано\n")
                 + (f"Максимальное изменение бюджета: {float(config['max_budget_change_percent']):g}%\n" if config.get("max_budget_change_percent") is not None else "")
-                + (f"\n{blocked_reason}" if blocked_reason else "\nПосле включения MaxiBot сам начнёт искать первый безопасный эксперимент.")
+                + (f"\n{blocked_reason}" if blocked_reason else "\nПосле включения MaxiBot продолжит анализ; действия возможны только при включённых системных разрешениях и готовности кампании.")
             )
             controls = [("⬅️ Отмена", f"ads_autopilot_enable:{object_type}:{object_id}")]
             if eligible:
                 controls.insert(0, ("✅ Включить автопилот", f"ads_autopilot_enable_confirm_apply:{object_type}:{object_id}:{campaign_id_from_route}"))
-            elif provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:
-                # A confirmed inactive campaign has a concrete, user-fixable
-                # condition.  Keep the historical continuation button here;
-                # retry/details are reserved for UNKNOWN/provider failures.
-                controls.insert(0, ("🔧 Исправить настройку", f"ads:{object_id}" if object_type == "CHANNEL" else f"ads_bot:{object_id}"))
-            elif not provider_ready:
+            elif not provider_known:
                 retry_action = f"ads_autopilot_preflight_retry:{object_type}:{object_id}:{campaign_id_from_route}"
                 details_action = f"ads_autopilot_preflight_details:{object_type}:{object_id}:{campaign_id_from_route}"
                 if preflight_details:

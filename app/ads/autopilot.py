@@ -8,6 +8,7 @@ missing.  No table outside the canonical ADS model is introduced.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -70,6 +71,8 @@ AUTOPILOT_ACTION_ALLOWLIST = frozenset({
 })
 _AD_ACTIONS = frozenset({"PAUSE_AD", "ENABLE_AD"})
 _CREATIVE_ACTIONS = frozenset({"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"})
+_EXECUTABLE_CAMPAIGN_STATES = {"ON"}
+_INACTIVE_CAMPAIGN_STATES = {"SUSPENDED", "OFF", "DISABLED", "ARCHIVED", "ENDED", "DELETED", "REJECTED"}
 
 
 def budget_experiment_readiness(*, data_trust: str | None, direct_auth: bool | None,
@@ -242,6 +245,11 @@ def _positive(value: Any, *, field: str) -> float:
     return float(parsed)
 
 
+def campaign_state_allows_execution(state: str | None) -> bool:
+    """Provider execution is allowed only while Direct confirms delivery ON."""
+    return str(state or "UNKNOWN").strip().upper() in _EXECUTABLE_CAMPAIGN_STATES
+
+
 @dataclass(frozen=True)
 class GuardrailDecision:
     allowed: bool
@@ -339,15 +347,35 @@ async def promotion_policy(db: AsyncSession, *, object_type: str, object_id: str
     links = await object_links(db, object_type=object_type, object_id=object_id)
     if not links:
         return {"execution_mode": ADVISORY, **default_autopilot_config(), "active_links": 0,
-                "execution_capability": "DISABLED" if not (settings.ads_autopilot_enabled and settings.ads_write_actions_enabled) else "BLOCKED"}
+                "execution_capability": "DISABLED" if not (settings.ads_autopilot_enabled and settings.ads_write_actions_enabled) else "BLOCKED",
+                "ads_autopilot_enabled": bool(settings.ads_autopilot_enabled),
+                "ads_write_actions_enabled": bool(settings.ads_write_actions_enabled),
+                "campaign_state": "UNKNOWN", "selected_campaign_id": None,
+                "execution_readiness": "BLOCKED_BY_ADVISORY_MODE"}
     authorized = [link.campaign_id for link in links if str(link.execution_mode or ADVISORY).upper() == AUTONOMOUS]
     mode = AUTONOMOUS if authorized else ADVISORY
     source = next((link for link in links if link.campaign_id in authorized), links[0])
     config = parse_config(source.autopilot_config_json)
     campaign = await db.get(AdsCampaign, source.campaign_id)
     capability = "READY" if settings.ads_autopilot_enabled and settings.ads_write_actions_enabled else "DISABLED"
+    provider_state = str(campaign.state or campaign.status or "UNKNOWN").upper() if campaign else "UNKNOWN"
+    if mode != AUTONOMOUS:
+        execution_readiness = "BLOCKED_BY_ADVISORY_MODE"
+    elif provider_state in _INACTIVE_CAMPAIGN_STATES:
+        execution_readiness = "BLOCKED_BY_CAMPAIGN_STATE"
+    elif provider_state != "ON":
+        execution_readiness = "BLOCKED_BY_UNKNOWN_CAMPAIGN_STATE"
+    elif not settings.ads_autopilot_enabled or not settings.ads_write_actions_enabled:
+        execution_readiness = "BLOCKED_BY_SYSTEM_MASTER"
+    else:
+        execution_readiness = "READY"
     return {"execution_mode": mode, **config, "active_links": len(links),
             "authorized_campaign_ids": authorized,
+            "selected_campaign_id": source.campaign_id,
+            "campaign_state": provider_state,
+            "execution_readiness": execution_readiness,
+            "ads_autopilot_enabled": bool(settings.ads_autopilot_enabled),
+            "ads_write_actions_enabled": bool(settings.ads_write_actions_enabled),
             "experiment_budget_cap": float(source.experiment_budget_cap) if source.experiment_budget_cap is not None else None,
             "campaign_budget_type": campaign.budget_type if campaign else None,
             "campaign_weekly_budget": float(campaign.weekly_budget) if campaign and campaign.weekly_budget is not None else None,
@@ -365,13 +393,24 @@ async def autopilot_enable_requirements(db: AsyncSession, *, object_type: str, o
     selected = next((link for link in links if link.campaign_id == campaign_id), None)
     if not selected:
         return ["выбрать кампанию для автопилота"]
+    def valid_positive(value: Any) -> bool:
+        try:
+            number = float(value)
+            return math.isfinite(number) and number > 0
+        except (TypeError, ValueError, OverflowError):
+            return False
     missing: list[str] = []
-    if not selected.objective_type or selected.target_cpa is None or float(selected.target_cpa) <= 0:
+    if (not selected.objective_type or selected.target_cpa is None
+            or not valid_positive(selected.target_cpa)):
         missing.append("задать цену за цель")
     config = parse_config(selected.autopilot_config_json)
-    if config.get("monthly_budget_limit") is None or float(config.get("monthly_budget_limit") or 0) <= 0:
+    monthly_limit = config.get("monthly_budget_limit")
+    if not valid_positive(monthly_limit):
         missing.append("задать бюджет автопилота")
-    if selected.experiment_budget_cap is None or float(selected.experiment_budget_cap) <= 0:
+    max_test_spend = config.get("max_test_spend")
+    if not valid_positive(max_test_spend):
+        missing.append("задать максимальный расход теста")
+    if not valid_positive(selected.experiment_budget_cap):
         missing.append("задать лимит одного эксперимента")
     return missing
 
@@ -537,6 +576,7 @@ async def execute_autonomous_action(
     # Missing safety attestations are ambiguous and therefore fail closed.
     evidence_sufficient = bool(target.get("evidence_sufficient", False)) if isinstance(target, dict) else False
     provider_ready = bool(target.get("provider_ready", False)) if isinstance(target, dict) else False
+    provider_ready = provider_ready and campaign_state_allows_execution(campaign.state or campaign.status)
     verified_provider_capabilities = target.get("verified_provider_capabilities") if isinstance(target, dict) else None
     if verified_provider_capabilities is None:
         stored = stored_provider_capabilities(campaign)

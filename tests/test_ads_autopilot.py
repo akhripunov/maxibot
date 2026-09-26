@@ -12,6 +12,8 @@ from app.ads.autopilot import (
     store_provider_capability_assessment,
     stored_provider_capabilities,
     budget_experiment_readiness,
+    set_mode,
+    campaign_state_allows_execution,
 )
 
 
@@ -146,10 +148,13 @@ def test_autopilot_confirmation_is_human_readable_and_hides_internal_policy_name
 
 def test_autopilot_confirmation_fails_closed_without_confirmed_provider_state():
     source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
-    section = source[source.index("provider_ready = provider_state == \"ON\""):source.index("if action_name == \"ads_autopilot_enable\":", source.index("provider_ready = provider_state == \"ON\""))]
+    section = source[source.index("provider_known = provider_state in {\"ON\", \"SUSPENDED\"}"):source.index("if action_name == \"ads_autopilot_enable\":", source.index("provider_known = provider_state in {\"ON\", \"SUSPENDED\"}"))]
+    assert 'provider_state = str(provider_state or "UNKNOWN").upper()' in source
     assert "Не удалось подтвердить состояние" in section
     assert "if eligible:" in section
     assert "Включить автопилот" in section
+    assert 'provider_state == "SUSPENDED"' in section
+    assert "выполнение действий начнётся только после запуска кампании" in section
 
 
 def test_unknown_provider_preflight_offers_retry_and_details_instead_of_fix_settings():
@@ -159,16 +164,116 @@ def test_unknown_provider_preflight_offers_retry_and_details_instead_of_fix_sett
     assert "🔍 Технические детали" in section
     assert "ads_autopilot_preflight_retry:" in section
     assert "ads_autopilot_preflight_details:" in section
-    unknown_controls = section[section.index("elif not provider_ready:"):section.index("else:", section.index("elif not provider_ready:"))]
+    unknown_controls = section[section.index("elif not provider_known:"):section.index("else:", section.index("elif not provider_known:"))]
     assert "🔧 Исправить настройку" not in unknown_controls
 
 
-def test_confirmed_inactive_provider_state_restores_fix_settings_continuation():
+def test_suspended_provider_state_can_confirm_but_unknown_cannot():
     source = (Path(__file__).resolve().parents[1] / "app/bot/menu.py").read_text()
     section = source[source.index('if action_name == "ads_autopilot_enable_confirm":'):source.index('if action_name == "ads_autopilot_enable":', source.index('if action_name == "ads_autopilot_enable_confirm":'))]
-    inactive_branch = section[section.index("elif provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:"):section.index("elif not provider_ready:", section.index("elif provider_state in _AUTOPILOT_INACTIVE_PROVIDER_STATES:"))]
-    assert '"🔧 Исправить настройку"' in inactive_branch
-    assert '"↻ Проверить ещё раз"' not in inactive_branch
+    assert 'provider_known = provider_state in {"ON", "SUSPENDED"}' in section
+    assert 'eligible = provider_known and not missing' in section
+    assert 'elif not provider_known:' in section
+
+
+def test_final_apply_rechecks_owner_scope_active_link_prerequisites_and_provider():
+    source = (Path(__file__).resolve().parents[1] / "app/bot/runtime.py").read_text()
+    section = source[source.index('elif action.startswith("ads_autopilot_enable_confirm_apply:"):'):source.index('elif action.startswith("ads_autopilot_disable:"):')]
+    for check in (
+        "can_access_ads(str(user_id))", "Channel.admin_id == admin.id",
+        "profile.owner_admin_id != admin.id", "active_links(db",
+        "item.campaign_id == campaign_id", "autopilot_enable_requirements(",
+        "_fresh_campaign_provider_state(", 'provider_state not in {"ON", "SUSPENDED"}',
+    ):
+        assert check in section
+    assert section.index("_fresh_campaign_provider_state(") < section.index("set_mode(db")
+
+
+def test_final_apply_keeps_global_flags_and_provider_execution_separate():
+    runtime = (Path(__file__).resolve().parents[1] / "app/bot/runtime.py").read_text()
+    section = runtime[runtime.index('elif action.startswith("ads_autopilot_enable_confirm_apply:"):'):runtime.index('elif action.startswith("ads_autopilot_disable:"):')]
+    assert "ads_autopilot_enabled =" not in section
+    assert "ads_write_actions_enabled =" not in section
+    assert "run_check(db" in section and "run_bot_check(db" in section
+    assert "provider_execute=" not in section and "yandex_autopilot_adapter" not in section
+
+
+def test_suspended_campaign_blocks_execution_even_if_recommendation_says_provider_ready():
+    assert campaign_state_allows_execution("ON") is True
+    assert campaign_state_allows_execution("SUSPENDED") is False
+    assert campaign_state_allows_execution("UNKNOWN") is False
+
+
+def test_set_mode_does_not_create_experiment_or_mutate_global_master_flags():
+    source = (Path(__file__).resolve().parents[1] / "app/ads/autopilot.py").read_text()
+    section = source[source.index("async def set_mode("):source.index("async def set_budget(")]
+    assert "link.execution_mode = AUTONOMOUS if link is selected else ADVISORY" in section
+    assert "AdsRecommendation(" not in section and "AdsAiOutcome(" not in section
+    assert "ads_autopilot_enabled =" not in section and "ads_write_actions_enabled =" not in section
+
+
+@pytest.mark.asyncio
+async def test_suspended_campaign_can_be_authorized_without_resume_or_experiment_and_isolated():
+    import json
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from app.core.config import settings
+    from app.db.models import Admin, AdsAccount, AdsAiOutcome, AdsCampaign, AdsPromotionCampaignLink, AdsRecommendation, Base, Channel
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    old_flags = (settings.ads_autopilot_enabled, settings.ads_write_actions_enabled)
+    try:
+        async with sessions() as db:
+            admin = Admin(external_id="autopilot-owner-test")
+            db.add(admin)
+            await db.flush()
+            channel = Channel(admin_id=admin.id, external_id="channel-main", title="Main", public_slug="autopilot-main")
+            other_channel = Channel(admin_id=admin.id, external_id="channel-other", title="Other", public_slug="autopilot-other")
+            db.add_all([channel, other_channel])
+            account = AdsAccount(admin_id=admin.id, external_account_id="direct-account")
+            db.add(account)
+            await db.flush()
+            first = AdsCampaign(account_id=account.id, external_id="campaign-suspended", name="Paused", state="SUSPENDED", status="SUSPENDED")
+            second = AdsCampaign(account_id=account.id, external_id="campaign-same-object", name="Other same object", state="ON", status="ON")
+            unrelated = AdsCampaign(account_id=account.id, external_id="campaign-unrelated", name="Unrelated", state="ON", status="ON")
+            db.add_all([first, second, unrelated])
+            await db.flush()
+            links = [
+                AdsPromotionCampaignLink(object_type="CHANNEL", channel_id=channel.id, campaign_id=first.id,
+                    status="ACTIVE", objective_type="max_subscriber", target_cpa=20, experiment_budget_cap=100,
+                    autopilot_config_json=json.dumps({"monthly_budget_limit": 1000, "max_test_spend": 1000}), execution_mode="ADVISORY"),
+                AdsPromotionCampaignLink(object_type="CHANNEL", channel_id=channel.id, campaign_id=second.id,
+                    status="ACTIVE", objective_type="max_subscriber", target_cpa=20, experiment_budget_cap=100,
+                    autopilot_config_json=json.dumps({"monthly_budget_limit": 1000, "max_test_spend": 1000}), execution_mode="AUTONOMOUS"),
+                AdsPromotionCampaignLink(object_type="CHANNEL", channel_id=other_channel.id, campaign_id=unrelated.id,
+                    status="ACTIVE", objective_type="max_subscriber", target_cpa=20, experiment_budget_cap=100,
+                    autopilot_config_json=json.dumps({"monthly_budget_limit": 1000, "max_test_spend": 1000}), execution_mode="AUTONOMOUS"),
+            ]
+            db.add_all(links)
+            await db.flush()
+            result = await set_mode(db, object_type="CHANNEL", object_id=channel.id,
+                                    mode=AUTONOMOUS, campaign_id=first.id)
+            await db.commit()
+            assert result["authorized_campaign_ids"] == [first.id]
+            assert result["execution_readiness"] == "BLOCKED_BY_CAMPAIGN_STATE"
+            assert first.state == "SUSPENDED"
+            refreshed = list((await db.scalars(select(AdsPromotionCampaignLink).order_by(AdsPromotionCampaignLink.id))).all())
+            modes = {item.campaign_id: item.execution_mode for item in refreshed}
+            assert modes[first.id] == AUTONOMOUS
+            assert modes[second.id] == ADVISORY
+            assert modes[unrelated.id] == AUTONOMOUS
+            assert await db.scalar(select(AdsRecommendation.id).limit(1)) is None
+            assert await db.scalar(select(AdsAiOutcome.id).limit(1)) is None
+            assert (settings.ads_autopilot_enabled, settings.ads_write_actions_enabled) == old_flags
+    finally:
+        await engine.dispose()
+
+
+def test_enablement_provider_state_accepts_suspended_but_rejects_unknown():
+    assert 'provider_state not in {"ON", "SUSPENDED"}' in (Path(__file__).resolve().parents[1] / "app/bot/runtime.py").read_text()
 
 
 def test_preflight_retry_is_read_only_and_returns_to_confirmation_renderer():

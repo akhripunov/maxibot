@@ -281,6 +281,22 @@ def test_unified_screen_renders_recommendations_and_autopilot_states():
     assert "↩️ MaxiBot откатил изменение." in failed
 
 
+def test_autonomous_suspended_campaign_shows_paused_execution_and_master_flags():
+    state = _state()
+    state["execution_mode"] = "AUTONOMOUS"
+    state["autopilot"] = {
+        "execution_capability": "DISABLED", "campaign_state": "SUSPENDED",
+        "execution_readiness": "BLOCKED_BY_CAMPAIGN_STATE",
+        "ads_autopilot_enabled": False, "ads_write_actions_enabled": False,
+    }
+    text = format_ads_unified_dashboard(state, title="Москва 365")
+    assert "🚀 Автопилот включён" in text
+    assert "⏸ Выполнение приостановлено: кампания остановлена." in text
+    assert "Системный автопилот: выключен" in text
+    assert "Запись в Директ: выключена" in text
+    assert "Автопилот работает" not in text
+
+
 def test_detail_renderers_preserve_isolation_and_verified_learning_only():
     state = _state("RECOMMENDATION", root="🎨 Креатив A")
     state["active_campaigns"] = [{
