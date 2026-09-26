@@ -241,6 +241,9 @@ async def mark_outcome_completed(db: AsyncSession, outcome: AdsAiOutcome, *, fol
                 await release_experiment_budget(db, recommendation, reason=outcome.evaluation_status or "completed")
         except ImportError:
             pass
+    if outcome.execution_state == "IMPLEMENTED":
+        outcome.execution_state = "COMPLETED"
+        outcome.execution_lease_expires_at = None
     if outcome.evaluation_status in {"SUCCESS", "FAIL"} and recommendation and recommendation.ai_run_id:
         ai = await db.get(AdsAiRun, recommendation.ai_run_id)
         try:

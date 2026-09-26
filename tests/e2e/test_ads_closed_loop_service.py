@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.ads.memory import retrieve
 from app.ads.outcomes import ensure_outcome_checkpoints, mark_outcome_completed, record_implementation_evidence
 from app.ads.service import _active_experiment_exists, _assign_experiment_identity, _closed_loop_context, _context, _experiment_object_lock_key, _experiment_scope_lock_key
+from app.ads.autopilot import _claim_apply_lease, _persist_prewrite_claim
 from app.db.models import AdsAiOutcome, AdsAiRun, AdsAnalysisSnapshot, AdsMemory, AdsMemoryEvidence, AdsRecommendation, Base
 
 
@@ -154,6 +155,124 @@ async def test_business_experiment_sequence_ignores_technical_and_recommendation
     assert next_recommendation.experiment_id == next_recommendation.id
 
 
+async def _claim_fixture(db, suffix: str):
+    ai = AdsAiRun(id=f"ai-claim-{suffix}", promotion_object_type="BOT",
+                  promotion_object_id="bot-claim", campaign_id="campaign-claim")
+    recommendation = AdsRecommendation(
+        id=f"rec-claim-{suffix}", ai_run_id=ai.id, promotion_object_type="BOT",
+        promotion_object_id="bot-claim", action_code="BOUNDED_BUDGET_REALLOCATION",
+        title="Bounded budget test", created_at=datetime.now(timezone.utc),
+    )
+    db.add_all([ai, recommendation])
+    await db.flush()
+    outcome = AdsAiOutcome(recommendation_id=recommendation.id, horizon="7d",
+                           due_at=datetime.now(timezone.utc))
+    db.add(outcome)
+    await db.flush()
+    return recommendation, outcome
+
+
+@pytest.mark.asyncio
+async def test_durable_prewrite_claim_commits_rollback_state_and_execution_identity(db):
+    recommendation, outcome = await _claim_fixture(db, "first")
+    prepared = {
+        "action_type": "BOUNDED_BUDGET_REALLOCATION", "campaign_id": 101,
+        "target": {"weekly_budget_amount": 2000},
+        "before_state": {"campaign": {"WeeklySpendLimit": 1000}},
+        "expected_state": {"budget_value": 2000},
+        "mutation": {"resource": "campaigns", "method": "update"},
+    }
+    claimed, reason = await _persist_prewrite_claim(
+        db, recommendation=recommendation, outcome=outcome, object_type="BOT",
+        object_id="bot-claim", campaign_id="campaign-claim",
+        action_type="BOUNDED_BUDGET_REALLOCATION", execution_key="execution-key-first",
+        prepared=prepared,
+    )
+    assert claimed and reason is None
+    assert recommendation.experiment_id == recommendation.id
+    assert recommendation.experiment_seq == 1
+    assert outcome.execution_state == "CLAIMED"
+    assert outcome.rollback_state_json is not None
+    await db.refresh(outcome)
+    assert "WeeklySpendLimit" in outcome.rollback_state_json
+    assert outcome.execution_claimed_at is not None
+    assert await _claim_apply_lease(db, outcome.id, expected_state="CLAIMED") is True
+    assert await _claim_apply_lease(db, outcome.id, expected_state="CLAIMED") is False
+
+
+@pytest.mark.asyncio
+async def test_active_claim_recheck_denies_second_worker_and_does_not_allocate_identity(db):
+    first, first_outcome = await _claim_fixture(db, "active")
+    second, second_outcome = await _claim_fixture(db, "waiting")
+    prepared = {"before_state": {"ad": {"State": "ON"}}, "expected_state": {"ad_state": "OFF"}}
+    claimed, _ = await _persist_prewrite_claim(
+        db, recommendation=first, outcome=first_outcome, object_type="BOT",
+        object_id="bot-claim", campaign_id="campaign-claim", action_type="PAUSE_AD",
+        execution_key="execution-key-active", prepared=prepared,
+    )
+    assert claimed
+    second_claimed, reason = await _persist_prewrite_claim(
+        db, recommendation=second, outcome=second_outcome, object_type="BOT",
+        object_id="bot-claim", campaign_id="campaign-claim", action_type="PAUSE_AD",
+        execution_key="execution-key-waiting", prepared=prepared,
+    )
+    assert not second_claimed
+    assert reason == "ACTIVE_EXPERIMENT_EXISTS"
+    await db.refresh(second)
+    await db.refresh(second_outcome)
+    assert second.experiment_id is None and second.experiment_seq is None
+    assert second_outcome.execution_key is None
+
+
+@pytest.mark.asyncio
+async def test_crash_before_provider_write_keeps_sequence_reserved_and_no_retry_claim(db):
+    first, outcome = await _claim_fixture(db, "crash")
+    prepared = {"before_state": {"campaign": {"budget": 100}}, "expected_state": {"budget": 200}}
+    claimed, _ = await _persist_prewrite_claim(
+        db, recommendation=first, outcome=outcome, object_type="BOT",
+        object_id="bot-claim", campaign_id="campaign-claim", action_type="BOUNDED_BUDGET_REALLOCATION",
+        execution_key="execution-key-crash", prepared=prepared,
+    )
+    assert claimed
+    next_recommendation, _ = await _claim_fixture(db, "next-after-crash")
+    await _assign_experiment_identity(db, next_recommendation)
+    assert next_recommendation.experiment_seq == 2
+    assert outcome.execution_state == "CLAIMED"  # restart can resume only this identity
+
+
+@pytest.mark.asyncio
+async def test_concurrent_claim_lease_allows_exactly_one_provider_write(tmp_path):
+    import asyncio
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'autopilot-claims.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as db:
+            recommendation, outcome = await _claim_fixture(db, "concurrent")
+            prepared = {"before_state": {"ad": {"State": "ON"}}, "expected_state": {"ad_state": "OFF"}}
+            claimed, _ = await _persist_prewrite_claim(
+                db, recommendation=recommendation, outcome=outcome, object_type="BOT",
+                object_id="bot-claim", campaign_id="campaign-claim", action_type="PAUSE_AD",
+                execution_key="execution-key-concurrent", prepared=prepared,
+            )
+            assert claimed
+            outcome_id = outcome.id
+
+        async def worker():
+            async with sessions() as session:
+                return await _claim_apply_lease(session, outcome_id, expected_state="CLAIMED")
+
+        winners = await asyncio.gather(worker(), worker())
+        provider_write_count = sum(1 for winner in winners if winner)
+        assert sum(winners) == 1
+        assert provider_write_count == 1
+    finally:
+        await engine.dispose()
+
+
+
 @pytest.mark.asyncio
 async def test_active_experiment_blocks_second_experiment_but_completed_allows_next(db):
     ai = AdsAiRun(id="ai-active", promotion_object_type="BOT", promotion_object_id="bot-loop", campaign_id="campaign-loop")
@@ -195,5 +314,6 @@ def test_enable_path_invokes_decision_runner_and_control_plane_is_write_gated():
     assert "await trigger_autopilot_execution(session_factory)" in periodic
     assert "execute_autonomous_action(" in periodic
     assert "_assign_experiment_identity(db, recommendation)" not in service
-    assert "assign_business_experiment_identity" in periodic or "assign_business_experiment_identity" in open("app/ads/autopilot.py", encoding="utf-8").read()
+    assert "provider_prepare=adapter.prepare" in periodic
+    assert "provider_reconcile=adapter.reconcile" in periodic
     assert "ads_write_actions_enabled" in periodic

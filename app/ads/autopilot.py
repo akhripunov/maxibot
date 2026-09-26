@@ -8,13 +8,16 @@ missing.  No table outside the canonical ADS model is introduced.
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -525,6 +528,128 @@ def rollback_for(action_type: str, previous_state: dict[str, Any] | None = None)
     }.get(action_type, "NO_DESTRUCTIVE_ROLLBACK")
 
 
+_ACTIVE_CLAIM_STATES = ("CLAIMED", "APPLYING", "NEEDS_RECONCILIATION", "IMPLEMENTED")
+
+
+def _claim_json(value: Any) -> str:
+    def encode(item: Any) -> Any:
+        if isinstance(item, bytes):
+            return {"__maxibot_bytes_b64__": base64.b64encode(item).decode("ascii")}
+        if isinstance(item, dict):
+            return {str(key): encode(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [encode(child) for child in item]
+        return item
+    return json.dumps(encode(value), ensure_ascii=False, sort_keys=True)
+
+
+def _claim_data(raw: str | None) -> Any:
+    def decode(item: Any) -> Any:
+        if isinstance(item, dict):
+            if set(item) == {"__maxibot_bytes_b64__"}:
+                return base64.b64decode(item["__maxibot_bytes_b64__"])
+            return {key: decode(value) for key, value in item.items()}
+        if isinstance(item, list):
+            return [decode(value) for value in item]
+        return item
+    return decode(json.loads(raw or "null"))
+
+
+def _execution_key(*, recommendation_id: str, object_type: str, object_id: str,
+                   campaign_id: str, action_type: str) -> str:
+    material = "|".join((recommendation_id, object_type.upper(), object_id, campaign_id, action_type.upper()))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+async def _active_business_experiment_exists(
+    db: AsyncSession, *, object_type: str, object_id: str, campaign_id: str,
+    exclude_recommendation_id: str, exclude_outcome_id: str,
+) -> bool:
+    from app.db.models import AdsAiRun
+    object_filter = (AdsAiRun.channel_id == object_id) if object_type == "CHANNEL" else and_(
+        AdsAiRun.promotion_object_type == object_type,
+        AdsAiRun.promotion_object_id == object_id,
+    )
+    active_recommendation = await db.scalar(
+        select(AdsRecommendation.id)
+        .join(AdsAiRun, AdsAiRun.id == AdsRecommendation.ai_run_id)
+        .where(object_filter, AdsAiRun.campaign_id == campaign_id,
+               AdsRecommendation.id != exclude_recommendation_id,
+               AdsRecommendation.experiment_status.in_(("executing", "running", "evaluating", "rolling_back")))
+        .limit(1)
+    )
+    if active_recommendation:
+        return True
+    active_claim = await db.scalar(select(AdsAiOutcome.id).where(
+        AdsAiOutcome.execution_scope_type == object_type,
+        AdsAiOutcome.execution_scope_id == object_id,
+        AdsAiOutcome.execution_campaign_id == campaign_id,
+        AdsAiOutcome.execution_state.in_(_ACTIVE_CLAIM_STATES),
+        AdsAiOutcome.id != exclude_outcome_id,
+    ).limit(1))
+    return bool(active_claim)
+
+
+async def _persist_prewrite_claim(
+    db: AsyncSession, *, recommendation: AdsRecommendation, outcome: AdsAiOutcome,
+    object_type: str, object_id: str, campaign_id: str, action_type: str,
+    execution_key: str, prepared: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Allocate identity and persist an exclusive claim before any provider mutation."""
+    from app.ads.service import _assign_experiment_identity, _lock_experiment_scope
+    await _lock_experiment_scope(db, object_type=object_type, object_id=object_id, campaign_id=campaign_id)
+    await db.refresh(outcome)
+    if outcome.execution_key:
+        await db.rollback()
+        return False, "EXECUTION_CLAIM_EXISTS"
+    if await _active_business_experiment_exists(
+        db, object_type=object_type, object_id=object_id, campaign_id=campaign_id,
+        exclude_recommendation_id=recommendation.id, exclude_outcome_id=outcome.id,
+    ):
+        await db.rollback()
+        return False, "ACTIVE_EXPERIMENT_EXISTS"
+    await _assign_experiment_identity(db, recommendation)
+    now = datetime.now(timezone.utc)
+    recommendation.experiment_status = "executing"
+    outcome.experiment_id = recommendation.experiment_id
+    outcome.execution_key = execution_key
+    outcome.execution_state = "CLAIMED"
+    outcome.execution_status = "CLAIMED"
+    outcome.execution_claimed_at = now
+    outcome.execution_lease_expires_at = None
+    outcome.execution_scope_type = object_type
+    outcome.execution_scope_id = object_id
+    outcome.execution_campaign_id = campaign_id
+    outcome.execution_action_type = action_type
+    outcome.rollback_state_json = _claim_json({
+        "action": rollback_for(action_type), "before_state": prepared.get("before_state"),
+        "target": prepared.get("target"), "execution_key": execution_key,
+        "campaign_id": campaign_id,
+    })
+    outcome.prepared_request_json = _claim_json(prepared)
+    try:
+        await db.flush()
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return False, "ACTIVE_EXPERIMENT_EXISTS"
+    return True, None
+
+
+async def _claim_apply_lease(db: AsyncSession, outcome_id: str, *, expected_state: str) -> bool:
+    now = datetime.now(timezone.utc)
+    result = await db.execute(update(AdsAiOutcome).where(
+        AdsAiOutcome.id == outcome_id,
+        AdsAiOutcome.execution_state == expected_state,
+    ).values(execution_state="APPLYING", execution_status="APPLYING",
+             execution_lease_expires_at=now + timedelta(minutes=5)))
+    if result.rowcount != 1:
+        await db.rollback()
+        return False
+    await db.commit()
+    return True
+
+
 async def execute_autonomous_action(
     db: AsyncSession,
     *,
@@ -537,6 +662,8 @@ async def execute_autonomous_action(
     monthly_spend: float = 0.0,
     proposed_spend: float = 0.0,
     provider_execute: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    provider_prepare: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    provider_reconcile: Callable[[dict[str, Any]], Awaitable[Any]] | None = None,
     outcome: AdsAiOutcome | None = None,
 ) -> ExecutionResult:
     """Execute exactly one allowlisted action after all deterministic gates.
@@ -565,6 +692,9 @@ async def execute_autonomous_action(
     if not campaign or not account:
         reason = "CAMPAIGN_OR_ACCOUNT_NOT_FOUND"
         return ExecutionResult("DENIED", reason, {"status": "EXECUTION_DENIED", "reason": reason, "campaign_id": campaign_id})
+    recommendation = await db.get(AdsRecommendation, outcome.recommendation_id) if outcome else None
+    if outcome and recommendation is None:
+        return ExecutionResult("DENIED", "EXPERIMENT_RECOMMENDATION_NOT_FOUND", {"status": "EXECUTION_DENIED"})
     policy = await promotion_policy(db, object_type=object_type, object_id=object_id)
     selected_link = next((item for item in await object_links(db, object_type=object_type, object_id=object_id)
                           if item.campaign_id == campaign_id), None)
@@ -590,6 +720,11 @@ async def execute_autonomous_action(
     active_experiments = await active_experiment_count_for_scope(
         db, object_type=object_type, object_id=object_id, campaign_id=campaign_id
     )
+    if outcome and outcome.execution_key:
+        # A retry/reconcile of this same durable claim is not a second
+        # experiment competing with itself; scope exclusivity is represented
+        # by its DB-protected claim and rechecked under the advisory lock.
+        active_experiments = 0
     guard = validate_action(execution_mode=AUTONOMOUS, action_type=action_type,
                            data_trust=data_trust, active_experiments=active_experiments,
                            monthly_spend=monthly_spend,
@@ -630,8 +765,8 @@ async def execute_autonomous_action(
             guardrail_evidence["reasons"] = ["ATOMIC_BUDGET_RESERVATION_DENIED"]
             recommendation.guardrail_decision_json = json.dumps(guardrail_evidence, ensure_ascii=False)
             return ExecutionResult("DENIED", "ATOMIC_BUDGET_RESERVATION_DENIED", {"status": "EXECUTION_DENIED", "guardrail": guardrail_evidence})
-    if provider_execute is None:
-        reason = "PROVIDER_EXECUTOR_NOT_CONFIGURED"
+    if provider_execute is None or provider_prepare is None or provider_reconcile is None or outcome is None or recommendation is None:
+        reason = "DURABLE_EXECUTION_CLAIM_ADAPTER_REQUIRED"
         evidence = {"status": "EXECUTION_DENIED", "reason": reason,
                     "campaign_id": campaign_id, "action_type": action_type,
                     "executed_by": "MAXIBOT"}
@@ -640,19 +775,58 @@ async def execute_autonomous_action(
             outcome.implementation_confirmed = "NO"
             outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
         return ExecutionResult("DENIED", reason, evidence)
-    experiment_recommendation = None
-    if outcome:
-        from app.ads.outcomes import assign_business_experiment_identity
-        experiment_recommendation = await assign_business_experiment_identity(db, outcome)
-        experiment_recommendation.experiment_status = "executing"
-    if outcome:
-        recommendation = await db.get(AdsRecommendation, outcome.recommendation_id)
-        if recommendation:
-            recommendation.experiment_status = "executing"
-        await db.flush()
+    execution_key = _execution_key(recommendation_id=recommendation.id, object_type=object_type,
+                                   object_id=object_id, campaign_id=campaign_id, action_type=action_type)
+    existing_claim = bool(outcome.execution_key)
+    if existing_claim and outcome.execution_key != execution_key:
+        return ExecutionResult("DENIED", "EXECUTION_KEY_MISMATCH", {"status": "EXECUTION_DENIED"})
+    prepared = _claim_data(outcome.prepared_request_json) if existing_claim else None
+    if existing_claim:
+        state = str(outcome.execution_state or "").upper()
+        if state in {"IMPLEMENTED", "COMPLETED", "ROLLED_BACK"}:
+            return ExecutionResult("DENIED", "EXECUTION_ALREADY_CLAIMED", {"status": state, "execution_key": execution_key})
+        if state == "APPLYING":
+            expires = outcome.execution_lease_expires_at
+            if expires and expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires and expires > datetime.now(timezone.utc):
+                return ExecutionResult("DENIED", "EXECUTION_IN_PROGRESS", {"status": "APPLYING", "execution_key": execution_key})
+        if state in {"APPLYING", "NEEDS_RECONCILIATION"}:
+            try:
+                reconciliation = await provider_reconcile(prepared)
+                reconcile_status = str(reconciliation.get("status") if isinstance(reconciliation, dict) else reconciliation).upper()
+            except Exception:
+                reconcile_status = "UNKNOWN"
+            if reconcile_status == "APPLIED":
+                response = reconciliation if isinstance(reconciliation, dict) else {"reconciled": True, "verified_after_state": prepared.get("expected_state")}
+                request = {"execution_key": execution_key, "action_type": action_type,
+                           "campaign_id": campaign_id, "object_type": object_type, "object_id": object_id}
+                # Continue through the normal confirmation path below without
+                # resending the provider mutation.
+            elif reconcile_status == "NOT_APPLIED_SAFE_TO_RETRY":
+                if not await _claim_apply_lease(db, outcome.id, expected_state=state):
+                    return ExecutionResult("DENIED", "EXECUTION_IN_PROGRESS", {"status": state})
+                response = None
+            else:
+                outcome.execution_state = "NEEDS_RECONCILIATION"
+                outcome.execution_status = "NEEDS_RECONCILIATION"
+                outcome.execution_lease_expires_at = None
+                outcome.implementation_confirmed = "UNKNOWN"
+                await db.commit()
+                return ExecutionResult("DENIED", "NEEDS_RECONCILIATION", {"status": "NEEDS_RECONCILIATION", "execution_key": execution_key})
+        elif state == "CLAIMED":
+            if not await _claim_apply_lease(db, outcome.id, expected_state="CLAIMED"):
+                return ExecutionResult("DENIED", "EXECUTION_IN_PROGRESS", {"status": "APPLYING"})
+            response = None
+        else:
+            outcome.execution_state = "NEEDS_RECONCILIATION"
+            outcome.execution_status = "NEEDS_RECONCILIATION"
+            outcome.execution_lease_expires_at = None
+            await db.commit()
+            return ExecutionResult("DENIED", "NEEDS_RECONCILIATION", {"status": state or "UNKNOWN"})
     else:
-        recommendation = None
-    if action_type == "CREATE_CREATIVE_TEST":
+        response = None
+    if action_type == "CREATE_CREATIVE_TEST" and not existing_claim:
         if not recommendation:
             return ExecutionResult("DENIED", "CREATIVE_EXPERIMENT_RECOMMENDATION_REQUIRED", {"status": "EXECUTION_DENIED", "reason": "CREATIVE_EXPERIMENT_RECOMMENDATION_REQUIRED"})
         if not isinstance(target.get("ad_payload"), dict):
@@ -715,26 +889,39 @@ async def execute_autonomous_action(
                "campaign_id": campaign_id, "provider_account_id": account.external_account_id,
                "provider_campaign_id": campaign.external_id,
                "action_type": action_type, "target": provider_target,
+               "execution_key": execution_key,
                "rollback": rollback_for(action_type, target),
                "executed_by": "MAXIBOT", "scope_check": "AUTOPILOT_CAMPAIGN_SCOPE_CHECK_PASS"}
-    try:
-        response = await provider_execute(request)
-    except Exception as exc:
-        evidence = {**request, "status": "EXECUTION_FAILED", "reason": type(exc).__name__}
-        if outcome:
-            outcome.execution_status = "FAILED"
-            outcome.implementation_confirmed = "NO"
-            outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
-            if experiment_recommendation:
-                experiment_recommendation.experiment_id = None
-                experiment_recommendation.experiment_seq = None
-                experiment_recommendation.experiment_status = "completed"
-                siblings = list((await db.scalars(select(AdsAiOutcome).where(
-                    AdsAiOutcome.recommendation_id == experiment_recommendation.id
-                ))).all())
-                for sibling in siblings:
-                    sibling.experiment_id = None
-        return ExecutionResult("FAILED", type(exc).__name__, evidence)
+    if not existing_claim:
+        try:
+            prepared = await provider_prepare(request)
+        except Exception as exc:
+            return ExecutionResult("DENIED", "PROVIDER_PREPARE_FAILED", {"reason": type(exc).__name__})
+        if not isinstance(prepared, dict) or not isinstance(prepared.get("before_state"), dict):
+            return ExecutionResult("DENIED", "PROVIDER_PREPARE_INCOMPLETE", {"status": "EXECUTION_DENIED"})
+        claimed, reason = await _persist_prewrite_claim(
+            db, recommendation=recommendation, outcome=outcome, object_type=object_type,
+            object_id=object_id, campaign_id=campaign_id, action_type=action_type,
+            execution_key=execution_key, prepared=prepared,
+        )
+        if not claimed:
+            return ExecutionResult("DENIED", reason or "ACTIVE_EXPERIMENT_EXISTS", {"status": "EXECUTION_DENIED"})
+        if not await _claim_apply_lease(db, outcome.id, expected_state="CLAIMED"):
+            return ExecutionResult("DENIED", "EXECUTION_IN_PROGRESS", {"status": "CLAIMED"})
+    if response is None:
+        try:
+            response = await provider_execute(prepared)
+        except Exception as exc:
+            outcome.execution_state = "NEEDS_RECONCILIATION"
+            outcome.execution_status = "NEEDS_RECONCILIATION"
+            outcome.execution_lease_expires_at = None
+            outcome.implementation_confirmed = "UNKNOWN"
+            outcome.implementation_evidence_json = _claim_json({
+                "execution_key": execution_key, "action_type": action_type,
+                "status": "PROVIDER_RESULT_UNKNOWN", "reason": type(exc).__name__,
+            })
+            await db.commit()
+            return ExecutionResult("DENIED", "NEEDS_RECONCILIATION", {"status": "NEEDS_RECONCILIATION", "execution_key": execution_key})
     evidence = {**request, "status": "IMPLEMENTED", **(response or {}),
                 "executed_at": datetime.now(timezone.utc).isoformat()}
     if outcome:
@@ -764,6 +951,9 @@ async def execute_autonomous_action(
         outcome.execution_status = "IMPLEMENTED"
         outcome.implementation_confirmed = "YES"
         outcome.implementation_evidence_json = json.dumps(evidence, ensure_ascii=False)
+        outcome.execution_state = "IMPLEMENTED"
+        outcome.execution_lease_expires_at = None
+        await db.commit()
     return ExecutionResult("IMPLEMENTED", "PROVIDER_CONFIRMED", evidence)
 
 
@@ -792,6 +982,8 @@ async def rollback_autonomous_action(
     completed = {"status": "ROLLED_BACK", "rollback_of": evidence, "rollback": result,
                  "executed_by": "MAXIBOT", "executed_at": datetime.now(timezone.utc).isoformat()}
     outcome.execution_status = "ROLLED_BACK"
+    outcome.execution_state = "ROLLED_BACK"
+    outcome.execution_lease_expires_at = None
     outcome.implementation_confirmed = "YES"
     outcome.implementation_evidence_json = json.dumps(completed, ensure_ascii=False)
     if recommendation:

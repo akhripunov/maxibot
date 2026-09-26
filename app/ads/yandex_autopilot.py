@@ -151,19 +151,227 @@ class YandexAutopilotAdapter:
     def __init__(self, client: YandexDirectClient):
         self.client = client
 
-    async def execute(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def prepare(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Build a read-only, rollback-complete mutation plan for a durable claim."""
         action = str(request.get("action_type") or "").upper()
         target = deepcopy(request.get("target") or {})
         campaign_id = _id(target.get("provider_campaign_id") or request.get("provider_campaign_id"), "PROVIDER_CAMPAIGN_ID")
         if action in {"PAUSE_AD", "ENABLE_AD"}:
-            return await self._ad_state(action, campaign_id, target)
+            ad_id = _id(target.get("ad_id"), "AD_ID")
+            before = await self._ad(campaign_id, ad_id)
+            expected = "OFF" if action == "PAUSE_AD" else "ON"
+            method = "suspend" if action == "PAUSE_AD" else "resume"
+            mutation = {"resource": "ads", "method": method, "params": {"SelectionCriteria": {"Ids": [ad_id]}}}
+            return self._prepared(action, campaign_id, target, {"ad": before}, {"ad_state": expected}, mutation)
         if action in {"EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT"}:
-            return await self._placement(action, campaign_id, target)
+            placement = str(target.get("placement") or "").strip()
+            if not placement or len(placement) > 255:
+                raise ValueError("PLACEMENT_REQUIRED")
+            before = await self._campaign(campaign_id)
+            old = _items(before, "ExcludedSites")
+            items = list(dict.fromkeys(old + [placement])) if action == "EXCLUDE_PLACEMENT" else [item for item in old if item != placement]
+            if len(items) > 1000:
+                raise ValueError("EXCLUDED_SITES_LIMIT")
+            mutation = {"resource": "campaigns", "method": "update", "params": {"Campaigns": [{"Id": campaign_id, "ExcludedSites": {"Items": items}}]}}
+            return self._prepared(action, campaign_id, target, {"campaign": before}, {"excluded_sites": items}, mutation)
         if action == "BOUNDED_BUDGET_REALLOCATION":
-            return await self._budget(campaign_id, target)
+            return await self._prepare_budget(campaign_id, target)
         if action in {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"}:
-            return await self._create_ad_test(action, campaign_id, target)
+            return await self._prepare_create_ad_test(action, campaign_id, target)
         raise ValueError("ACTION_NOT_ALLOWLISTED")
+
+    @staticmethod
+    def _prepared(action: str, campaign_id: int, target: dict[str, Any], before: dict[str, Any], expected: dict[str, Any], mutation: dict[str, Any]) -> dict[str, Any]:
+        return {"action_type": action, "campaign_id": campaign_id, "target": target,
+                "before_state": before, "expected_state": expected, "mutation": mutation}
+
+    async def apply_prepared(self, prepared: dict[str, Any]) -> dict[str, Any]:
+        """Apply only after the caller has durably committed the execution claim."""
+        action = prepared["action_type"]
+        campaign_id = _id(prepared["campaign_id"], "PROVIDER_CAMPAIGN_ID")
+        before = prepared["before_state"]
+        mutation = prepared["mutation"]
+        if action in {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"}:
+            ad_group_id = _id(prepared["target"].get("ad_group_id"), "AD_GROUP_ID")
+            get_groups = getattr(self.client, "get_ad_groups_by_ids", None)
+            if get_groups is None:
+                raise ProviderVerificationError("AD_GROUP_OWNERSHIP_READ_UNAVAILABLE")
+            groups = await get_groups([ad_group_id])
+            group = next((row for row in groups if int(row.get("Id", 0)) == ad_group_id), None)
+            if not group or int(group.get("CampaignId", 0)) != campaign_id:
+                raise ProviderVerificationError("AD_GROUP_CAMPAIGN_SCOPE_NOT_VERIFIED")
+            return await self._apply_create_ad(prepared)
+        current = await self._read_prepared_state(prepared)
+        if self._state_matches(current, prepared["expected_state"]):
+            return {"before_state": before, "requested_mutation": mutation,
+                    "verified_after_state": current, "already_applied": True}
+        if not self._state_matches(current, before):
+            raise ProviderVerificationError("PROVIDER_PRECONDITION_DRIFT")
+        if action in {"PAUSE_AD", "ENABLE_AD", "EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT", "BOUNDED_BUDGET_REALLOCATION"}:
+            response = await self.client.mutate(mutation["resource"], method=mutation["method"], params=mutation["params"])
+            after = await self._read_prepared_state(prepared)
+            if not self._state_matches(after, prepared["expected_state"]):
+                raise ProviderVerificationError("PROVIDER_MUTATION_NOT_VERIFIED")
+            return {"before_state": before, "requested_mutation": mutation,
+                    "provider_response": response, "verified_after_state": after}
+        raise ValueError("ACTION_NOT_ALLOWLISTED")
+
+    async def _apply_create_ad(self, prepared: dict[str, Any]) -> dict[str, Any]:
+        action = prepared["action_type"]
+        campaign_id = int(prepared["campaign_id"])
+        target = prepared["target"]
+        mutation = prepared["mutation"]
+        image_hash = target.get("provider_image_hash")
+        image_bytes = target.get("image_bytes")
+        if image_bytes and not image_hash:
+            add_image = getattr(self.client, "add_ad_image", None)
+            if add_image is None:
+                raise ProviderVerificationError("PROVIDER_IMAGE_UPLOAD_UNAVAILABLE")
+            image_result = await add_image(image_bytes)
+            rows = image_result.get("AddResults") or image_result.get("addResults") or []
+            image_hash = rows[0].get("AdImageHash") if rows and isinstance(rows[0], dict) else None
+            if not image_hash:
+                raise ProviderVerificationError("PROVIDER_IMAGE_ID_MISSING")
+        ad = deepcopy(mutation["ad"])
+        if image_hash:
+            for key in ("TextImageAd", "TextAd", "TextAdBuilderAd", "ResponsiveAd"):
+                if isinstance(ad.get(key), dict):
+                    ad[key].setdefault("AdImageHash", image_hash)
+        response = await self.client.mutate("ads", method="add", params={"Ads": [ad]})
+        created_ad_id = _result_id(response)
+        after_ad = await self._ad(campaign_id, created_ad_id)
+        lifecycle = provider_lifecycle(after_ad, created=True)
+        return {"before_state": prepared["before_state"], "requested_mutation": mutation,
+                "provider_response": response,
+                "verified_after_state": {"created_ad_id": created_ad_id, "ad": after_ad,
+                                         "provider_lifecycle": lifecycle,
+                                         "provider_image_hash": image_hash,
+                                         "measurement_started_at": measurement_start(lifecycle).isoformat() if measurement_start(lifecycle) else None}}
+
+    async def reconcile(self, prepared: dict[str, Any]) -> dict[str, Any]:
+        """Read-only crash reconciliation: APPLIED, NOT_APPLIED_SAFE_TO_RETRY, UNKNOWN."""
+        if prepared.get("action_type") in {"CREATE_AD_TEST", "CREATE_CREATIVE_TEST"}:
+            # Direct has no idempotency token for Ads.add and this adapter
+            # cannot prove whether an accepted create was lost before DB ack.
+            return {"status": "UNKNOWN"}
+        try:
+            current = await self._read_prepared_state(prepared)
+        except Exception:
+            return {"status": "UNKNOWN"}
+        if self._state_matches(current, prepared["expected_state"]):
+            return {"status": "APPLIED", "verified_after_state": current, "reconciled": True}
+        if self._state_matches(current, prepared["before_state"]):
+            return {"status": "NOT_APPLIED_SAFE_TO_RETRY", "observed_state": current}
+        return {"status": "UNKNOWN", "observed_state": current}
+
+    async def _read_prepared_state(self, prepared: dict[str, Any]) -> dict[str, Any]:
+        action = prepared["action_type"]
+        campaign_id = int(prepared["campaign_id"])
+        if action in {"PAUSE_AD", "ENABLE_AD"}:
+            return {"ad": await self._ad(campaign_id, _id(prepared["target"].get("ad_id"), "AD_ID"))}
+        campaign = await self._campaign(campaign_id)
+        if action in {"EXCLUDE_PLACEMENT", "RESTORE_PLACEMENT"}:
+            return {"excluded_sites": _items(campaign, "ExcludedSites")}
+        if action == "BOUNDED_BUDGET_REALLOCATION":
+            route = _network_strategy(campaign)
+            return {"campaign": campaign, "budget_strategy": route[0] if route else None,
+                    "budget_value": (route[1].get("WeeklySpendLimit") if route and route[0] != "DAILY_BUDGET" else (campaign.get("DailyBudget") or {}).get("Amount") if route else None)}
+        return {"campaign": campaign}
+
+    @staticmethod
+    def _state_matches(current: dict[str, Any], expected: dict[str, Any]) -> bool:
+        if "ad_state" in expected:
+            return str((current.get("ad") or {}).get("State") or "").upper() == expected["ad_state"]
+        if "ad" in expected:
+            return current.get("ad") == expected.get("ad")
+        if "excluded_sites" in expected:
+            current_sites = current.get("excluded_sites")
+            if current_sites is None and isinstance(current.get("campaign"), dict):
+                current_sites = _items(current["campaign"], "ExcludedSites")
+            return sorted(current_sites or []) == sorted(expected["excluded_sites"])
+        if "budget_strategy" in expected:
+            strategy = current.get("budget_strategy")
+            value = current.get("budget_value")
+            if strategy is None and isinstance(current.get("campaign"), dict):
+                route = _network_strategy(current["campaign"])
+                strategy = route[0] if route else None
+                value = (route[1].get("WeeklySpendLimit") if route and route[0] != "DAILY_BUDGET" else (current["campaign"].get("DailyBudget") or {}).get("Amount") if route else None)
+            return strategy == expected["budget_strategy"] and value == expected.get("budget_value")
+        if "campaign" in expected and current.get("excluded_sites") is not None:
+            return sorted(current.get("excluded_sites") or []) == sorted(
+                _items(expected["campaign"], "ExcludedSites")
+            )
+        if "campaign" in expected:
+            return current.get("campaign") == expected.get("campaign")
+        return False
+
+    async def _prepare_budget(self, campaign_id: int, target: dict[str, Any]) -> dict[str, Any]:
+        before = await self._campaign(campaign_id)
+        expected_strategy = str(target.get("expected_strategy_type") or "").upper()
+        observed_network = (((before.get("TextCampaign") or {}).get("BiddingStrategy") or {}).get("Network") or {})
+        observed_strategy = str(observed_network.get("BiddingStrategyType") or "").upper()
+        if expected_strategy and expected_strategy != observed_strategy:
+            raise ProviderVerificationError("PROVIDER_CONFIG_DRIFT")
+        route = _network_strategy(before)
+        if route and route[0] in {"PAY_FOR_CONVERSION", "WB_MAXIMUM_CONVERSION_RATE"}:
+            strategy_name, current_settings, _ = route
+            amount = _micros(target.get("weekly_budget_amount"), "WEEKLY_BUDGET_AMOUNT")
+            cpa = current_settings.get("Cpa")
+            if strategy_name == "PAY_FOR_CONVERSION" and cpa is not None and amount < int(cpa) * 20:
+                raise ValueError("WEEKLY_BUDGET_BELOW_CPA_MINIMUM")
+            expected_field = str(target.get("expected_budget_field") or "")
+            expected_current = target.get("expected_current_weekly_budget_micros")
+            actual_field = f"TextCampaign.BiddingStrategy.Network.{strategy_name.title().replace('_', '')}.WeeklySpendLimit"
+            if expected_field and expected_field not in {actual_field, f"{strategy_name}.WeeklySpendLimit"}:
+                raise ProviderVerificationError("PROVIDER_CONFIG_DRIFT")
+            current_amount = current_settings.get("WeeklySpendLimit")
+            if current_amount is None or (expected_current is not None and int(expected_current) != int(current_amount)):
+                raise ProviderVerificationError("PROVIDER_CONFIG_DRIFT" if expected_current is not None else "BUDGET_FIELD_UNAVAILABLE")
+            max_change = target.get("max_budget_change_percent")
+            if max_change is not None and abs(amount - int(current_amount)) / int(current_amount) * 100 > float(max_change):
+                raise ValueError("BUDGET_CHANGE_EXCEEDS_BOUND")
+            strategy = deepcopy((before.get("TextCampaign") or {}).get("BiddingStrategy") or {})
+            network = strategy.setdefault("Network", {})
+            key = "PayForConversion" if strategy_name == "PAY_FOR_CONVERSION" else "WbMaximumConversionRate"
+            changed = deepcopy(network.get(key) or {})
+            changed["WeeklySpendLimit"] = amount
+            network["BiddingStrategyType"] = strategy_name
+            network[key] = changed
+            payload = {"Id": campaign_id, "TextCampaign": {"BiddingStrategy": strategy}}
+            expected = {"budget_strategy": strategy_name, "budget_value": amount}
+            mutation = {"resource": "campaigns", "method": "update", "params": {"Campaigns": [payload]}}
+            return self._prepared("BOUNDED_BUDGET_REALLOCATION", campaign_id, target, {"campaign": before}, expected, mutation)
+        amount = _id(target.get("daily_budget_amount"), "DAILY_BUDGET_AMOUNT")
+        mode = str(target.get("daily_budget_mode") or "STANDARD").upper()
+        if mode not in {"STANDARD", "DISTRIBUTED"}:
+            raise ValueError("DAILY_BUDGET_MODE_INVALID")
+        budget = {"Amount": amount, "Mode": mode}
+        mutation = {"resource": "campaigns", "method": "update", "params": {"Campaigns": [{"Id": campaign_id, "DailyBudget": budget}]}}
+        return self._prepared("BOUNDED_BUDGET_REALLOCATION", campaign_id, target, {"campaign": before}, {"budget_strategy": "DAILY_BUDGET", "budget_value": amount}, mutation)
+
+    async def _prepare_create_ad_test(self, action: str, campaign_id: int, target: dict[str, Any]) -> dict[str, Any]:
+        ad_group_id = _id(target.get("ad_group_id"), "AD_GROUP_ID")
+        ad_payload = target.get("ad_payload")
+        if not isinstance(ad_payload, dict) or not any(key in ad_payload for key in ("TextAd", "TextImageAd", "TextAdBuilderAd", "ResponsiveAd")):
+            raise ValueError("TEST_AD_PAYLOAD_REQUIRED")
+        control_ad_id = target.get("control_ad_id")
+        control = await self._ad(campaign_id, _id(control_ad_id, "CONTROL_AD_ID")) if control_ad_id else None
+        get_groups = getattr(self.client, "get_ad_groups_by_ids", None)
+        if get_groups is None:
+            raise ProviderVerificationError("AD_GROUP_OWNERSHIP_READ_UNAVAILABLE")
+        groups = await get_groups([ad_group_id])
+        group = next((row for row in groups if int(row.get("Id", 0)) == ad_group_id), None)
+        if not group or int(group.get("CampaignId", 0)) != campaign_id:
+            raise ProviderVerificationError("AD_GROUP_CAMPAIGN_SCOPE_NOT_VERIFIED")
+        image_bytes = target.get("image_bytes")
+        if image_bytes and not target.get("provider_image_hash") and getattr(self.client, "add_ad_image", None) is None:
+            raise ProviderVerificationError("PROVIDER_IMAGE_UPLOAD_UNAVAILABLE")
+        request_ad = {"AdGroupId": ad_group_id, **deepcopy(ad_payload)}
+        mutation = {"resource": "ads", "method": "add", "ad": request_ad, "ad_group_id": ad_group_id, "action": action}
+        return self._prepared(action, campaign_id, target, {"campaign": None, "control_ad": control}, {"created_ad": True}, mutation)
+
+    async def execute(self, request: dict[str, Any]) -> dict[str, Any]:
+        raise PermissionError("DURABLE_EXECUTION_CLAIM_REQUIRED")
 
     async def refresh_ad_lifecycle(self, campaign_id: int | str, ad_id: int | str) -> dict[str, Any]:
         """Reread a created treatment and expose the canonical moderation state."""

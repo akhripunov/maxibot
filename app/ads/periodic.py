@@ -691,7 +691,10 @@ async def trigger_autopilot_execution(session_factory) -> int:
                     db, object_type=object_type, object_id=object_id, campaign_id=ai_run.campaign_id,
                     action_type=action_type, target=target, data_trust="GOOD",
                     proposed_spend=float(payload.get("proposed_spend") or 0),
-                    provider_execute=adapter.execute, outcome=outcome,
+                    provider_prepare=adapter.prepare,
+                    provider_execute=adapter.apply_prepared,
+                    provider_reconcile=adapter.reconcile,
+                    outcome=outcome,
                 )
                 await db.commit()
                 executed += int(result.status == "IMPLEMENTED")

@@ -99,8 +99,11 @@ async def _assign_experiment_identity(db: AsyncSession, recommendation: AdsRecom
             AdsRecommendation.experiment_seq.is_not(None),
             or_(AdsRecommendation.experiment_kind.is_(None),
                 ~AdsRecommendation.experiment_kind.ilike("TECHNICAL%")),
-            AdsAiOutcome.implementation_confirmed == "YES",
-            AdsAiOutcome.execution_status.in_(("IMPLEMENTED", "FINALIZED", "ROLLED_BACK")),
+            or_(
+                and_(AdsAiOutcome.implementation_confirmed == "YES",
+                     AdsAiOutcome.execution_status.in_(("IMPLEMENTED", "FINALIZED", "ROLLED_BACK"))),
+                AdsAiOutcome.execution_state.is_not(None),
+            ),
         )
     )
     recommendation.experiment_id = recommendation.id

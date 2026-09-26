@@ -1060,13 +1060,35 @@ class AdsAiOutcome(Base):
     evaluation_status: Mapped[Optional[str]] = mapped_column(String(24), index=True)
     implementation_confirmed: Mapped[str] = mapped_column(String(16), default="UNKNOWN", nullable=False)
     implementation_evidence_json: Mapped[Optional[str]] = mapped_column(Text)
+    # Durable Autopilot write claim.  These fields are populated and committed
+    # before a provider mutation; NULL keeps historical/recommendation-only
+    # outcomes outside execution idempotency and active-scope constraints.
+    execution_key: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True)
+    execution_state: Mapped[Optional[str]] = mapped_column(String(32), index=True)
+    execution_claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    execution_lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True)
+    execution_scope_type: Mapped[Optional[str]] = mapped_column(String(16))
+    execution_scope_id: Mapped[Optional[str]] = mapped_column(String(36))
+    execution_campaign_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
+    execution_action_type: Mapped[Optional[str]] = mapped_column(String(64))
+    rollback_state_json: Mapped[Optional[str]] = mapped_column(Text)
+    prepared_request_json: Mapped[Optional[str]] = mapped_column(Text)
     baseline_metrics_json: Mapped[Optional[str]] = mapped_column(Text)
     expected_direction: Mapped[Optional[str]] = mapped_column(String(16))
     expected_impact_json: Mapped[Optional[str]] = mapped_column(Text)
     actual_metrics_json: Mapped[Optional[str]] = mapped_column(Text)
     confidence: Mapped[Optional[str]] = mapped_column(String(16))
     reason_json: Mapped[Optional[str]] = mapped_column(Text)
-    __table_args__ = (UniqueConstraint("recommendation_id", "horizon", name="uq_ads_ai_outcome_horizon"),)
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "horizon", name="uq_ads_ai_outcome_horizon"),
+        Index(
+            "uq_ads_ai_outcome_active_execution_scope",
+            "execution_scope_type", "execution_scope_id", "execution_campaign_id",
+            unique=True,
+            postgresql_where=sa.text("execution_state IN ('CLAIMED','APPLYING','NEEDS_RECONCILIATION','IMPLEMENTED')"),
+            sqlite_where=sa.text("execution_state IN ('CLAIMED','APPLYING','NEEDS_RECONCILIATION','IMPLEMENTED')"),
+        ),
+    )
 
 
 class AdsAiRun(Base):

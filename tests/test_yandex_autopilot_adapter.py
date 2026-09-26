@@ -3,10 +3,17 @@ import pytest
 from app.ads.yandex_autopilot import YandexAutopilotAdapter, budget_capability_attestation, record_strategy_observation
 
 
+async def _execute(adapter, request):
+    """Exercise the adapter plan/apply API used behind the durable claim."""
+    prepared = await adapter.prepare(request)
+    return await adapter.apply_prepared(prepared)
+
+
 class FakeDirect:
     def __init__(self):
         self.ads = {11: {"Id": 11, "CampaignId": 101, "State": "ON", "Status": "ACCEPTED"}}
         self.campaign = {"Id": 101, "ExcludedSites": {"Items": []}, "DailyBudget": {"Amount": 1_000_000, "Mode": "STANDARD"}}
+        self.mutation_count = 0
 
     async def get_ads_by_ids(self, ids):
         return [dict(self.ads[item]) for item in ids if item in self.ads]
@@ -14,7 +21,11 @@ class FakeDirect:
     async def get_campaign_configuration(self, campaign_id):
         return dict(self.campaign) if int(campaign_id) == 101 else None
 
+    async def get_ad_groups_by_ids(self, ids):
+        return [{"Id": item, "CampaignId": 101} for item in ids]
+
     async def mutate(self, resource, *, method, params):
+        self.mutation_count += 1
         if resource == "ads" and method in {"suspend", "resume"}:
             for item in params["SelectionCriteria"]["Ids"]:
                 self.ads[item]["State"] = "OFF" if method == "suspend" else "ON"
@@ -33,9 +44,37 @@ class FakeDirect:
 
 
 @pytest.mark.asyncio
+async def test_provider_success_with_lost_confirmation_reconciles_without_retry():
+    direct = FakeDirect()
+    adapter = YandexAutopilotAdapter(direct)
+    request = {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+               "target": {"daily_budget_amount": 2_000_000}}
+    prepared = await adapter.prepare(request)
+    applied = await adapter.apply_prepared(prepared)
+    assert applied["verified_after_state"]["campaign"]["DailyBudget"]["Amount"] == 2_000_000
+    writes_after_provider_success = direct.mutation_count
+
+    # Simulate process death after provider accepted the mutation but before
+    # the execution confirmation committed to MaxiBot's database.
+    reconciliation = await adapter.reconcile(prepared)
+    assert reconciliation["status"] == "APPLIED"
+    assert direct.mutation_count == writes_after_provider_success == 1
+
+
+@pytest.mark.asyncio
+async def test_create_ad_reconciliation_fails_closed_when_provider_result_is_ambiguous():
+    adapter = YandexAutopilotAdapter(FakeDirect())
+    prepared = await adapter.prepare({
+        "action_type": "CREATE_AD_TEST", "provider_campaign_id": 101,
+        "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Test", "Text": "Text", "Href": "https://example.test"}}},
+    })
+    assert (await adapter.reconcile(prepared))["status"] == "UNKNOWN"
+
+
+@pytest.mark.asyncio
 async def test_pause_ad_collects_verified_before_after_and_real_rollback():
     adapter = YandexAutopilotAdapter(FakeDirect())
-    result = await adapter.execute({"action_type": "PAUSE_AD", "provider_campaign_id": 101, "target": {"ad_id": 11}})
+    result = await _execute(adapter, {"action_type": "PAUSE_AD", "provider_campaign_id": 101, "target": {"ad_id": 11}})
     assert result["before_state"]["ad"]["State"] == "ON"
     assert result["verified_after_state"]["ad"]["State"] == "OFF"
     rollback = await adapter.rollback({"action_type": "PAUSE_AD", "target": {"provider_campaign_id": 101, "ad_id": 11}, "before_state": result["before_state"]})
@@ -48,18 +87,18 @@ async def test_enable_ad_and_restore_placement_are_verified():
     direct.ads[11]["State"] = "OFF"
     direct.campaign["ExcludedSites"] = {"Items": ["example.test"]}
     adapter = YandexAutopilotAdapter(direct)
-    enabled = await adapter.execute({"action_type": "ENABLE_AD", "provider_campaign_id": 101, "target": {"ad_id": 11}})
+    enabled = await _execute(adapter, {"action_type": "ENABLE_AD", "provider_campaign_id": 101, "target": {"ad_id": 11}})
     assert enabled["verified_after_state"]["ad"]["State"] == "ON"
-    restored = await adapter.execute({"action_type": "RESTORE_PLACEMENT", "provider_campaign_id": 101, "target": {"placement": "example.test"}})
-    assert restored["verified_after_state"]["campaign"]["ExcludedSites"]["Items"] == []
+    restored = await _execute(adapter, {"action_type": "RESTORE_PLACEMENT", "provider_campaign_id": 101, "target": {"placement": "example.test"}})
+    assert restored["verified_after_state"]["excluded_sites"] == []
 
 
 @pytest.mark.asyncio
 async def test_placement_and_budget_mutations_verify_provider_state():
     adapter = YandexAutopilotAdapter(FakeDirect())
-    placement = await adapter.execute({"action_type": "EXCLUDE_PLACEMENT", "provider_campaign_id": 101, "target": {"placement": "example.test"}})
-    assert placement["verified_after_state"]["campaign"]["ExcludedSites"]["Items"] == ["example.test"]
-    budget = await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101, "target": {"daily_budget_amount": 2_000_000}})
+    placement = await _execute(adapter, {"action_type": "EXCLUDE_PLACEMENT", "provider_campaign_id": 101, "target": {"placement": "example.test"}})
+    assert placement["verified_after_state"]["excluded_sites"] == ["example.test"]
+    budget = await _execute(adapter, {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101, "target": {"daily_budget_amount": 2_000_000}})
     assert budget["verified_after_state"]["campaign"]["DailyBudget"]["Amount"] == 2_000_000
 
 
@@ -96,7 +135,7 @@ class WbMaximumConversionRateDirect(PayForConversionDirect):
 @pytest.mark.parametrize("amount,micros", [(2020, 2_020_000_000), (1800, 1_800_000_000)])
 async def test_wb_maximum_conversion_rate_uses_strategy_specific_weekly_budget(amount, micros):
     direct = WbMaximumConversionRateDirect()
-    result = await YandexAutopilotAdapter(direct).execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+    result = await _execute(YandexAutopilotAdapter(direct), {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
         "target": {"weekly_budget_amount": amount, "expected_strategy_type": "WB_MAXIMUM_CONVERSION_RATE", "expected_current_weekly_budget_micros": 2_000_000_000}})
     network = result["verified_after_state"]["campaign"]["TextCampaign"]["BiddingStrategy"]["Network"]
     assert network["WbMaximumConversionRate"]["WeeklySpendLimit"] == micros
@@ -108,7 +147,7 @@ async def test_wb_maximum_conversion_rate_uses_strategy_specific_weekly_budget(a
 async def test_wb_budget_rollback_restores_exact_weekly_limit():
     direct = WbMaximumConversionRateDirect()
     adapter = YandexAutopilotAdapter(direct)
-    result = await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101, "target": {"weekly_budget_amount": 2020}})
+    result = await _execute(adapter, {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101, "target": {"weekly_budget_amount": 2020}})
     rollback = await adapter.rollback({"action_type": "BOUNDED_BUDGET_REALLOCATION", "target": {"provider_campaign_id": 101}, "before_state": result["before_state"]})
     assert rollback["verified_after_state"]["campaign"]["TextCampaign"]["BiddingStrategy"]["Network"]["WbMaximumConversionRate"]["WeeklySpendLimit"] == 2_000_000_000
 
@@ -116,7 +155,7 @@ async def test_wb_budget_rollback_restores_exact_weekly_limit():
 @pytest.mark.asyncio
 async def test_wb_budget_change_over_bound_is_denied():
     with pytest.raises(ValueError, match="BUDGET_CHANGE_EXCEEDS_BOUND"):
-        await YandexAutopilotAdapter(WbMaximumConversionRateDirect()).execute({
+        await _execute(YandexAutopilotAdapter(WbMaximumConversionRateDirect()), {
             "action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
             "target": {"weekly_budget_amount": 2300, "max_budget_change_percent": 10},
         })
@@ -127,7 +166,7 @@ async def test_strategy_drift_fails_closed_before_wb_write():
     direct = WbMaximumConversionRateDirect()
     direct.campaign["TextCampaign"]["BiddingStrategy"]["Network"]["BiddingStrategyType"] = "PAY_FOR_CONVERSION"
     with pytest.raises(Exception, match="PROVIDER_CONFIG_DRIFT"):
-        await YandexAutopilotAdapter(direct).execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+        await _execute(YandexAutopilotAdapter(direct), {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
             "target": {"weekly_budget_amount": 2020, "expected_strategy_type": "WB_MAXIMUM_CONVERSION_RATE"}})
 
 
@@ -172,7 +211,7 @@ def test_unsupported_strategy_is_not_attested():
 async def test_pay_for_conversion_uses_weekly_spend_limit_and_preserves_strategy(amount, micros):
     direct = PayForConversionDirect()
     adapter = YandexAutopilotAdapter(direct)
-    result = await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+    result = await _execute(adapter, {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
                                     "target": {"weekly_budget_amount": amount}})
     payload = direct.campaign["TextCampaign"]["BiddingStrategy"]["Network"]["PayForConversion"]
     assert payload["WeeklySpendLimit"] == micros
@@ -185,13 +224,13 @@ async def test_pay_for_conversion_uses_weekly_spend_limit_and_preserves_strategy
 async def test_pay_for_conversion_rejects_budget_below_cpa_minimum():
     adapter = YandexAutopilotAdapter(PayForConversionDirect())
     with pytest.raises(ValueError, match="WEEKLY_BUDGET_BELOW_CPA_MINIMUM"):
-        await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+        await _execute(adapter, {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
                                "target": {"weekly_budget_amount": 399}})
 
 
 @pytest.mark.asyncio
 async def test_pay_for_conversion_accepts_exact_cpa_minimum():
-    result = await YandexAutopilotAdapter(PayForConversionDirect()).execute(
+    result = await _execute(YandexAutopilotAdapter(PayForConversionDirect()),
         {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
          "target": {"weekly_budget_amount": 400}}
     )
@@ -206,8 +245,8 @@ async def test_pay_for_conversion_reread_mismatch_is_not_verified():
             if row:
                 row["TextCampaign"]["BiddingStrategy"]["Network"]["PayForConversion"]["WeeklySpendLimit"] += 1
             return row
-    with pytest.raises(Exception, match="BUDGET_NOT_VERIFIED"):
-        await YandexAutopilotAdapter(Mismatch()).execute(
+    with pytest.raises(Exception, match="PROVIDER_MUTATION_NOT_VERIFIED"):
+        await _execute(YandexAutopilotAdapter(Mismatch()),
             {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
              "target": {"weekly_budget_amount": 1800}}
         )
@@ -217,7 +256,7 @@ async def test_pay_for_conversion_reread_mismatch_is_not_verified():
 async def test_pay_for_conversion_rollback_restores_weekly_budget():
     direct = PayForConversionDirect()
     adapter = YandexAutopilotAdapter(direct)
-    result = await adapter.execute({"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
+    result = await _execute(adapter, {"action_type": "BOUNDED_BUDGET_REALLOCATION", "provider_campaign_id": 101,
                                     "target": {"weekly_budget_amount": 1800}})
     rollback = await adapter.rollback({"action_type": "BOUNDED_BUDGET_REALLOCATION",
                                        "target": {"provider_campaign_id": 101},
@@ -228,14 +267,14 @@ async def test_pay_for_conversion_rollback_restores_weekly_budget():
 @pytest.mark.asyncio
 async def test_create_ad_test_requires_precise_payload_and_verifies_created_ad():
     adapter = YandexAutopilotAdapter(FakeDirect())
-    result = await adapter.execute({"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test", "Mobile": "NO"}}}})
+    result = await _execute(adapter, {"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test", "Mobile": "NO"}}}})
     assert result["verified_after_state"]["created_ad_id"] == 12
 
 
 @pytest.mark.asyncio
 async def test_create_creative_test_uses_same_verified_ad_creation_path():
     adapter = YandexAutopilotAdapter(FakeDirect())
-    result = await adapter.execute({"action_type": "CREATE_CREATIVE_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextImageAd": {"AdImageHash": "image-hash", "Href": "https://example.test"}}}})
+    result = await _execute(adapter, {"action_type": "CREATE_CREATIVE_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextImageAd": {"AdImageHash": "image-hash", "Href": "https://example.test"}}}})
     assert result["verified_after_state"]["ad"]["CampaignId"] == 101
 
 
@@ -243,7 +282,7 @@ async def test_create_creative_test_uses_same_verified_ad_creation_path():
 async def test_created_ad_rollback_accepts_verified_after_state_contract():
     direct = FakeDirect()
     adapter = YandexAutopilotAdapter(direct)
-    result = await adapter.execute({"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test"}}}})
+    result = await _execute(adapter, {"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test"}}}})
     rollback = await adapter.rollback({"action_type": "CREATE_AD_TEST", "target": {"provider_campaign_id": 101}, "before_state": result["before_state"], "verified_after_state": result["verified_after_state"]})
     assert rollback["verified_after_state"]["ad"]["State"] == "OFF"
 
@@ -256,4 +295,4 @@ async def test_adgroup_campaign_scope_is_fail_closed_when_provider_can_verify():
 
     adapter = YandexAutopilotAdapter(GroupAware())
     with pytest.raises(Exception, match="AD_GROUP_CAMPAIGN_SCOPE_NOT_VERIFIED"):
-        await adapter.execute({"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test"}}}})
+        await _execute(adapter, {"action_type": "CREATE_AD_TEST", "provider_campaign_id": 101, "target": {"ad_group_id": 7, "ad_payload": {"TextAd": {"Title": "Тест", "Text": "Текст", "Href": "https://example.test"}}}})
