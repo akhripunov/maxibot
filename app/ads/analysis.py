@@ -242,6 +242,7 @@ def build_deterministic_findings(dataset: dict[str, Any]) -> dict[str, Any]:
     for dimension, section in (dataset.get("sections") or {}).items():
         for row in section.get("notable", []):
             baseline = row.get("cpa_delta_pct")
+            cost_share = row.get("cost_share")
             if row.get("sample_sufficiency") == "INSUFFICIENT":
                 continue
             common = {
@@ -264,7 +265,10 @@ def build_deterministic_findings(dataset: dict[str, Any]) -> dict[str, Any]:
             elif row.get("sample_sufficiency") == "SUFFICIENT" and row.get("cpa") is not None and baseline is not None and baseline <= -0.2 and row.get("conversions", 0) >= 3:
                 common.update({"finding_id": f"{dimension.upper()}_STRONG_CPA", "finding_type": "STRONG_PERFORMANCE", "severity": "POSITIVE", "materiality": "HIGH", "impact": abs(baseline) * float(row.get("cost", 0.0))})
                 candidates.append(common)
-            elif row.get("sample_sufficiency") == "WEAK_SIGNAL" and ((baseline is not None and abs(baseline) >= 0.5) or row.get("cost_share", 0) >= 0.1):
+            elif row.get("sample_sufficiency") == "WEAK_SIGNAL" and (
+                (baseline is not None and abs(baseline) >= 0.5)
+                or (cost_share is not None and cost_share >= 0.1)
+            ):
                 common.update({"finding_id": f"{dimension.upper()}_WATCH_SIGNAL", "finding_type": "WATCH_SIGNAL", "severity": "WATCH", "materiality": "MEDIUM", "impact": abs(baseline or 0.0) * float(row.get("cost", 0.0))})
                 candidates.append(common)
     positives = sorted((x for x in candidates if x["severity"] == "POSITIVE"), key=_finding_rank)[:5]

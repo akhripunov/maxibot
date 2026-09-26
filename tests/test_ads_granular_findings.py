@@ -30,6 +30,15 @@ def test_low_sample_never_becomes_strong_finding():
     assert result["watch"][0]["sample_sufficiency"] == "WEAK_SIGNAL"
 
 
+def test_unknown_cost_share_is_not_compared_or_treated_as_zero_signal():
+    result = build_deterministic_findings(_dataset([{
+        "value": "unknown-cost.example", "evidence_id": "V2-unknown-cost", "cost": 0,
+        "sample_sufficiency": "WEAK_SIGNAL", "cpa_delta_pct": None, "cost_share": None,
+    }]))
+    assert result["all_candidates"] == 0
+    assert result["watch"] == []
+
+
 def test_bounded_dataset_keeps_findings_evidence_registry_consistent():
     dataset = _dataset([{
         "value": "example", "evidence_id": "V2-example", "impressions": 100,
