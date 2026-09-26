@@ -176,7 +176,12 @@ class YandexDirectClient:
         ids = [int(value) for value in group_ids if str(value).isdigit()]
         if not ids:
             return []
-        return await self._request("adgroups", selection={"Ids": ids}, fields=("Id", "CampaignId", "Status", "State"))
+        return await self._request_result(
+            "adgroups",
+            selection={"Ids": ids},
+            fields=("Id", "CampaignId", "Status"),
+            result_keys=("AdGroups",),
+        )
 
     async def add_ad_image(self, content: bytes) -> dict[str, Any]:
         if not self._allow_write:

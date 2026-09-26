@@ -36,6 +36,32 @@ def test_direct_client_sets_client_login_for_agency_context():
 
 
 @pytest.mark.asyncio
+async def test_get_ad_groups_uses_supported_fields_and_reads_adgroups_result():
+    requests = []
+
+    async def handler(request: httpx.Request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"result": {"AdGroups": [{"Id": 456, "CampaignId": 714373352, "Status": "ACCEPTED"}]}},
+        )
+
+    client = YandexDirectClient("opaque", "https://direct.test", "v5")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(base_url="https://direct.test/v5", transport=httpx.MockTransport(handler))
+    groups = await client.get_ad_groups_by_ids([456])
+    await client.close()
+
+    assert groups == [{"Id": 456, "CampaignId": 714373352, "Status": "ACCEPTED"}]
+    payload = json.loads(requests[0].content)
+    assert requests[0].url == "https://direct.test/v5/adgroups"
+    assert payload["params"]["FieldNames"] == ["Id", "CampaignId", "Status"]
+    assert "State" not in payload["params"]["FieldNames"]
+    assert payload["params"]["SelectionCriteria"] == {"Ids": [456]}
+    assert payload["method"] == "get"
+
+
+@pytest.mark.asyncio
 async def test_direct_api_errors_are_not_silenced():
     async def handler(request: httpx.Request):
         return httpx.Response(403, json={"error": {"Code": "AuthorizationError"}})
