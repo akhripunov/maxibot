@@ -55,10 +55,17 @@ async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: 
         AdsPromotionCampaignLink.object_type == "CHANNEL",
         AdsPromotionCampaignLink.status == "ACTIVE",
     ))).all())
-    campaign_specific: dict[str, Any] = {"supported": False, "value": None, "reason": "reliable campaign-scoped visit and membership population is unavailable"}
+    campaign_specific: dict[str, Any] = {
+        "supported": False,
+        "value": None,
+        "coverage": None,
+        "reason": "a unique active campaign link and campaign-scoped membership evidence are required",
+        "campaign_id": None,
+    }
     if len(links) == 1:
         campaign = await db.get(AdsCampaign, links[0].campaign_id)
         if campaign:
+            campaign_specific["campaign_id"] = campaign.external_id
             start, end = window_bounds(end_date=end_date, window="7d")
             memberships = list((await db.scalars(select(TrafficMembership).join(
                 TrafficVisit, TrafficVisit.id == TrafficMembership.attributed_visit_id
@@ -69,13 +76,10 @@ async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: 
                 TrafficMembership.joined_at < end,
             ))).all())
             matched = 0
-            unknown = 0
             for membership in memberships:
                 visit = await db.get(TrafficVisit, membership.attributed_visit_id)
                 if visit and visit.utm_campaign:
                     matched += int(campaign_matches(visit.utm_campaign, campaign.external_id))
-                else:
-                    unknown += 1
             if matched:
                 campaign_specific = {
                     "supported": True,
@@ -84,6 +88,12 @@ async def build_maxibot_metrics(db: AsyncSession, *, channel_id: str, end_date: 
                     "reason": "single active campaign with deterministic landing UTM mapping",
                     "campaign_id": campaign.external_id,
                 }
+            else:
+                campaign_specific["reason"] = "no EXACT/HIGH attributed membership matched the campaign in the aligned 7d window"
+    # Keep the campaign-scoped outcome in the canonical return contract.
+    # Per-window membership metrics above intentionally remain channel-wide;
+    # campaign attribution is a separate object-level metric.
+    result["campaign_specific"] = campaign_specific
     return result
 
 
