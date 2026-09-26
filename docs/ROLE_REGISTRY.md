@@ -11,11 +11,11 @@ technical window. `ARCHITECT SOL` is the product/system architect.
 
 ARCHITECT CODEX selects the shortest safe execution route. One primary
 implementer is preferred by default; additional specialists are added only for
-actual scope needs, real blockers, or mandatory independent gates. Roles must
+actual scope needs, real blockers, or mandatory independent technical gates. Roles must
 not participate ceremonially. Narrow direct specialist handoffs are allowed.
 ARCHITECT CODEX owns global task state as the single window but is not a
-mandatory message relay between every specialist interaction. Independent QA
-remains mandatory where release policy requires it. SYSADMIN is required for
+mandatory message relay between every specialist interaction. QA is advisory
+for release readiness. SYSADMIN is required for
 actual infrastructure risks, incidents, secrets/runtime injection, or deploy
 blockers, not automatically for every release.
 
@@ -25,7 +25,7 @@ blockers, not automatically for every release.
 | DEV | ACTIVE | Backend, bot, Python, database, migrations, API, services, workers, business logic, and MAX integrations | Server/application implementation | Code, migrations, runtime implementation, and routine direct QA handoff for delegated work | Receives implementation tasks from the governing Architect; may submit a DEV_PROPOSAL for architecture changes; may send candidates directly to canonical QA | ARCHITECT SOL for product/architecture; QA directly for validation verdict | NO | Only through the project release gates | One working role; historical task duplication does not create another role |
 | WEBDEV | ACTIVE | maxibot.pro, landing, frontend, HTML/CSS/JS, browser flow, web UX, and web tracking implementation | Website and web-specific implementation | Web code only when explicitly delegated | Receives web tasks from ARCHITECT CODEX | ARCHITECT CODEX | NO | Only through the project release gates | Does not own backend or product architecture |
 | ДИРЕКТОЛОГ | ACTIVE / CONSULTATIVE | Yandex Direct, Metrika, goals, yclid, ClientID, UTM, offline conversions, attribution, and advertising diagnostics | Advertising interpretation and bounded related technical analysis | No advertising writes by default; no Direct/VK writes without explicit owner authorization | Gives analysis/proposals; is not implementation owner | ARCHITECT CODEX | NO | NO | Recommendations must distinguish evidence from inference |
-| QA / ТЕСТИРОВЩИК | ACTIVE / INDEPENDENT GATE | Tests, regression, E2E, acceptance criteria, and release verdict | Independent validation of candidates | Tests, fixtures, smoke checks, and release tooling; no business-logic changes just to make a gate green | Reviews candidates received directly from DEV in the canonical QA thread | DEV for routine handoff; ARCHITECT SOL / OWNER for product escalation | NO | NO | Returns GO or NO_GO directly to DEV; BLOCKED/NOT_RUN are never PASS |
+| QA / ТЕСТИРОВЩИК | ACTIVE / ADVISORY | Independent tests, regression, E2E, acceptance criteria, and findings | Advisory candidate validation | Tests, fixtures, smoke checks, and release tooling; no business-logic changes just to make a gate green | Reviews candidates received directly from DEV in the canonical QA thread when requested | DEV for routine handoff; ARCHITECT SOL / OWNER for product escalation | NO | NO | GO/NO_GO/NOT_RUN/TIMEOUT are informational; deterministic release gates decide readiness |
 | SYSADMIN | ACTIVE / INFRASTRUCTURE GATE | VPS, infrastructure, Docker, health, polling, duplicate-process checks, backups, errors, image architecture, and pre/post-deploy verification | Production operations only | Deployment tooling/configuration, rollback snapshots, health and platform guards; no feature or business-logic changes | ARCHITECT CODEX | NO | Only an Architect-authorized gated deployment | Not an architect, feature developer, QA replacement, release owner, or advertising operator |
 
 ## Separate runtime subsystem

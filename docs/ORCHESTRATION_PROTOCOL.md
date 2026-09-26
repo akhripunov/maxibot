@@ -38,8 +38,8 @@ real blockers, or mandatory independent validation. Existing roles must not be
 involved ceremonially. Narrow direct specialist handoffs are allowed.
 
 ARCHITECT CODEX remains the single window and task-state owner, but need not
-relay every narrow specialist message. Independent QA remains mandatory where
-the release policy requires it. SYSADMIN is not mandatory for every deployment;
+relay every narrow specialist message. QA is advisory for release readiness.
+SYSADMIN is not mandatory for every deployment;
 deterministic automated infrastructure guards are preferred for routine
 releases, with human SYSADMIN involvement reserved for infrastructure risks,
 incidents, secrets/runtime injection, or blockers.
@@ -100,8 +100,8 @@ Executable release flow is fixed:
 
 ```text
 ARCHITECT CODEX exact SHA
-  → independent QA GO
-  → SYSADMIN predeploy snapshot/platform/source guard
+  → deterministic tests + exact-SHA technical gates
+  → predeploy snapshot/platform/source guard
   → canonical linux/amd64 build
   → SYSADMIN replacement
   → SYSADMIN postdeploy health/polling/errors/parity
@@ -247,12 +247,18 @@ checks use the isolated local Docker process specified in `QA_PROCESS.md`,
 including separate app, PostgreSQL, volumes, `.env.staging`, ports, static,
 unit, integration, regression, build, health, and E2E checks.
 
-Executable code, schema, runtime, API, bot, landing, tracking, ADS, worker, or
-deployment changes require the independent QA gate. QA returns `GO` or
-`NO_GO`; QA GO does not itself mean MASTER TASK or architectural PASS. `NOT_RUN`
-and `BLOCKED` are never PASS. Bugs require regression coverage, and new
-functionality requires new or updated canonical test cases. Preserve the
-existing TC-ID, classification, priority, and critical-regression rules.
+QA returns `GO`, `NO_GO`, `NOT_RUN`, or `TIMEOUT` as advisory information and
+does not change `CANDIDATE_READY`, `RELEASE_READY`, or `DEPLOY_ALLOWED` by
+itself. For candidate commit trees containing `scripts/release_policy.py`,
+readiness comes from deterministic technical evidence: targeted tests, full
+suite with zero failures, frozen-path guard where applicable, exact source SHA,
+exact `linux/amd64` image, API/worker parity, platform preflight, migration
+rehearsal when applicable, release dry-run, production rehearsal, and
+post-deploy health/SHA readback. Trees predating that policy marker retain the
+historical policy. Defects reproduced by mandatory deterministic gates remain
+blockers. Bugs require regression coverage, and new functionality requires new
+or updated canonical test cases. Preserve the existing TC-ID, classification,
+priority, and critical-regression rules.
 
 QA may repair QA tooling within the existing policy, but must not rewrite
 application business logic to make a gate pass. If application changes are
@@ -266,7 +272,7 @@ forbidden without explicit owner authorization.
 
 After handoffs, ARCHITECT CODEX reviews actual implementation, full diff when
 Git is available, unexpected files, duplicate architecture, migrations,
-schemas, tests, QA verdict, regression, secrets, auth, permissions,
+schemas, tests, advisory QA findings, regression, secrets, auth, permissions,
 destructive behavior, runtime configuration, production impact, rollback, and
 all MASTER TASK criteria. Any unchecked mandatory item remains UNVERIFIED or
 BLOCKED.

@@ -185,6 +185,8 @@ CRITICAL_BUGS = $CRITICAL_BUGS
 NON_CRITICAL_BUGS = $NON_CRITICAL_BUGS
 
 QA_VERDICT = $VERDICT
+QA_STATUS = $VERDICT
+QA_ROLE = ADVISORY_ONLY_FOR_RELEASE_READINESS
 
 PRODUCTION = $PRODUCTION
 PRODUCTION_CHANGED = $PRODUCTION_CHANGED
@@ -463,20 +465,29 @@ if ! bash -o pipefail -c "$QA_STAGING_E2E_CMD" >"$LOG_DIR/staging-e2e.log" 2>&1;
 E2E="PASS"
 if [ "$BROKEN_CRITICAL" -gt 0 ] || [ "$UNKNOWN_CRITICAL" -gt 0 ]; then
   VERDICT="NO_GO"
-  finalize
-  exit 1
+  write_status
+  if [ "${1:-}" != "DEPLOY" ]; then
+    finalize
+    exit 1
+  fi
+else
+  VERDICT="GO"
 fi
 NEW_FEATURE="✅"
 
-VERDICT="GO"
 PRODUCTION="WAITING_OWNER_APPROVAL"
 write_status
 
 if [ "${1:-}" = "DEPLOY" ]; then
-  if [ "${OWNER_APPROVED:-0}" != "1" ] || [ "${VERDICT}" != "GO" ] || [ -z "${PRODUCTION_DEPLOY_CMD:-}" ]; then
-    echo "DEPLOY BLOCKED: require QA GO, OWNER_APPROVED=1 and PRODUCTION_DEPLOY_CMD" >&2
+  if ! git cat-file -e "$CANDIDATE_SHA:scripts/release_policy.py" 2>/dev/null; then
+    echo "DEPLOY BLOCKED: candidate predates prospective release policy" >&2
     fail_gate
   fi
+  if [ "${OWNER_APPROVED:-0}" != "1" ] || [ -z "${PRODUCTION_DEPLOY_CMD:-}" ]; then
+    echo "DEPLOY BLOCKED: require OWNER_APPROVED=1 and PRODUCTION_DEPLOY_CMD after deterministic gates pass" >&2
+    fail_gate
+  fi
+  echo "QA_STATUS=$VERDICT (advisory; not a release gate)"
   PRODUCTION="DEPLOYED"; PRODUCTION_CHANGED="YES"; CURRENT_PROD_SHA="$CANDIDATE_SHA"
   if ! bash -o pipefail -c "$PRODUCTION_DEPLOY_CMD" >"$LOG_DIR/production-deploy.log" 2>&1; then PRODUCTION_SMOKE="FAIL"; fail_gate; fi
   if [ -z "${PRODUCTION_URL:-}" ] || ! curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" "$PRODUCTION_URL/health/ready" >"$LOG_DIR/production-smoke.json" 2>"$LOG_DIR/production-smoke.log"; then

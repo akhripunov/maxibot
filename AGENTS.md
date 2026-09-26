@@ -128,10 +128,17 @@ landing получает yclid/UTM
   is inspected and matches the canonical VPS.
 - Do not improvise `docker build/save/load` deployment flows. Use the
   repository's canonical Compose/runbook and rollback snapshot.
-- The deployment sequence is: exact-SHA QA GO → SYSADMIN preflight and
-  rollback snapshot → canonical amd64 build and platform/source guard → image
+- The deployment sequence is: deterministic gates on exact SHA → preflight
+  and rollback snapshot → canonical amd64 build and platform/source guard → image
   replacement → SYSADMIN postdeploy health/polling/error/parity checks →
   channel regression → ARCHITECT CODEX final verdict.
+
+- For prospective candidates whose commit tree contains
+  `scripts/release_policy.py`, independent QA verdicts are advisory only.
+  Readiness is determined by deterministic tests, exact-SHA/image/platform/
+  migration checks, parity, dry-run, rehearsal, and post-deploy readback.
+  Historical candidates without that file remain governed by their prior
+  release policy.
 
 ## Эксплуатационное правило: MAX updates читаются в одном месте
 
@@ -217,7 +224,7 @@ mobile landing
   это не повышает качество и расходует контекст.
 - Более сильная модель или отдельный specialist подключается только при
   архитектурном решении, реальном blocker, security/production risk,
-  независимом QA gate или доказанной недостаточности primary implementer.
+  обязательном независимом техническом gate или доказанной недостаточности primary implementer.
 - Цепочка по умолчанию: `OWNER → ARCHITECT SOL → DEV LUNA → ARCHITECT SOL
   review → exact GitHub SHA → exact VPS SHA`. QA/SYSADMIN добавляются только
   по risk-based policy и release gates.

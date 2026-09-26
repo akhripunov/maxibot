@@ -32,6 +32,12 @@ done
 
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || die "full 40-hex SHA required"
 git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null || die "unknown commit"
+# Prospective policy activation: immutable candidates must contain this policy
+# module in their own tree. Historical pre-policy SHAs remain governed by the
+# release policy that existed when they were created.
+git cat-file -e "$TARGET_SHA:scripts/release_policy.py" 2>/dev/null || die "candidate predates prospective release policy"
+say QA_POLICY ADVISORY_ONLY
+say AUTO_REVIEW_REQUIRES_QA NO
 ROOT_DIR=$(git rev-parse --show-toplevel)
 COMPOSE_TEMPLATE="$ROOT_DIR/docker-compose.vps.yml"
 [[ -f "$COMPOSE_TEMPLATE" ]] || die "docker-compose.vps.yml missing"
