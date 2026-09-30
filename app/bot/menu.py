@@ -1948,8 +1948,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             title = bot.display_name or (f"@{bot.username.lstrip('@')}" if bot.username else "Бот")
             return (f"📊 Аналитика\n\n🤖 {title}\n\n"
                     f"👀 Посещений лендинга: {stats['visits']}\n"
-                    f"📢 Перешли в MAX: {stats['to_channel']}\n👥 Всего новых участников: {stats['new_members']}\n"
-                    f"↩️ Отписок: {stats['unsubscribed']}\n\nMAX signals:\n"
+                    f"📢 Перешли в MAX: {stats['to_channel']}\n"
+                    f"✅ Подписалось с рекламы за всё время: +{stats['lifetime_ads_subscribed']}\n"
+                    f"⛔️ Отписалось с рекламы за всё время: -{stats['lifetime_ads_unsubscribed']}\n\nMAX signals:\n"
                     f"MAX_OPEN_LIKELY: {stats['max_open_likely']}\nMAX_OPEN_CONFIRMED: {stats['max_open_confirmed']}\n"
                     f"JOIN_REQUEST: {stats['join_events']}\n\nАтрибуция:\n"
                     f"EXACT: {stats['EXACT']}\nHIGH: {stats['HIGH']}\n"
@@ -2462,8 +2463,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         stats = await traffic_stats(db, selected_id)
         return (f"📊 Аналитика\n\n📢 {channel.title}\n\n"
                 f"👀 Посещений лендинга: {stats['visits']}\n"
-                f"📢 Перешли в MAX: {stats['to_channel']}\n👥 Всего новых участников: {stats['new_members']}\n"
-                f"↩️ Отписок: {stats['unsubscribed']}\n\nMAX signals:\n"
+                f"📢 Перешли в MAX: {stats['to_channel']}\n"
+                f"✅ Подписалось с рекламы за всё время: +{stats['lifetime_ads_subscribed']}\n"
+                f"⛔️ Отписалось с рекламы за всё время: -{stats['lifetime_ads_unsubscribed']}\n\nMAX signals:\n"
                 f"MAX_OPEN_LIKELY: {stats['max_open_likely']}\nMAX_OPEN_CONFIRMED: {stats['max_open_confirmed']}\n"
                 f"JOIN_REQUEST: {stats['join_events']}\n\nАтрибуция:\n"
                 f"EXACT: {stats['EXACT']}\nHIGH: {stats['HIGH']}\n"
