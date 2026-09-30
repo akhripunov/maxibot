@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -136,10 +137,12 @@ async def test_exact_membership_sender_targets_user_did_subscribe(monkeypatch):
     monkeypatch.setattr(settings, "yandex_conversion_dry_run", False)
     client = Client()
     result = await send_user_subscribed(
-        client, counter_id=303, yclid="yclid-A", client_id="123456", conversion_datetime="1700000000", verified_membership=True
+        client, counter_id=303, yclid="yclid-A", client_id="123456", conversion_datetime="1700000000", verified_membership=True,
+        visit_at=datetime.now(timezone.utc),
     )
     alias_result = await send_max_subscriber(
-        client, counter_id=303, yclid="yclid-B", client_id="123457", conversion_datetime="1700000001", exact_membership=True
+        client, counter_id=303, yclid="yclid-B", client_id="123457", conversion_datetime="1700000001", exact_membership=True,
+        visit_at=datetime.now(timezone.utc),
     )
     assert result.status == alias_result.status == "sent"
     assert client.goal_names == ["userDidSubscribe", "userDidSubscribe"]

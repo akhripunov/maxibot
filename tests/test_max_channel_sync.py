@@ -50,6 +50,14 @@ def test_user_added_exact_identity_delivers_pending_conversion_automatically():
     assert 'conversion.last_error = "yclid_required"' in source
 
 
+def test_expired_metrica_visit_result_is_persisted_as_terminal_block():
+    source = Path("app/bot/menu.py").read_text()
+    assert "visit_at=metrica_hit_at" in source
+    assert 'elif result.status == "blocked":' in source
+    assert 'conversion.status = "blocked"' in source
+    assert 'conversion.last_error = result.reason or "metrica_conversion_blocked"' in source
+
+
 def test_user_added_exact_identity_is_idempotent_for_conversion_queue():
     source = Path("app/bot/menu.py").read_text()
     assert 'OfflineConversion.target == "YANDEX"' in source

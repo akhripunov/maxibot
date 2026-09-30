@@ -193,10 +193,11 @@ async def _send_exact_conversion(db: AsyncSession, conversion: OfflineConversion
             conversion.last_error = "yclid_required"
             await db.commit()
             return "blocked"
-        metrica_hit_confirmed = bool(visit and await db.scalar(select(TrafficEvent.id).where(
+        metrica_hit_at = await db.scalar(select(TrafficEvent.event_time).where(
             TrafficEvent.visit_id == visit.id,
             TrafficEvent.event_type == "METRICA_HIT_CONFIRMED",
-        )))
+        ).order_by(TrafficEvent.event_time.asc()).limit(1)) if visit else None
+        metrica_hit_confirmed = metrica_hit_at is not None
         if not visit or not metrica_hit_confirmed or not visit.metrica_client_id:
             conversion.status = "blocked"
             conversion.last_error = "metrica_visit_unconfirmed"
@@ -229,6 +230,9 @@ async def _send_exact_conversion(db: AsyncSession, conversion: OfflineConversion
             # timestamp, not an ISO-8601 string.
             conversion_datetime=str(int(conversion.conversion_datetime.timestamp())),
             verified_membership=True,
+            # Use the confirmed Metrica hit for this exact visit; the landing
+            # row can be created before the actual Metrica session is recorded.
+            visit_at=metrica_hit_at,
         )
         if result.status == "sent":
             uploading = (result.response or {}).get("uploading") or {}
@@ -248,6 +252,10 @@ async def _send_exact_conversion(db: AsyncSession, conversion: OfflineConversion
             conversion.metrica_upload_checked_at = datetime.now(timezone.utc)
             conversion.attempts = int(conversion.attempts or 0) + 1
             conversion.last_error = None
+            await db.commit()
+        elif result.status == "blocked":
+            conversion.status = "blocked"
+            conversion.last_error = result.reason or "metrica_conversion_blocked"
             await db.commit()
         return result.status
     except Exception as exc:
