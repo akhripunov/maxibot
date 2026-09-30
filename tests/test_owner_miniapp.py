@@ -63,5 +63,8 @@ def test_owner_miniapp_analytics_is_project_scoped_and_shared():
     assert 'traffic_stats_for_channels' in main
     assert 'traffic_stats_for_channels' in menu
     assert '/api/miniapp/analytics/' in app
-    assert 'MAX_OPEN_LIKELY' in app
-    assert 'EXACT' in app
+    assert 'lifetime_ads_subscribed' in app
+    assert 'lifetime_ads_unsubscribed' in app
+    assert 'MAX_OPEN_LIKELY' not in app
+    assert 'UNATTRIBUTED' not in app
+    assert 'dry-run' not in app

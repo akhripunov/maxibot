@@ -83,3 +83,15 @@ def test_bot_and_miniapp_analytics_render_daily_style_lifetime_totals():
         assert "lifetime_ads_unsubscribed" in source
         assert "Подписалось с рекламы за всё время" in source
         assert "Отписалось с рекламы за всё время" in source
+
+
+def test_client_analytics_does_not_render_internal_attribution_diagnostics():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    menu = (root / "app/bot/menu.py").read_text()
+    miniapp = (root / "miniapp/app.js").read_text()
+    assert "MAX signals:" not in menu
+    assert "MAX signals:" not in miniapp
+    assert "В Яндекс отправляются только EXACT/HIGH" not in menu
+    assert "В Яндекс отправляются только EXACT/HIGH" not in miniapp

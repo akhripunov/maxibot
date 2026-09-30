@@ -1950,12 +1950,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                     f"👀 Посещений лендинга: {stats['visits']}\n"
                     f"📢 Перешли в MAX: {stats['to_channel']}\n"
                     f"✅ Подписалось с рекламы за всё время: +{stats['lifetime_ads_subscribed']}\n"
-                    f"⛔️ Отписалось с рекламы за всё время: -{stats['lifetime_ads_unsubscribed']}\n\nMAX signals:\n"
-                    f"MAX_OPEN_LIKELY: {stats['max_open_likely']}\nMAX_OPEN_CONFIRMED: {stats['max_open_confirmed']}\n"
-                    f"JOIN_REQUEST: {stats['join_events']}\n\nАтрибуция:\n"
-                    f"EXACT: {stats['EXACT']}\nHIGH: {stats['HIGH']}\n"
-                    f"MEDIUM: {stats['MEDIUM']}\nAMBIGUOUS: {stats['AMBIGUOUS']}\nUNATTRIBUTED: {stats['UNATTRIBUTED']}\n\n"
-                    "В Яндекс отправляются только EXACT/HIGH; отправка по умолчанию в dry-run.",
+                    f"⛔️ Отписалось с рекламы за всё время: -{stats['lifetime_ads_unsubscribed']}",
                     buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
         labels = {
             "promotion_bot_landing": ("📄 Лендинг", "Лендинг для этого бота ещё не настроен."),
@@ -2465,12 +2460,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 f"👀 Посещений лендинга: {stats['visits']}\n"
                 f"📢 Перешли в MAX: {stats['to_channel']}\n"
                 f"✅ Подписалось с рекламы за всё время: +{stats['lifetime_ads_subscribed']}\n"
-                f"⛔️ Отписалось с рекламы за всё время: -{stats['lifetime_ads_unsubscribed']}\n\nMAX signals:\n"
-                f"MAX_OPEN_LIKELY: {stats['max_open_likely']}\nMAX_OPEN_CONFIRMED: {stats['max_open_confirmed']}\n"
-                f"JOIN_REQUEST: {stats['join_events']}\n\nАтрибуция:\n"
-                f"EXACT: {stats['EXACT']}\nHIGH: {stats['HIGH']}\n"
-                f"MEDIUM: {stats['MEDIUM']}\nAMBIGUOUS: {stats['AMBIGUOUS']}\nUNATTRIBUTED: {stats['UNATTRIBUTED']}\n\n"
-                "В Яндекс отправляются только EXACT/HIGH; отправка по умолчанию в dry-run.",
+                f"⛔️ Отписалось с рекламы за всё время: -{stats['lifetime_ads_unsubscribed']}",
                 buttons(("⬅️ Назад", f"promotion_channel:{channel.id}")))
     if screen.startswith("promotion_yandex:"):
         selected_id = screen.split(":", 1)[1]
