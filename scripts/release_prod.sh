@@ -29,11 +29,21 @@ timed_stage() {
 # Only wrap idempotent reads in this retry loop. Callers must never pass a
 # mutation command here; apply-stage writes continue to fail closed as-is.
 NETWORK_RETRY_BUDGET_SECONDS=1800
-NETWORK_RETRY_STARTED=$SECONDS
+NETWORK_RETRY_SPENT_SECONDS=0
+if [[ -n "${NETWORK_RETRY_BUDGET_STATE:-}" && -f "$NETWORK_RETRY_BUDGET_STATE" ]]; then
+  NETWORK_RETRY_SPENT_SECONDS=$(<"$NETWORK_RETRY_BUDGET_STATE")
+  [[ "$NETWORK_RETRY_SPENT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "invalid shared network retry budget state"
+fi
 NETWORK_LAST_ERROR=
 NETWORK_LAST_STATUS=
+persist_network_retry_budget() {
+  [[ -n "${NETWORK_RETRY_BUDGET_STATE:-}" ]] || return 0
+  local temporary="${NETWORK_RETRY_BUDGET_STATE}.$$"
+  printf '%s\n' "${1:-$NETWORK_RETRY_SPENT_SECONDS}" > "$temporary"
+  mv -f "$temporary" "$NETWORK_RETRY_BUDGET_STATE"
+}
 network_retry_read() {
-  local stage=$1 attempt=0 cap=1 remaining delay elapsed output error status
+  local stage=$1 attempt=0 cap=1 remaining delay elapsed output error status started=$SECONDS
   shift
   NETWORK_LAST_ERROR=
   NETWORK_LAST_STATUS=
@@ -49,7 +59,7 @@ network_retry_read() {
     error=$(cat "$stderr_file")
     if [[ "$status" == 0 ]]; then
       NETWORK_LAST_ATTEMPTS=$((attempt + 1))
-      elapsed=$((SECONDS - NETWORK_RETRY_STARTED))
+      elapsed=$((SECONDS - started))
       if (( elapsed >= NETWORK_RETRY_BUDGET_SECONDS )); then
         NETWORK_LAST_STATUS=NETWORK_UNAVAILABLE
         printf 'NETWORK_UNAVAILABLE stage=%s elapsed_s=%s budget_s=%s\n' "$stage" "$elapsed" "$NETWORK_RETRY_BUDGET_SECONDS" >&2
@@ -58,6 +68,8 @@ network_retry_read() {
       fi
       NETWORK_LAST_STATUS=PASS
       if (( attempt > 0 )); then
+        NETWORK_RETRY_SPENT_SECONDS=$((NETWORK_RETRY_SPENT_SECONDS + elapsed))
+        persist_network_retry_budget
         printf 'NETWORK_RESTORED stage=%s elapsed_s=%s\n' "$stage" "$elapsed" >&2
       fi
       printf 'RELEASE_CONTINUING stage=%s\n' "$stage" >&2
@@ -76,10 +88,12 @@ network_retry_read() {
       rm -f "$stderr_file"
       return "$status"
     fi
-    elapsed=$((SECONDS - NETWORK_RETRY_STARTED))
-    remaining=$((NETWORK_RETRY_BUDGET_SECONDS - elapsed))
+    elapsed=$((SECONDS - started))
+    remaining=$((NETWORK_RETRY_BUDGET_SECONDS - NETWORK_RETRY_SPENT_SECONDS - elapsed))
     if (( remaining <= 0 )); then
       NETWORK_LAST_STATUS=NETWORK_UNAVAILABLE
+      NETWORK_RETRY_SPENT_SECONDS=$NETWORK_RETRY_BUDGET_SECONDS
+      persist_network_retry_budget
       printf 'NETWORK_UNAVAILABLE stage=%s elapsed_s=%s budget_s=%s\n' "$stage" "$elapsed" "$NETWORK_RETRY_BUDGET_SECONDS" >&2
       rm -f "$stderr_file"
       return 75
@@ -89,6 +103,8 @@ network_retry_read() {
     printf 'NETWORK_RETRYING stage=%s retry_in_s=%s elapsed_s=%s\n' "$stage" "$delay" "$elapsed" >&2
     attempt=$((attempt + 1))
     sleep "$delay"
+    elapsed=$((SECONDS - started))
+    persist_network_retry_budget "$((NETWORK_RETRY_SPENT_SECONDS + elapsed))"
     if (( cap < 32 )); then cap=$((cap * 2)); else cap=60; fi
   done
 }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import socket
@@ -138,6 +139,7 @@ def main() -> int:
                 if "\n" in value or "\r" in value:
                     raise ValidationError("GitHub output contains invalid line breaks")
                 output.write(f"{key}={value}\n")
+            output.write(f"network_retry_budget_used_seconds={math.ceil(NETWORK_BUDGET.spent)}\n")
         print(f"RELEASE_PROVENANCE=PASS SHA={result['candidate']} PREPARE_RUN={result['prepare_run_id']}")
         return 0
     except (ValidationError, OSError) as exc:

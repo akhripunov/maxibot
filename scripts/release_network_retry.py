@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import random
+import math
+import os
+from pathlib import Path
 import time
 from collections.abc import Callable
 from typing import TypeVar
@@ -18,11 +21,28 @@ class NetworkUnavailable(RuntimeError):
 
 class RetryBudget:
     def __init__(self, seconds: float = NETWORK_RETRY_BUDGET_SECONDS,
-                 clock: Callable[[], float] | None = None) -> None:
+                 clock: Callable[[], float] | None = None,
+                 state_path: str | None = None) -> None:
         self.clock = clock or time.monotonic
         self.started = self.clock()
-        self.deadline = self.started + seconds
         self.seconds = seconds
+        configured_path = state_path or os.environ.get("NETWORK_RETRY_BUDGET_STATE")
+        self.state_path = Path(configured_path) if configured_path else None
+        self.spent = 0.0
+        if self.state_path and self.state_path.exists():
+            try:
+                self.spent = max(0.0, float(self.state_path.read_text(encoding="utf-8").strip()))
+            except (OSError, ValueError):
+                raise RuntimeError("Invalid shared network retry budget state") from None
+        self.deadline = self.started + max(0.0, seconds - self.spent)
+
+    def persist(self, elapsed: float) -> None:
+        if self.state_path:
+            self.spent += max(0.0, elapsed)
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+            temporary.write_text(f"{math.ceil(self.spent)}\n", encoding="utf-8")
+            temporary.replace(self.state_path)
 
 
 def retry_network_read(operation: Callable[[], T], stage: str,
@@ -37,20 +57,24 @@ def retry_network_read(operation: Callable[[], T], stage: str,
     sleep = sleep or time.sleep
     jitter = jitter or random.uniform
     budget = budget or RetryBudget(clock=clock)
+    call_started = clock()
     retries = 0
 
     def unavailable() -> NetworkUnavailable:
-        elapsed = clock() - budget.started
+        elapsed = budget.spent + clock() - call_started
         emit(f"NETWORK_UNAVAILABLE stage={stage} elapsed_s={elapsed:.1f} budget_s={budget.seconds}")
         return NetworkUnavailable(stage)
 
-    while True:
-        if clock() >= budget.deadline:
+    retries = 0
+    deadline = clock() + max(0.0, budget.seconds - budget.spent)
+    try:
+      while True:
+        if clock() >= deadline:
             raise unavailable()
         try:
             result = operation()
-            elapsed = clock() - budget.started
-            if clock() >= budget.deadline:
+            elapsed = budget.spent + clock() - call_started
+            if clock() >= deadline:
                 raise unavailable()
             if retries:
                 emit(f"NETWORK_RESTORED stage={stage} elapsed_s={elapsed:.1f}")
@@ -59,11 +83,14 @@ def retry_network_read(operation: Callable[[], T], stage: str,
         except Exception as error:
             if not is_retryable(error):
                 raise
-            remaining = budget.deadline - clock()
+            remaining = deadline - clock()
             if remaining <= 0:
                 raise unavailable() from None
             cap = min(NETWORK_BACKOFF_CAP_SECONDS, 2 ** min(retries, 6))
             delay = min(max(0.0, jitter(0.0, cap)), remaining)
-            emit(f"NETWORK_RETRYING stage={stage} retry_in_s={delay:.1f} elapsed_s={clock()-budget.started:.1f}")
+            emit(f"NETWORK_RETRYING stage={stage} retry_in_s={delay:.1f} elapsed_s={budget.spent + clock()-call_started:.1f}")
             retries += 1
             sleep(delay)
+    finally:
+        if retries:
+            budget.persist(clock() - call_started)

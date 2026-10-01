@@ -263,6 +263,19 @@ def test_production_ssh_target_is_explicit_and_canonical():
     assert "SSH_PREFLIGHT PASS" in source
 
 
+def test_shared_retry_budget_is_carried_across_release_stages_and_never_wraps_apply():
+    source = SCRIPT.read_text()
+    assert 'NETWORK_RETRY_BUDGET_STATE' in source
+    assert 'NETWORK_RETRY_SPENT_SECONDS' in source
+    assert 'network_retry_read production_preflight' in source
+    assert 'network_retry_read ssh_preflight' in source
+    assert 'timed_stage MIGRATION' in source
+    mutation_section = source[source.index('timed_stage SOURCE_UPLOAD'):]
+    assert 'network_retry_read' not in mutation_section
+    assert 'timed_stage IMAGE_LOAD' in mutation_section
+    assert 'timed_stage MIGRATION' in mutation_section
+
+
 def test_frozen_guard_exempts_only_ads_schema_plumbing():
     source = (ROOT / "scripts/frozen_path_guard.sh").read_text()
     assert "def ads_only_shared_change(path: str)" in source
