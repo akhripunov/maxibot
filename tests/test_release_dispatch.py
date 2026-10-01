@@ -127,6 +127,8 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "Python 3.12.10" in workflow
     assert "actions/setup-python@v5" not in workflow
     assert 'RUNNER_TOOL_CACHE=$RUNNER_TEMP/maxibot-toolcache" >> "$GITHUB_ENV"' in workflow
+    assert 'PYTHONDONTWRITEBYTECODE: "1"' in workflow
+    assert 'git status --porcelain' in workflow
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
 
