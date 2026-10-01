@@ -1,23 +1,84 @@
-from scripts.verify_prepared_image import inspect_mismatches
+import hashlib
+import io
+import json
+import tarfile
+
+import pytest
+
+from scripts.prepared_image_archive import inspect_prepared_archive
 
 
-def test_prepared_image_inspect_accepts_exact_platform_id_and_source_labels():
-    sha = "a" * 40
-    assert inspect_mismatches(f"linux/amd64|sha256:config|{sha}|{sha}|{sha}",
-                              "sha256:config", sha) == []
+SHA = "a" * 40
+IMAGE = f"maxibot-vps-api:{SHA}"
 
 
-def test_prepared_image_inspect_reports_each_mismatched_field():
-    sha = "a" * 40
-    mismatches = inspect_mismatches(f"linux/arm64|sha256:other|old|{sha}|{sha}",
-                                    "sha256:config", sha)
-    assert len(mismatches) == 3
-    assert "platform expected='linux/amd64' actual='linux/arm64'" in mismatches
-    assert "image_id expected='sha256:config' actual='sha256:other'" in mismatches
-    assert "revision_label expected=" in mismatches[2]
+def make_archive(path, *, platform="linux/amd64", labels=None, tag=IMAGE):
+    labels = labels or {
+        "org.opencontainers.image.revision": SHA,
+        "org.opencontainers.image.source-sha": SHA,
+        "org.maxibot.release.sha": SHA,
+    }
+    os_name, architecture = platform.split("/", 1)
+    config = json.dumps({
+        "os": os_name,
+        "architecture": architecture,
+        "config": {"Labels": labels},
+    }, separators=(",", ":")).encode()
+    config_name = f"{hashlib.sha256(config).hexdigest()}.json"
+    manifest = json.dumps([{
+        "Config": config_name,
+        "RepoTags": [tag],
+        "Layers": [],
+    }]).encode()
+    with tarfile.open(path, "w:") as archive:
+        for name, data in (("manifest.json", manifest), (config_name, config)):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return "sha256:" + hashlib.sha256(config).hexdigest()
 
 
-def test_prepared_image_inspect_rejects_malformed_output():
-    assert inspect_mismatches("linux/amd64|truncated", "sha256:config", "a" * 40) == [
-        "inspect_field_count expected=5 actual=2"
-    ]
+def test_prepared_archive_verifies_config_digest_platform_and_source_labels(tmp_path):
+    archive = tmp_path / "image.tar"
+    expected_id = make_archive(archive)
+
+    image_id, platform = inspect_prepared_archive(archive, IMAGE, SHA)
+
+    assert image_id == expected_id
+    assert platform == "linux/amd64"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"platform": "linux/arm64"}, "platform"),
+        ({"tag": "maxibot-vps-api:" + "b" * 40}, "tag"),
+        ({"labels": {"org.opencontainers.image.revision": "b" * 40}}, "label"),
+    ],
+)
+def test_prepared_archive_fails_closed_on_platform_tag_or_label_mismatch(tmp_path, kwargs, message):
+    archive = tmp_path / "image.tar"
+    make_archive(archive, **kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        inspect_prepared_archive(archive, IMAGE, SHA)
+
+
+def test_prepared_archive_rejects_multiple_images(tmp_path):
+    archive = tmp_path / "image.tar"
+    make_archive(archive)
+    with tarfile.open(archive, "r:") as source:
+        config = next(member for member in source.getmembers()
+                      if member.name.endswith(".json") and member.name != "manifest.json")
+        config_bytes = source.extractfile(config).read()
+        manifest_bytes = source.extractfile("manifest.json").read()
+    entries = json.loads(manifest_bytes)
+    entries.append(entries[0])
+    with tarfile.open(archive, "w:") as target:
+        for name, data in (("manifest.json", json.dumps(entries).encode()), (config.name, config_bytes)):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            target.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(ValueError, match="exactly one image"):
+        inspect_prepared_archive(archive, IMAGE, SHA)

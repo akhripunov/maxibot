@@ -6,20 +6,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
-
-def inspect_mismatches(inspected: str, image_id: str, sha: str) -> list[str]:
-    """Return the exact non-secret image fields that differ from the receipt."""
-    actual = inspected.split("|")
-    expected = ["linux/amd64", image_id, sha, sha, sha]
-    names = ["platform", "image_id", "revision_label", "source_sha_label", "release_sha_label"]
-    if len(actual) != len(expected):
-        return [f"inspect_field_count expected={len(expected)} actual={len(actual)}"]
-    return [f"{name} expected={want!r} actual={got!r}"
-            for name, want, got in zip(names, expected, actual) if want != got]
+try:
+    from scripts.prepared_image_archive import inspect_prepared_archive
+except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
+    from prepared_image_archive import inspect_prepared_archive
 
 
 def main() -> int:
@@ -45,20 +39,17 @@ def main() -> int:
         image = manifest.get("image", "")
         if image != f"maxibot-vps-api:{sha}":
             raise ValueError("prepared image tag does not match candidate SHA")
-        subprocess.run(["docker", "load", "--input", str(archive)], check=True)
-        fmt = (
-            "{{.Os}}/{{.Architecture}}|{{.Id}}|"
-            "{{index .Config.Labels \"org.opencontainers.image.revision\"}}|"
-            "{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}|"
-            "{{index .Config.Labels \"org.maxibot.release.sha\"}}"
-        )
-        inspected = subprocess.check_output(["docker", "image", "inspect", image, "--format", fmt], text=True).strip()
-        mismatches = inspect_mismatches(inspected, manifest["image_id"], sha)
-        if mismatches:
-            raise ValueError("loaded image differs from Prepare receipt: " + "; ".join(mismatches))
+        image_id, platform = inspect_prepared_archive(archive, image, sha)
+        if image_id != manifest.get("image_id"):
+            raise ValueError(
+                f"archive config digest differs from Prepare receipt: "
+                f"expected={manifest.get('image_id')!r} actual={image_id!r}"
+            )
+        if platform != manifest["platform"]:
+            raise ValueError("archive platform differs from Prepare receipt")
         print(f"PREPARED_IMAGE=PASS SHA={sha} PREPARE_RUN={run_id} IMAGE_ID={manifest['image_id']} ARCHIVE_SHA256={actual_hash}")
         return 0
-    except (OSError, ValueError, KeyError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, KeyError, json.JSONDecodeError, tarfile.TarError) as exc:
         print(f"PREPARED_IMAGE=BLOCKED REASON={exc}", file=sys.stderr)
         return 1
 

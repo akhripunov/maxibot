@@ -12,6 +12,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from scripts.prepared_image_archive import inspect_prepared_archive
+except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
+    from prepared_image_archive import inspect_prepared_archive
+
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 
@@ -74,11 +79,9 @@ def main() -> int:
             raise RuntimeError("Prepared image provenance does not match selected candidate/Prepare run")
         if manifest.get("archive_sha256") != archive_sha256 or manifest.get("platform") != "linux/amd64":
             raise RuntimeError("Prepared image archive digest/platform verification failed")
-        inspect = subprocess.check_output(
-            ["docker", "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}|{{.Id}}|{{index .Config.Labels \"org.opencontainers.image.revision\"}}|{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}|{{index .Config.Labels \"org.maxibot.release.sha\"}}"], text=True,
-        ).strip()
-        if inspect != f"linux/amd64|{manifest.get('image_id')}|{sha}|{sha}|{sha}":
-            raise RuntimeError("Prepared image config digest/platform/source SHA verification failed")
+        image_id, platform = inspect_prepared_archive(archive, image, sha)
+        if image_id != manifest.get("image_id") or platform != "linux/amd64":
+            raise RuntimeError("Prepared image archive config digest/platform/source SHA verification failed")
         env = os.environ.copy()
         env["API_CANDIDATE_IMAGE"] = image
         env["WORKER_CANDIDATE_IMAGE"] = image
