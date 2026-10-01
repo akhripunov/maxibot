@@ -58,7 +58,10 @@ def upsert_block(content: str, marker: str, block: str) -> str:
     starts, ends = content.count(start), content.count(end)
     if starts != ends or starts > 1:
         raise SyncError("MAXIBOT Linear automation markers are malformed")
-    section = f"{start}\n{block.rstrip()}\n{end}"
+    # Keep the closing HTML marker outside Markdown list continuation. Linear's
+    # Markdown round-trip indents a comment immediately after a list item, which
+    # makes exact read-back verification fail even though the document was saved.
+    section = f"{start}\n{block.rstrip()}\n\n{end}"
     if starts == 1:
         before, rest = content.split(start, 1)
         _, after = rest.split(end, 1)

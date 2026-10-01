@@ -113,6 +113,11 @@ def test_linear_owned_block_updates_in_place_and_preserves_architect_text():
     assert "new release status" in after
 
 
+def test_linear_release_block_closes_outside_markdown_list_continuation():
+    after = upsert_block("Architect-owned content.", "MB_RELEASE", "* GitHub run: [#14](https://example.test/run)")
+    assert "https://example.test/run)\n\n<!-- MB_RELEASE_END -->" in after
+
+
 def test_linear_owned_block_fails_closed_on_duplicate_markers():
     content = "<!-- MB_RELEASE_START -->x<!-- MB_RELEASE_END -->\n<!-- MB_RELEASE_START -->y<!-- MB_RELEASE_END -->"
     with pytest.raises(SyncError, match="markers are malformed"):
