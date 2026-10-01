@@ -115,6 +115,7 @@ def test_linear_owned_block_updates_in_place_and_preserves_architect_text():
 
 def test_linear_release_block_closes_outside_markdown_list_continuation():
     after = upsert_block("Architect-owned content.", "MB_RELEASE", "* GitHub run: [#14](https://example.test/run)")
+    assert "<!-- MB_RELEASE_START -->\n\n" in after
     assert "https://example.test/run)\n\n<!-- MB_RELEASE_END -->" in after
 
 
