@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_release_dispatch import ValidationError, validate  # noqa: E402
-from publish_release_to_linear import SyncError, upsert_block, write_document  # noqa: E402
+from publish_release_to_linear import SyncError, append_journal_event, upsert_block, write_document  # noqa: E402
 import publish_release_to_linear  # noqa: E402
 import run_release_workflow  # noqa: E402
 
@@ -158,6 +158,14 @@ def test_linear_release_block_closes_outside_markdown_list_continuation():
     after = upsert_block("Architect-owned content.", "MB_RELEASE", "* GitHub run: [#14](https://example.test/run)")
     assert "<!-- MB_RELEASE_START -->\n\n" in after
     assert "https://example.test/run)\n\n<!-- MB_RELEASE_END -->" in after
+
+
+def test_linear_journal_event_has_markdown_roundtrip_spacing():
+    marker = "<!-- MAXIBOT_RELEASE_EVENT_123_candidate_CI_PASS -->"
+    block = "### 2026-10-01T00:00:00+00:00 — candidate: **CI_PASS**\n\n* SHA: `" + SHA + "`"
+    content = append_journal_event("journal intro", marker, block)
+    assert f"\n\n{marker}\n\n{block}\n" in content
+    assert append_journal_event(content, marker, "ignored") == content
 
 
 def test_linear_write_retries_only_readback_after_eventual_visibility(monkeypatch):

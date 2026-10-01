@@ -77,6 +77,15 @@ def upsert_block(content: str, marker: str, block: str) -> str:
     return content.rstrip() + "\n\n" + section + "\n"
 
 
+def append_journal_event(content: str, event_marker: str, block: str) -> str:
+    if event_marker in content:
+        return content
+    # Linear's document Markdown round-trip separates HTML comments from
+    # adjacent content. Submit the canonical spacing up front so strict
+    # read-back verification compares equivalent content.
+    return content.rstrip() + f"\n\n{event_marker}\n\n{block}\n"
+
+
 def event_markdown(phase: str, status: str, sha: str, migration: str, run_id: str, url: str, result_path: str) -> str:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
@@ -132,7 +141,7 @@ def publish(env: dict[str, str]) -> None:
     current_journal = read_document(JOURNAL_ID, JOURNAL_TITLE, api_key)
     event_marker = f"<!-- MAXIBOT_RELEASE_EVENT_{run_id}_{phase}_{status} -->"
     if event_marker not in current_journal:
-        updated_journal = current_journal.rstrip() + f"\n\n{event_marker}\n{block}\n"
+        updated_journal = append_journal_event(current_journal, event_marker, block)
         write_document(JOURNAL_ID, JOURNAL_TITLE, updated_journal, api_key)
     print(f"MAXIBOT_LINEAR_PUBLICATION=PASS PHASE={phase} STATUS={status} SHA={sha}")
 
