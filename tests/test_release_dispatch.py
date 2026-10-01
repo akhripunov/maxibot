@@ -103,6 +103,12 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_python3():
     assert "scripts/verify_prepared_image.py" in workflow
 
 
+def test_prepare_writes_valid_json_newline_to_image_manifest():
+    workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert 'sort_keys=True) + "\\n")' in workflow
+    assert 'sort_keys=True) + "\\\\n")' not in workflow
+
+
 def test_release_apply_loads_verified_prepared_image_without_rebuilding():
     release = (ROOT / "scripts/release_prod.sh").read_text()
     assert 'docker load --input $REMOTE_IMAGE_TMP' in release

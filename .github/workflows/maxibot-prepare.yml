@@ -130,7 +130,7 @@ jobs:
                   "org.opencontainers.image.source-sha": sha,
                   "org.maxibot.release.sha": sha,
               },
-          }, sort_keys=True) + "\\n")
+          }, sort_keys=True) + "\n")
           PY
           echo "IMAGE_ID=$IMAGE_ID" >> "$GITHUB_OUTPUT"
           echo "IMAGE_ARCHIVE_SHA256=$ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
