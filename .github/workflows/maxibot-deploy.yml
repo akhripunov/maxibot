@@ -84,6 +84,14 @@ jobs:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
 
+      - name: Set deterministic Python runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify Python runtime
+        run: python3 --version | grep -E '^Python 3\.12\.'
+
       - name: Download exact prepared image artifact
         uses: actions/download-artifact@v4
         with:
@@ -95,6 +103,8 @@ jobs:
       - name: Recheck current main and Prepare provenance on the Mac
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
+          PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
         run: python3 scripts/validate_release_dispatch.py
 
       - name: Verify and load the prepared image

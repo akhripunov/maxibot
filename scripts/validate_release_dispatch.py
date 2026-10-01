@@ -45,6 +45,10 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
     migration = values.get("TARGET_MIGRATION", "")
     approve = values.get("APPROVE_PRODUCTION", "false").strip().lower()
     token = values.get("GITHUB_TOKEN", "")
+    expected_prepare_run_id = values.get("PREPARE_RUN_ID", "").strip()
+    expected_prepare_run_attempt = values.get("PREPARE_RUN_ATTEMPT", "").strip()
+    if bool(expected_prepare_run_id) != bool(expected_prepare_run_attempt):
+        raise ValidationError("Expected Prepare run ID and attempt must be supplied together")
     if not SHA_RE.fullmatch(sha):
         raise ValidationError("A full 40-character lowercase candidate SHA is required")
     if mode not in {"preflight", "production"}:
@@ -74,6 +78,15 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
         raise ValidationError("The latest Prepare run for this candidate is not successful")
     if latest.get("event") not in {"push", "workflow_dispatch"} or latest.get("head_branch") != "main":
         raise ValidationError("Prepare run did not come from trusted main")
+    latest_run_id = str(latest.get("id", ""))
+    latest_run_attempt = str(latest.get("run_attempt", 1))
+    if expected_prepare_run_id and (
+        expected_prepare_run_id != latest_run_id
+        or expected_prepare_run_attempt != latest_run_attempt
+    ):
+        raise ValidationError(
+            "Latest successful Prepare run/attempt changed after artifact selection; restart Deploy"
+        )
     artifact_name = f"maxibot-image-{sha}-{latest['id']}-{latest.get('run_attempt', 1)}"
     artifacts = api_get(f"actions/runs/{latest['id']}/artifacts", token)
     if not any(item.get("name") == artifact_name and not item.get("expired") for item in artifacts.get("artifacts", [])):
@@ -83,8 +96,8 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
         "candidate": sha,
         "target_migration": migration,
         "mode": mode,
-        "prepare_run_id": str(latest["id"]),
-        "prepare_run_attempt": str(latest.get("run_attempt", 1)),
+        "prepare_run_id": latest_run_id,
+        "prepare_run_attempt": latest_run_attempt,
         "prepare_url": str(latest.get("html_url", "")),
     }
 

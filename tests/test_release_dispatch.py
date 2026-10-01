@@ -64,6 +64,26 @@ def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
     assert any(f"head_sha={SHA}" in path for path in github.paths)
 
 
+@pytest.mark.parametrize(
+    ("expected_id", "expected_attempt"),
+    [("13", "1"), ("14", "2")],
+)
+def test_dispatch_recheck_rejects_changed_prepare_run_or_attempt(expected_id, expected_attempt):
+    with pytest.raises(ValidationError, match="changed after artifact selection"):
+        validate(values(PREPARE_RUN_ID=expected_id, PREPARE_RUN_ATTEMPT=expected_attempt), FakeGitHub())
+
+
+def test_dispatch_recheck_accepts_same_prepare_run_and_attempt():
+    selected = validate(values(PREPARE_RUN_ID="14", PREPARE_RUN_ATTEMPT="1"), FakeGitHub())
+    assert selected["prepare_run_id"] == "14"
+    assert selected["prepare_run_attempt"] == "1"
+
+
+def test_dispatch_recheck_requires_run_id_and_attempt_together():
+    with pytest.raises(ValidationError, match="must be supplied together"):
+        validate(values(PREPARE_RUN_ID="14"), FakeGitHub())
+
+
 @pytest.mark.parametrize("candidate", ["main", "a" * 39, "A" * 40, "a" * 40 + "\n"])
 def test_dispatch_rejects_branch_names_and_noncanonical_shas(candidate):
     with pytest.raises(ValidationError, match="full 40-character"):
@@ -101,6 +121,10 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_python3():
     assert "python scripts/" not in workflow
     assert "python3 scripts/validate_release_dispatch.py" in workflow
     assert "scripts/verify_prepared_image.py" in workflow
+    assert "actions/setup-python@v5" in workflow
+    assert "python-version: '3.12'" in workflow
+    assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
+    assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
 
 
 def test_prepare_writes_valid_json_newline_to_image_manifest():
