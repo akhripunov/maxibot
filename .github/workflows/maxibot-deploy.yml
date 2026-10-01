@@ -73,11 +73,16 @@ jobs:
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
-      RUNNER_TOOL_CACHE: ${{ runner.temp }}/maxibot-toolcache
     steps:
       - name: Set result evidence path
         shell: bash
         run: echo "RELEASE_RESULT=$RUNNER_TEMP/maxibot-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+
+      - name: Configure writable job-local tool cache
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/maxibot-toolcache"
+          echo "RUNNER_TOOL_CACHE=$RUNNER_TEMP/maxibot-toolcache" >> "$GITHUB_ENV"
 
       - name: Checkout the approved candidate
         uses: actions/checkout@v4
