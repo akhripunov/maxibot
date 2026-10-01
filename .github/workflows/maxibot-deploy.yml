@@ -41,6 +41,7 @@ jobs:
       candidate: ${{ steps.select.outputs.candidate }}
       target_migration: ${{ steps.select.outputs.target_migration }}
       prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
+      prepare_run_attempt: ${{ steps.select.outputs.prepare_run_attempt }}
       prepare_url: ${{ steps.select.outputs.prepare_url }}
     steps:
       - name: Checkout trusted main workflow source
@@ -56,7 +57,7 @@ jobs:
           TARGET_MIGRATION: ${{ inputs.target_migration }}
           RELEASE_MODE: ${{ inputs.mode }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
-        run: python scripts/validate_release_dispatch.py
+        run: python3 scripts/validate_release_dispatch.py
 
   deploy:
     needs: validate
@@ -69,6 +70,7 @@ jobs:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
+      PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
     steps:
@@ -82,14 +84,31 @@ jobs:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
 
+      - name: Download exact prepared image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: maxibot-image-${{ needs.validate.outputs.candidate }}-${{ needs.validate.outputs.prepare_run_id }}-${{ needs.validate.outputs.prepare_run_attempt }}
+          path: ${{ runner.temp }}/maxibot-prepared-image
+          run-id: ${{ needs.validate.outputs.prepare_run_id }}
+          github-token: ${{ github.token }}
+
       - name: Recheck current main and Prepare provenance on the Mac
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/validate_release_dispatch.py
+        run: python3 scripts/validate_release_dispatch.py
+
+      - name: Verify and load the prepared image
+        env:
+          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar
+          IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
+        run: python3 scripts/verify_prepared_image.py
 
       - name: Run production preflight and requested release mode
         id: execute
-        run: python scripts/run_release_workflow.py
+        env:
+          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar
+          IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
+        run: python3 scripts/run_release_workflow.py
 
       - name: Publish preflight result to MAXIBOT Linear
         if: always()
@@ -98,7 +117,7 @@ jobs:
           RELEASE_PHASE: preflight
           RELEASE_STATUS: ${{ steps.execute.outputs.preflight == 'PASS' && 'READY' || 'FAILED' }}
           RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
-        run: python scripts/publish_release_to_linear.py
+        run: python3 scripts/publish_release_to_linear.py
 
       - name: Publish production result to MAXIBOT Linear
         if: always()
@@ -107,7 +126,7 @@ jobs:
           RELEASE_PHASE: production
           RELEASE_STATUS: ${{ steps.execute.outputs.status || 'FAILED' }}
           RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
-        run: python scripts/publish_release_to_linear.py
+        run: python3 scripts/publish_release_to_linear.py
 
       - name: Preserve exact release result
         if: always()

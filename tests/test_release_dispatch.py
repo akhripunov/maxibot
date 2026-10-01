@@ -34,6 +34,10 @@ class FakeGitHub:
             return {"object": {"sha": self.main_sha}}
         if path.startswith("actions/workflows/"):
             return {"workflow_runs": self.runs}
+        if path.startswith("actions/runs/") and path.endswith("/artifacts"):
+            run_id = path.split("/")[2]
+            attempt = next((run.get("run_attempt", 1) for run in self.runs if str(run["id"]) == run_id), 1)
+            return {"artifacts": [{"name": f"maxibot-image-{SHA}-{run_id}-{attempt}", "expired": False}]}
         raise AssertionError(path)
 
 
@@ -55,6 +59,7 @@ def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
     assert selected["candidate"] == SHA
     assert selected["target_migration"] == MIGRATION
     assert selected["prepare_run_id"] == "14"
+    assert selected["prepare_run_attempt"] == "1"
     assert any(f"head_sha={SHA}" in path for path in github.paths)
 
 
@@ -75,6 +80,41 @@ def test_dispatch_rejects_unfinished_or_failed_latest_prepare(status, conclusion
            "status": status, "conclusion": conclusion, "event": "push", "head_branch": "main"}
     with pytest.raises(ValidationError, match="latest Prepare"):
         validate(values(), FakeGitHub(runs=[run]))
+
+
+def test_dispatch_rejects_missing_or_expired_prepared_image_artifact():
+    class MissingArtifactGitHub(FakeGitHub):
+        def __call__(self, path, token):
+            if path.startswith("actions/runs/"):
+                return {"artifacts": []}
+            return super().__call__(path, token)
+
+    with pytest.raises(ValidationError, match="image artifact"):
+        validate(values(), MissingArtifactGitHub())
+
+
+def test_deploy_workflow_downloads_prepare_artifact_and_uses_python3():
+    workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+    assert "actions/download-artifact@v4" in workflow
+    assert "run-id: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
+    assert "python scripts/" not in workflow
+    assert "python3 scripts/validate_release_dispatch.py" in workflow
+    assert "scripts/verify_prepared_image.py" in workflow
+
+
+def test_release_apply_loads_verified_prepared_image_without_rebuilding():
+    release = (ROOT / "scripts/release_prod.sh").read_text()
+    assert 'docker load --input $REMOTE_IMAGE_TMP' in release
+    assert 'docker build --platform linux/amd64' not in release
+    assert 'RELEASE_IMAGE_ID' in release
+    assert 'A verified Prepare image archive is required' in release
+
+
+def test_release_workflow_wrapper_never_builds_and_requires_prepare_image():
+    wrapper = (ROOT / "scripts/run_release_workflow.py").read_text()
+    assert '"docker", "build"' not in wrapper
+    assert 'IMAGE_ARCHIVE' in wrapper and 'IMAGE_MANIFEST' in wrapper
+    assert 'PREPARE_RUN_ID' in wrapper
 
 
 def test_dispatch_requires_exact_operator_confirmation_for_production():

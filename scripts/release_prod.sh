@@ -414,9 +414,16 @@ tar --exclude='._*' --exclude='.DS_Store' --exclude='__MACOSX' -cf "$ARCHIVE" -C
 REMOTE_TMP="/tmp/maxibot-release-$TARGET_SHA.tar"
 "${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"
 
+IMAGE_ARCHIVE=${RELEASE_IMAGE_ARCHIVE:-}
+[[ -n "$IMAGE_ARCHIVE" && -r "$IMAGE_ARCHIVE" ]] || die "A verified Prepare image archive is required; source rebuilds are disabled"
+RELEASE_IMAGE_ID=${RELEASE_IMAGE_ID:-}
+[[ "$RELEASE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_ID must be the verified image config digest"
+REMOTE_IMAGE_TMP="/tmp/maxibot-image-$TARGET_SHA.tar"
+"${SCP[@]}" "$IMAGE_ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_IMAGE_TMP"
+
 remote "set -eu; test -r $PRODUCTION_ROOT/.env; mkdir -p $PRODUCTION_ROOT/releases/$TARGET_SHA; tar -xf $REMOTE_TMP -C $PRODUCTION_ROOT/releases/$TARGET_SHA; find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -exec rm -rf {} +; if find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -print -quit | grep -q .; then echo 'AppleDouble or macOS metadata remains in remote release context' >&2; exit 1; fi"
 remote "rm -f $REMOTE_TMP"
-remote "set -eu; cd $PRODUCTION_ROOT; docker build --platform linux/amd64 --label org.opencontainers.image.revision=$TARGET_SHA --label org.maxibot.release.sha=$TARGET_SHA -t maxibot-vps-api:$TARGET_SHA releases/$TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64"
+remote "set -eu; docker load --input $REMOTE_IMAGE_TMP; docker image inspect maxibot-vps-api:$TARGET_SHA >/dev/null; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}')\" = $RELEASE_IMAGE_ID; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; rm -f $REMOTE_IMAGE_TMP"
 PREVIOUS_CONFIG=$(remote "docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'")
 PREVIOUS_SHA=$(remote "docker inspect maxibot-vps-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p' | head -1")
 PREVIOUS_IMAGE=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'")

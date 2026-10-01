@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -65,26 +66,27 @@ def main() -> int:
             raise ValueError("Release checkout must be clean and match the exact candidate SHA")
 
         image = f"maxibot-vps-api:{sha}"
-        build = [
-            "docker", "build", "--platform", "linux/amd64",
-            "--label", f"org.opencontainers.image.revision={sha}",
-            "--label", f"org.opencontainers.image.source-sha={sha}",
-            "--label", f"org.maxibot.release.sha={sha}",
-            "--tag", image, ".",
-        ]
-        build_code, _ = run(build, os.environ.copy())
-        if build_code != 0:
-            raise RuntimeError("Candidate linux/amd64 image build failed")
+        archive = Path(os.environ.get("IMAGE_ARCHIVE", ""))
+        manifest_path = Path(os.environ.get("IMAGE_MANIFEST", ""))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if manifest.get("candidate_sha") != sha or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID"):
+            raise RuntimeError("Prepared image provenance does not match selected candidate/Prepare run")
+        if manifest.get("archive_sha256") != archive_sha256 or manifest.get("platform") != "linux/amd64":
+            raise RuntimeError("Prepared image archive digest/platform verification failed")
         inspect = subprocess.check_output(
-            ["docker", "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}|{{index .Config.Labels \"org.opencontainers.image.revision\"}}|{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}|{{index .Config.Labels \"org.maxibot.release.sha\"}}"],
-            text=True,
+            ["docker", "image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}|{{.Id}}|{{index .Config.Labels \"org.opencontainers.image.revision\"}}|{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}|{{index .Config.Labels \"org.maxibot.release.sha\"}}"], text=True,
         ).strip()
-        if inspect != f"linux/amd64|{sha}|{sha}|{sha}":
-            raise RuntimeError("Candidate image platform/source SHA verification failed")
+        if inspect != f"linux/amd64|{manifest.get('image_id')}|{sha}|{sha}|{sha}":
+            raise RuntimeError("Prepared image config digest/platform/source SHA verification failed")
+        env = os.environ.copy()
+        env["API_CANDIDATE_IMAGE"] = image
+        env["WORKER_CANDIDATE_IMAGE"] = image
+        env["RELEASE_IMAGE_ARCHIVE"] = str(archive)
+        env["RELEASE_IMAGE_ID"] = manifest["image_id"]
         result["image_platform"] = "linux/amd64"
         result["image_source_sha"] = sha
 
-        env = os.environ.copy()
         env["TARGET_MIGRATION"] = migration
         dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)
         if dry_code != 0 or "SAFE_TO_RELEASE=YES" not in dry_output or "DRY_RUN_RESULT=PASS" not in dry_output:
@@ -110,7 +112,7 @@ def main() -> int:
             result["final_runtime_sha"] = sha
             result["final_migration"] = migration
         return_code = 0
-    except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError) as exc:
+    except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError, KeyError) as exc:
         result["error"] = str(exc)
         return_code = 1
     finally:

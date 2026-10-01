@@ -193,7 +193,7 @@ def test_release_tooling_contains_required_safety_gates():
     for marker in (
         "OWNER_APPROVED=1",
         "env_file: /opt/maxibot/.env",
-        "--platform linux/amd64",
+        "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}'",
         "MIGRATION_ALLOWED YES",
         "alembic upgrade $TARGET_MIGRATION",
         "health/ready",
@@ -237,8 +237,7 @@ def test_readiness_probe_is_bounded_and_exit_first():
 
 def test_exact_sha_is_proven_without_git_inside_release_directory():
     source = SCRIPT.read_text()
-    assert "org.maxibot.release.sha" in source
-    assert '{{index .Config.Labels \\"org.maxibot.release.sha\\"}}' in source
+    assert 'org.maxibot.release.sha' in source
     assert '.Config.Labels.org.maxibot.release.sha' not in source
     assert "release-manifest.json" in source
 

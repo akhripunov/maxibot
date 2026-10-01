@@ -74,12 +74,17 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
         raise ValidationError("The latest Prepare run for this candidate is not successful")
     if latest.get("event") not in {"push", "workflow_dispatch"} or latest.get("head_branch") != "main":
         raise ValidationError("Prepare run did not come from trusted main")
+    artifact_name = f"maxibot-image-{sha}-{latest['id']}-{latest.get('run_attempt', 1)}"
+    artifacts = api_get(f"actions/runs/{latest['id']}/artifacts", token)
+    if not any(item.get("name") == artifact_name and not item.get("expired") for item in artifacts.get("artifacts", [])):
+        raise ValidationError("Exact prepared linux/amd64 image artifact is missing or expired")
 
     return {
         "candidate": sha,
         "target_migration": migration,
         "mode": mode,
         "prepare_run_id": str(latest["id"]),
+        "prepare_run_attempt": str(latest.get("run_attempt", 1)),
         "prepare_url": str(latest.get("html_url", "")),
     }
 
