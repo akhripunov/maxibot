@@ -148,17 +148,19 @@ jobs:
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           RELEASE_PHASE: preflight
-          RELEASE_STATUS: ${{ steps.execute.outputs.preflight == 'PASS' && 'READY' || 'FAILED' }}
+          RELEASE_STATUS: ${{ steps.execute.outputs.preflight == 'PASS' && 'READY' || (steps.execute.outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
           RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: '"$MAXIBOT_PYTHON" scripts/publish_release_to_linear.py'
 
       - name: Publish production result to MAXIBOT Linear
-        if: always()
+        if: always() && inputs.mode == 'production' && steps.execute.outcome != 'skipped'
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           RELEASE_PHASE: production
           RELEASE_STATUS: ${{ steps.execute.outputs.status || 'FAILED' }}
           RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: '"$MAXIBOT_PYTHON" scripts/publish_release_to_linear.py'
 
       - name: Preserve exact release result

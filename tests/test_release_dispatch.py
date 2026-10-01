@@ -131,6 +131,7 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert 'git status --porcelain' in workflow
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
+    assert "inputs.mode == 'production' && steps.execute.outcome != 'skipped'" in workflow
 
 
 def test_prepare_writes_valid_json_newline_to_image_manifest():
