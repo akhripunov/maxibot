@@ -73,6 +73,7 @@ jobs:
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+      RUNNER_TOOL_CACHE: ${{ runner.temp }}/maxibot-toolcache
     steps:
       - name: Set result evidence path
         shell: bash
@@ -84,13 +85,23 @@ jobs:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
 
-      - name: Set deterministic Python runtime
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          python-version: '3.12'
+          version: 0.12.0
+
+      - name: Install portable Python 3.12.10
+        env:
+          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/maxibot-python/install
+          UV_PYTHON_BIN_DIR: ${{ runner.temp }}/maxibot-python/bin
+        run: |
+          uv python install 3.12.10
+          python_path="$(uv python find --managed-python 3.12.10)"
+          test -x "$python_path"
+          echo "MAXIBOT_PYTHON=$python_path" >> "$GITHUB_ENV"
 
       - name: Verify Python runtime
-        run: python3 --version | grep -E '^Python 3\.12\.'
+        run: '"$MAXIBOT_PYTHON" --version | grep -Fx "Python 3.12.10"'
 
       - name: Download exact prepared image artifact
         uses: actions/download-artifact@v4
@@ -105,20 +116,20 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
           PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
-        run: python3 scripts/validate_release_dispatch.py
+        run: '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py'
 
       - name: Verify and load the prepared image
         env:
           IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
-        run: python3 scripts/verify_prepared_image.py
+        run: '"$MAXIBOT_PYTHON" scripts/verify_prepared_image.py'
 
       - name: Run production preflight and requested release mode
         id: execute
         env:
           IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
-        run: python3 scripts/run_release_workflow.py
+        run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
 
       - name: Publish preflight result to MAXIBOT Linear
         if: always()
@@ -127,7 +138,7 @@ jobs:
           RELEASE_PHASE: preflight
           RELEASE_STATUS: ${{ steps.execute.outputs.preflight == 'PASS' && 'READY' || 'FAILED' }}
           RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
-        run: python3 scripts/publish_release_to_linear.py
+        run: '"$MAXIBOT_PYTHON" scripts/publish_release_to_linear.py'
 
       - name: Publish production result to MAXIBOT Linear
         if: always()
@@ -136,7 +147,7 @@ jobs:
           RELEASE_PHASE: production
           RELEASE_STATUS: ${{ steps.execute.outputs.status || 'FAILED' }}
           RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
-        run: python3 scripts/publish_release_to_linear.py
+        run: '"$MAXIBOT_PYTHON" scripts/publish_release_to_linear.py'
 
       - name: Preserve exact release result
         if: always()

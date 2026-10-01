@@ -114,15 +114,18 @@ def test_dispatch_rejects_missing_or_expired_prepared_image_artifact():
         validate(values(), MissingArtifactGitHub())
 
 
-def test_deploy_workflow_downloads_prepare_artifact_and_uses_python3():
+def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_python():
     workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
     assert "actions/download-artifact@v4" in workflow
     assert "run-id: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "python scripts/" not in workflow
-    assert "python3 scripts/validate_release_dispatch.py" in workflow
+    assert '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py' in workflow
     assert "scripts/verify_prepared_image.py" in workflow
-    assert "actions/setup-python@v5" in workflow
-    assert "python-version: '3.12'" in workflow
+    assert "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4" in workflow
+    assert "uv python install 3.12.10" in workflow
+    assert "uv python find --managed-python 3.12.10" in workflow
+    assert "Python 3.12.10" in workflow
+    assert "actions/setup-python@v5" not in workflow
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
 
