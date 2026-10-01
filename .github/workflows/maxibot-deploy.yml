@@ -73,6 +73,7 @@ jobs:
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+      RUNNER_TOOL_CACHE: ${{ runner.temp }}/maxibot-toolcache
     steps:
       - name: Set result evidence path
         shell: bash
