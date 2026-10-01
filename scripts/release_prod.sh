@@ -15,6 +15,16 @@ EOF
 }
 die() { echo "RELEASE_BLOCKED=$*" >&2; exit 1; }
 say() { printf '%s=%s\n' "$1" "$2"; }
+timed_stage() {
+  local name=$1 started finished code
+  shift
+  started=$(date +%s)
+  printf 'RELEASE_STAGE=%s_START\n' "$name" >&2
+  if "$@"; then code=0; else code=$?; fi
+  finished=$(date +%s)
+  printf 'STAGE_SECONDS_%s=%s\n' "$name" "$((finished - started))" >&2
+  return "$code"
+}
 
 [[ $# -ge 1 ]] || { usage; exit 2; }
 TARGET_SHA=$1
@@ -418,14 +428,19 @@ EOF
 ARCHIVE="$WORK/../maxibot-release-$TARGET_SHA.tar"
 tar --exclude='._*' --exclude='.DS_Store' --exclude='__MACOSX' -cf "$ARCHIVE" -C "$WORK" .
 REMOTE_TMP="/tmp/maxibot-release-$TARGET_SHA.tar"
-"${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"
-
-REMOTE_IMAGE_TMP="/tmp/maxibot-image-$TARGET_SHA.tar"
-"${SCP[@]}" "$IMAGE_ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_IMAGE_TMP"
+timed_stage SOURCE_UPLOAD "${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"
 
 remote "set -eu; test -r $PRODUCTION_ROOT/.env; mkdir -p $PRODUCTION_ROOT/releases/$TARGET_SHA; tar -xf $REMOTE_TMP -C $PRODUCTION_ROOT/releases/$TARGET_SHA; find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -exec rm -rf {} +; if find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -print -quit | grep -q .; then echo 'AppleDouble or macOS metadata remains in remote release context' >&2; exit 1; fi"
 remote "rm -f $REMOTE_TMP"
-remote "set -eu; test \"\$(sha256sum $REMOTE_IMAGE_TMP | cut -d ' ' -f1)\" = $RELEASE_IMAGE_ARCHIVE_SHA256; docker load --input $REMOTE_IMAGE_TMP; docker image inspect maxibot-vps-api:$TARGET_SHA >/dev/null; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; rm -f $REMOTE_IMAGE_TMP"
+IMAGE_REUSE=$(remote "if test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.sha256 && test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config && test \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.sha256)\" = $RELEASE_IMAGE_ARCHIVE_SHA256 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}' 2>/dev/null)\" = \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config)\" && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; then echo YES; else echo NO; fi")
+say IMAGE_REUSED "$IMAGE_REUSE"
+if [[ "$IMAGE_REUSE" != YES ]]; then
+REMOTE_IMAGE_TMP="/tmp/maxibot-image-$TARGET_SHA.tar.gz"
+timed_stage IMAGE_UPLOAD "${SCP[@]}" "$IMAGE_ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_IMAGE_TMP"
+
+timed_stage IMAGE_LOAD remote "set -eu; test \"\$(sha256sum $REMOTE_IMAGE_TMP | cut -d ' ' -f1)\" = $RELEASE_IMAGE_ARCHIVE_SHA256; docker load --input $REMOTE_IMAGE_TMP; docker image inspect maxibot-vps-api:$TARGET_SHA >/dev/null; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; rm -f $REMOTE_IMAGE_TMP"
+remote "printf '%s\\n' $RELEASE_IMAGE_ARCHIVE_SHA256 > $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.sha256; docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}' > $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config"
+fi
 REMOTE_LOADED_IMAGE_ID=$(remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}'")
 [[ "$REMOTE_LOADED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "loaded VPS image config digest is unavailable"
 say PREPARED_IMAGE_CONFIG_DIGEST "$RELEASE_IMAGE_ID"
@@ -480,9 +495,9 @@ say PRE_APPLY_IMAGE_PARITY PASS
 remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic heads | grep -q '^$TARGET_MIGRATION'"
 say MIGRATION_ALLOWED YES
 
-remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic upgrade $TARGET_MIGRATION"
-remote "set -eu; docker compose -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d --no-build --force-recreate api worker"
-if ! remote "set -Eeuo pipefail
+timed_stage MIGRATION remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic upgrade $TARGET_MIGRATION"
+timed_stage RUNTIME_SWITCH remote "set -eu; docker compose -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d --no-build --force-recreate api worker"
+if ! timed_stage HEALTH remote "set -Eeuo pipefail
 deadline=\$((\$(date +%s) + $HEALTH_TIMEOUT_SECONDS))
 while true; do
   state=\$(docker inspect --format '{{.State.Status}}' maxibot-vps-api-1 2>/dev/null || true)
@@ -537,9 +552,12 @@ FINAL_ALEMBIC_HEAD=$FINAL_ALEMBIC
 FINAL_STATUS=PASS
 EOF"
 RELEASE_REF="refs/maxibot/release/$TARGET_SHA"
-git show-ref --verify --quiet "refs/heads/$(git symbolic-ref --short HEAD)" || die "candidate branch is unavailable"
+[[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]] || die "candidate checkout SHA changed before finalization"
+[[ -z "$(git status --porcelain)" ]] || die "candidate checkout changed before finalization"
+EXISTING_RELEASE_REF_SHA=$(git ls-remote --refs origin "$RELEASE_REF" | awk 'NR == 1 {print $1}')
+[[ -z "$EXISTING_RELEASE_REF_SHA" || "$EXISTING_RELEASE_REF_SHA" == "$TARGET_SHA" ]] || die "immutable release ref already names another candidate"
+timed_stage FINALIZATION git push --force-with-lease="$RELEASE_REF:$EXISTING_RELEASE_REF_SHA" origin "$TARGET_SHA:$RELEASE_REF"
 git update-ref "$RELEASE_REF" "$TARGET_SHA"
-git push origin "$TARGET_SHA:$RELEASE_REF"
 REMOTE_RELEASE_REF_SHA=$(git ls-remote --refs origin "$RELEASE_REF" | awk 'NR == 1 {print $1}')
 [[ "$REMOTE_RELEASE_REF_SHA" == "$TARGET_SHA" ]] || die "remote release ref verification failed"
 say RELEASE_REF "$RELEASE_REF"

@@ -17,7 +17,7 @@ IMAGE_LABELS = (
 
 def inspect_prepared_archive(archive: Path, image: str, sha: str) -> tuple[str, str]:
     """Return config digest and platform, rejecting any archive provenance mismatch."""
-    with tarfile.open(archive, "r:") as image_tar:
+    with tarfile.open(archive, "r:*") as image_tar:
         try:
             manifest_member = image_tar.getmember("manifest.json")
         except KeyError as exc:

@@ -38,7 +38,7 @@ class FakeGitHub:
         if path.startswith("actions/runs/") and path.endswith("/artifacts"):
             run_id = path.split("/")[2]
             attempt = next((run.get("run_attempt", 1) for run in self.runs if str(run["id"]) == run_id), 1)
-            return {"artifacts": [{"name": f"maxibot-image-{SHA}-{run_id}-{attempt}", "expired": False}]}
+            return {"artifacts": [{"id": 123, "name": f"maxibot-image-{SHA}-{run_id}-{attempt}", "expired": False}]}
         raise AssertionError(path)
 
 
@@ -116,8 +116,8 @@ def test_dispatch_rejects_missing_or_expired_prepared_image_artifact():
 
 def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_python():
     workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
-    assert "actions/download-artifact@v4" in workflow
-    assert "run-id: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
+    assert "scripts/prepared_artifact_cache.py" in workflow
+    assert "PREPARE_ARTIFACT_ID: ${{ needs.validate.outputs.prepare_artifact_id }}" in workflow
     assert "python scripts/" not in workflow
     assert '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py' in workflow
     assert "scripts/verify_prepared_image.py" in workflow
@@ -126,18 +126,67 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "uv python find --managed-python 3.12.10" in workflow
     assert "Python 3.12.10" in workflow
     assert "actions/setup-python@v5" not in workflow
-    assert 'RUNNER_TOOL_CACHE=$RUNNER_TEMP/maxibot-toolcache" >> "$GITHUB_ENV"' in workflow
+    assert 'RUNNER_TOOL_CACHE=$HOME/.cache/maxibot-release/toolcache" >> "$GITHUB_ENV"' in workflow
     assert 'PYTHONDONTWRITEBYTECODE: "1"' in workflow
     assert 'git status --porcelain' in workflow
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
-    assert "inputs.mode == 'production' && steps.execute.outcome != 'skipped'" in workflow
+    assert "inputs.mode == 'production' && needs.deploy.outputs.status != ''" in workflow
 
 
 def test_prepare_writes_valid_json_newline_to_image_manifest():
     workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
     assert 'sort_keys=True) + "\\n")' in workflow
     assert 'sort_keys=True) + "\\\\n")' not in workflow
+
+
+@pytest.mark.parametrize(
+    ("prepare_result", "expected"),
+    [("success", "CI_PASS"), ("failure", "FAILED"), ("cancelled", "CANCELLED"), ("skipped", "SKIPPED")],
+)
+def test_linear_candidate_status_reflects_final_prepare_and_artifact_result(prepare_result, expected):
+    workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert "Publish complete Prepare artifacts" in workflow
+    assert workflow.index("Publish complete Prepare artifacts") < workflow.index("Publish final Prepare result to MAXIBOT Linear")
+    assert "PREPARE_RESULT: ${{ needs.prepare.result }}" in workflow
+    assert publish_release_to_linear.candidate_status(prepare_result) == expected
+
+
+def test_preflight_only_does_not_record_production_event():
+    workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+    step = workflow.split("- name: Publish production result to MAXIBOT Linear", 1)[1].split("- name: Preserve exact release result", 1)[0]
+    assert "if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''" in step
+    assert "RELEASE_PHASE: production" in step
+    assert "RELEASE_PHASE: production" not in workflow.split("- name: Publish preflight result to MAXIBOT Linear", 1)[1].split("- name: Publish production result to MAXIBOT Linear", 1)[0]
+
+
+@pytest.mark.parametrize("status", ["FAILED_PRE_SWITCH", "COMPLETE", "RECOVERY_REQUIRED", "FAILED"])
+def test_deploy_linear_records_canonical_attempt_status(status):
+    workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+    assert "needs.deploy.outputs.status || 'FAILED'" in workflow
+    assert status in (ROOT / "scripts/run_release_workflow.py").read_text() or status == "FAILED"
+    assert "PLANNED" not in publish_release_to_linear.STATUSES["production"]
+
+
+def test_linear_rerun_attempts_keep_distinct_journal_events():
+    publisher = (ROOT / "scripts/publish_release_to_linear.py").read_text()
+    assert "GITHUB_RUN_ATTEMPT" in publisher
+    assert "ATTEMPT_{attempt}" in publisher
+    assert "предыдущая запись сохранена" in publisher
+    first = publish_release_to_linear.journal_event_marker("123", "1", "candidate", "CI_PASS")
+    second = publish_release_to_linear.journal_event_marker("123", "2", "candidate", "CI_PASS")
+    journal = append_journal_event("history", first, "first")
+    journal = append_journal_event(journal, second, "second")
+    assert first in journal and second in journal
+    assert "first" in journal and "second" in journal
+
+
+def test_publisher_uses_only_maxibot_documents():
+    source = (ROOT / "scripts/publish_release_to_linear.py").read_text()
+    assert 'HANDOFF_ID = "6f799a5c-75b2-4fc1-a522-86bab4c1950b"' in source
+    assert 'JOURNAL_ID = "13df4e43-f252-424c-afca-fdb2a37eaf29"' in source
+    assert "1d84a3c6-f297-40c2-b9e7-ab81bc749c48" not in source
+    assert "56f7f9f5-c6e1-42b7-8c29-5b24e6c41a06" not in source
 
 
 def test_release_apply_loads_verified_prepared_image_without_rebuilding():
@@ -203,7 +252,7 @@ def test_linear_release_block_closes_outside_markdown_list_continuation():
 
 
 def test_linear_journal_event_has_markdown_roundtrip_spacing():
-    marker = "<!-- MAXIBOT_RELEASE_EVENT_123_candidate_CI_PASS -->"
+    marker = "<!-- MAXIBOT_RELEASE_EVENT_123_ATTEMPT_1_candidate_CI_PASS -->"
     block = "### 2026-10-01T00:00:00+00:00 — candidate: **CI_PASS**\n\n* SHA: `" + SHA + "`"
     content = append_journal_event("journal intro", marker, block)
     assert f"\n\n{marker}\n\n{block}\n" in content

@@ -82,3 +82,12 @@ def test_prepared_archive_rejects_multiple_images(tmp_path):
 
     with pytest.raises(ValueError, match="exactly one image"):
         inspect_prepared_archive(archive, IMAGE, SHA)
+
+
+def test_compressed_archive_preserves_exact_config_identity(tmp_path):
+    import gzip
+    archive = tmp_path / "image.tar"
+    identity = make_archive(archive)
+    compressed = tmp_path / "image.tar.gz"
+    compressed.write_bytes(gzip.compress(archive.read_bytes(), compresslevel=1))
+    assert inspect_prepared_archive(compressed, IMAGE, SHA) == (identity, "linux/amd64")

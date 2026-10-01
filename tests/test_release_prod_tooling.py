@@ -222,7 +222,7 @@ def test_release_tooling_contains_required_safety_gates():
         "sha256sum $REMOTE_IMAGE_TMP",
         "VPS_LOADED_IMAGE_CONFIG_DIGEST",
         "refs/maxibot/release/",
-        "git push origin \"$TARGET_SHA:$RELEASE_REF\"",
+        "git push --force-with-lease=\"$RELEASE_REF:$EXISTING_RELEASE_REF_SHA\" origin \"$TARGET_SHA:$RELEASE_REF\"",
         "REMOTE_RELEASE_REF_SHA",
     ):
         assert marker in source

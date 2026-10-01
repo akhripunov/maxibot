@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-import hashlib
+try:
+    from scripts.prepared_artifact_cache import checksum
+except ModuleNotFoundError:
+    from prepared_artifact_cache import checksum
 import json
 import os
 import sys
@@ -23,7 +26,7 @@ def main() -> int:
     run_id = os.environ.get("PREPARE_RUN_ID", "")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        actual_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+        actual_hash = checksum(archive)
         expected_labels = {
             "org.opencontainers.image.revision": sha,
             "org.opencontainers.image.source-sha": sha,

@@ -40,6 +40,7 @@ jobs:
     outputs:
       candidate: ${{ steps.select.outputs.candidate }}
       target_migration: ${{ steps.select.outputs.target_migration }}
+      prepare_artifact_id: ${{ steps.select.outputs.prepare_artifact_id }}
       prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
       prepare_run_attempt: ${{ steps.select.outputs.prepare_run_attempt }}
       prepare_url: ${{ steps.select.outputs.prepare_url }}
@@ -66,9 +67,14 @@ jobs:
     permissions:
       contents: write
       actions: read
+    outputs:
+      preflight: ${{ steps.execute.outputs.preflight }}
+      status: ${{ steps.execute.outputs.status }}
+      execute_outcome: ${{ steps.execute.outcome }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
+      PREPARE_ARTIFACT_ID: ${{ needs.validate.outputs.prepare_artifact_id }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
@@ -79,11 +85,11 @@ jobs:
         shell: bash
         run: echo "RELEASE_RESULT=$RUNNER_TEMP/maxibot-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
 
-      - name: Configure writable job-local tool cache
+      - name: Configure writable persistent tool cache
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/maxibot-toolcache"
-          echo "RUNNER_TOOL_CACHE=$RUNNER_TEMP/maxibot-toolcache" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.cache/maxibot-release/toolcache"
+          echo "RUNNER_TOOL_CACHE=$HOME/.cache/maxibot-release/toolcache" >> "$GITHUB_ENV"
 
       - name: Checkout the approved candidate
         uses: actions/checkout@v4
@@ -95,12 +101,12 @@ jobs:
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: 0.12.0
+          prune-cache: false
 
       - name: Install portable Python 3.12.10
-        env:
-          UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/maxibot-python/install
-          UV_PYTHON_BIN_DIR: ${{ runner.temp }}/maxibot-python/bin
         run: |
+          export UV_PYTHON_INSTALL_DIR="$RUNNER_TOOL_CACHE/maxibot-python/install"
+          export UV_PYTHON_BIN_DIR="$RUNNER_TOOL_CACHE/maxibot-python/bin"
           uv python install 3.12.10
           python_path="$(uv python find --managed-python 3.12.10)"
           test -x "$python_path"
@@ -109,24 +115,20 @@ jobs:
       - name: Verify Python runtime
         run: '"$MAXIBOT_PYTHON" --version | grep -Fx "Python 3.12.10"'
 
-      - name: Download exact prepared image artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: maxibot-image-${{ needs.validate.outputs.candidate }}-${{ needs.validate.outputs.prepare_run_id }}-${{ needs.validate.outputs.prepare_run_attempt }}
-          path: ${{ runner.temp }}/maxibot-prepared-image
-          run-id: ${{ needs.validate.outputs.prepare_run_id }}
-          github-token: ${{ github.token }}
-
       - name: Recheck current main and Prepare provenance on the Mac
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
-          PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
         run: '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py'
+
+      - name: Restore or download the verified immutable artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ARTIFACT_DESTINATION: ${{ runner.temp }}/maxibot-prepared-image
+        run: '"$MAXIBOT_PYTHON" scripts/prepared_artifact_cache.py'
 
       - name: Verify and load the prepared image
         env:
-          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar
+          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
         run: '"$MAXIBOT_PYTHON" scripts/verify_prepared_image.py'
 
@@ -139,35 +141,54 @@ jobs:
       - name: Run production preflight and requested release mode
         id: execute
         env:
-          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar
+          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
         run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
-
-      - name: Publish preflight result to MAXIBOT Linear
-        if: always()
-        env:
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          RELEASE_PHASE: preflight
-          RELEASE_STATUS: ${{ steps.execute.outputs.preflight == 'PASS' && 'READY' || (steps.execute.outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
-          RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
-          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: '"$MAXIBOT_PYTHON" scripts/publish_release_to_linear.py'
-
-      - name: Publish production result to MAXIBOT Linear
-        if: always() && inputs.mode == 'production' && steps.execute.outcome != 'skipped'
-        env:
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          RELEASE_PHASE: production
-          RELEASE_STATUS: ${{ steps.execute.outputs.status || 'FAILED' }}
-          RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
-          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: '"$MAXIBOT_PYTHON" scripts/publish_release_to_linear.py'
 
       - name: Preserve exact release result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: maxibot-release-result-${{ github.run_id }}
+          name: maxibot-release-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.RELEASE_RESULT }}
           if-no-files-found: warn
           retention-days: 90
+
+  publish:
+    needs: [validate, deploy]
+    if: always() && needs.validate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: maxibot-linear-release
+      cancel-in-progress: false
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      RELEASE_RESULT: ${{ runner.temp }}/release-evidence/maxibot-release-result-${{ github.run_id }}.json
+      GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+      TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.candidate }}
+      - name: Read saved release evidence
+        if: needs.deploy.outputs.status != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: maxibot-release-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-evidence
+      - name: Publish preflight result to MAXIBOT Linear
+        if: always()
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_PHASE: preflight
+          RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PASS' && 'READY' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
+        run: python3 scripts/publish_release_to_linear.py
+      - name: Publish production result to MAXIBOT Linear
+        if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_PHASE: production
+          RELEASE_STATUS: ${{ needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || (needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || needs.deploy.outputs.status || 'FAILED') }}
+        run: python3 scripts/publish_release_to_linear.py

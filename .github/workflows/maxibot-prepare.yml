@@ -50,6 +50,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Verify exact current main SHA
         run: |
@@ -100,7 +102,7 @@ jobs:
         id: image
         env:
           IMAGE: maxibot-vps-api:${{ inputs.candidate || github.sha }}
-          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-image-${{ inputs.candidate || github.sha }}.tar
+          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-image-${{ inputs.candidate || github.sha }}.tar.gz
         run: |
           set -euo pipefail
           docker build --platform linux/amd64 \
@@ -111,7 +113,7 @@ jobs:
           docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source-sha"}}|{{index .Config.Labels "org.maxibot.release.sha"}}' \
             | grep -Fx "linux/amd64|$CANDIDATE_SHA|$CANDIDATE_SHA|$CANDIDATE_SHA"
           IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
-          docker save "$IMAGE" -o "$IMAGE_ARCHIVE"
+          docker save "$IMAGE" | gzip -1 > "$IMAGE_ARCHIVE"
           ARCHIVE_SHA256="$(sha256sum "$IMAGE_ARCHIVE" | awk '{print $1}')"
           python3 - "$RUNNER_TEMP/maxibot-image-manifest.json" "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$IMAGE_ID" "$ARCHIVE_SHA256" <<'PY'
           import json, sys
@@ -136,17 +138,6 @@ jobs:
           echo "IMAGE_ARCHIVE_SHA256=$ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
           echo "LINUX_AMD64_CANDIDATE=PASS" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Publish immutable prepared image artifact
-        if: steps.image.outcome == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: maxibot-image-${{ inputs.candidate || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/maxibot-image-${{ inputs.candidate || github.sha }}.tar
-            ${{ runner.temp }}/maxibot-image-manifest.json
-          if-no-files-found: error
-          retention-days: 30
-
       - name: Write CI result receipt
         if: always()
         env:
@@ -162,7 +153,7 @@ jobs:
           result = {
               "schema": "MAXIBOT_PREPARE_RECEIPT_V1",
               "candidate_sha": sha,
-              "status": "CI_PASS" if os.environ["JOB_STATUS"] == "success" else "FAILED",
+              "status": "VALIDATED" if os.environ["JOB_STATUS"] == "success" else "FAILED",
               "tests": os.environ.get("TEST_STATUS", "skipped"),
               "frozen_path_guard": os.environ.get("FROZEN_STATUS", "skipped"),
               "linux_amd64_image": os.environ.get("IMAGE_STATUS", "skipped"),
@@ -176,20 +167,36 @@ jobs:
               f.write(f"\n## MAXIBOT candidate: {result['status']}\n\nSHA: `{sha}`\n")
           PY
 
-      - name: Publish candidate status to MAXIBOT Linear
-        if: always() && github.ref == 'refs/heads/main'
+      - name: Publish complete Prepare artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: maxibot-image-${{ inputs.candidate || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/maxibot-image-${{ inputs.candidate || github.sha }}.tar.gz
+            ${{ runner.temp }}/maxibot-image-manifest.json
+            ${{ runner.temp }}/maxibot-prepare-result.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  publish:
+    needs: prepare
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: maxibot-linear-release
+      cancel-in-progress: false
+    steps:
+      - name: Checkout workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: Publish final Prepare result to MAXIBOT Linear
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           RELEASE_PHASE: candidate
-          RELEASE_STATUS: ${{ job.status == 'success' && 'CI_PASS' || 'FAILED' }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
           CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 scripts/publish_release_to_linear.py
-
-      - name: Preserve Prepare receipt
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: maxibot-prepare-${{ inputs.candidate || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/maxibot-prepare-result.json
-          if-no-files-found: error
-          retention-days: 30

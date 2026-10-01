@@ -6,8 +6,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import hashlib
+try:
+    from scripts.prepared_artifact_cache import checksum
+except ModuleNotFoundError:
+    from prepared_artifact_cache import checksum
 import subprocess
+import time
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,9 +26,18 @@ MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 
 
 def run(command: list[str], env: dict[str, str]) -> tuple[int, str]:
-    result = subprocess.run(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    print(result.stdout, end="", flush=True)
-    return result.returncode, result.stdout
+    stage = "PREFLIGHT" if "--dry-run" in command else "APPLY"
+    started = time.monotonic()
+    print(f"RELEASE_STAGE={stage}_START", flush=True)
+    chunks = []
+    with subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, bufsize=1) as process:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            chunks.append(line)
+        code = process.wait()
+    print(f"STAGE_SECONDS_{stage}={time.monotonic() - started:.3f}", flush=True)
+    return code, ''.join(chunks)
 
 
 def write_result(path: str, result: dict[str, object]) -> None:
@@ -74,7 +87,7 @@ def main() -> int:
         archive = Path(os.environ.get("IMAGE_ARCHIVE", ""))
         manifest_path = Path(os.environ.get("IMAGE_MANIFEST", ""))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+        archive_sha256 = checksum(archive)
         if manifest.get("candidate_sha") != sha or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID"):
             raise RuntimeError("Prepared image provenance does not match selected candidate/Prepare run")
         if manifest.get("archive_sha256") != archive_sha256 or manifest.get("platform") != "linux/amd64":
@@ -94,7 +107,9 @@ def main() -> int:
         result["image_archive_sha256"] = archive_sha256
 
         env["TARGET_MIGRATION"] = migration
+        preflight_started = time.monotonic()
         dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)
+        result["stage_seconds"] = {"PREFLIGHT": round(time.monotonic() - preflight_started, 3)}
         if dry_code != 0 or "SAFE_TO_RELEASE=YES" not in dry_output or "DRY_RUN_RESULT=PASS" not in dry_output:
             raise RuntimeError("Canonical production preflight did not report SAFE_TO_RELEASE=YES")
         result["preflight"] = "PASS"
@@ -104,7 +119,11 @@ def main() -> int:
             result["status"] = "PLANNED"
         else:
             env["OWNER_APPROVED"] = "1"
+            apply_started = time.monotonic()
             apply_code, apply_output = run(["bash", "scripts/release_prod.sh", sha, "--apply"], env)
+            result["stage_seconds"]["APPLY"] = round(time.monotonic() - apply_started, 3)
+            for name, seconds in re.findall(r"STAGE_SECONDS_([A-Z_]+)=([0-9.]+)", apply_output):
+                result["stage_seconds"][name] = float(seconds)
             if "MIGRATION_ALLOWED=YES" not in apply_output:
                 result["status"] = "FAILED_PRE_SWITCH"
                 result["production_changed"] = False

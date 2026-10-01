@@ -19,9 +19,9 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 PHASES = {"candidate", "preflight", "production"}
 STATUSES = {
-    "candidate": {"CI_PASS", "FAILED"},
-    "preflight": {"READY", "FAILED"},
-    "production": {"PLANNED", "COMPLETE", "FAILED_PRE_SWITCH", "RECOVERY_REQUIRED", "FAILED"},
+    "candidate": {"CI_PASS", "FAILED", "CANCELLED", "SKIPPED"},
+    "preflight": {"READY", "FAILED", "BLOCKED"},
+    "production": {"COMPLETE", "FAILED_PRE_SWITCH", "RECOVERY_REQUIRED", "FAILED"},
 }
 
 
@@ -86,14 +86,24 @@ def append_journal_event(content: str, event_marker: str, block: str) -> str:
     return content.rstrip() + f"\n\n{event_marker}\n\n{block}\n"
 
 
-def event_markdown(phase: str, status: str, sha: str, migration: str, run_id: str, url: str, result_path: str) -> str:
+def journal_event_marker(run_id: str, attempt: str, phase: str, status: str) -> str:
+    return f"<!-- MAXIBOT_RELEASE_EVENT_{run_id}_ATTEMPT_{attempt}_{phase}_{status} -->"
+
+
+def candidate_status(prepare_result: str) -> str:
+    return {"success": "CI_PASS", "cancelled": "CANCELLED", "skipped": "SKIPPED"}.get(prepare_result, "FAILED")
+
+
+def event_markdown(phase: str, status: str, sha: str, migration: str, run_id: str, attempt: str, url: str, result_path: str) -> str:
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     lines = [
         f"### {timestamp} — {phase}: **{status}**",
         "",
         f"* SHA: `{sha}`",
-        f"* GitHub run: [#{run_id}]({url})",
+        f"* GitHub run: [#{run_id}, попытка {attempt}]({url}/attempts/{attempt})",
     ]
+    if int(attempt) > 1:
+        lines.extend(["", "Повторный запуск: предыдущая запись сохранена; статус относится только к этой попытке."])
     if phase != "candidate" and migration:
         lines.insert(4, f"* Target Alembic: `{migration}`")
     if phase == "production" and result_path:
@@ -116,10 +126,11 @@ def event_markdown(phase: str, status: str, sha: str, migration: str, run_id: st
 def publish(env: dict[str, str]) -> None:
     api_key = env.get("MAXIBOT_LINEAR_API_KEY", "") or env.get("LINEAR_API_KEY", "")
     phase = env.get("RELEASE_PHASE", "")
-    status = env.get("RELEASE_STATUS", "")
+    status = candidate_status(env.get("PREPARE_RESULT", "")) if phase == "candidate" else env.get("RELEASE_STATUS", "")
     sha = env.get("CANDIDATE_SHA", "")
     migration = env.get("TARGET_MIGRATION", "")
     run_id = env.get("GITHUB_RUN_ID", "")
+    attempt = env.get("GITHUB_RUN_ATTEMPT", "1")
     server = env.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
     repository = env.get("GITHUB_REPOSITORY", "akhripunov/maxibot")
     result_path = env.get("RELEASE_RESULT", "")
@@ -127,19 +138,19 @@ def publish(env: dict[str, str]) -> None:
         raise SyncError("LINEAR_API_KEY repository secret is required")
     if phase not in PHASES or status not in STATUSES.get(phase, set()):
         raise SyncError("MAXIBOT release phase/status is invalid")
-    if not SHA_RE.fullmatch(sha) or not run_id.isdigit():
+    if not SHA_RE.fullmatch(sha) or not run_id.isdigit() or not attempt.isdigit() or int(attempt) < 1:
         raise SyncError("MAXIBOT release identity is invalid")
     if phase != "candidate" and not MIGRATION_RE.fullmatch(migration):
         raise SyncError("MAXIBOT release identity is invalid")
     url = f"{server}/{repository}/actions/runs/{run_id}"
-    block = event_markdown(phase, status, sha, migration, run_id, url, result_path)
+    block = event_markdown(phase, status, sha, migration, run_id, attempt, url, result_path)
 
     current_handoff = read_document(HANDOFF_ID, HANDOFF_TITLE, api_key)
     updated_handoff = upsert_block(current_handoff, f"MAXIBOT_RELEASE_{phase.upper()}", block)
     write_document(HANDOFF_ID, HANDOFF_TITLE, updated_handoff, api_key)
 
     current_journal = read_document(JOURNAL_ID, JOURNAL_TITLE, api_key)
-    event_marker = f"<!-- MAXIBOT_RELEASE_EVENT_{run_id}_{phase}_{status} -->"
+    event_marker = journal_event_marker(run_id, attempt, phase, status)
     if event_marker not in current_journal:
         updated_journal = append_journal_event(current_journal, event_marker, block)
         write_document(JOURNAL_ID, JOURNAL_TITLE, updated_journal, api_key)

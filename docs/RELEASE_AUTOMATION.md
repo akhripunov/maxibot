@@ -26,3 +26,34 @@ Publisher обновляет только именованные MAXIBOT release
 Регистрировать runner следует из Settings → Actions → Runners в репозитории MAXIBOT; temporary registration token не сохранять. На GitHub проверить `maxibot-owner-mac` / `maxibot-production` = `Idle`. Если пользовательский сервис не работает, production job остаётся `Queued` — это не успешная выкладка.
 
 Проверки и runner используют Linux/macOS user environment с production MAX polling выключенным для тестов; единственный production poller остаётся на VPS `worker`. Production SSH key и `.env` остаются на Mac/VPS. Ветки PR, пользовательский Telegram smoke и реклама автоматикой не меняются.
+
+## Release performance and finalization
+
+Prepare exports the single verified linux/amd64 image as gzip level 1; the
+outer GitHub artifact ZIP uses compression level 0. Both Mac verification and
+VPS checksum verification use the same compressed bytes. Application images
+are never rebuilt by Deploy.
+
+Artifact names contain candidate SHA, Prepare run ID and attempt. Before using
+`~/.cache/maxibot-release/artifacts`, Deploy checks fresh GitHub main/run/artifact
+metadata and the ZIP's published SHA-256. Missing/expired artifacts, changed
+attempts and mismatches fail closed. The cache retains at most three ZIPs / 1
+GiB (a selected oversized ZIP is retained alone). Portable Python 3.12.10 uses
+a separate persistent project tool cache. No caches dirty the candidate checkout.
+
+VPS image reuse is allowed only when the saved archive checksum and loaded
+config ID still match and image platform plus all three source labels pass.
+Fresh candidates still use canonical upload/load. The release wrapper streams
+output immediately; upload, load, migration, runtime switch, health and ref
+finalization emit timings, which are also saved in the workflow result.
+
+Finalization supports a clean detached HEAD by checking the exact candidate
+commit. The immutable release ref is pushed with a compare-and-swap lease;
+a pre-existing ref for another SHA blocks finalization. Branch names are never
+used as production identity. Backups and all safety gates remain mandatory.
+
+Deploy preserves runtime evidence before the separate Ubuntu Linear job.
+Publication failures remain visible failed workflows; they do not replace the
+runtime result. If runtime is already complete, retry the publication job
+instead of switching production again. All events and result artifacts include
+the GitHub attempt, preserving earlier history.
