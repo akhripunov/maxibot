@@ -140,6 +140,13 @@ landing получает yclid/UTM
   Historical candidates without that file remain governed by their prior
   release policy.
 
+## Automated release control
+
+- GitHub Actions `MAXIBOT — Prepare` and `MAXIBOT — Deploy` are the owner-facing wrappers described in `docs/RELEASE_AUTOMATION.md`.
+- `scripts/release_prod.sh` remains the sole production mutation path. Deploy requires current exact `origin/main`, latest successful Prepare for that SHA, explicit Alembic target, canonical dry-run `SAFE_TO_RELEASE=YES`, and an explicit production approval input. The workflow never sets advertising write flags.
+- The production runner is repository-scoped and labelled `maxibot-production`; it must not run pull-request/fork workflows. A separate registration may share the owner's macOS account with GPoint, but uses a distinct runner directory and a work directory without spaces. The account can read the MAXIBOT SSH key, so only trusted main/workflow_dispatch jobs may be routed there.
+- Linear release publication changes only owned MAXIBOT release blocks in the Architect Handoff and appends idempotent Journal events. Missing/failed publication or an offline runner is visible failure, not release success.
+
 ## Эксплуатационное правило: MAX updates читаются в одном месте
 
 - Production MAX updates читает только выделенный VPS `worker`.

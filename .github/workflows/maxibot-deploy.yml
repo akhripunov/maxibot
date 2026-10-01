@@ -1,0 +1,119 @@
+name: MAXIBOT — Deploy
+run-name: MAXIBOT ${{ inputs.mode }} ${{ inputs.candidate }} by ${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'Exact full SHA from a successful MAXIBOT — Prepare run'
+        required: true
+        type: string
+      target_migration:
+        description: 'Exact intended Alembic head supplied by Dev'
+        required: true
+        type: string
+      mode:
+        description: 'preflight checks production; production applies the candidate'
+        required: true
+        default: preflight
+        type: choice
+        options: [preflight, production]
+      approve_production:
+        description: 'I authorize this exact candidate and Alembic target on MAXIBOT production'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: maxibot-production-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      candidate: ${{ steps.select.outputs.candidate }}
+      target_migration: ${{ steps.select.outputs.target_migration }}
+      prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
+      prepare_url: ${{ steps.select.outputs.prepare_url }}
+    steps:
+      - name: Checkout trusted main workflow source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Verify approval, current main and latest successful Prepare
+        id: select
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate }}
+          TARGET_MIGRATION: ${{ inputs.target_migration }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+        run: python scripts/validate_release_dispatch.py
+
+  deploy:
+    needs: validate
+    runs-on: [self-hosted, macOS, maxibot-production]
+    timeout-minutes: 75
+    permissions:
+      contents: write
+      actions: read
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
+      PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+    steps:
+      - name: Set result evidence path
+        shell: bash
+        run: echo "RELEASE_RESULT=$RUNNER_TEMP/maxibot-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+
+      - name: Checkout the approved candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.candidate }}
+          fetch-depth: 0
+
+      - name: Recheck current main and Prepare provenance on the Mac
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/validate_release_dispatch.py
+
+      - name: Run production preflight and requested release mode
+        id: execute
+        run: python scripts/run_release_workflow.py
+
+      - name: Publish preflight result to MAXIBOT Linear
+        if: always()
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_PHASE: preflight
+          RELEASE_STATUS: ${{ steps.execute.outputs.preflight == 'PASS' && 'READY' || 'FAILED' }}
+          RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
+        run: python scripts/publish_release_to_linear.py
+
+      - name: Publish production result to MAXIBOT Linear
+        if: always()
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_PHASE: production
+          RELEASE_STATUS: ${{ steps.execute.outputs.status || 'FAILED' }}
+          RELEASE_RESULT: ${{ env.RELEASE_RESULT }}
+        run: python scripts/publish_release_to_linear.py
+
+      - name: Preserve exact release result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maxibot-release-result-${{ github.run_id }}
+          path: ${{ env.RELEASE_RESULT }}
+          if-no-files-found: warn
+          retention-days: 90
