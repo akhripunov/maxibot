@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 
 from sync_agents_to_linear import SyncError, _content_matches, graphql_request
@@ -49,8 +50,15 @@ def write_document(document_id: str, expected_title: str, content: str, api_key:
         raise SyncError("MAXIBOT Linear document update was rejected")
     if document.get("id") != document_id or document.get("title") != expected_title:
         raise SyncError("MAXIBOT Linear update returned an unexpected document")
-    if not _content_matches(content, read_document(document_id, expected_title, api_key)):
-        raise SyncError("MAXIBOT Linear read-back does not match the published content")
+    # Linear document writes can become visible to subsequent reads a few
+    # seconds after the mutation response. Retry only the read; never repeat
+    # the document update, and remain fail-closed after this bounded window.
+    for attempt in range(4):
+        if _content_matches(content, read_document(document_id, expected_title, api_key)):
+            return
+        if attempt < 3:
+            time.sleep(0.5)
+    raise SyncError("MAXIBOT Linear read-back does not match the published content")
 
 
 def upsert_block(content: str, marker: str, block: str) -> str:

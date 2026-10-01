@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_release_dispatch import ValidationError, validate  # noqa: E402
-from publish_release_to_linear import SyncError, upsert_block  # noqa: E402
+from publish_release_to_linear import SyncError, upsert_block, write_document  # noqa: E402
+import publish_release_to_linear  # noqa: E402
 import run_release_workflow  # noqa: E402
 
 
@@ -157,6 +158,40 @@ def test_linear_release_block_closes_outside_markdown_list_continuation():
     after = upsert_block("Architect-owned content.", "MB_RELEASE", "* GitHub run: [#14](https://example.test/run)")
     assert "<!-- MB_RELEASE_START -->\n\n" in after
     assert "https://example.test/run)\n\n<!-- MB_RELEASE_END -->" in after
+
+
+def test_linear_write_retries_only_readback_after_eventual_visibility(monkeypatch):
+    expected = "published content"
+    reads = iter(["stale", expected])
+    calls = []
+
+    def fake_graphql(query, variables, api_key):
+        calls.append("mutation" if "mutation UpdateDocument" in query else "read")
+        if "mutation UpdateDocument" in query:
+            return {"documentUpdate": {"success": True, "document": {"id": "doc", "title": "title"}}}
+        return {"document": {"id": "doc", "title": "title", "content": next(reads)}}
+
+    monkeypatch.setattr(publish_release_to_linear, "graphql_request", fake_graphql)
+    monkeypatch.setattr(publish_release_to_linear.time, "sleep", lambda _: None)
+    write_document("doc", "title", expected, "key")
+    assert calls == ["mutation", "read", "read"]
+
+
+def test_linear_write_does_not_repeat_mutation_when_readback_never_matches(monkeypatch):
+    calls = []
+
+    def fake_graphql(query, variables, api_key):
+        calls.append("mutation" if "mutation UpdateDocument" in query else "read")
+        if "mutation UpdateDocument" in query:
+            return {"documentUpdate": {"success": True, "document": {"id": "doc", "title": "title"}}}
+        return {"document": {"id": "doc", "title": "title", "content": "stale"}}
+
+    monkeypatch.setattr(publish_release_to_linear, "graphql_request", fake_graphql)
+    monkeypatch.setattr(publish_release_to_linear.time, "sleep", lambda _: None)
+    with pytest.raises(SyncError, match="read-back"):
+        write_document("doc", "title", "expected", "key")
+    assert calls.count("mutation") == 1
+    assert calls.count("read") == 4
 
 
 def test_linear_owned_block_fails_closed_on_duplicate_markers():
