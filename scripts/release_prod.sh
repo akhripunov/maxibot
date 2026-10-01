@@ -265,6 +265,12 @@ PRODUCTION_ROOT=${PRODUCTION_ROOT:-${MAXIBOT_PRODUCTION_ROOT:-/opt/maxibot}}
 [[ -n "$PRODUCTION_HOST" ]] || die "PRODUCTION_HOST is required"
 [[ "$PRODUCTION_HOST" == "$CANONICAL_PRODUCTION_HOST" ]] || die "canonical production host required: $CANONICAL_PRODUCTION_HOST"
 [[ -r "$PRODUCTION_SSH_KEY" ]] || die "PRODUCTION_SSH_KEY is not readable"
+IMAGE_ARCHIVE=${RELEASE_IMAGE_ARCHIVE:-}
+[[ -n "$IMAGE_ARCHIVE" && -r "$IMAGE_ARCHIVE" ]] || die "A verified Prepare image archive is required; source rebuilds are disabled"
+RELEASE_IMAGE_ID=${RELEASE_IMAGE_ID:-}
+[[ "$RELEASE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_ID must be the verified image config digest"
+RELEASE_IMAGE_ARCHIVE_SHA256=${RELEASE_IMAGE_ARCHIVE_SHA256:-}
+[[ "$RELEASE_IMAGE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_ARCHIVE_SHA256 must be the verified archive checksum"
 
 PRODUCTION_SSH_USER=root
 PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"
@@ -407,23 +413,24 @@ s = re.sub(r'MAXIBOT_COMMIT_SHA: "[^"]+"', f'MAXIBOT_COMMIT_SHA: "{sha}"', s)
 p.write_text(s)
 PY
 cat > "$WORK/release-manifest.json" <<EOF
-{"release_id":"$TARGET_SHA","target_sha":"$TARGET_SHA","target_migration":"$TARGET_MIGRATION","down_revision":"$TARGET_DOWN","env_file":"/opt/maxibot/.env","image":"maxibot-vps-api:$TARGET_SHA","platform":"linux/amd64"}
+{"release_id":"$TARGET_SHA","target_sha":"$TARGET_SHA","target_migration":"$TARGET_MIGRATION","down_revision":"$TARGET_DOWN","env_file":"/opt/maxibot/.env","image":"maxibot-vps-api:$TARGET_SHA","platform":"linux/amd64","prepared_image_config_digest":"$RELEASE_IMAGE_ID","image_archive_sha256":"$RELEASE_IMAGE_ARCHIVE_SHA256"}
 EOF
 ARCHIVE="$WORK/../maxibot-release-$TARGET_SHA.tar"
 tar --exclude='._*' --exclude='.DS_Store' --exclude='__MACOSX' -cf "$ARCHIVE" -C "$WORK" .
 REMOTE_TMP="/tmp/maxibot-release-$TARGET_SHA.tar"
 "${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"
 
-IMAGE_ARCHIVE=${RELEASE_IMAGE_ARCHIVE:-}
-[[ -n "$IMAGE_ARCHIVE" && -r "$IMAGE_ARCHIVE" ]] || die "A verified Prepare image archive is required; source rebuilds are disabled"
-RELEASE_IMAGE_ID=${RELEASE_IMAGE_ID:-}
-[[ "$RELEASE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_ID must be the verified image config digest"
 REMOTE_IMAGE_TMP="/tmp/maxibot-image-$TARGET_SHA.tar"
 "${SCP[@]}" "$IMAGE_ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_IMAGE_TMP"
 
 remote "set -eu; test -r $PRODUCTION_ROOT/.env; mkdir -p $PRODUCTION_ROOT/releases/$TARGET_SHA; tar -xf $REMOTE_TMP -C $PRODUCTION_ROOT/releases/$TARGET_SHA; find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -exec rm -rf {} +; if find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -print -quit | grep -q .; then echo 'AppleDouble or macOS metadata remains in remote release context' >&2; exit 1; fi"
 remote "rm -f $REMOTE_TMP"
-remote "set -eu; docker load --input $REMOTE_IMAGE_TMP; docker image inspect maxibot-vps-api:$TARGET_SHA >/dev/null; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}')\" = $RELEASE_IMAGE_ID; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; rm -f $REMOTE_IMAGE_TMP"
+remote "set -eu; test \"\$(sha256sum $REMOTE_IMAGE_TMP | cut -d ' ' -f1)\" = $RELEASE_IMAGE_ARCHIVE_SHA256; docker load --input $REMOTE_IMAGE_TMP; docker image inspect maxibot-vps-api:$TARGET_SHA >/dev/null; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; rm -f $REMOTE_IMAGE_TMP"
+REMOTE_LOADED_IMAGE_ID=$(remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}'")
+[[ "$REMOTE_LOADED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "loaded VPS image config digest is unavailable"
+say PREPARED_IMAGE_CONFIG_DIGEST "$RELEASE_IMAGE_ID"
+say VPS_LOADED_IMAGE_CONFIG_DIGEST "$REMOTE_LOADED_IMAGE_ID"
+say IMAGE_ARCHIVE_SHA256 "$RELEASE_IMAGE_ARCHIVE_SHA256"
 PREVIOUS_CONFIG=$(remote "docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'")
 PREVIOUS_SHA=$(remote "docker inspect maxibot-vps-api-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p' | head -1")
 PREVIOUS_IMAGE=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'")
@@ -515,6 +522,9 @@ RELEASE_ID=$TARGET_SHA
 TARGET_SHA=$TARGET_SHA
 PREVIOUS_SHA=$PREVIOUS_SHA
 TARGET_IMAGE=maxibot-vps-api:$TARGET_SHA
+PREPARED_IMAGE_CONFIG_DIGEST=$RELEASE_IMAGE_ID
+VPS_LOADED_IMAGE_CONFIG_DIGEST=$REMOTE_LOADED_IMAGE_ID
+IMAGE_ARCHIVE_SHA256=$RELEASE_IMAGE_ARCHIVE_SHA256
 PREVIOUS_IMAGE=$PREVIOUS_IMAGE
 MIGRATION_FROM=$CURRENT_ALEMBIC
 MIGRATION_TO=$TARGET_MIGRATION

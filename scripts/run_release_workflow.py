@@ -87,8 +87,11 @@ def main() -> int:
         env["WORKER_CANDIDATE_IMAGE"] = image
         env["RELEASE_IMAGE_ARCHIVE"] = str(archive)
         env["RELEASE_IMAGE_ID"] = manifest["image_id"]
+        env["RELEASE_IMAGE_ARCHIVE_SHA256"] = archive_sha256
         result["image_platform"] = "linux/amd64"
         result["image_source_sha"] = sha
+        result["image_config_digest"] = manifest["image_id"]
+        result["image_archive_sha256"] = archive_sha256
 
         env["TARGET_MIGRATION"] = migration
         dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)

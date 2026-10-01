@@ -142,6 +142,11 @@ def test_prepare_writes_valid_json_newline_to_image_manifest():
 def test_release_apply_loads_verified_prepared_image_without_rebuilding():
     release = (ROOT / "scripts/release_prod.sh").read_text()
     assert 'docker load --input $REMOTE_IMAGE_TMP' in release
+    assert 'sha256sum $REMOTE_IMAGE_TMP' in release
+    assert 'prepared_image_config_digest' in release
+    assert 'image_archive_sha256' in release
+    assert 'VPS_LOADED_IMAGE_CONFIG_DIGEST=$REMOTE_LOADED_IMAGE_ID' in release
+    assert 'test "$(docker image inspect maxibot-vps-api:$TARGET_SHA --format \'{{.Id}}\')" = $RELEASE_IMAGE_ID' not in release
     assert 'docker build --platform linux/amd64' not in release
     assert 'RELEASE_IMAGE_ID' in release
     assert 'A verified Prepare image archive is required' in release
