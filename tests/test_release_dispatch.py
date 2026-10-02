@@ -268,6 +268,8 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
     commands = []
     monkeypatch.setattr(run_release_workflow, "run", lambda command, env: (commands.append(command) or (1, "MIGRATION_ALLOWED=NO\n")))
     assert run_release_workflow.main() == 1
+    assert run_release_workflow.main() == 1
+    assert len(commands) == 2
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert json.loads(result_path.read_text())["production_changed"] is False
 

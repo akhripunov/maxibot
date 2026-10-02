@@ -237,6 +237,15 @@ def test_loaded_archive_identity_and_native_runtime_rehearsal_are_fail_closed():
     assert 'PRODUCTION_IMAGE_REHEARSAL' not in source
 
 
+def test_loaded_verifier_uses_containerd_content_proof_without_image_save():
+    verifier = (ROOT / "scripts/verify_loaded_prepared_image.py").read_text()
+    assert 'docker", "image", "save"' not in verifier
+    assert '"Containerd"' in verifier
+    assert '"content", "get", native_id' in verifier
+    assert '"content", "get", expected' in verifier
+    assert 'native.get("RootFS", {}).get("Layers")' in verifier
+
+
 def test_readiness_probe_is_bounded_and_exit_first():
     source = SCRIPT.read_text()
     assert "deadline=\\$((\\$(date +%s) + $HEALTH_TIMEOUT_SECONDS))" in source

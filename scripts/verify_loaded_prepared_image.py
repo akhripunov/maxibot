@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Prove a loaded MAXIBOT image's manifest, config, labels and rootfs identity."""
 from __future__ import annotations
-import hashlib, json, re, subprocess, sys, tempfile, tarfile
-from pathlib import Path
+import hashlib, json, re, subprocess, sys
 
 def digest(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
@@ -22,23 +21,28 @@ def main(argv: list[str]) -> int:
         raise RuntimeError("invalid native Docker image ID")
     if native.get("Os") != "linux" or native.get("Architecture") != "amd64":
         raise RuntimeError("loaded image platform mismatch")
-    with tempfile.TemporaryDirectory(prefix="maxibot-loaded-proof-") as temp:
-        archive = Path(temp) / "image.tar"
-        archive.write_bytes(run("docker", "image", "save", image))
-        with tarfile.open(archive) as bundle:
-            manifest = json.loads(bundle.extractfile("manifest.json").read())[0]
-            config_name = manifest["Config"]
-            config_bytes = bundle.extractfile(config_name).read()
-            config_id = digest(config_bytes)
-            if config_id != expected:
-                raise RuntimeError(f"loaded image config identity mismatch: expected {expected}, actual {config_id}")
-            config = json.loads(config_bytes)
-            labels = (config.get("config") or {}).get("Labels") or {}
-            if labels.get("org.opencontainers.image.revision") != sha or labels.get("org.opencontainers.image.source-sha") != sha or labels.get("org.maxibot.release.sha") != sha:
-                raise RuntimeError("loaded image source labels mismatch")
-            layers = config.get("rootfs", {}).get("diff_ids") or []
-            if not layers or len(layers) != len(manifest.get("Layers") or []):
-                raise RuntimeError("loaded image rootfs differs from verified config")
+    info = json.loads(run("docker", "info", "--format", "{{json .}}"))
+    address = (info.get("Containerd") or {}).get("Address")
+    if not address:
+        raise RuntimeError("Docker containerd content address is unavailable")
+    manifest_bytes = run("ctr", "--address", address, "-n", "moby", "content", "get", native_id)
+    if digest(manifest_bytes) != native_id:
+        raise RuntimeError("loaded image manifest checksum mismatch")
+    manifest = json.loads(manifest_bytes)
+    if manifest.get("schemaVersion") != 2 or manifest.get("config", {}).get("digest") != expected:
+        raise RuntimeError("loaded image config identity mismatch")
+    config_bytes = run("ctr", "--address", address, "-n", "moby", "content", "get", expected)
+    if digest(config_bytes) != expected:
+        raise RuntimeError("loaded image config checksum mismatch")
+    config = json.loads(config_bytes)
+    if config.get("os") != "linux" or config.get("architecture") != "amd64":
+        raise RuntimeError("verified config platform mismatch")
+    labels = (config.get("config") or {}).get("Labels") or {}
+    if any(labels.get(key) != sha for key in ("org.opencontainers.image.revision", "org.opencontainers.image.source-sha", "org.maxibot.release.sha")):
+        raise RuntimeError("loaded image source labels mismatch")
+    layers = config.get("rootfs", {}).get("diff_ids") or []
+    if not layers or layers != native.get("RootFS", {}).get("Layers") or len(layers) != len(manifest.get("layers", [])):
+        raise RuntimeError("loaded image rootfs differs from verified config")
     container = "maxibot-loaded-proof"
     try:
         run("docker", "create", "--name", container, "--network", "none", "--entrypoint", "/bin/true", image)
