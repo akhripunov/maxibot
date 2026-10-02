@@ -84,6 +84,9 @@ def test_primary_runtime_heartbeat_follows_durable_marker_and_stop(monkeypatch):
     client = AsyncMock()
     runtime = MaxBotRuntime(client, AsyncMock())
     runtime._load_primary_marker = AsyncMock(return_value=7)
+    runtime._daily_report_loop = AsyncMock()
+    runtime._ads_ai_event_loop = AsyncMock()
+    runtime._poll_custom_bots = AsyncMock()
     stored = AsyncMock(side_effect=lambda marker: runtime._stop.set())
     runtime._store_primary_marker = stored
     updates = [MaxUpdate(update_type="message_created", raw={})]
@@ -106,7 +109,12 @@ def test_primary_runtime_does_not_heartbeat_when_marker_persistence_fails(monkey
     client = AsyncMock()
     runtime = MaxBotRuntime(client, AsyncMock())
     runtime._load_primary_marker = AsyncMock(return_value=7)
-    runtime._store_primary_marker = AsyncMock(side_effect=lambda marker: (runtime._stop.set(), RuntimeError("db"))[1])
+    runtime._daily_report_loop = AsyncMock()
+    runtime._ads_ai_event_loop = AsyncMock()
+    async def persist_failure(marker):
+        runtime._stop.set()
+        raise RuntimeError("isolated persistence failure")
+    runtime._store_primary_marker = AsyncMock(side_effect=persist_failure)
     client.updates = AsyncMock(return_value=([], 8))
     heartbeat = Mock()
     monkeypatch.setattr("app.bot.runtime.write_heartbeat", heartbeat)
