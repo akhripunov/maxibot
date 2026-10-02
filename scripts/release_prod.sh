@@ -26,6 +26,89 @@ timed_stage() {
   return "$code"
 }
 
+# Only wrap idempotent reads in this retry loop. Callers must never pass a
+# mutation command here; apply-stage writes continue to fail closed as-is.
+NETWORK_RETRY_BUDGET_SECONDS=1800
+NETWORK_RETRY_SPENT_SECONDS=0
+if [[ -n "${NETWORK_RETRY_BUDGET_STATE:-}" && -f "$NETWORK_RETRY_BUDGET_STATE" ]]; then
+  NETWORK_RETRY_SPENT_SECONDS=$(<"$NETWORK_RETRY_BUDGET_STATE")
+  [[ "$NETWORK_RETRY_SPENT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "invalid shared network retry budget state"
+fi
+NETWORK_LAST_ERROR=
+NETWORK_LAST_STATUS=
+persist_network_retry_budget() {
+  [[ -n "${NETWORK_RETRY_BUDGET_STATE:-}" ]] || return 0
+  local temporary="${NETWORK_RETRY_BUDGET_STATE}.$$"
+  printf '%s\n' "${1:-$NETWORK_RETRY_SPENT_SECONDS}" > "$temporary"
+  mv -f "$temporary" "$NETWORK_RETRY_BUDGET_STATE"
+}
+network_retry_read() {
+  local stage=$1 attempt=0 cap=1 remaining delay elapsed output error status started=$SECONDS
+  shift
+  NETWORK_LAST_ERROR=
+  NETWORK_LAST_STATUS=
+  local stderr_file
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/maxibot-network-retry.XXXXXX") || return 1
+  while :; do
+    : > "$stderr_file"
+    if [[ -n "${NETWORK_RETRY_STDIN_FILE:-}" ]]; then
+      if output=$("$@" < "$NETWORK_RETRY_STDIN_FILE" 2>"$stderr_file"); then status=0; else status=$?; fi
+    else
+      if output=$("$@" 2>"$stderr_file"); then status=0; else status=$?; fi
+    fi
+    error=$(cat "$stderr_file")
+    if [[ "$status" == 0 ]]; then
+      NETWORK_LAST_ATTEMPTS=$((attempt + 1))
+      elapsed=$((SECONDS - started))
+      if (( elapsed >= NETWORK_RETRY_BUDGET_SECONDS )); then
+        NETWORK_LAST_STATUS=NETWORK_UNAVAILABLE
+        printf 'NETWORK_UNAVAILABLE stage=%s elapsed_s=%s budget_s=%s\n' "$stage" "$elapsed" "$NETWORK_RETRY_BUDGET_SECONDS" >&2
+        rm -f "$stderr_file"
+        return 75
+      fi
+      NETWORK_LAST_STATUS=PASS
+      if (( attempt > 0 )); then
+        NETWORK_RETRY_SPENT_SECONDS=$((NETWORK_RETRY_SPENT_SECONDS + elapsed))
+        persist_network_retry_budget
+        printf 'NETWORK_RESTORED stage=%s elapsed_s=%s\n' "$stage" "$elapsed" >&2
+      fi
+      printf 'RELEASE_CONTINUING stage=%s\n' "$stage" >&2
+      printf '%s' "$output"
+      rm -f "$stderr_file"
+      return 0
+    fi
+    NETWORK_LAST_ERROR=$error
+    if [[ "$status" != 255 ]] || [[ "$error" =~ [Pp]ermission\ denied|[Hh]ost\ key\ verification\ failed|[Aa]uthentication\ failed|[Nn]o\ matching\ host\ key|[Tt]oo\ many\ authentication ]]; then
+      NETWORK_LAST_STATUS=BLOCKED
+      rm -f "$stderr_file"
+      return "$status"
+    fi
+    if ! [[ "$error" =~ [Cc]ould\ not\ resolve|[Nn]odename\ nor\ servname|[Tt]emporary\ failure\ in\ name\ resolution|[Nn]ame\ or\ service\ not\ known|[Ee][Aa][Ii]_[Aa][Gg][Aa][Ii][Nn]|[Ee][Nn][Oo][Ff][Oo][Uu][Nn][Dd]|[Cc]onnection\ timed\ out|[Oo]peration\ timed\ out|[Cc]onnection\ reset|[Cc]onnection\ closed|[Bb]anner\ exchange|[Cc]onnection\ refused|[Nn]etwork\ is\ unreachable|[Nn]o\ route\ to\ host|[Ss]oftware\ caused\ connection\ abort|[Ee]nd\ of\ file|[Ss]ocket\ is\ not\ connected ]]; then
+      NETWORK_LAST_STATUS=BLOCKED
+      rm -f "$stderr_file"
+      return "$status"
+    fi
+    elapsed=$((SECONDS - started))
+    remaining=$((NETWORK_RETRY_BUDGET_SECONDS - NETWORK_RETRY_SPENT_SECONDS - elapsed))
+    if (( remaining <= 0 )); then
+      NETWORK_LAST_STATUS=NETWORK_UNAVAILABLE
+      NETWORK_RETRY_SPENT_SECONDS=$NETWORK_RETRY_BUDGET_SECONDS
+      persist_network_retry_budget
+      printf 'NETWORK_UNAVAILABLE stage=%s elapsed_s=%s budget_s=%s\n' "$stage" "$elapsed" "$NETWORK_RETRY_BUDGET_SECONDS" >&2
+      rm -f "$stderr_file"
+      return 75
+    fi
+    delay=$((1 + RANDOM % cap))
+    (( delay > remaining )) && delay=$remaining
+    printf 'NETWORK_RETRYING stage=%s retry_in_s=%s elapsed_s=%s\n' "$stage" "$delay" "$elapsed" >&2
+    attempt=$((attempt + 1))
+    sleep "$delay"
+    elapsed=$((SECONDS - started))
+    persist_network_retry_budget "$((NETWORK_RETRY_SPENT_SECONDS + elapsed))"
+    if (( cap < 32 )); then cap=$((cap * 2)); else cap=60; fi
+  done
+}
+
 [[ $# -ge 1 ]] || { usage; exit 2; }
 TARGET_SHA=$1
 MODE=DRY_RUN
@@ -177,7 +260,8 @@ if [[ "$MODE" == DRY_RUN ]]; then
     # Keep the read-only production checks in one authenticated SSH session.
     # Repeated handshakes made the old preflight intermittently lose the SSH
     # banner and hid which check had failed behind a generic BLOCKED result.
-    if PREFLIGHT_OUTPUT=$("${PREFLIGHT_SSH[@]}" 'bash -s' 2>&1 <<'REMOTE_PREFLIGHT'
+    PREFLIGHT_SCRIPT_FILE=$(mktemp "${TMPDIR:-/tmp}/maxibot-preflight.XXXXXX")
+    cat > "$PREFLIGHT_SCRIPT_FILE" <<'REMOTE_PREFLIGHT'
 set -u
 
 check_value() {
@@ -205,7 +289,8 @@ else
 fi
 unset env_output
 REMOTE_PREFLIGHT
-    ); then
+    NETWORK_RETRY_STDIN_FILE=$PREFLIGHT_SCRIPT_FILE
+    if PREFLIGHT_OUTPUT=$(network_retry_read production_preflight "${PREFLIGHT_SSH[@]}" 'bash -s'); then
       say SSH_REMOTE_PREFLIGHT PASS
       PREFLIGHT_ERRORS=
       while IFS='=' read -r key value; do
@@ -243,10 +328,12 @@ REMOTE_PREFLIGHT
       fi
     else
       PREFLIGHT_OK=0
-      SSH_FAILURE_DETAIL=$(printf '%s' "$PREFLIGHT_OUTPUT" | tr '\n' ' ' | sed -E 's/(root@)[^[:space:]]+/\1<production-host>/g' | cut -c1-240)
+      SSH_FAILURE_DETAIL="safe read-only SSH preflight failed; see retry status above"
       say SSH_REMOTE_PREFLIGHT FAIL
       [[ -z "$SSH_FAILURE_DETAIL" ]] || say SSH_FAILURE_DETAIL "$SSH_FAILURE_DETAIL"
     fi
+    rm -f "$PREFLIGHT_SCRIPT_FILE"
+    unset NETWORK_RETRY_STDIN_FILE
   fi
   if [[ "$PREFLIGHT_OK" == 1 ]]; then
     say ENV_READY PASS
@@ -298,24 +385,28 @@ cleanup_release() {
 }
 trap cleanup_release EXIT
 remote() { "${SSH[@]}" "$@"; }
+remote_read() {
+  local stage=$1
+  shift
+  network_retry_read "$stage" remote "$@"
+}
 say RELEASE_SSH_USER "$PRODUCTION_SSH_USER"
 say CANONICAL_TARGET "$PRODUCTION_TARGET"
 SSH_PREFLIGHT_OK=0
-for attempt in 1 2 3; do
-  if "${SSH[@]}" true; then
-    SSH_PREFLIGHT_OK=1
-    say SSH_PREFLIGHT_ATTEMPTS "$attempt"
-    break
-  fi
-  [[ "$attempt" == 3 ]] || sleep 5
-done
-[[ "$SSH_PREFLIGHT_OK" == 1 ]] || die "SSH preflight failed after three authenticated attempts for $PRODUCTION_TARGET"
+if network_retry_read ssh_preflight "${SSH[@]}" true >/dev/null; then
+  SSH_PREFLIGHT_OK=1
+  say SSH_PREFLIGHT_ATTEMPTS "$NETWORK_LAST_ATTEMPTS"
+fi
+if [[ "$SSH_PREFLIGHT_OK" != 1 ]]; then
+  [[ "$NETWORK_LAST_STATUS" == NETWORK_UNAVAILABLE ]] && die "NETWORK_UNAVAILABLE stage=ssh_preflight"
+  die "SSH preflight blocked by a permanent or unclassified transport error"
+fi
 say SSH_PREFLIGHT PASS
 # Resolve the live production provenance before creating the remote release
 # context.  A candidate is compatible only when its migration parent is the
 # database head currently running in production.
-CURRENT_PRODUCTION_SHA=$(remote "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"commit_sha\"])'")
-CURRENT_PRODUCTION_DB_HEAD=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
+CURRENT_PRODUCTION_SHA=$(remote_read production_sha "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"commit_sha\"])'")
+CURRENT_PRODUCTION_DB_HEAD=$(remote_read production_db_head "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
 [[ "$CURRENT_PRODUCTION_SHA" =~ ^[0-9a-f]{40}$ ]] || die "current production SHA is unavailable"
 [[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
 say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"

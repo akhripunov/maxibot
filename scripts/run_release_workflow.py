@@ -116,6 +116,9 @@ def main() -> int:
         dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)
         result["stage_seconds"] = {"PREFLIGHT": round(time.monotonic() - preflight_started, 3)}
         if dry_code != 0 or "SAFE_TO_RELEASE=YES" not in dry_output or "DRY_RUN_RESULT=PASS" not in dry_output:
+            if "NETWORK_UNAVAILABLE" in dry_output:
+                result["network_status"] = "NETWORK_UNAVAILABLE"
+                raise RuntimeError("NETWORK_UNAVAILABLE during canonical production preflight")
             raise RuntimeError("Canonical production preflight did not report SAFE_TO_RELEASE=YES")
         result["preflight"] = "PASS"
         result["production_changed"] = False
@@ -136,6 +139,8 @@ def main() -> int:
                 result["status"] = "RECOVERY_REQUIRED"
                 result["production_changed"] = "POSSIBLE"
             if apply_code != 0 or "RELEASE_STATUS=PASS" not in apply_output:
+                if "NETWORK_UNAVAILABLE" in apply_output and result["status"] == "FAILED_PRE_SWITCH":
+                    result["network_status"] = "NETWORK_UNAVAILABLE"
                 raise RuntimeError("Canonical apply did not report RELEASE_STATUS=PASS; reconcile live production")
             result["status"] = "COMPLETE"
             result["production_changed"] = True

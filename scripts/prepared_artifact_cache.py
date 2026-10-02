@@ -6,15 +6,60 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
+import ssl
 import stat
+import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+
 
 MAX_BYTES = 4 * 1024 ** 3
+NETWORK_BUDGET = None
+
+
+class NetworkStageError(RuntimeError):
+    def __init__(self, stage: str, error_type: str) -> None:
+        super().__init__(stage, error_type)
+        self.stage = stage
+        self.error_type = error_type
+
+
+def _retryable(error: BaseException) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in {408, 425, 429, 500, 502, 503, 504}
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        return not any(marker in str(reason).lower() for marker in (
+            "certificate_verify_failed", "wrong_version_number", "protocol_version"))
+    return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
+
+
+def network_request(operation, stage: str, allow_redirect: bool = False):
+    def request_once():
+        try:
+            return operation()
+        except urllib.error.HTTPError as error:
+            # This one redirect is the expected handoff to signed blob storage.
+            if allow_redirect and error.code == 302:
+                return error
+            raise
+    try:
+        return retry_network_read(request_once, stage, _retryable, budget=NETWORK_BUDGET)
+    except NetworkUnavailable:
+        raise NetworkStageError(stage, "NETWORK_UNAVAILABLE") from None
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
+            socket.timeout, ConnectionError, ssl.SSLError) as error:
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        raise NetworkStageError(stage, type(reason).__name__) from None
 
 
 def checksum(path):
@@ -25,12 +70,14 @@ def checksum(path):
     return digest.hexdigest()
 
 
-def github(repo, route, token):
+def github(repo, route, token, stage):
     request = urllib.request.Request(f'https://api.github.com/repos/{repo}/{route}', headers={
         'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28'})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    def fetch():
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    return network_request(fetch, stage)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -43,25 +90,40 @@ def download(repo, artifact_id, token, target):
     request = urllib.request.Request(
         f'https://api.github.com/repos/{repo}/actions/artifacts/{artifact_id}/zip',
         headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'})
-    try:
-        response = urllib.request.build_opener(NoRedirect).open(request, timeout=30)
-    except urllib.error.HTTPError as error:
+    response = network_request(
+        lambda: urllib.request.build_opener(NoRedirect).open(request, timeout=30),
+        "artifact_zip_redirect", allow_redirect=True)
+    if isinstance(response, urllib.error.HTTPError):
+        error = response
         if error.code != 302:
             raise RuntimeError(f'Artifact download HTTP {error.code}') from None
         location = error.headers.get('Location', '')
+        error.close()
         if not location.startswith('https://'):
             raise RuntimeError('Artifact redirect must use HTTPS')
-        response = urllib.request.urlopen(location, timeout=30)
-    count = 0
-    with response, target.open('wb') as output:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            count += len(chunk)
-            if count > MAX_BYTES:
-                raise RuntimeError('Artifact exceeds the bounded cache size')
-            output.write(chunk)
+        def fetch_storage():
+            with urllib.request.urlopen(location, timeout=30) as response, target.open('wb') as output:
+                count = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    count += len(chunk)
+                    if count > MAX_BYTES:
+                        raise RuntimeError('Artifact exceeds the bounded cache size')
+                    output.write(chunk)
+        network_request(fetch_storage, 'artifact_zip_storage')
+    else:
+        count = 0
+        with response, target.open('wb') as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                count += len(chunk)
+                if count > MAX_BYTES:
+                    raise RuntimeError('Artifact exceeds the bounded cache size')
+                output.write(chunk)
 
 
 def extract(archive, destination, expected):
@@ -114,6 +176,8 @@ def materialize(cache, destination, artifact_id, digest, expected, fetch):
 
 
 def main():
+    global NETWORK_BUDGET
+    NETWORK_BUDGET = RetryBudget()
     started = time.monotonic()
     repo = os.environ['GITHUB_REPOSITORY']
     projects = {
@@ -128,16 +192,19 @@ def main():
     if not re.fullmatch(r'[a-f0-9]{40}', sha) or not all(x.isdigit() for x in (run_id, attempt, artifact_id)):
         raise RuntimeError('Invalid release identity')
     token = os.environ['GITHUB_TOKEN']
-    run = github(repo, f'actions/runs/{run_id}', token)
+    stage = 'prepare_run_metadata'
+    run = github(repo, f'actions/runs/{run_id}', token, stage)
     if (run.get('status') != 'completed' or run.get('conclusion') != 'success'
             or run.get('head_sha') != sha or run.get('head_branch') != 'main'
             or run.get('event') not in ('push', 'workflow_dispatch')
             or run.get('path') != f'.github/workflows/{workflow}'
             or str(run.get('run_attempt')) != attempt):
         raise RuntimeError('Successful Prepare provenance changed')
-    if github(repo, 'git/ref/heads/main', token)['object']['sha'] != sha:
+    stage = 'current_main_ref'
+    if github(repo, 'git/ref/heads/main', token, stage)['object']['sha'] != sha:
         raise RuntimeError('Candidate is no longer current main')
-    metadata = github(repo, f'actions/artifacts/{artifact_id}', token)
+    stage = 'artifact_metadata'
+    metadata = github(repo, f'actions/artifacts/{artifact_id}', token, stage)
     name = f'gpoint-release-{sha}-{run_id}-{attempt}' if project == 'gpoint' else f'maxibot-image-{sha}-{run_id}-{attempt}'
     if (metadata.get('expired') is not False or metadata.get('name') != name
             or str(metadata.get('workflow_run', {}).get('id')) != run_id
@@ -147,6 +214,7 @@ def main():
     if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
         raise RuntimeError('GitHub artifact digest is unavailable')
     cache = Path.home() / '.cache' / f'{project}-release' / 'artifacts'
+    stage = 'artifact_cache_or_download'
     result = materialize(cache, Path(os.environ['ARTIFACT_DESTINATION']), artifact_id,
                          digest[7:], expected, lambda path: download(repo, artifact_id, token, path))
     print(f'ARTIFACT_CACHE={result} ARTIFACT_ID={artifact_id} SHA={sha}', flush=True)
@@ -156,7 +224,10 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except NetworkStageError as error:
+        print(f'ARTIFACT_CACHE=BLOCKED STAGE={error.stage} ERROR_TYPE={error.error_type}', flush=True)
+        raise SystemExit(1)
     except Exception as error:
         # Network exception strings may contain signed URLs; never print them.
-        print(f'ARTIFACT_CACHE=BLOCKED ERROR_TYPE={type(error).__name__}', flush=True)
+        print(f'ARTIFACT_CACHE=BLOCKED STAGE={locals().get("stage", "artifact_validation")} ERROR_TYPE={type(error).__name__}', flush=True)
         raise SystemExit(1)

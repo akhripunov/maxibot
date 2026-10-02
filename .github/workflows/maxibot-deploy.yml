@@ -36,7 +36,7 @@ jobs:
   validate:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 35
     outputs:
       candidate: ${{ steps.select.outputs.candidate }}
       target_migration: ${{ steps.select.outputs.target_migration }}
@@ -44,7 +44,13 @@ jobs:
       prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
       prepare_run_attempt: ${{ steps.select.outputs.prepare_run_attempt }}
       prepare_url: ${{ steps.select.outputs.prepare_url }}
+      network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
     steps:
+      - name: Initialize shared retry budget
+        shell: bash
+        run: |
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '0\n' > "$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID"
       - name: Checkout trusted main workflow source
         uses: actions/checkout@v4
         with:
@@ -83,7 +89,10 @@ jobs:
     steps:
       - name: Set result evidence path
         shell: bash
-        run: echo "RELEASE_RESULT=$RUNNER_TEMP/maxibot-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+        run: |
+          echo "RELEASE_RESULT=$RUNNER_TEMP/maxibot-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '%s\n' '${{ needs.validate.outputs.network_retry_budget_used_seconds }}' > "$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID"
 
       - name: Configure writable persistent tool cache
         shell: bash

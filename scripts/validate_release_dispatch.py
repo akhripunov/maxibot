@@ -4,24 +4,43 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import socket
+import ssl
 import sys
 import urllib.error
 import urllib.request
 from typing import Any
 
+from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+
 REPO = "akhripunov/maxibot"
 WORKFLOW = "maxibot-prepare.yml"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+NETWORK_BUDGET = RetryBudget()
+
+
+def _retryable_github_error(error: BaseException) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in {408, 425, 429, 500, 502, 503, 504}
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        return not any(marker in str(reason).lower() for marker in (
+            "certificate_verify_failed", "wrong_version_number", "protocol_version"))
+    return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
 
 
 class ValidationError(RuntimeError):
     pass
 
 
-def github_get(path: str, token: str, opener=urllib.request.urlopen) -> Any:
+def github_get(path: str, token: str, opener=urllib.request.urlopen, *,
+               budget: RetryBudget | None = None, retry_options: dict[str, Any] | None = None) -> Any:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{REPO}/{path}",
         headers={
@@ -30,9 +49,14 @@ def github_get(path: str, token: str, opener=urllib.request.urlopen) -> Any:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    try:
-        with opener(request, timeout=20) as response:
+    def fetch() -> Any:
+        with opener(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
+    try:
+        return retry_network_read(fetch, "release_provenance", _retryable_github_error,
+                                  budget=budget or NETWORK_BUDGET, **(retry_options or {}))
+    except NetworkUnavailable:
+        raise ValidationError("NETWORK_UNAVAILABLE stage=release_provenance") from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValidationError("GitHub release provenance could not be verified") from exc
     except urllib.error.HTTPError as exc:
@@ -115,6 +139,7 @@ def main() -> int:
                 if "\n" in value or "\r" in value:
                     raise ValidationError("GitHub output contains invalid line breaks")
                 output.write(f"{key}={value}\n")
+            output.write(f"network_retry_budget_used_seconds={math.ceil(NETWORK_BUDGET.spent)}\n")
         print(f"RELEASE_PROVENANCE=PASS SHA={result['candidate']} PREPARE_RUN={result['prepare_run_id']}")
         return 0
     except (ValidationError, OSError) as exc:

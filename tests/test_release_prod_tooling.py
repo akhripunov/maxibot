@@ -132,6 +132,8 @@ def test_release_dry_run_collects_production_preflight_in_one_ssh_session(tmp_pa
         "    *) shift ;;\n"
         "  esac\n"
         "done\n"
+        "calls=$(wc -l < \"$SSH_COUNTER\")\n"
+        "if [ \"$calls\" -eq 1 ]; then echo 'Connection timed out during banner exchange' >&2; exit 255; fi\n"
         "[ \"$1\" = 'bash -s' ] || exit 2\n"
         "exec /bin/bash -s\n"
     )
@@ -163,7 +165,9 @@ def test_release_dry_run_collects_production_preflight_in_one_ssh_session(tmp_pa
     )
     assert "PRODUCTION_REHEARSAL=PASS" in result.stdout
     assert "RELEASE_READY=YES" in result.stdout
-    assert counter.read_text().splitlines() == ["call"]
+    assert counter.read_text().splitlines() == ["call", "call"]
+    assert "NETWORK_RETRYING stage=production_preflight" in result.stderr
+    assert "NETWORK_RESTORED stage=production_preflight" in result.stderr
 
 
 def test_release_entrypoint_is_valid_shell():
@@ -270,10 +274,24 @@ def test_production_ssh_target_is_explicit_and_canonical():
     assert 'PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"' in source
     assert '"${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"' in source
     assert '[[ "$PRODUCTION_HOST" == "$CANONICAL_PRODUCTION_HOST" ]]' in source
-    assert 'for attempt in 1 2 3; do' in source
-    assert 'if "${SSH[@]}" true; then' in source
+    assert 'network_retry_read ssh_preflight' in source
+    assert 'NETWORK_RETRY_BUDGET_SECONDS=1800' in source
+    assert 'if network_retry_read ssh_preflight "${SSH[@]}" true >/dev/null; then' in source
     assert 'ConnectTimeout=10' in source
     assert "SSH_PREFLIGHT PASS" in source
+
+
+def test_shared_retry_budget_is_carried_across_release_stages_and_never_wraps_apply():
+    source = SCRIPT.read_text()
+    assert 'NETWORK_RETRY_BUDGET_STATE' in source
+    assert 'NETWORK_RETRY_SPENT_SECONDS' in source
+    assert 'network_retry_read production_preflight' in source
+    assert 'network_retry_read ssh_preflight' in source
+    assert 'timed_stage MIGRATION' in source
+    mutation_section = source[source.index('timed_stage SOURCE_UPLOAD'):]
+    assert 'network_retry_read' not in mutation_section
+    assert 'timed_stage IMAGE_LOAD' in mutation_section
+    assert 'timed_stage MIGRATION' in mutation_section
 
 
 def test_frozen_guard_exempts_only_ads_schema_plumbing():

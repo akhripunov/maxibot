@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from validate_release_dispatch import ValidationError, validate  # noqa: E402
+from validate_release_dispatch import ValidationError, github_get, validate  # noqa: E402
 from publish_release_to_linear import SyncError, append_journal_event, upsert_block, write_document  # noqa: E402
 import publish_release_to_linear  # noqa: E402
 import run_release_workflow  # noqa: E402
@@ -62,6 +62,47 @@ def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
     assert selected["prepare_run_id"] == "14"
     assert selected["prepare_run_attempt"] == "1"
     assert any(f"head_sha={SHA}" in path for path in github.paths)
+
+
+def test_github_get_recovers_after_extended_tls_outage_and_continues_read():
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self):
+            return b'{"object":{"sha":"' + SHA.encode() + b'"}}'
+
+    import ssl
+    import urllib.error
+    from release_network_retry import RetryBudget
+
+    calls = []
+    now = [0.0]
+    events = []
+
+    def opener(_request, timeout):
+        assert timeout == 30
+        calls.append(now[0])
+        if len(calls) <= 27:
+            raise urllib.error.URLError(ssl.SSLError("TLS read timeout"))
+        return Response()
+
+    result = github_get(
+        "git/ref/heads/main", "test-token", opener,
+        budget=RetryBudget(1800, clock=lambda: now[0]),
+        retry_options={
+            "clock": lambda: now[0],
+            "sleep": lambda seconds: now.__setitem__(0, now[0] + seconds),
+            "jitter": lambda _low, high: high,
+            "emit": events.append,
+        },
+    )
+    assert result["object"]["sha"] == SHA
+    assert now[0] > 1200
+    assert any(event.startswith("NETWORK_RETRYING") for event in events)
+    assert any(event.startswith("NETWORK_RESTORED") for event in events)
+    assert events[-1] == "RELEASE_CONTINUING stage=release_provenance"
 
 
 @pytest.mark.parametrize(
