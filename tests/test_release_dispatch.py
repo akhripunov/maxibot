@@ -134,7 +134,7 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "inputs.mode == 'production' && needs.deploy.outputs.status != ''" in workflow
     assert "scripts/rehearse_prepared_image.py" not in workflow
     prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
-    assert "scripts/rehearse_prepared_image.py" in prepare
+    assert "scripts/rehearse_private_docker.py" in prepare
     assert "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70" in prepare
     assert '"containerd-snapshotter":true' in prepare
     assert '"native_image_id": native_image_id' in prepare

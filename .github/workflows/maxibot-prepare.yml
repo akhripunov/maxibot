@@ -192,6 +192,7 @@ jobs:
               "tests": os.environ.get("TEST_STATUS", "skipped"),
               "frozen_path_guard": os.environ.get("FROZEN_STATUS", "skipped"),
               "linux_amd64_image": os.environ.get("IMAGE_STATUS", "skipped"),
+              "private_docker_rehearsal": os.environ.get("MAXIBOT_PRIVATE_REHEARSAL", "skipped"),
               "github_run_id": os.environ["GITHUB_RUN_ID"],
               "created_at": datetime.now(timezone.utc).isoformat(),
           }

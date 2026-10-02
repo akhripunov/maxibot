@@ -39,6 +39,10 @@ def main() -> int:
         actual = subprocess.check_output(["docker", "inspect", cid, "--format", "{{.Image}}"], env=env, text=True).strip()
         if actual == verify_env["EXPECTED_CONFIG"]: raise RuntimeError("negative config/native comparison was accepted")
         subprocess.run(["docker", "rm", "-f", cid], env=env, check=True, stdout=subprocess.DEVNULL)
+        github_env = os.environ.get("GITHUB_ENV")
+        if github_env:
+            with open(github_env, "a", encoding="utf-8") as handle:
+                handle.write("MAXIBOT_PRIVATE_REHEARSAL=PASS\n")
         print("MAXIBOT_PRIVATE_DOCKER_REHEARSAL=PASS")
         return 0
     finally:
