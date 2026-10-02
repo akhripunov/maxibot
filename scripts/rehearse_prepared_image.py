@@ -44,7 +44,8 @@ def main() -> int:
         print(f"PREPARED_IMAGE_REHEARSAL=PASS IMAGE_ID={native_id} PLATFORM={native_platform}")
         return 0
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-        print(f"PREPARED_IMAGE_REHEARSAL=BLOCKED REASON={type(exc).__name__}", file=sys.stderr)
+        reason = str(exc).replace("\n", " ")[:240]
+        print(f"PREPARED_IMAGE_REHEARSAL=BLOCKED REASON={reason}", file=sys.stderr)
         return 1
     finally:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, text=True)
