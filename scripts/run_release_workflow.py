@@ -87,8 +87,8 @@ def main() -> int:
         archive = Path(os.environ.get("IMAGE_ARCHIVE", ""))
         manifest_path = Path(os.environ.get("IMAGE_MANIFEST", ""))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        result_path = Path(os.environ.get("IMAGE_RESULT", ""))
-        if not result_path.is_file() or json.loads(result_path.read_text(encoding="utf-8")).get("private_docker_rehearsal") != "PASS":
+        image_result_path = Path(os.environ.get("IMAGE_RESULT", ""))
+        if not image_result_path.is_file() or json.loads(image_result_path.read_text(encoding="utf-8")).get("private_docker_rehearsal") != "PASS":
             raise RuntimeError("Prepare private Docker rehearsal receipt is missing or failed")
         archive_sha256 = checksum(archive)
         if manifest.get("candidate_sha") != sha or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID"):

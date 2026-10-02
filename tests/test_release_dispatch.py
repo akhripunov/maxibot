@@ -254,12 +254,15 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
     archive = tmp_path / "image.tar.gz"
     manifest = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
+    rehearsal_path = tmp_path / "prepare-result.json"
     archive.write_bytes(b"prepared")
     manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
+    rehearsal_path.write_text(json.dumps({"private_docker_rehearsal": "PASS"}))
     for key, value in {
         "CANDIDATE_SHA": SHA, "TARGET_MIGRATION": MIGRATION, "RELEASE_MODE": "production",
         "APPROVE_PRODUCTION": "true", "RELEASE_RESULT": str(result_path), "GITHUB_RUN_ID": "123",
         "PREPARE_RUN_ID": "123", "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
+        "IMAGE_RESULT": str(rehearsal_path),
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(run_release_workflow.subprocess, "check_output", lambda command, **kwargs: SHA if command[:2] == ["git", "rev-parse"] else "")
