@@ -157,11 +157,11 @@ jobs:
           echo "IMAGE_ARCHIVE_SHA256=$ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
           echo "LINUX_AMD64_CANDIDATE=PASS" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Rehearse archive import and native identity
+      - name: Rehearse archive import in private Docker/containerd
         env:
           IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-image-${{ inputs.candidate || github.sha }}.tar.gz
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-image-manifest.json
-        run: python3 scripts/rehearse_prepared_image.py
+        run: sudo -n python3 scripts/rehearse_private_docker.py
 
       - name: Prove loaded config and rootfs content identity
         env:
