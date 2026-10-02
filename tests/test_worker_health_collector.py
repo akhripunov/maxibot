@@ -68,3 +68,48 @@ def test_stalled_primary_loop_fails_even_with_healthy_process():
     started=datetime.now(timezone.utc).isoformat()
     result=run_collect([snap(started=started),snap(started=started)],[hb(100),hb(100)])
     assert result['status']=='FAIL' and result['reason']=='worker_heartbeat_not_advanced'
+
+
+def bootstrap_collect(samples, *, failure='heartbeat_absent', legacy=None, expected=None):
+    from scripts.worker_health_preflight import LEGACY_BOOTSTRAP_SHA
+    def missing(*_):
+        if failure:
+            raise ValueError(failure)
+        return hb(100)
+    return collect('worker',35,90,90,expected,
+                   sample_fn=lambda _: samples.pop(0), heartbeat_fn=missing,
+                   sleep_fn=lambda _: None, bootstrap_from=legacy or LEGACY_BOOTSTRAP_SHA)
+
+
+def test_bootstrap_only_known_legacy_absent_heartbeat_and_stable_process():
+    from scripts.worker_health_preflight import LEGACY_BOOTSTRAP_SHA
+    before=snap(release=LEGACY_BOOTSTRAP_SHA)
+    result=bootstrap_collect([before, dict(before)])
+    assert result['status']=='PASS'
+    assert result['primary_loop_verified'] is False
+    assert result['reason']=='approved_legacy_bootstrap'
+
+
+@pytest.mark.parametrize('change', [{'restart_count':1},{'oom_killed':True},{'status':'restarting'},
+                                   {'id':'other'},{'release':'b'*40},{'started_at':'other'},
+                                   {'paused':True},{'dead':True}])
+def test_bootstrap_unstable_worker_is_blocked(change):
+    from scripts.worker_health_preflight import LEGACY_BOOTSTRAP_SHA
+    before=snap(release=LEGACY_BOOTSTRAP_SHA)
+    assert bootstrap_collect([before, {**before,**change}])['status']=='FAIL'
+
+
+@pytest.mark.parametrize('failure', ['docker_read_failed','heartbeat_stale','malformed',None])
+def test_bootstrap_does_not_waive_failed_or_present_heartbeat(failure):
+    from scripts.worker_health_preflight import LEGACY_BOOTSTRAP_SHA
+    with pytest.raises(ValueError):
+        bootstrap_collect([snap(release=LEGACY_BOOTSTRAP_SHA)],failure=failure)
+
+
+def test_bootstrap_cannot_be_used_for_other_sha_or_postdeploy():
+    with pytest.raises(ValueError,match='bootstrap_legacy_release_mismatch'):
+        bootstrap_collect([snap()])
+    with pytest.raises(ValueError,match='bootstrap_scope_invalid'):
+        bootstrap_collect([],legacy='b'*40)
+    with pytest.raises(ValueError,match='bootstrap_scope_invalid'):
+        bootstrap_collect([],expected='a'*40)

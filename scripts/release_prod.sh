@@ -209,6 +209,12 @@ HEALTH_POLL_INTERVAL_SECONDS=${HEALTH_POLL_INTERVAL_SECONDS:-2}
 [[ "$HEALTH_POLL_INTERVAL_SECONDS" =~ ^[0-9]+$ && "$HEALTH_POLL_INTERVAL_SECONDS" -gt 0 ]] || die "HEALTH_POLL_INTERVAL_SECONDS must be a positive integer"
 say HEALTH_READINESS_POLICY "bounded:${HEALTH_TIMEOUT_SECONDS}s/${HEALTH_POLL_INTERVAL_SECONDS}s"
 WORKER_HEARTBEAT_MAX_AGE_SECONDS=${WORKER_HEARTBEAT_MAX_AGE_SECONDS:-90}
+WORKER_BOOTSTRAP_FROM=
+[[ "${WORKER_BOOTSTRAP_APPROVED:-0}" =~ ^[01]$ ]] || die "invalid worker bootstrap approval"
+if [[ "${WORKER_BOOTSTRAP_APPROVED:-0}" == 1 ]]; then
+  WORKER_BOOTSTRAP_FROM=206a1a144be4e0c5de52238c273f89e908d4a84d
+  say WORKER_BOOTSTRAP_APPROVAL "explicit;legacy=$WORKER_BOOTSTRAP_FROM;primary_loop_unverified_until_postdeploy"
+fi
 WORKER_HEALTH_SAMPLE_SECONDS=${WORKER_HEALTH_SAMPLE_SECONDS:-35}
 [[ "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" -gt 0 ]] || die "WORKER_HEARTBEAT_MAX_AGE_SECONDS must be positive"
 [[ "$WORKER_HEALTH_SAMPLE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEALTH_SAMPLE_SECONDS" -gt 0 ]] || die "WORKER_HEALTH_SAMPLE_SECONDS must be positive"
@@ -296,7 +302,7 @@ fi
 unset env_output
 REMOTE_PREFLIGHT
     # Stream the shared stdlib health collector; it is never installed on VPS.
-    printf "\nif worker_health=\$(python3 - --interval %s --max-age %s <<'WORKER_HEALTH_PY'\n" "$WORKER_HEALTH_SAMPLE_SECONDS" "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" >> "$PREFLIGHT_SCRIPT_FILE"
+    printf "\nif worker_health=\$(python3 - --interval %s --max-age %s %s <<'WORKER_HEALTH_PY'\n" "$WORKER_HEALTH_SAMPLE_SECONDS" "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" "${WORKER_BOOTSTRAP_FROM:+--bootstrap-from $WORKER_BOOTSTRAP_FROM}" >> "$PREFLIGHT_SCRIPT_FILE"
     cat "$ROOT_DIR/app/worker_health.py" "$ROOT_DIR/scripts/worker_health_preflight.py" >> "$PREFLIGHT_SCRIPT_FILE"
     printf '\nWORKER_HEALTH_PY\n); then\n  printf "PROD_WORKER_HEALTH=%%s\\n" "$worker_health"\nelse\n  printf "PROD_WORKER_HEALTH=ERROR\\n"\n  printf "WORKER_HEALTH_DETAIL=%%s\\n" "$worker_health"\nfi\n' >> "$PREFLIGHT_SCRIPT_FILE"
     NETWORK_RETRY_STDIN_FILE=$PREFLIGHT_SCRIPT_FILE
@@ -324,6 +330,10 @@ REMOTE_PREFLIGHT
       if [[ -n "$PREFLIGHT_ERRORS" ]]; then
         say PRODUCTION_PREFLIGHT_FAILED_CHECKS "$PREFLIGHT_ERRORS"
         PREFLIGHT_OK=0
+      fi
+      if [[ -n "$WORKER_BOOTSTRAP_FROM" && ( "$PROD_DB_HEAD" != "$TARGET_MIGRATION" || "$PROD_API_IMAGE" != "maxibot-vps-api:$WORKER_BOOTSTRAP_FROM" || "$PROD_WORKER_IMAGE" != "$PROD_API_IMAGE" ) ]]; then
+        PREFLIGHT_OK=0
+        say WORKER_BOOTSTRAP_SCOPE FAIL
       fi
       DB_REHEARSAL_OK=0
       if [[ "$PROD_DB_HEAD" == "$TARGET_MIGRATION" ]]; then
@@ -423,6 +433,9 @@ CURRENT_PRODUCTION_DB_HEAD=$(remote_read production_db_head "docker exec maxibot
 [[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
 say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"
 say CURRENT_PRODUCTION_DB_HEAD "$CURRENT_PRODUCTION_DB_HEAD"
+if [[ -n "$WORKER_BOOTSTRAP_FROM" ]]; then
+  [[ "$CURRENT_PRODUCTION_SHA" == "$WORKER_BOOTSTRAP_FROM" && "$CURRENT_PRODUCTION_DB_HEAD" == "$TARGET_MIGRATION" ]] || die "worker bootstrap forbids changed legacy SHA or pending migrations"
+fi
 MIGRATION_PATH=$(python3 - "$TARGET_SHA" "$CURRENT_PRODUCTION_DB_HEAD" "$TARGET_MIGRATION" <<'PY'
 import ast
 import re
