@@ -132,6 +132,13 @@ jobs:
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
         run: '"$MAXIBOT_PYTHON" scripts/verify_prepared_image.py'
 
+      - name: Rehearse archive import in native Docker store
+        env:
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
+          IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
+        run: '"$MAXIBOT_PYTHON" scripts/rehearse_prepared_image.py'
+
       - name: Verify exact candidate checkout is still clean
         shell: bash
         run: |

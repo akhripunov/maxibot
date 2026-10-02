@@ -132,6 +132,9 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
     assert "inputs.mode == 'production' && needs.deploy.outputs.status != ''" in workflow
+    assert "scripts/rehearse_prepared_image.py" in workflow
+    assert "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70" in (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert '"containerd-snapshotter":true' in (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
 
 
 def test_prepare_writes_valid_json_newline_to_image_manifest():

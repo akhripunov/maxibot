@@ -443,6 +443,7 @@ remote "printf '%s\\n' $RELEASE_IMAGE_ARCHIVE_SHA256 > $PRODUCTION_ROOT/releases
 fi
 REMOTE_LOADED_IMAGE_ID=$(remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}'")
 [[ "$REMOTE_LOADED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "loaded VPS image config digest is unavailable"
+[[ "$REMOTE_LOADED_IMAGE_ID" == "$RELEASE_IMAGE_ID" ]] || die "loaded VPS image config digest differs from Prepare receipt"
 say PREPARED_IMAGE_CONFIG_DIGEST "$RELEASE_IMAGE_ID"
 say VPS_LOADED_IMAGE_CONFIG_DIGEST "$REMOTE_LOADED_IMAGE_ID"
 say IMAGE_ARCHIVE_SHA256 "$RELEASE_IMAGE_ARCHIVE_SHA256"
@@ -492,7 +493,10 @@ WORKER_EFFECTIVE_IMAGE=$(printf '%s\n' "$EFFECTIVE_IMAGES" | sed -n '2p')
 say PRE_APPLY_API_IMAGE "$API_EFFECTIVE_IMAGE"
 say PRE_APPLY_WORKER_IMAGE "$WORKER_EFFECTIVE_IMAGE"
 say PRE_APPLY_IMAGE_PARITY PASS
+remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false -e MAXIBOT_COMMIT_SHA=$TARGET_SHA maxibot-vps-api:$TARGET_SHA python -c 'from app.core.config import settings; assert settings.maxibot_commit_sha == \"$TARGET_SHA\"; import app.main, app.poller; print(\"MAXIBOT_NATIVE_RUNTIME=PASS\")'"
+say PRODUCTION_IMAGE_REHEARSAL PASS
 remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic heads | grep -q '^$TARGET_MIGRATION'"
+say MIGRATION_HEAD_REHEARSAL PASS
 say MIGRATION_ALLOWED YES
 
 timed_stage MIGRATION remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic upgrade $TARGET_MIGRATION"
