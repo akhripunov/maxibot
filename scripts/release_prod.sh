@@ -208,6 +208,11 @@ HEALTH_POLL_INTERVAL_SECONDS=${HEALTH_POLL_INTERVAL_SECONDS:-2}
 [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ && "$HEALTH_TIMEOUT_SECONDS" -gt 0 ]] || die "HEALTH_TIMEOUT_SECONDS must be a positive integer"
 [[ "$HEALTH_POLL_INTERVAL_SECONDS" =~ ^[0-9]+$ && "$HEALTH_POLL_INTERVAL_SECONDS" -gt 0 ]] || die "HEALTH_POLL_INTERVAL_SECONDS must be a positive integer"
 say HEALTH_READINESS_POLICY "bounded:${HEALTH_TIMEOUT_SECONDS}s/${HEALTH_POLL_INTERVAL_SECONDS}s"
+WORKER_HEARTBEAT_MAX_AGE_SECONDS=${WORKER_HEARTBEAT_MAX_AGE_SECONDS:-90}
+WORKER_HEALTH_SAMPLE_SECONDS=${WORKER_HEALTH_SAMPLE_SECONDS:-30}
+[[ "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" -gt 0 ]] || die "WORKER_HEARTBEAT_MAX_AGE_SECONDS must be positive"
+[[ "$WORKER_HEALTH_SAMPLE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEALTH_SAMPLE_SECONDS" -gt 0 ]] || die "WORKER_HEALTH_SAMPLE_SECONDS must be positive"
+say WORKER_HEALTH_POLICY "heartbeat_max_age=${WORKER_HEARTBEAT_MAX_AGE_SECONDS}s;restart_delta_interval=${WORKER_HEALTH_SAMPLE_SECONDS}s;legacy_updates_fallback=explicit"
 
 if [[ "$MODE" == DRY_RUN ]]; then
   say TARGET_SHA_PROVEN YES
@@ -616,15 +621,41 @@ done"; then
   [[ -n "$PREVIOUS_CONFIG" ]] && remote "docker compose -p maxibot-vps -f $PREVIOUS_CONFIG up -d --no-build --force-recreate api worker" || true
   die "runtime rollback attempted; DB rollback remains a separate safety decision"
 fi
+# The API can remain healthy while the dedicated poller is wedged.  Require a
+# current heartbeat after the runtime switch, with an explicit legacy fallback
+# for workers from before the heartbeat contract.
+WORKER_HEALTH=$(remote "set -Eeuo pipefail
+worker=maxibot-vps-worker-1
+status=\$(docker inspect \"\$worker\" --format '{{.State.Status}}' 2>/dev/null || true)
+oom=\$(docker inspect \"\$worker\" --format '{{.State.OOMKilled}}' 2>/dev/null || true)
+test \"\$status\" = running
+test \"\$oom\" != true
+if heartbeat=\$(docker exec \"\$worker\" sh -c 'cat \"\${MAX_WORKER_HEARTBEAT_PATH:-/tmp/maxibot-worker-heartbeat.json}\"' 2>/dev/null); then
+  python3 - \"$WORKER_HEARTBEAT_MAX_AGE_SECONDS\" \"\$heartbeat\" <<'PY'
+import json,sys,time
+max_age=int(sys.argv[1]); item=json.loads(sys.argv[2]); age=time.time()-float(item['timestamp'])
+assert item.get('version') == 1 and age <= max_age and age >= -5 and int(item['pid']) > 0
+print('HEARTBEAT')
+PY
+else
+  docker logs --since \"$WORKER_HEALTH_SAMPLE_SECONDS\" \"\$worker\" 2>&1 | grep -Eq 'MAX_UPDATES_SUCCESS'
+  echo LEGACY_UPDATES_SUCCESS
+fi")" || {
+  echo "POSTDEPLOY_WORKER_HEALTH=FAIL" >&2
+  die "dedicated worker functional health failed"
+}
+say POSTDEPLOY_WORKER_HEALTH "$WORKER_HEALTH"
 FINAL_SHA=$(remote "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"commit_sha\"])'")
 FINAL_ALEMBIC=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
 API_IMAGE=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'")
 WORKER_IMAGE=$(remote "docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}'")
 API_POLLING=$(remote "docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING")
 WORKER_POLLING=$(remote "docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING")
+WORKER_WRITE_FLAGS=$(remote "docker inspect maxibot-vps-worker-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(ADS_AUTOPILOT_ENABLED|ADS_WRITE_ACTIONS_ENABLED)=' | paste -sd, - || true")
 [[ "$FINAL_SHA" == "$TARGET_SHA" && "$FINAL_ALEMBIC" == "$TARGET_MIGRATION" ]] || die "postdeploy parity failed"
 [[ "$API_IMAGE" == "$WORKER_IMAGE" && "$API_IMAGE" == "maxibot-vps-api:$TARGET_SHA" ]] || die "API/worker image parity failed"
 [[ "$API_POLLING" == false && "$WORKER_POLLING" == true ]] || die "polling role check failed"
+[[ "$WORKER_WRITE_FLAGS" == *"ADS_AUTOPILOT_ENABLED=false"* && "$WORKER_WRITE_FLAGS" == *"ADS_WRITE_ACTIONS_ENABLED=false"* ]] || die "worker ADS write flags are not disabled"
 remote "cat > $PRODUCTION_ROOT/releases/$TARGET_SHA/release-report.env <<EOF
 RELEASE_ID=$TARGET_SHA
 TARGET_SHA=$TARGET_SHA

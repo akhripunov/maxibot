@@ -81,7 +81,7 @@ services:
       resources:
         limits:
           cpus: "0.35"
-          memory: 256M
+          memory: 512M
     networks:
       - maxibot_internal
 
