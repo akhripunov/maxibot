@@ -1,4 +1,5 @@
-import json
+import asyncio
+from unittest.mock import AsyncMock, Mock
 
 from app.worker_health import evaluate_runtime, read_heartbeat
 
@@ -60,15 +61,55 @@ def test_legacy_worker_is_blocked_without_primary_heartbeat():
 
 
 def test_corrupt_heartbeat_is_rejected():
-    try:
-        read_heartbeat("{\"version\": 1, \"timestamp\": 1, \"pid\": 4}", now=100)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("stale heartbeat must fail closed")
+    for raw in ["{\"version\": 1, \"timestamp\": 1, \"pid\": 4}", "null", "[]", "42"]:
+        try:
+            read_heartbeat(raw, now=100)
+        except ValueError:
+            continue
+        raise AssertionError("corrupt heartbeat must fail closed")
 
 
 def test_release_keeps_ads_write_flags_disabled():
     source = open("scripts/release_prod.sh", encoding="utf-8").read()
     assert "ADS_AUTOPILOT_ENABLED=false" in source
     assert "ADS_WRITE_ACTIONS_ENABLED=false" in source
+
+
+def test_primary_runtime_heartbeat_follows_durable_marker_and_stop(monkeypatch):
+    import pytest
+    pytest.importorskip("sqlalchemy")
+    from app.bot.runtime import MaxBotRuntime
+    from app.integrations.max_client import MaxUpdate
+
+    client = AsyncMock()
+    runtime = MaxBotRuntime(client, AsyncMock())
+    runtime._load_primary_marker = AsyncMock(return_value=7)
+    stored = AsyncMock(side_effect=lambda marker: runtime._stop.set())
+    runtime._store_primary_marker = stored
+    updates = [MaxUpdate(update_type="message_created", raw={})]
+    client.updates = AsyncMock(return_value=(updates, 8))
+    runtime.handle = AsyncMock()
+    heartbeat = Mock()
+    monkeypatch.setattr("app.bot.runtime.write_heartbeat", heartbeat)
+
+    asyncio.run(runtime.run_forever())
+    stored.assert_awaited_once_with(8)
+    heartbeat.assert_called_once_with(marker=8)
+    client.close.assert_not_awaited()
+
+
+def test_primary_runtime_does_not_heartbeat_when_marker_persistence_fails(monkeypatch):
+    import pytest
+    pytest.importorskip("sqlalchemy")
+    from app.bot.runtime import MaxBotRuntime
+
+    client = AsyncMock()
+    runtime = MaxBotRuntime(client, AsyncMock())
+    runtime._load_primary_marker = AsyncMock(return_value=7)
+    runtime._store_primary_marker = AsyncMock(side_effect=lambda marker: (runtime._stop.set(), RuntimeError("db"))[1])
+    client.updates = AsyncMock(return_value=([], 8))
+    heartbeat = Mock()
+    monkeypatch.setattr("app.bot.runtime.write_heartbeat", heartbeat)
+
+    asyncio.run(runtime.run_forever())
+    heartbeat.assert_not_called()
