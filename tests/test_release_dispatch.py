@@ -257,7 +257,7 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
     rehearsal_path = tmp_path / "prepare-result.json"
     archive.write_bytes(b"prepared")
     manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
-    rehearsal_path.write_text(json.dumps({"private_docker_rehearsal": "PASS"}))
+    rehearsal_path.write_text(json.dumps({"private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES", "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123", "rehearsal_archive_sha256": "a" * 64}))
     for key, value in {
         "CANDIDATE_SHA": SHA, "TARGET_MIGRATION": MIGRATION, "RELEASE_MODE": "production",
         "APPROVE_PRODUCTION": "true", "RELEASE_RESULT": str(result_path), "GITHUB_RUN_ID": "123",
