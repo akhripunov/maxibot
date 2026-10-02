@@ -104,6 +104,22 @@ def test_release_dry_run_collects_production_preflight_in_one_ssh_session(tmp_pa
     docker = tmp_path / "docker"
     docker.write_text("#!/usr/bin/env python3\nimport json,os,sys,time\nargs=sys.argv[1:]; sha=os.environ['FAKE_IMAGE_SHA']\nif args[:2]==['image','inspect']:\n print('linux/amd64|'+sha+'||'+sha)\nelif args[:2]==['exec','maxibot-vps-db-1']:\n print('0098_durable_autopilot_execution_claim_v1')\nelif args[:2]==['exec','maxibot-vps-api-1']:\n print('ready')\nelif args[:2]==['exec','maxibot-vps-worker-1']:\n print(json.dumps({'version':1,'timestamp':time.time(),'pid':1,'release':sha,'marker':None}))\nelif args[0]=='inspect' and len(args)==2:\n print(json.dumps([{'Id':'stable-worker','RestartCount':173,'State':{'StartedAt':'2026-01-01T00:00:00Z','Status':'running','OOMKilled':False,'Paused':False,'Dead':False},'Config':{'Env':['ADS_AUTOPILOT_ENABLED=false','ADS_WRITE_ACTIONS_ENABLED=false'],'Labels':{'org.opencontainers.image.revision':sha}}}]))\nelif args[0]=='inspect':\n joined=' '.join(args)\n if 'range .Config.Env' in joined:print('ADS_AUTOPILOT_ENABLED=false\\nADS_WRITE_ACTIONS_ENABLED=false')\n elif 'project.config_files' in joined:print('/opt/maxibot/releases/previous/docker-compose.vps.yml')\n else:print('maxibot-vps-api:previous')\nelse:sys.exit(2)\n")
     docker.chmod(0o755)
+    # The Docker/SSH fixture is synthetic: use a virtual observation clock.
+    # Production still observes its real 35-second stability interval.
+    python = tmp_path / "python3"
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import os,sys\n"
+        "if len(sys.argv)>2 and sys.argv[1]=='-' and '--interval' in sys.argv:\n"
+        "    source=sys.stdin.read()\n"
+        "    assert 'def collect(' in source\n"
+        "    source=source.replace('def collect(', 'time.sleep=lambda seconds: None\\n\\ndef collect(',1)\n"
+        "    sys.argv=['worker-health-probe']+sys.argv[2:]\n"
+        "    exec(compile(source,'<isolated-health-probe>','exec'),{'__name__':'__main__'})\n"
+        "else:\n"
+        f"    os.execv({sys.executable!r},[{sys.executable!r}]+sys.argv[1:])\n"
+    )
+    python.chmod(0o755)
     ssh = tmp_path / "ssh"
     ssh.write_text(
         "#!/bin/sh\n"
