@@ -398,3 +398,17 @@ def test_linear_owned_block_fails_closed_on_duplicate_markers():
     content = "<!-- MB_RELEASE_START -->x<!-- MB_RELEASE_END -->\n<!-- MB_RELEASE_START -->y<!-- MB_RELEASE_END -->"
     with pytest.raises(SyncError, match="markers are malformed"):
         upsert_block(content, "MB_RELEASE", "next")
+
+
+@pytest.mark.parametrize('approval', ['garbage','1','yes'])
+def test_bootstrap_dispatch_rejects_nonboolean_approval(approval):
+    with pytest.raises(ValidationError,match='bootstrap approval'):
+        validate(values(APPROVE_WORKER_BOOTSTRAP=approval),FakeGitHub())
+
+
+def test_bootstrap_dispatch_still_requires_exact_main_prepare_and_production_approval():
+    assert validate(values(APPROVE_WORKER_BOOTSTRAP='true'),FakeGitHub())['candidate']==SHA
+    with pytest.raises(ValidationError,match='exact current'):
+        validate(values(APPROVE_WORKER_BOOTSTRAP='true'),FakeGitHub(main_sha='b'*40))
+    with pytest.raises(ValidationError,match='owner approval'):
+        validate(values(APPROVE_WORKER_BOOTSTRAP='true',RELEASE_MODE='production'),FakeGitHub())

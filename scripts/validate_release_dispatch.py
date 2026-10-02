@@ -85,6 +85,8 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
         raise ValidationError("Production mode requires explicit owner approval")
     if mode == "preflight" and approve == "true":
         raise ValidationError("Preflight must not carry production approval")
+    if values.get("APPROVE_WORKER_BOOTSTRAP", "false").lower() not in {"true", "false"}:
+        raise ValidationError("Worker bootstrap approval input is invalid")
     if not token:
         raise ValidationError("GitHub token is required for release provenance")
 

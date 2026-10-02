@@ -111,6 +111,11 @@ def main() -> int:
         result["image_config_digest"] = manifest["image_id"]
         result["image_archive_sha256"] = archive_sha256
 
+        bootstrap = os.environ.get("APPROVE_WORKER_BOOTSTRAP", "false").lower()
+        if bootstrap not in {"true", "false"}:
+            raise ValueError("Worker bootstrap approval input is invalid")
+        env["WORKER_BOOTSTRAP_APPROVED"] = "1" if bootstrap == "true" else "0"
+        result["worker_bootstrap_approved"] = bootstrap == "true"
         env["TARGET_MIGRATION"] = migration
         preflight_started = time.monotonic()
         dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)

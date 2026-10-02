@@ -24,6 +24,12 @@ on:
         default: false
         type: boolean
 
+      approve_worker_bootstrap:
+        description: 'Authorize first heartbeat adoption from legacy 206a1a1 only; no migrations; strict postdeploy required'
+        required: true
+        default: false
+        type: boolean
+
 permissions:
   contents: read
   actions: read
@@ -64,6 +70,7 @@ jobs:
           TARGET_MIGRATION: ${{ inputs.target_migration }}
           RELEASE_MODE: ${{ inputs.mode }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+          APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
         run: python3 scripts/validate_release_dispatch.py
 
   deploy:
@@ -85,6 +92,7 @@ jobs:
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+      APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Set result evidence path
