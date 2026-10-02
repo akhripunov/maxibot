@@ -2541,7 +2541,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             "💎 **О сервисе**\n\n"
             "🤖 **MAXIBOT** — умный сервис для продвижения и управления каналами в MAX.\n\n"
             "**Наша цель:** помочь владельцам каналов находить свою аудиторию и привлекать подписчиков эффективнее.\n\n"
-            "🌐 **Наш сайт:** [maxibot.pro](https://maxibot.jobjin.ru)",
+            "🌐 **Наш сайт:** [maxibot.pro](https://maxibot.pro)",
             [
                 [{"text": "📣 Наш MAX-канал", "type": "link", "url": MAXIBOT_CHANNEL_URL}],
                 [support_button()],
