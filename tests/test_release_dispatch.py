@@ -173,6 +173,21 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
     assert "inputs.mode == 'production' && needs.deploy.outputs.status != ''" in workflow
+    assert "scripts/rehearse_prepared_image.py" not in workflow
+    prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert "scripts/rehearse_private_docker.py" in prepare
+    assert "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70" in prepare
+    assert '"containerd-snapshotter":false' in prepare
+    assert "private_docker_rehearsal" in prepare
+    assert '"native_image_id": native_image_id' in prepare
+    assert 'ARCHIVE_CONFIG_ID=' in prepare
+
+
+def test_prepare_allows_explicit_branch_rehearsal_without_linear_publish():
+    workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert "github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'" in workflow
+    assert "BRANCH_REHEARSAL_SHA=PASS" in workflow
+    assert "always() && github.ref == 'refs/heads/main'" in workflow
 
 
 def test_prepare_writes_valid_json_newline_to_image_manifest():
@@ -275,6 +290,51 @@ def test_apply_wrapper_never_runs_without_owner_confirmation(monkeypatch, tmp_pa
     receipt = json.loads(result_path.read_text())
     assert receipt["status"] == "FAILED"
     assert receipt["production_changed"] is False
+
+
+def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeypatch, tmp_path):
+    archive = tmp_path / "image.tar.gz"
+    manifest = tmp_path / "manifest.json"
+    result_path = tmp_path / "result.json"
+    rehearsal_path = tmp_path / "prepare-result.json"
+    archive.write_bytes(b"prepared")
+    manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
+    rehearsal_path.write_text(json.dumps({"private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES", "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123", "rehearsal_archive_sha256": "a" * 64}))
+    for key, value in {
+        "CANDIDATE_SHA": SHA, "TARGET_MIGRATION": MIGRATION, "RELEASE_MODE": "production",
+        "APPROVE_PRODUCTION": "true", "RELEASE_RESULT": str(result_path), "GITHUB_RUN_ID": "123",
+        "PREPARE_RUN_ID": "123", "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
+        "IMAGE_RESULT": str(rehearsal_path),
+    }.items():
+        monkeypatch.setenv(key, value)
+    git_commands = []
+    def read_git(command, **kwargs):
+        git_commands.append(command)
+        return SHA if command[:2] == ["git", "rev-parse"] else ""
+    monkeypatch.setattr(run_release_workflow.subprocess, "check_output", read_git)
+    monkeypatch.setattr(run_release_workflow, "checksum", lambda _: "a" * 64)
+    monkeypatch.setattr(run_release_workflow, "inspect_prepared_archive", lambda *_: ("sha256:" + "1" * 64, "linux/amd64"))
+    commands = []
+    def execute(command, env):
+        commands.append((command, env.copy()))
+        if command[-1] == "--dry-run":
+            return 0, "SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\n"
+        return 1, "MIGRATION_ALLOWED=NO\n"
+    monkeypatch.setattr(run_release_workflow, "run", execute)
+    for attempt in (1, 2):
+        result_path = tmp_path / f"attempt-{attempt}.json"
+        monkeypatch.setenv("RELEASE_RESULT", str(result_path))
+        assert run_release_workflow.main() == 1
+        result = json.loads(result_path.read_text())
+        assert result["status"] == "FAILED_PRE_SWITCH"
+        assert result["production_changed"] is False
+        assert result["image_archive_sha256"] == "a"*64
+    assert len(commands) == 4
+    assert [c[-1] for c, _ in commands] == ["--dry-run", "--apply"]*2
+    assert all(SHA in c for c, _ in commands)
+    assert all(env["RELEASE_IMAGE_ID"] == "sha256:"+"1"*64 for _, env in commands)
+    assert all(command[1] in ("rev-parse", "status") for command in git_commands)
+    assert archive.read_bytes() == b"prepared"
 
 
 def test_linear_owned_block_updates_in_place_and_preserves_architect_text():

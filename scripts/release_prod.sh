@@ -534,6 +534,8 @@ remote "printf '%s\\n' $RELEASE_IMAGE_ARCHIVE_SHA256 > $PRODUCTION_ROOT/releases
 fi
 REMOTE_LOADED_IMAGE_ID=$(remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}'")
 [[ "$REMOTE_LOADED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "loaded VPS image config digest is unavailable"
+remote "python3 $PRODUCTION_ROOT/releases/$TARGET_SHA/scripts/verify_loaded_prepared_image.py maxibot-vps-api:$TARGET_SHA $RELEASE_IMAGE_ID $TARGET_SHA"
+say LOADED_IMAGE_CONTENT_PROOF PASS
 say PREPARED_IMAGE_CONFIG_DIGEST "$RELEASE_IMAGE_ID"
 say VPS_LOADED_IMAGE_CONFIG_DIGEST "$REMOTE_LOADED_IMAGE_ID"
 say IMAGE_ARCHIVE_SHA256 "$RELEASE_IMAGE_ARCHIVE_SHA256"

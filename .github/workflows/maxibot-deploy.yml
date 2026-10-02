@@ -152,6 +152,7 @@ jobs:
         env:
           IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
+          IMAGE_RESULT: ${{ runner.temp }}/maxibot-prepared-image/maxibot-prepare-result.json
         run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
 
       - name: Preserve exact release result

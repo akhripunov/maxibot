@@ -87,6 +87,11 @@ def main() -> int:
         archive = Path(os.environ.get("IMAGE_ARCHIVE", ""))
         manifest_path = Path(os.environ.get("IMAGE_MANIFEST", ""))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        image_result_path = Path(os.environ.get("IMAGE_RESULT", ""))
+        rehearsal = json.loads(image_result_path.read_text(encoding="utf-8")) if image_result_path.is_file() else {}
+        required = {"private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES", "rehearsal_candidate_sha": sha, "rehearsal_prepare_run_id": os.environ.get("PREPARE_RUN_ID", ""), "rehearsal_archive_sha256": manifest.get("archive_sha256")}
+        if any(rehearsal.get(key) != value for key, value in required.items()):
+            raise RuntimeError("Prepare private Docker rehearsal receipt is missing or failed")
         archive_sha256 = checksum(archive)
         if manifest.get("candidate_sha") != sha or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID"):
             raise RuntimeError("Prepared image provenance does not match selected candidate/Prepare run")
