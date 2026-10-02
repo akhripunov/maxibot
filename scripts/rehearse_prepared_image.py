@@ -30,8 +30,11 @@ def main() -> int:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         image = manifest["image"]
         image_id, platform = inspect_prepared_archive(archive, image, sha)
-        if checksum(archive) != manifest["archive_sha256"] or image_id != manifest["image_id"]:
-            raise ValueError("prepared archive receipt mismatch")
+        actual_archive_sha = checksum(archive)
+        if actual_archive_sha != manifest["archive_sha256"]:
+            raise ValueError("prepared archive checksum differs from receipt")
+        if image_id != manifest["image_id"]:
+            raise ValueError("prepared archive config digest differs from receipt")
         docker("load", "--input", str(archive))
         native_id = docker("image", "inspect", image, "--format", "{{.Id}}")
         native_platform = docker("image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}")
