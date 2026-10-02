@@ -137,6 +137,13 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert '"containerd-snapshotter":true' in (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
 
 
+def test_prepare_allows_explicit_branch_rehearsal_without_linear_publish():
+    workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert "github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'" in workflow
+    assert "BRANCH_REHEARSAL_SHA=PASS" in workflow
+    assert "always() && github.ref == 'refs/heads/main'" in workflow
+
+
 def test_prepare_writes_valid_json_newline_to_image_manifest():
     workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
     assert 'sort_keys=True) + "\\n")' in workflow

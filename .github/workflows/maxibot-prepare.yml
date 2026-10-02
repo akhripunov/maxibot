@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   prepare:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -58,9 +58,13 @@ jobs:
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          git fetch origin main --quiet
-          test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
-          echo "EXACT_SHA=PASS ($CANDIDATE_SHA)" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            git fetch origin main --quiet
+            test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
+            echo "EXACT_SHA=PASS ($CANDIDATE_SHA)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "BRANCH_REHEARSAL_SHA=PASS ($CANDIDATE_SHA)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Validate patch and frozen paid-traffic paths
         id: frozen
