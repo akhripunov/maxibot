@@ -125,6 +125,7 @@ jobs:
           docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source-sha"}}|{{index .Config.Labels "org.maxibot.release.sha"}}' \
             | grep -Fx "linux/amd64|$CANDIDATE_SHA|$CANDIDATE_SHA|$CANDIDATE_SHA"
           NATIVE_IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+          python3 scripts/rehearse_worker_memory.py "$IMAGE"
           docker save "$IMAGE" | gzip -1 > "$IMAGE_ARCHIVE"
           ARCHIVE_SHA256="$(sha256sum "$IMAGE_ARCHIVE" | awk '{print $1}')"
           ARCHIVE_CONFIG_ID="$(python3 - "$IMAGE_ARCHIVE" "$IMAGE" "$CANDIDATE_SHA" <<'PY'

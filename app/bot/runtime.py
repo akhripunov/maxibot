@@ -17,6 +17,7 @@ from app.bot.menu import MenuRepository, is_maxibot_owner, official_bot_added_di
 from app.db.models import Admin, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsRecommendation, BotPromotionProfile, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
+from app.worker_health import write_heartbeat
 from app.daily_reports import send_due_daily_reports
 from app.integrations.max_client import MaxClient, MaxMessage, MaxUpdate, RealMaxClient, MaxApiError
 from app.security_tokens import decrypt_token, encrypt_token
@@ -114,6 +115,10 @@ class MaxBotRuntime:
                 # silently hide the rest of the batch.
                 await self._store_primary_marker(next_marker)
                 self.marker = next_marker
+                # Publish only after durable cursor persistence: a heartbeat
+                # must never make a stalled or uncommitted poll look healthy.
+                write_heartbeat(marker=next_marker)
+                logger.info("MAX_UPDATES_SUCCESS marker=%s updates=%s", next_marker, len(updates))
                 # Keep custom-bot long polling independent.  Waiting here
                 # would block the main MAXIBOT polling loop for the full
                 # long-poll timeout and make /start and admin callbacks feel

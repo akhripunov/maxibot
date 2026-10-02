@@ -102,24 +102,7 @@ def test_production_dry_run_uses_one_ssh_session_and_names_failed_checks():
 def test_release_dry_run_collects_production_preflight_in_one_ssh_session(tmp_path):
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     docker = tmp_path / "docker"
-    docker.write_text(
-        "#!/bin/sh\n"
-        "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
-        "  printf 'linux/amd64|%s||%s\\n' \"$FAKE_IMAGE_SHA\" \"$FAKE_IMAGE_SHA\"\n"
-        "elif [ \"$1\" = exec ] && [ \"$2\" = maxibot-vps-db-1 ]; then\n"
-        f"  printf '%s\\n' {CANDIDATE_HEAD_MIGRATION!r}\n"
-        "elif [ \"$1\" = exec ] && [ \"$2\" = maxibot-vps-api-1 ]; then\n"
-        "  printf 'ready\\n'\n"
-        "elif [ \"$1\" = inspect ]; then\n"
-        "  case \"$*\" in\n"
-        "    *'range .Config.Env'*) printf 'ADS_AUTOPILOT_ENABLED=false\\nADS_WRITE_ACTIONS_ENABLED=false\\n' ;;\n"
-        "    *'project.config_files'*) printf '/opt/maxibot/releases/previous/docker-compose.vps.yml\\n' ;;\n"
-        "    *) printf 'maxibot-vps-api:previous\\n' ;;\n"
-        "  esac\n"
-        "else\n"
-        "  exit 2\n"
-        "fi\n"
-    )
+    docker.write_text("#!/usr/bin/env python3\nimport json,os,sys,time\nargs=sys.argv[1:]; sha=os.environ['FAKE_IMAGE_SHA']\nif args[:2]==['image','inspect']:\n print('linux/amd64|'+sha+'||'+sha)\nelif args[:2]==['exec','maxibot-vps-db-1']:\n print('0098_durable_autopilot_execution_claim_v1')\nelif args[:2]==['exec','maxibot-vps-api-1']:\n print('ready')\nelif args[:2]==['exec','maxibot-vps-worker-1']:\n print(json.dumps({'version':1,'timestamp':time.time(),'pid':1,'release':sha,'marker':None}))\nelif args[0]=='inspect' and len(args)==2:\n print(json.dumps([{'Id':'stable-worker','RestartCount':173,'State':{'StartedAt':'2026-01-01T00:00:00Z','Status':'running','OOMKilled':False,'Paused':False,'Dead':False},'Config':{'Env':['ADS_AUTOPILOT_ENABLED=false','ADS_WRITE_ACTIONS_ENABLED=false'],'Labels':{'org.opencontainers.image.revision':sha}}}]))\nelif args[0]=='inspect':\n joined=' '.join(args)\n if 'range .Config.Env' in joined:print('ADS_AUTOPILOT_ENABLED=false\\nADS_WRITE_ACTIONS_ENABLED=false')\n elif 'project.config_files' in joined:print('/opt/maxibot/releases/previous/docker-compose.vps.yml')\n else:print('maxibot-vps-api:previous')\nelse:sys.exit(2)\n")
     docker.chmod(0o755)
     ssh = tmp_path / "ssh"
     ssh.write_text(

@@ -208,6 +208,11 @@ HEALTH_POLL_INTERVAL_SECONDS=${HEALTH_POLL_INTERVAL_SECONDS:-2}
 [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ && "$HEALTH_TIMEOUT_SECONDS" -gt 0 ]] || die "HEALTH_TIMEOUT_SECONDS must be a positive integer"
 [[ "$HEALTH_POLL_INTERVAL_SECONDS" =~ ^[0-9]+$ && "$HEALTH_POLL_INTERVAL_SECONDS" -gt 0 ]] || die "HEALTH_POLL_INTERVAL_SECONDS must be a positive integer"
 say HEALTH_READINESS_POLICY "bounded:${HEALTH_TIMEOUT_SECONDS}s/${HEALTH_POLL_INTERVAL_SECONDS}s"
+WORKER_HEARTBEAT_MAX_AGE_SECONDS=${WORKER_HEARTBEAT_MAX_AGE_SECONDS:-90}
+WORKER_HEALTH_SAMPLE_SECONDS=${WORKER_HEALTH_SAMPLE_SECONDS:-35}
+[[ "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" -gt 0 ]] || die "WORKER_HEARTBEAT_MAX_AGE_SECONDS must be positive"
+[[ "$WORKER_HEALTH_SAMPLE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEALTH_SAMPLE_SECONDS" -gt 0 ]] || die "WORKER_HEALTH_SAMPLE_SECONDS must be positive"
+say WORKER_HEALTH_POLICY "heartbeat_max_age=${WORKER_HEARTBEAT_MAX_AGE_SECONDS}s;restart_delta_interval=${WORKER_HEALTH_SAMPLE_SECONDS}s;primary_heartbeat_required=true"
 
 if [[ "$MODE" == DRY_RUN ]]; then
   say TARGET_SHA_PROVEN YES
@@ -255,6 +260,7 @@ if [[ "$MODE" == DRY_RUN ]]; then
     PROD_READY=
     PROD_API_IMAGE=
     PROD_WORKER_IMAGE=
+    PROD_WORKER_HEALTH=ERROR
     ROLLBACK_CONFIG=
     PROD_WRITE_FLAGS=
     # Keep the read-only production checks in one authenticated SSH session.
@@ -289,6 +295,10 @@ else
 fi
 unset env_output
 REMOTE_PREFLIGHT
+    # Stream the shared stdlib health collector; it is never installed on VPS.
+    printf "\nif worker_health=\$(python3 - --interval %s --max-age %s <<'WORKER_HEALTH_PY'\n" "$WORKER_HEALTH_SAMPLE_SECONDS" "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" >> "$PREFLIGHT_SCRIPT_FILE"
+    cat "$ROOT_DIR/app/worker_health.py" "$ROOT_DIR/scripts/worker_health_preflight.py" >> "$PREFLIGHT_SCRIPT_FILE"
+    printf '\nWORKER_HEALTH_PY\n); then\n  printf "PROD_WORKER_HEALTH=%%s\\n" "$worker_health"\nelse\n  printf "PROD_WORKER_HEALTH=ERROR\\n"\n  printf "WORKER_HEALTH_DETAIL=%%s\\n" "$worker_health"\nfi\n' >> "$PREFLIGHT_SCRIPT_FILE"
     NETWORK_RETRY_STDIN_FILE=$PREFLIGHT_SCRIPT_FILE
     if PREFLIGHT_OUTPUT=$(network_retry_read production_preflight "${PREFLIGHT_SSH[@]}" 'bash -s'); then
       say SSH_REMOTE_PREFLIGHT PASS
@@ -299,6 +309,8 @@ REMOTE_PREFLIGHT
           PROD_READY) PROD_READY=$value ;;
           PROD_API_IMAGE) PROD_API_IMAGE=$value ;;
           PROD_WORKER_IMAGE) PROD_WORKER_IMAGE=$value ;;
+          PROD_WORKER_HEALTH) PROD_WORKER_HEALTH=$value ;;
+          WORKER_HEALTH_DETAIL) say WORKER_HEALTH_DETAIL "$value"; continue ;;
           ROLLBACK_CONFIG) ROLLBACK_CONFIG=$value ;;
           PROD_WRITE_FLAGS) PROD_WRITE_FLAGS=$value ;;
           *) continue ;;
@@ -323,7 +335,7 @@ REMOTE_PREFLIGHT
       else
         say MIGRATION_REHEARSAL "BLOCKED (production DB head unavailable or rehearsal failed)"
       fi
-      if [[ "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" == ERROR || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || "$PROD_WORKER_IMAGE" == ERROR || -z "$ROLLBACK_CONFIG" || "$ROLLBACK_CONFIG" == ERROR || "$PROD_WRITE_FLAGS" == ERROR || "$PROD_WRITE_FLAGS" != *"ADS_AUTOPILOT_ENABLED=false"* || "$PROD_WRITE_FLAGS" != *"ADS_WRITE_ACTIONS_ENABLED=false"* ]]; then
+      if [[ "$PROD_WORKER_HEALTH" == ERROR || "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" == ERROR || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || "$PROD_WORKER_IMAGE" == ERROR || -z "$ROLLBACK_CONFIG" || "$ROLLBACK_CONFIG" == ERROR || "$PROD_WRITE_FLAGS" == ERROR || "$PROD_WRITE_FLAGS" != *"ADS_AUTOPILOT_ENABLED=false"* || "$PROD_WRITE_FLAGS" != *"ADS_WRITE_ACTIONS_ENABLED=false"* ]]; then
         PREFLIGHT_OK=0
       fi
     else
@@ -616,15 +628,28 @@ done"; then
   [[ -n "$PREVIOUS_CONFIG" ]] && remote "docker compose -p maxibot-vps -f $PREVIOUS_CONFIG up -d --no-build --force-recreate api worker" || true
   die "runtime rollback attempted; DB rollback remains a separate safety decision"
 fi
+# A fresh baseline follows the intentional runtime switch. No restart waiver.
+WORKER_HEALTH_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/maxibot-worker-health.XXXXXX")
+cat "$ROOT_DIR/app/worker_health.py" "$ROOT_DIR/scripts/worker_health_preflight.py" > "$WORKER_HEALTH_SCRIPT"
+if WORKER_HEALTH=$("${SSH[@]}" "python3 - --expected-release $TARGET_SHA --interval $WORKER_HEALTH_SAMPLE_SECONDS --max-age $WORKER_HEARTBEAT_MAX_AGE_SECONDS" < "$WORKER_HEALTH_SCRIPT"); then
+  say POSTDEPLOY_WORKER_HEALTH "$WORKER_HEALTH"
+else
+  rm -f "$WORKER_HEALTH_SCRIPT"
+  say POSTDEPLOY_WORKER_HEALTH "$WORKER_HEALTH"
+  die "dedicated worker functional health failed; runtime reconciliation required"
+fi
+rm -f "$WORKER_HEALTH_SCRIPT"
 FINAL_SHA=$(remote "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"commit_sha\"])'")
 FINAL_ALEMBIC=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
 API_IMAGE=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'")
 WORKER_IMAGE=$(remote "docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}'")
 API_POLLING=$(remote "docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING")
 WORKER_POLLING=$(remote "docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING")
+WORKER_WRITE_FLAGS=$(remote "docker inspect maxibot-vps-worker-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(ADS_AUTOPILOT_ENABLED|ADS_WRITE_ACTIONS_ENABLED)=' | paste -sd, - || true")
 [[ "$FINAL_SHA" == "$TARGET_SHA" && "$FINAL_ALEMBIC" == "$TARGET_MIGRATION" ]] || die "postdeploy parity failed"
 [[ "$API_IMAGE" == "$WORKER_IMAGE" && "$API_IMAGE" == "maxibot-vps-api:$TARGET_SHA" ]] || die "API/worker image parity failed"
 [[ "$API_POLLING" == false && "$WORKER_POLLING" == true ]] || die "polling role check failed"
+[[ "$WORKER_WRITE_FLAGS" == *"ADS_AUTOPILOT_ENABLED=false"* && "$WORKER_WRITE_FLAGS" == *"ADS_WRITE_ACTIONS_ENABLED=false"* ]] || die "worker ADS write flags are not disabled"
 remote "cat > $PRODUCTION_ROOT/releases/$TARGET_SHA/release-report.env <<EOF
 RELEASE_ID=$TARGET_SHA
 TARGET_SHA=$TARGET_SHA
