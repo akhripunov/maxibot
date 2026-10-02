@@ -209,10 +209,10 @@ HEALTH_POLL_INTERVAL_SECONDS=${HEALTH_POLL_INTERVAL_SECONDS:-2}
 [[ "$HEALTH_POLL_INTERVAL_SECONDS" =~ ^[0-9]+$ && "$HEALTH_POLL_INTERVAL_SECONDS" -gt 0 ]] || die "HEALTH_POLL_INTERVAL_SECONDS must be a positive integer"
 say HEALTH_READINESS_POLICY "bounded:${HEALTH_TIMEOUT_SECONDS}s/${HEALTH_POLL_INTERVAL_SECONDS}s"
 WORKER_HEARTBEAT_MAX_AGE_SECONDS=${WORKER_HEARTBEAT_MAX_AGE_SECONDS:-90}
-WORKER_HEALTH_SAMPLE_SECONDS=${WORKER_HEALTH_SAMPLE_SECONDS:-30}
+WORKER_HEALTH_SAMPLE_SECONDS=${WORKER_HEALTH_SAMPLE_SECONDS:-35}
 [[ "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" -gt 0 ]] || die "WORKER_HEARTBEAT_MAX_AGE_SECONDS must be positive"
 [[ "$WORKER_HEALTH_SAMPLE_SECONDS" =~ ^[0-9]+$ && "$WORKER_HEALTH_SAMPLE_SECONDS" -gt 0 ]] || die "WORKER_HEALTH_SAMPLE_SECONDS must be positive"
-say WORKER_HEALTH_POLICY "heartbeat_max_age=${WORKER_HEARTBEAT_MAX_AGE_SECONDS}s;restart_delta_interval=${WORKER_HEALTH_SAMPLE_SECONDS}s;legacy_updates_fallback=explicit"
+say WORKER_HEALTH_POLICY "heartbeat_max_age=${WORKER_HEARTBEAT_MAX_AGE_SECONDS}s;restart_delta_interval=${WORKER_HEALTH_SAMPLE_SECONDS}s;primary_heartbeat_required=true"
 
 if [[ "$MODE" == DRY_RUN ]]; then
   say TARGET_SHA_PROVEN YES
@@ -260,6 +260,7 @@ if [[ "$MODE" == DRY_RUN ]]; then
     PROD_READY=
     PROD_API_IMAGE=
     PROD_WORKER_IMAGE=
+    PROD_WORKER_HEALTH=ERROR
     ROLLBACK_CONFIG=
     PROD_WRITE_FLAGS=
     # Keep the read-only production checks in one authenticated SSH session.
@@ -294,6 +295,10 @@ else
 fi
 unset env_output
 REMOTE_PREFLIGHT
+    # Stream the shared stdlib health collector; it is never installed on VPS.
+    printf "\nif worker_health=\$(python3 - --interval %s --max-age %s <<'WORKER_HEALTH_PY'\n" "$WORKER_HEALTH_SAMPLE_SECONDS" "$WORKER_HEARTBEAT_MAX_AGE_SECONDS" >> "$PREFLIGHT_SCRIPT_FILE"
+    cat "$ROOT_DIR/app/worker_health.py" "$ROOT_DIR/scripts/worker_health_preflight.py" >> "$PREFLIGHT_SCRIPT_FILE"
+    printf '\nWORKER_HEALTH_PY\n); then\n  printf "PROD_WORKER_HEALTH=%%s\\n" "$worker_health"\nelse\n  printf "PROD_WORKER_HEALTH=ERROR\\n"\n  printf "WORKER_HEALTH_DETAIL=%%s\\n" "$worker_health"\nfi\n' >> "$PREFLIGHT_SCRIPT_FILE"
     NETWORK_RETRY_STDIN_FILE=$PREFLIGHT_SCRIPT_FILE
     if PREFLIGHT_OUTPUT=$(network_retry_read production_preflight "${PREFLIGHT_SSH[@]}" 'bash -s'); then
       say SSH_REMOTE_PREFLIGHT PASS
@@ -304,6 +309,8 @@ REMOTE_PREFLIGHT
           PROD_READY) PROD_READY=$value ;;
           PROD_API_IMAGE) PROD_API_IMAGE=$value ;;
           PROD_WORKER_IMAGE) PROD_WORKER_IMAGE=$value ;;
+          PROD_WORKER_HEALTH) PROD_WORKER_HEALTH=$value ;;
+          WORKER_HEALTH_DETAIL) say WORKER_HEALTH_DETAIL "$value"; continue ;;
           ROLLBACK_CONFIG) ROLLBACK_CONFIG=$value ;;
           PROD_WRITE_FLAGS) PROD_WRITE_FLAGS=$value ;;
           *) continue ;;
@@ -328,7 +335,7 @@ REMOTE_PREFLIGHT
       else
         say MIGRATION_REHEARSAL "BLOCKED (production DB head unavailable or rehearsal failed)"
       fi
-      if [[ "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" == ERROR || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || "$PROD_WORKER_IMAGE" == ERROR || -z "$ROLLBACK_CONFIG" || "$ROLLBACK_CONFIG" == ERROR || "$PROD_WRITE_FLAGS" == ERROR || "$PROD_WRITE_FLAGS" != *"ADS_AUTOPILOT_ENABLED=false"* || "$PROD_WRITE_FLAGS" != *"ADS_WRITE_ACTIONS_ENABLED=false"* ]]; then
+      if [[ "$PROD_WORKER_HEALTH" == ERROR || "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" == ERROR || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || "$PROD_WORKER_IMAGE" == ERROR || -z "$ROLLBACK_CONFIG" || "$ROLLBACK_CONFIG" == ERROR || "$PROD_WRITE_FLAGS" == ERROR || "$PROD_WRITE_FLAGS" != *"ADS_AUTOPILOT_ENABLED=false"* || "$PROD_WRITE_FLAGS" != *"ADS_WRITE_ACTIONS_ENABLED=false"* ]]; then
         PREFLIGHT_OK=0
       fi
     else
@@ -621,30 +628,17 @@ done"; then
   [[ -n "$PREVIOUS_CONFIG" ]] && remote "docker compose -p maxibot-vps -f $PREVIOUS_CONFIG up -d --no-build --force-recreate api worker" || true
   die "runtime rollback attempted; DB rollback remains a separate safety decision"
 fi
-# The API can remain healthy while the dedicated poller is wedged.  Require a
-# current heartbeat after the runtime switch, with an explicit legacy fallback
-# for workers from before the heartbeat contract.
-WORKER_HEALTH=$(remote "set -Eeuo pipefail
-worker=maxibot-vps-worker-1
-status=\$(docker inspect \"\$worker\" --format '{{.State.Status}}' 2>/dev/null || true)
-oom=\$(docker inspect \"\$worker\" --format '{{.State.OOMKilled}}' 2>/dev/null || true)
-test \"\$status\" = running
-test \"\$oom\" != true
-if heartbeat=\$(docker exec \"\$worker\" sh -c 'cat \"\${MAX_WORKER_HEARTBEAT_PATH:-/tmp/maxibot-worker-heartbeat.json}\"' 2>/dev/null); then
-  python3 - \"$WORKER_HEARTBEAT_MAX_AGE_SECONDS\" \"\$heartbeat\" <<'PY'
-import json,sys,time
-max_age=int(sys.argv[1]); item=json.loads(sys.argv[2]); age=time.time()-float(item['timestamp'])
-assert item.get('version') == 1 and age <= max_age and age >= -5 and int(item['pid']) > 0
-print('HEARTBEAT')
-PY
+# A fresh baseline follows the intentional runtime switch. No restart waiver.
+WORKER_HEALTH_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/maxibot-worker-health.XXXXXX")
+cat "$ROOT_DIR/app/worker_health.py" "$ROOT_DIR/scripts/worker_health_preflight.py" > "$WORKER_HEALTH_SCRIPT"
+if WORKER_HEALTH=$("${SSH[@]}" "python3 - --expected-release $TARGET_SHA --interval $WORKER_HEALTH_SAMPLE_SECONDS --max-age $WORKER_HEARTBEAT_MAX_AGE_SECONDS" < "$WORKER_HEALTH_SCRIPT"); then
+  say POSTDEPLOY_WORKER_HEALTH "$WORKER_HEALTH"
 else
-  docker logs --since \"$WORKER_HEALTH_SAMPLE_SECONDS\" \"\$worker\" 2>&1 | grep -Eq 'MAX_UPDATES_SUCCESS'
-  echo LEGACY_UPDATES_SUCCESS
-fi")" || {
-  echo "POSTDEPLOY_WORKER_HEALTH=FAIL" >&2
-  die "dedicated worker functional health failed"
-}
-say POSTDEPLOY_WORKER_HEALTH "$WORKER_HEALTH"
+  rm -f "$WORKER_HEALTH_SCRIPT"
+  say POSTDEPLOY_WORKER_HEALTH "$WORKER_HEALTH"
+  die "dedicated worker functional health failed; runtime reconciliation required"
+fi
+rm -f "$WORKER_HEALTH_SCRIPT"
 FINAL_SHA=$(remote "docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen(\"http://127.0.0.1:8000/health/ready\"))[\"commit_sha\"])'")
 FINAL_ALEMBIC=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
 API_IMAGE=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'")

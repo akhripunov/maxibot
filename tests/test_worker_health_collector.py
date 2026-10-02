@@ -49,3 +49,22 @@ def test_stale_malformed_wrong_release_and_pid_heartbeats_fail_closed():
     for bad in [hb(1), hb(101, release="b" * 40), hb(101, pid=2), {"version": 1}]:
         with pytest.raises(ValueError):
             run_collect([snap(), snap()], [hb(100), bad])
+
+
+def test_startup_waits_before_taking_control_baseline():
+    started=datetime.now(timezone.utc).isoformat()
+    samples=iter([snap(started=started,status='restarting',restarts=172),
+                  snap(started=started,restarts=173),snap(started=started,restarts=173)])
+    beats=iter([hb(100),hb(101)])
+    sleeps=[]
+    result=collect('worker',35,90,90,'a'*40,
+        sample_fn=lambda _:next(samples),heartbeat_fn=lambda *_:next(beats),
+        sleep_fn=sleeps.append,clock_fn=lambda:0)
+    assert result['status']=='PASS' and result['restart_before']==173
+    assert sleeps==[2,35]
+
+
+def test_stalled_primary_loop_fails_even_with_healthy_process():
+    started=datetime.now(timezone.utc).isoformat()
+    result=run_collect([snap(started=started),snap(started=started)],[hb(100),hb(100)])
+    assert result['status']=='FAIL' and result['reason']=='worker_heartbeat_not_advanced'

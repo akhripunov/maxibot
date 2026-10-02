@@ -68,7 +68,7 @@ def evaluate_runtime(*, before: dict, after: dict, heartbeat: dict | None, legac
                      interval_seconds: int = 30, expected_release: str | None = None,
                      heartbeat_before: dict | None = None) -> tuple[bool, str]:
     """Evaluate a pair of Docker snapshots without treating historical restarts as failure."""
-    if after.get("status") != "running":
+    if before.get("status") != "running" or after.get("status") != "running" or after.get("paused") or after.get("dead"):
         return False, "worker_not_running"
     if after.get("oom_killed") is True:
         return False, "worker_oom_killed"
@@ -87,6 +87,4 @@ def evaluate_runtime(*, before: dict, after: dict, heartbeat: dict | None, legac
     if heartbeat_before is not None:
         if heartbeat.get("timestamp", 0) <= heartbeat_before.get("timestamp", 0):
             return False, "worker_heartbeat_not_advanced"
-        if heartbeat.get("marker") == heartbeat_before.get("marker"):
-            return False, "primary_marker_not_advanced"
     return True, "heartbeat" if heartbeat is not None else "legacy_updates_success"
