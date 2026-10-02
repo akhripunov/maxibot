@@ -153,7 +153,7 @@ jobs:
               },
           }, sort_keys=True) + "\n")
           PY
-          echo "IMAGE_ID=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_ID=$ARCHIVE_CONFIG_ID" >> "$GITHUB_OUTPUT"
           echo "IMAGE_ARCHIVE_SHA256=$ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
           echo "LINUX_AMD64_CANDIDATE=PASS" >> "$GITHUB_STEP_SUMMARY"
 
