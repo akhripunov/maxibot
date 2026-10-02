@@ -123,19 +123,27 @@ jobs:
             --tag "$IMAGE" .
           docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source-sha"}}|{{index .Config.Labels "org.maxibot.release.sha"}}' \
             | grep -Fx "linux/amd64|$CANDIDATE_SHA|$CANDIDATE_SHA|$CANDIDATE_SHA"
-          IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
+          NATIVE_IMAGE_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
           docker save "$IMAGE" | gzip -1 > "$IMAGE_ARCHIVE"
           ARCHIVE_SHA256="$(sha256sum "$IMAGE_ARCHIVE" | awk '{print $1}')"
-          python3 - "$RUNNER_TEMP/maxibot-image-manifest.json" "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$IMAGE_ID" "$ARCHIVE_SHA256" <<'PY'
+          ARCHIVE_CONFIG_ID="$(python3 - "$IMAGE_ARCHIVE" "$IMAGE" "$CANDIDATE_SHA" <<'PY'
+          import sys
+          from pathlib import Path
+          from scripts.prepared_image_archive import inspect_prepared_archive
+          print(inspect_prepared_archive(Path(sys.argv[1]), sys.argv[2], sys.argv[3])[0])
+          PY
+          )"
+          python3 - "$RUNNER_TEMP/maxibot-image-manifest.json" "$CANDIDATE_SHA" "$GITHUB_RUN_ID" "$ARCHIVE_CONFIG_ID" "$NATIVE_IMAGE_ID" "$ARCHIVE_SHA256" <<'PY'
           import json, sys
           from pathlib import Path
-          path, sha, run_id, image_id, archive_sha256 = sys.argv[1:]
+          path, sha, run_id, image_id, native_image_id, archive_sha256 = sys.argv[1:]
           Path(path).write_text(json.dumps({
               "schema": "MAXIBOT_PREPARED_IMAGE_V1",
               "candidate_sha": sha,
               "prepare_run_id": run_id,
               "image": f"maxibot-vps-api:{sha}",
               "image_id": image_id,
+              "native_image_id": native_image_id,
               "archive_sha256": archive_sha256,
               "platform": "linux/amd64",
               "labels": {

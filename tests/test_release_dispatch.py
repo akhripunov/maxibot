@@ -137,6 +137,8 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "scripts/rehearse_prepared_image.py" in prepare
     assert "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70" in prepare
     assert '"containerd-snapshotter":true' in prepare
+    assert '"native_image_id": native_image_id' in prepare
+    assert 'ARCHIVE_CONFIG_ID=' in prepare
 
 
 def test_prepare_allows_explicit_branch_rehearsal_without_linear_publish():
