@@ -185,6 +185,7 @@ jobs:
           PY
 
       - name: Publish complete Prepare artifacts
+        if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: maxibot-image-${{ inputs.candidate || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -195,6 +196,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Publish branch rehearsal receipt
+        if: github.ref != 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: maxibot-rehearsal-${{ inputs.candidate || github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/maxibot-prepare-result.json
+          if-no-files-found: error
+          retention-days: 7
 
   publish:
     needs: prepare

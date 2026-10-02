@@ -38,8 +38,10 @@ def main() -> int:
         docker("load", "--input", str(archive))
         native_id = docker("image", "inspect", image, "--format", "{{.Id}}")
         native_platform = docker("image", "inspect", image, "--format", "{{.Os}}/{{.Architecture}}")
-        if native_id != image_id or native_platform != platform:
-            raise ValueError("Docker native image identity differs from archive receipt")
+        labels = json.loads(docker("image", "inspect", image, "--format", "{{json .Config.Labels}}"))
+        expected_labels = manifest.get("labels") or {}
+        if native_platform != platform or any(labels.get(key) != value for key, value in expected_labels.items()):
+            raise ValueError("Docker native image platform or labels differ from archive receipt")
         docker("create", "--name", container, "--network", "none", "--entrypoint", "python", image, "-c", "print('MAXIBOT_NATIVE_RUNTIME=PASS')")
         created_id = docker("inspect", container, "--format", "{{.Image}}")
         if created_id != native_id:

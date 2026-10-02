@@ -132,9 +132,11 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
     assert "inputs.mode == 'production' && needs.deploy.outputs.status != ''" in workflow
-    assert "scripts/rehearse_prepared_image.py" in workflow
-    assert "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70" in (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
-    assert '"containerd-snapshotter":true' in (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert "scripts/rehearse_prepared_image.py" not in workflow
+    prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert "scripts/rehearse_prepared_image.py" in prepare
+    assert "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70" in prepare
+    assert '"containerd-snapshotter":true' in prepare
 
 
 def test_prepare_allows_explicit_branch_rehearsal_without_linear_publish():
