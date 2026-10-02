@@ -232,6 +232,8 @@ def test_loaded_archive_identity_and_native_runtime_rehearsal_are_fail_closed():
     source = SCRIPT.read_text()
     assert '[[ "$REMOTE_LOADED_IMAGE_ID" == "$RELEASE_IMAGE_ID" ]]' not in source
     assert 'docker load --input $REMOTE_IMAGE_TMP' in source
+    assert 'verify_loaded_prepared_image.py maxibot-vps-api:$TARGET_SHA $RELEASE_IMAGE_ID $TARGET_SHA' in source
+    assert 'LOADED_IMAGE_CONTENT_PROOF PASS' in source
     assert 'PRODUCTION_IMAGE_REHEARSAL' not in source
 
 

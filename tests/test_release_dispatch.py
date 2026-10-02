@@ -250,6 +250,28 @@ def test_apply_wrapper_never_runs_without_owner_confirmation(monkeypatch, tmp_pa
     assert receipt["production_changed"] is False
 
 
+def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeypatch, tmp_path):
+    archive = tmp_path / "image.tar.gz"
+    manifest = tmp_path / "manifest.json"
+    result_path = tmp_path / "result.json"
+    archive.write_bytes(b"prepared")
+    manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
+    for key, value in {
+        "CANDIDATE_SHA": SHA, "TARGET_MIGRATION": MIGRATION, "RELEASE_MODE": "production",
+        "APPROVE_PRODUCTION": "true", "RELEASE_RESULT": str(result_path), "GITHUB_RUN_ID": "123",
+        "PREPARE_RUN_ID": "123", "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(run_release_workflow.subprocess, "check_output", lambda command, **kwargs: SHA if command[:2] == ["git", "rev-parse"] else "")
+    monkeypatch.setattr(run_release_workflow, "checksum", lambda _: "a" * 64)
+    monkeypatch.setattr(run_release_workflow, "inspect_prepared_archive", lambda *_: ("sha256:" + "1" * 64, "linux/amd64"))
+    commands = []
+    monkeypatch.setattr(run_release_workflow, "run", lambda command, env: (commands.append(command) or (1, "MIGRATION_ALLOWED=NO\n")))
+    assert run_release_workflow.main() == 1
+    assert all(command[:2] != ["git", "push"] for command in commands)
+    assert json.loads(result_path.read_text())["production_changed"] is False
+
+
 def test_linear_owned_block_updates_in_place_and_preserves_architect_text():
     before = "Architect-owned opening.\n\n<!-- MB_RELEASE_START -->\nold\n<!-- MB_RELEASE_END -->\n\nArchitect-owned closing."
     after = upsert_block(before, "MB_RELEASE", "new release status")

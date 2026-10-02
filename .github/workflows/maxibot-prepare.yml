@@ -163,6 +163,16 @@ jobs:
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-image-manifest.json
         run: python3 scripts/rehearse_prepared_image.py
 
+      - name: Prove loaded config and rootfs content identity
+        env:
+          IMAGE: maxibot-vps-api:${{ inputs.candidate || github.sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
+          IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-image-manifest.json
+        run: |
+          set -euo pipefail
+          CONFIG_ID="$(python3 -c 'import json,os; print(json.load(open(os.environ["IMAGE_MANIFEST"]))["image_id"])')"
+          python3 scripts/verify_loaded_prepared_image.py "$IMAGE" "$CONFIG_ID" "$CANDIDATE_SHA"
+
       - name: Write CI result receipt
         if: always()
         env:
