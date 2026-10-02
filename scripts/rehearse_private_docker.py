@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Rehearse archive import in an empty private Docker/containerd store."""
 from __future__ import annotations
-import json, os, shutil, shlex, signal, subprocess, sys, tempfile, time
+import hashlib, json, os, shutil, shlex, signal, subprocess, sys, tempfile, time
 from pathlib import Path
 
 def main() -> int:
@@ -41,8 +41,10 @@ def main() -> int:
         subprocess.run(["docker", "rm", "-f", cid], env=env, check=True, stdout=subprocess.DEVNULL)
         github_env = os.environ.get("GITHUB_ENV")
         if github_env:
+            archive_sha = hashlib.sha256(archive.read_bytes()).hexdigest()
             with open(github_env, "a", encoding="utf-8") as handle:
-                handle.write("MAXIBOT_PRIVATE_REHEARSAL=PASS\n")
+                handle.write("MAXIBOT_PRIVATE_REHEARSAL=PASS\nMAXIBOT_PRIVATE_DOCKER_VERSION=29.1.3\nMAXIBOT_PRIVATE_STORE=containerd\nMAXIBOT_PRIVATE_SNAPSHOTTER=overlayfs\nMAXIBOT_PRIVATE_NETWORK_ISOLATED=YES\n")
+                handle.write(f"MAXIBOT_PRIVATE_CANDIDATE_SHA={sha}\nMAXIBOT_PRIVATE_PREPARE_RUN_ID={os.environ.get('GITHUB_RUN_ID', '')}\nMAXIBOT_PRIVATE_ARCHIVE_SHA256={archive_sha}\n")
         print("MAXIBOT_PRIVATE_DOCKER_REHEARSAL=PASS")
         return 0
     finally:

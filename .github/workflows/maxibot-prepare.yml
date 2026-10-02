@@ -193,6 +193,13 @@ jobs:
               "frozen_path_guard": os.environ.get("FROZEN_STATUS", "skipped"),
               "linux_amd64_image": os.environ.get("IMAGE_STATUS", "skipped"),
               "private_docker_rehearsal": os.environ.get("MAXIBOT_PRIVATE_REHEARSAL", "skipped"),
+              "private_docker_version": os.environ.get("MAXIBOT_PRIVATE_DOCKER_VERSION", "skipped"),
+              "private_store": os.environ.get("MAXIBOT_PRIVATE_STORE", "skipped"),
+              "private_snapshotter": os.environ.get("MAXIBOT_PRIVATE_SNAPSHOTTER", "skipped"),
+              "private_network_isolated": os.environ.get("MAXIBOT_PRIVATE_NETWORK_ISOLATED", "skipped"),
+              "rehearsal_candidate_sha": os.environ.get("MAXIBOT_PRIVATE_CANDIDATE_SHA", ""),
+              "rehearsal_prepare_run_id": os.environ.get("MAXIBOT_PRIVATE_PREPARE_RUN_ID", ""),
+              "rehearsal_archive_sha256": os.environ.get("MAXIBOT_PRIVATE_ARCHIVE_SHA256", ""),
               "github_run_id": os.environ["GITHUB_RUN_ID"],
               "created_at": datetime.now(timezone.utc).isoformat(),
           }
