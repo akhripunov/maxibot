@@ -363,3 +363,11 @@ campaign control is `OWNER_ONLY`.
   `max_subscriber`, BOT использует `bot_started`; `UNKNOWN != ZERO`.
 - Continuous analysis использует существующий collector/poller/worker,
   configurable cadence и dedupe текущих AI runs. Direct остаётся read-only.
+
+## Release operations interface
+
+- For any GPoint or MaxiBot release operation, do not use Computer Use, Chrome, mouse interaction, or GitHub Web UI to dispatch, approve, rerun, cancel, or coordinate workflows.
+- Dispatch GitHub Actions only through the authorized `gh workflow run` command or GitHub Actions API, with the exact workflow, SHA, and required inputs.
+- Check workflow status and logs only through GitHub MCP, GitHub API, or `gh run view/watch`.
+- Before dispatching, check whether the required workflow is already running. Never create a duplicate production Deploy, and do not cancel or rerun an active release unless necessary.
+- If CLI/API access, authorization, or the runner is unavailable, stop and report the concrete blocker. Do not fall back to browser UI or another unverified launch path.
