@@ -140,6 +140,17 @@ landing получает yclid/UTM
   Historical candidates without that file remain governed by their prior
   release policy.
 
+## Release authorization modes
+
+Use `docs/RELEASE_AUTHORIZATION.md` for the two OWNER authorization modes.
+Exact-SHA approval is the default. An explicit OWNER instruction to implement
+and deploy a named low-risk task authorizes one task-scoped release without a
+second SHA approval, only after the operator records and verifies the exact
+candidate, full unreleased diff and authorization in Linear. All technical
+release gates and production confirmation inputs remain mandatory. High-risk
+changes, failed gates and scope expansion stop this mode. This section governs
+approval semantics; the existing canonical tooling and invariants still apply.
+
 ## Automated release control
 
 - GitHub Actions `MAXIBOT — Prepare` and `MAXIBOT — Deploy` are the owner-facing wrappers described in `docs/RELEASE_AUTOMATION.md`.
@@ -314,7 +325,8 @@ campaign control is `OWNER_ONLY`.
   минимально необходимые изменения файлов, которых это поручение неизбежно
   касается, включая frozen path. От OWNER не требуется повторять специальную
   формулу `OWNER_APPROVAL_FOR_FROZEN_CHANGE = YES`.
-- Такое разрешение не включает deploy, изменение рекламных кампаний или
+- Поручение только реализовать изменение не включает deploy; явное «реализуй и выкатывай»
+  регулируется `docs/RELEASE_AUTHORIZATION.md`. Разрешение не включает изменение рекламных кампаний или
   расширение scope. Frozen regression и остальные release gates сохраняются.
 - После изменения `HEAD`, ветки, worktree или восстановления canonical
   baseline все прежние repository/environment blockers считаются устаревшими
