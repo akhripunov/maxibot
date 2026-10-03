@@ -4,9 +4,15 @@
 from __future__ import annotations
 
 import os
+import base64
+import io
+import json
 import re
 import sys
 import time
+import urllib.request
+from urllib.parse import urlparse
+import zipfile
 from datetime import datetime, timezone
 
 from sync_agents_to_linear import SyncError, _content_matches, graphql_request
@@ -23,6 +29,138 @@ STATUSES = {
     "preflight": {"READY", "FAILED", "BLOCKED"},
     "production": {"COMPLETE", "FAILED_PRE_SWITCH", "RECOVERY_REQUIRED", "FAILED"},
 }
+REPOSITORY = "akhripunov/maxibot"
+CURRENT_MARKER = "MAXIBOT_CURRENT_STATE"
+
+
+def github_json(path: str) -> dict:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        raise SyncError("GITHUB_TOKEN is required to verify MAXIBOT current state")
+    base = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    request = urllib.request.Request(f"{base}/{path.lstrip('/')}", headers={
+        "Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read())
+    except Exception as exc:
+        raise SyncError(f"GitHub current-state read failed: {type(exc).__name__}") from exc
+
+
+def read_result_artifact(run: dict) -> dict:
+    artifacts = github_json(f"repos/{REPOSITORY}/actions/runs/{run['id']}/artifacts").get("artifacts", [])
+    artifacts = [a for a in artifacts if a.get("name", "").startswith(f"maxibot-release-result-{run['id']}-") and not a.get("expired")]
+    if len(artifacts) != 1:
+        raise SyncError(f"Expected one MAXIBOT canonical result artifact for run {run['id']}; found {len(artifacts)}")
+    request = urllib.request.Request(artifacts[0]["archive_download_url"], headers={
+        "Accept": "application/vnd.github+json", "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}"})
+    class SafeRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            # Artifact endpoints redirect to signed object storage URLs. Never
+            # forward the GitHub bearer token to a different host.
+            if urlparse(newurl).netloc != urlparse(req.full_url).netloc:
+                return urllib.request.Request(newurl, headers={"Accept": "application/octet-stream"})
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+    try:
+        with urllib.request.build_opener(SafeRedirect).open(request, timeout=30) as response:
+            archive = zipfile.ZipFile(io.BytesIO(response.read()))
+            files = [name for name in archive.namelist() if name.endswith(".json")]
+            if len(files) != 1:
+                raise SyncError(f"Expected one JSON in MAXIBOT result artifact {run['id']}")
+            return json.loads(archive.read(files[0]))
+    except SyncError:
+        raise
+    except Exception as exc:
+        raise SyncError(f"MAXIBOT canonical result artifact read failed: {type(exc).__name__}") from exc
+
+
+def latest_runs(workflow: str) -> list[dict]:
+    return github_json(f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100").get("workflow_runs", [])
+
+
+def current_state() -> dict:
+    commit = github_json(f"repos/{REPOSITORY}/commits/main")
+    main_sha = commit.get("sha", "")
+    if not SHA_RE.fullmatch(main_sha):
+        raise SyncError("GitHub main SHA is invalid")
+    prepare_runs = latest_runs("maxibot-prepare.yml")
+    successful_prepares = [r for r in prepare_runs if r.get("status") == "completed" and r.get("conclusion") == "success"]
+    last_prepare = max(successful_prepares, key=lambda r: r.get("created_at", ""), default=None)
+    current_prepare = max((r for r in prepare_runs if r.get("head_sha") == main_sha),
+                          key=lambda r: (r.get("created_at", ""), r.get("run_attempt", 0), r.get("id", 0)), default=None)
+    deploy_runs = latest_runs("maxibot-deploy.yml")
+    production_runs = sorted((r for r in deploy_runs if r.get("conclusion") == "success" and
+                              "production " in (r.get("name") or r.get("display_title") or "").lower()),
+                             key=lambda r: r.get("created_at", ""), reverse=True)
+    deployment = evidence = None
+    for run in production_runs:
+        result = read_result_artifact(run)
+        if result.get("mode") == "production" and result.get("status") == "COMPLETE":
+            if result.get("github_run_id") != str(run.get("id")):
+                raise SyncError("MAXIBOT production result artifact run identity mismatch")
+            if result.get("final_runtime_sha") != result.get("candidate_sha"):
+                raise SyncError("MAXIBOT production result artifact SHA mismatch")
+            if result.get("candidate_sha") != run.get("head_sha"):
+                raise SyncError("MAXIBOT production result artifact does not match its workflow head SHA")
+            deployment, evidence = run, result
+            break
+    if deployment is None:
+        raise SyncError("No successful MAXIBOT production result artifact could be verified")
+    prod_sha = evidence.get("final_runtime_sha")
+    if not SHA_RE.fullmatch(prod_sha or ""):
+        raise SyncError("MAXIBOT production SHA is invalid")
+    ready = bool(current_prepare and current_prepare.get("conclusion") == "success")
+    return {
+        "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "main_sha": main_sha,
+        "main_checked_at": commit.get("commit", {}).get("committer", {}).get("date", "unknown"),
+        "production_sha": prod_sha, "production_checked_at": deployment.get("updated_at", deployment.get("created_at", "unknown")),
+        "production_status": evidence.get("status"), "in_sync": main_sha == prod_sha,
+        "prepare": last_prepare, "current_prepare": current_prepare,
+        "candidate": "READY" if ready else "NOT_PREPARED_FOR_CURRENT_MAIN",
+        "deploy": deployment, "evidence": evidence,
+    }
+
+
+def render_current_state(state: dict) -> str:
+    prepare, deploy, evidence = state["prepare"] or {}, state["deploy"], state["evidence"]
+    relation = "IN_SYNC" if state["in_sync"] else "MAIN_AHEAD_OF_PRODUCTION"
+    timestamp = state["production_checked_at"]
+    migration = evidence.get("final_migration") or evidence.get("target_migration") or "unconfirmed"
+    # COMPLETE is emitted only after post-deploy API readiness, Worker heartbeat/restart
+    # observation, and disabled ADS write flags pass in the canonical release script.
+    lines = [
+        f"Синхронизировано: `{state['synced_at']}` UTC.",
+        f"GitHub main: `{state['main_sha']}` (commit time `{state['main_checked_at']}`).",
+        f"Production: `{state['production_sha']}`; source: MAXIBOT Deploy result artifact [#{deploy['id']}]({deploy['html_url']}); проверка завершена `{timestamp}`; canonical status **{state['production_status']}**.",
+        f"Сверка SHA: **{relation}**.",
+        f"Последний успешный Prepare: `{prepare.get('head_sha', 'unknown')}` / run `#{prepare.get('id', 'unknown')}`; candidate текущего main: **{state['candidate']}**.",
+        f"Последний production Deploy: `{state['production_sha']}` / run `#{deploy['id']}` / **{state['production_status']}**.",
+        f"Alembic production head: `{migration}` (canonical production result artifact).",
+        f"Последнее подтверждённое API/Worker состояние: **PASS** в post-deploy checks, `{timestamp}`; это состояние на момент Deploy, не свежая независимая VPS-проверка.",
+        f"ADS_AUTOPILOT_ENABLED: **FALSE**; ADS_WRITE_ACTIONS_ENABLED: **FALSE** (обязательные pre/post-deploy guards того же завершённого Deploy, `{timestamp}`).",
+        "Пользовательская приёмка: **OWNER_ACCEPTANCE_NOT_RECORDED**; technical COMPLETE её не подтверждает.",
+        "Следующее действие: подготовить/рассмотреть текущий main только в рамках отдельного разрешённого релиза; production здесь не менялся.",
+    ]
+    return f"<!-- {CURRENT_MARKER}_START -->\n\n" + "\n\n".join(lines) + f"\n\n<!-- {CURRENT_MARKER}_END -->"
+
+
+def upsert_current_state(content: str, block: str, handoff: bool = False) -> str:
+    start, end = f"<!-- {CURRENT_MARKER}_START -->", f"<!-- {CURRENT_MARKER}_END -->"
+    starts, ends = content.count(start), content.count(end)
+    if starts != ends or starts > 1:
+        raise SyncError("MAXIBOT CURRENT STATE markers are malformed")
+    if starts:
+        before, rest = content.split(start, 1)
+        _, after = rest.split(end, 1)
+        return before + block + after
+    if handoff:
+        return block + "\n\n" + content
+    title_end = content.find("\n")
+    if not content.startswith("# ") or title_end < 0:
+        return block + "\n\n" + content
+    return content[:title_end + 1] + "\n" + block + "\n\n" + content[title_end + 1:].lstrip("\n")
 
 
 def read_document(document_id: str, expected_title: str, api_key: str) -> str:
@@ -123,7 +261,7 @@ def event_markdown(phase: str, status: str, sha: str, migration: str, run_id: st
     return "\n".join(lines)
 
 
-def publish(env: dict[str, str]) -> None:
+def publish(env: dict[str, str], state: dict | None = None) -> None:
     api_key = env.get("MAXIBOT_LINEAR_API_KEY", "") or env.get("LINEAR_API_KEY", "")
     phase = env.get("RELEASE_PHASE", "")
     status = candidate_status(env.get("PREPARE_RESULT", "")) if phase == "candidate" else env.get("RELEASE_STATUS", "")
@@ -144,15 +282,18 @@ def publish(env: dict[str, str]) -> None:
         raise SyncError("MAXIBOT release identity is invalid")
     url = f"{server}/{repository}/actions/runs/{run_id}"
     block = event_markdown(phase, status, sha, migration, run_id, attempt, url, result_path)
+    state_block = render_current_state(state or current_state())
 
     current_handoff = read_document(HANDOFF_ID, HANDOFF_TITLE, api_key)
     updated_handoff = upsert_block(current_handoff, f"MAXIBOT_RELEASE_{phase.upper()}", block)
+    updated_handoff = upsert_current_state(updated_handoff, state_block, handoff=True)
     write_document(HANDOFF_ID, HANDOFF_TITLE, updated_handoff, api_key)
 
     current_journal = read_document(JOURNAL_ID, JOURNAL_TITLE, api_key)
     event_marker = journal_event_marker(run_id, attempt, phase, status)
-    if event_marker not in current_journal:
-        updated_journal = append_journal_event(current_journal, event_marker, block)
+    updated_journal = append_journal_event(current_journal, event_marker, block)
+    updated_journal = upsert_current_state(updated_journal, state_block)
+    if updated_journal != current_journal:
         write_document(JOURNAL_ID, JOURNAL_TITLE, updated_journal, api_key)
     print(f"MAXIBOT_LINEAR_PUBLICATION=PASS PHASE={phase} STATUS={status} SHA={sha}")
 

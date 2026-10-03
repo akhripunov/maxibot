@@ -210,6 +210,10 @@ def test_linear_candidate_status_reflects_final_prepare_and_artifact_result(prep
 
 def test_preflight_only_does_not_record_production_event():
     workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+    publisher = workflow.split("  publish:", 1)[1]
+    assert "if: always() && github.ref == 'refs/heads/main'" in publisher
+    assert "needs.validate.outputs.candidate || inputs.candidate || github.sha" in publisher
+    assert "ref: ${{ github.sha }}" in publisher
     step = workflow.split("- name: Publish production result to MAXIBOT Linear", 1)[1].split("- name: Preserve exact release result", 1)[0]
     assert "if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''" in step
     assert "RELEASE_PHASE: production" in step
@@ -243,6 +247,55 @@ def test_publisher_uses_only_maxibot_documents():
     assert 'JOURNAL_ID = "13df4e43-f252-424c-afca-fdb2a37eaf29"' in source
     assert "1d84a3c6-f297-40c2-b9e7-ab81bc749c48" not in source
     assert "56f7f9f5-c6e1-42b7-8c29-5b24e6c41a06" not in source
+
+
+def test_current_state_block_is_identical_idempotent_and_preserves_manual_handoff():
+    state = {
+        "synced_at":"2026-10-03T07:00:00+00:00", "main_sha":"a"*40, "main_checked_at":"now",
+        "production_sha":"b"*40, "production_checked_at":"then", "production_status":"COMPLETE",
+        "in_sync":False, "prepare":{"head_sha":"a"*40,"id":12}, "current_prepare":{"conclusion":"success"},
+        "candidate":"READY", "deploy":{"id":14,"html_url":"https://github.test/run"},
+        "evidence":{"final_migration":"0098_durable_autopilot_execution_claim_v1"},
+    }
+    block = publish_release_to_linear.render_current_state(state)
+    handoff = publish_release_to_linear.upsert_current_state("## Owner section\nkeep", block, handoff=True)
+    journal = publish_release_to_linear.upsert_current_state("# Journal\n\nhistory", block)
+    assert handoff.startswith("<!-- MAXIBOT_CURRENT_STATE_START -->")
+    assert "## Owner section\nkeep" in handoff
+    assert "MAXIBOT_CURRENT_STATE_START" in journal.split("history")[0]
+    assert "MAIN_AHEAD_OF_PRODUCTION" in block
+    assert "ADS_AUTOPILOT_ENABLED: **FALSE**" in block
+    assert publish_release_to_linear.upsert_current_state(handoff, block, handoff=True) == handoff
+    assert "GPOINT_CURRENT_STATE" not in block
+
+
+def test_current_state_markers_fail_closed_on_duplicates():
+    block = publish_release_to_linear.render_current_state({
+        "synced_at":"t", "main_sha":"a"*40, "main_checked_at":"t", "production_sha":"a"*40,
+        "production_checked_at":"t", "production_status":"COMPLETE", "in_sync":True,
+        "prepare":None, "current_prepare":None, "candidate":"READY", "deploy":{"id":1,"html_url":"url"},
+        "evidence":{"final_migration":"0098"},
+    })
+    bad = "<!-- MAXIBOT_CURRENT_STATE_START -->a<!-- MAXIBOT_CURRENT_STATE_END -->\n<!-- MAXIBOT_CURRENT_STATE_START -->b<!-- MAXIBOT_CURRENT_STATE_END -->"
+    with pytest.raises(SyncError, match="CURRENT STATE markers"):
+        publish_release_to_linear.upsert_current_state(bad, block)
+
+
+def test_prepare_failure_for_current_main_does_not_reuse_old_success(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "test")
+    monkeypatch.setattr(publish_release_to_linear, "latest_runs", lambda workflow: [
+        {"id":1,"head_sha":"a"*40,"created_at":"2026-10-03T06:00:00Z","conclusion":"success","status":"completed"},
+        {"id":2,"head_sha":"a"*40,"created_at":"2026-10-03T07:00:00Z","conclusion":"failure","status":"completed"},
+    ] if "prepare" in workflow else [{"id":3,"head_sha":"b"*40,"conclusion":"success","name":"MAXIBOT production candidate"}])
+    monkeypatch.setattr(publish_release_to_linear, "read_result_artifact", lambda run: {
+        "mode":"production", "status":"COMPLETE", "github_run_id":"3", "final_runtime_sha":"b"*40, "candidate_sha":"b"*40,
+        "final_migration":"0098"})
+    monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: (
+        {"sha":"a"*40,"commit":{"committer":{"date":"t"}}} if "commits/main" in path else {"workflow_runs":[]}))
+    state = publish_release_to_linear.current_state()
+    assert state["candidate"] == "NOT_PREPARED_FOR_CURRENT_MAIN"
+    assert state["prepare"]["id"] == 1
+    assert state["current_prepare"]["id"] == 2
 
 
 def test_release_apply_loads_verified_prepared_image_without_rebuilding():

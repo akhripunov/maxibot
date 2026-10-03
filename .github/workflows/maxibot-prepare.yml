@@ -21,6 +21,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: maxibot-prepare-${{ github.ref }}
@@ -241,6 +242,7 @@ jobs:
       - name: Publish final Prepare result to MAXIBOT Linear
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: candidate
           PREPARE_RESULT: ${{ needs.prepare.result }}
           CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
