@@ -80,7 +80,18 @@ def latest_runs(workflow: str) -> list[dict]:
     return github_json(f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100").get("workflow_runs", [])
 
 
-def current_state() -> dict:
+def current_candidate_status(main_sha: str, current_main_run: dict | None, event: dict | None = None) -> str:
+    if current_main_run and current_main_run.get("status") == "completed" and current_main_run.get("conclusion") == "success":
+        return "READY"
+    if (event and event.get("sha") == main_sha and current_main_run and
+            str(current_main_run.get("id")) == str(event.get("run_id")) and event.get("status") == "CI_PASS"):
+        # Prepare job completed successfully (needs.prepare.result=success), but
+        # the containing workflow is still running its Linear publisher job.
+        return "PREPARE_GATES_PASS_WORKFLOW_PENDING"
+    return "NOT_PREPARED_FOR_CURRENT_MAIN"
+
+
+def current_state(event: dict | None = None) -> dict:
     commit = github_json(f"repos/{REPOSITORY}/commits/main")
     main_sha = commit.get("sha", "")
     if not SHA_RE.fullmatch(main_sha):
@@ -111,14 +122,13 @@ def current_state() -> dict:
     prod_sha = evidence.get("final_runtime_sha")
     if not SHA_RE.fullmatch(prod_sha or ""):
         raise SyncError("MAXIBOT production SHA is invalid")
-    ready = bool(current_prepare and current_prepare.get("conclusion") == "success")
     return {
         "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "main_sha": main_sha,
         "main_checked_at": commit.get("commit", {}).get("committer", {}).get("date", "unknown"),
         "production_sha": prod_sha, "production_checked_at": deployment.get("updated_at", deployment.get("created_at", "unknown")),
         "production_status": evidence.get("status"), "in_sync": main_sha == prod_sha,
         "prepare": last_prepare, "current_prepare": current_prepare,
-        "candidate": "READY" if ready else "NOT_PREPARED_FOR_CURRENT_MAIN",
+        "candidate": current_candidate_status(main_sha, current_prepare, event),
         "deploy": deployment, "evidence": evidence,
     }
 
@@ -135,7 +145,7 @@ def render_current_state(state: dict) -> str:
         f"GitHub main: `{state['main_sha']}` (commit time `{state['main_checked_at']}`).",
         f"Production: `{state['production_sha']}`; source: MAXIBOT Deploy result artifact [#{deploy['id']}]({deploy['html_url']}); проверка завершена `{timestamp}`; canonical status **{state['production_status']}**.",
         f"Сверка SHA: **{relation}**.",
-        f"Последний успешный Prepare: `{prepare.get('head_sha', 'unknown')}` / run `#{prepare.get('id', 'unknown')}`; candidate текущего main: **{state['candidate']}**.",
+        f"Последний завершившийся успешный Prepare: `{prepare.get('head_sha', 'unknown')}` / run `#{prepare.get('id', 'unknown')}`; current-main run `#{(state['current_prepare'] or {}).get('id', 'unknown')}`: **{state['candidate']}**.",
         f"Последний production Deploy: `{state['production_sha']}` / run `#{deploy['id']}` / **{state['production_status']}**.",
         f"Alembic production head: `{migration}` (canonical production result artifact).",
         f"Последнее подтверждённое API/Worker состояние: **PASS** в post-deploy checks, `{timestamp}`; это состояние на момент Deploy, не свежая независимая VPS-проверка.",
@@ -298,9 +308,29 @@ def publish(env: dict[str, str], state: dict | None = None) -> None:
     print(f"MAXIBOT_LINEAR_PUBLICATION=PASS PHASE={phase} STATUS={status} SHA={sha}")
 
 
+def sync_current_state(api_key: str) -> None:
+    if not api_key:
+        raise SyncError("LINEAR_API_KEY repository secret is required")
+    block = render_current_state(current_state())
+    handoff = read_document(HANDOFF_ID, HANDOFF_TITLE, api_key)
+    write_document(HANDOFF_ID, HANDOFF_TITLE, upsert_current_state(handoff, block, handoff=True), api_key)
+    journal = read_document(JOURNAL_ID, JOURNAL_TITLE, api_key)
+    updated = upsert_current_state(journal, block)
+    if updated != journal:
+        write_document(JOURNAL_ID, JOURNAL_TITLE, updated, api_key)
+
+
 def main() -> int:
     try:
-        publish(dict(os.environ))
+        env = dict(os.environ)
+        if env.get("STATE_SYNC_ONLY") == "true":
+            sync_current_state(env.get("MAXIBOT_LINEAR_API_KEY", "") or env.get("LINEAR_API_KEY", ""))
+            print("MAXIBOT_CURRENT_STATE_SYNC=PASS")
+            return 0
+        phase = env.get("RELEASE_PHASE", "")
+        event = {"sha": env.get("CANDIDATE_SHA", ""), "run_id": env.get("GITHUB_RUN_ID", ""),
+                 "status": candidate_status(env.get("PREPARE_RESULT", ""))} if phase == "candidate" else None
+        publish(env, state=current_state(event))
         return 0
     except SyncError as exc:
         print(f"MAXIBOT_LINEAR_PUBLICATION=FAIL REASON={exc}", file=sys.stderr)

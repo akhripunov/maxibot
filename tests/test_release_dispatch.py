@@ -281,6 +281,28 @@ def test_current_state_markers_fail_closed_on_duplicates():
         publish_release_to_linear.upsert_current_state(bad, block)
 
 
+def test_self_run_in_progress_waits_for_workflow_run_reconciliation():
+    run = {"id": 44, "head_sha":"a"*40, "status":"in_progress", "conclusion":None}
+    event = {"sha":"a"*40,"run_id":"44","status":"CI_PASS"}
+    assert publish_release_to_linear.current_candidate_status("a"*40, run, event) == "PREPARE_GATES_PASS_WORKFLOW_PENDING"
+    assert run["status"] == "in_progress" and run["conclusion"] is None
+    assert publish_release_to_linear.current_candidate_status("a"*40, run) == "NOT_PREPARED_FOR_CURRENT_MAIN"
+
+
+def test_final_completion_reconciles_ready_and_old_run_cannot_revert_it():
+    completed = {"id":44,"head_sha":"a"*40,"status":"completed","conclusion":"success"}
+    assert publish_release_to_linear.current_candidate_status("a"*40, completed) == "READY"
+    current = {"id":44,"head_sha":"a"*40,"status":"in_progress"}
+    stale = {"id":43,"head_sha":"a"*40,"status":"completed","conclusion":"success"}
+    stale_event = {"sha":"a"*40,"run_id":"43","status":"CI_PASS"}
+    assert publish_release_to_linear.current_candidate_status("a"*40, current, stale_event) == "NOT_PREPARED_FOR_CURRENT_MAIN"
+    assert publish_release_to_linear.current_candidate_status("a"*40, stale, stale_event) == "READY"
+    workflow = (ROOT / ".github/workflows/maxibot-linear-reconcile.yml").read_text()
+    assert "types: [completed]" in workflow
+    assert "STATE_SYNC_ONLY: 'true'" in workflow
+    assert "group: maxibot-linear-release" in workflow
+
+
 def test_prepare_failure_for_current_main_does_not_reuse_old_success(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "test")
     monkeypatch.setattr(publish_release_to_linear, "latest_runs", lambda workflow: [
