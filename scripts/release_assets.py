@@ -244,7 +244,6 @@ def _gh(*args: str) -> str:
     token = env.get("GITHUB_TOKEN", "")
     if token:
         env["GH_TOKEN"] = token
-    env.pop("MAXIBOT_RELEASE_ADMIN_TOKEN", None)
     try:
         return subprocess.check_output(["gh", *args], text=True, timeout=600, env=env).strip()
     except (OSError, subprocess.SubprocessError) as exc:
@@ -252,9 +251,9 @@ def _gh(*args: str) -> str:
 
 
 def _github_json(route: str) -> dict:
-    token = os.environ.get("MAXIBOT_RELEASE_ADMIN_TOKEN", "") if route == "immutable-releases" else os.environ.get("GITHUB_TOKEN", "")
+    token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        raise ReleaseAssetError("Required GitHub token is unavailable for Release policy/readback")
+        raise ReleaseAssetError("Workflow GitHub token is unavailable for Release readback")
     import urllib.request
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
     request = urllib.request.Request(
@@ -273,24 +272,12 @@ def _github_json(route: str) -> dict:
     return result
 
 
-def verify_immutable_releases_enabled(github_get) -> None:
-    """Fail closed unless the repository setting confirms immutable releases."""
-    try:
-        setting = github_get("immutable-releases")
-    except Exception as exc:
-        raise ReleaseAssetError("Repository immutable Releases setting is unavailable") from exc
-    if not isinstance(setting, dict) or setting.get("enabled") is not True:
-        raise ReleaseAssetError("Repository immutable Releases are not confirmed enabled")
-
-
 def _publish_release(tag: str, sha: str, run_id: str, attempt: str, asset_path: Path,
                      asset_name: str, kind: str) -> dict:
     if asset_path.is_symlink() or not asset_path.is_file():
         raise ReleaseAssetError("Release asset must be a regular file")
     if asset_path.stat().st_size <= 0 or asset_path.stat().st_size >= MAX_RELEASE_ASSET_BYTES:
         raise ReleaseAssetError("Release asset exceeds GitHub's per-asset size limit")
-    # Verify the repository-level policy before creating any tag or draft.
-    verify_immutable_releases_enabled(_github_json)
     # Ref creation is atomic. A collision is an error; never reuse a tag/release.
     _gh("api", "--method", "POST", f"repos/{REPOSITORY}/git/refs",
         "-f", f"ref=refs/tags/{tag}", "-f", f"sha={sha}")
@@ -298,6 +285,7 @@ def _publish_release(tag: str, sha: str, run_id: str, attempt: str, asset_path: 
         "--title", tag, "--notes", f"Exact SHA {sha}; workflow run {run_id}, attempt {attempt}.")
     _gh("release", "upload", tag, "--repo", REPOSITORY, str(asset_path))
     _gh("release", "edit", tag, "--repo", REPOSITORY, "--draft=false", "--latest=false")
+    # A successful publish is not READY until GitHub proves immutable readback.
     result = resolve_asset(kind, sha, run_id, attempt, asset_name, _github_json)
     local_digest = checksum(asset_path)
     if result["digest"] != f"sha256:{local_digest}":

@@ -17,17 +17,22 @@ production approval input по этому разрешению. Рискован
 ## Статус миграции хранения
 
 Переход новых MAXIBOT Prepare bundles и Deploy evidence с Actions Artifacts на
-immutable GitHub Releases реализуется, но пока не прошёл реальный Prepare,
-Deploy preflight, asset read-back и Linear publication. Статус остаётся
-**PLANNED / NOT VERIFIED** до прохождения всей цепочки. Наличие кода само по
-себе не доказывает, что включена repository setting или работает публикация.
+immutable GitHub Releases ещё не прошёл полный реальный Prepare и Deploy
+preflight. До фактического PASS цепочки статус **NOT VERIFIED**; наличие кода
+само по себе не доказывает, что Release становится immutable.
 
-Для проверки setting нужен secret `MAXIBOT_RELEASE_ADMIN_TOKEN` с минимальным
-GitHub `Administration: read`. Он используется только для
-`GET /repos/akhripunov/maxibot/immutable-releases`. Создание tag/Release выполняет
-ограниченный workflow `GITHUB_TOKEN` с `contents: write`. Если secret отсутствует,
-setting недоступен или `enabled` не равен `true`, publication fail-closed до
-создания tag или Release.
+Публикатор использует штатный workflow `GITHUB_TOKEN` (`contents: write`) для
+создания тега, черновика, загрузки bundle и публикации Release. После публикации
+обязательный API read-back через тот же workflow token проверяет
+`draft=false`, `immutable=true`, tag на точный SHA, загруженный asset и
+совпадение GitHub SHA256 digest с локальными байтами. Если `immutable=true`
+отсутствует или равно false, шаг публикации завершается ошибкой и весь Prepare
+имеет FAILED; Linear не отмечает candidate как READY, а Deploy не может выбрать
+bundle без успешного Prepare и повторного immutable read-back. Внутренний receipt
+отражает только результаты CI/build/rehearsal и сам по себе не разрешает Deploy.
+Это требует включить repository immutable Releases пользователю с
+`Administration: write`; checksum и workflow token эту проверку не заменяют. До
+подтверждения нового маршрута не считать production release readiness доказанной.
 
 ## Порядок для владельца
 

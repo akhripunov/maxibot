@@ -223,7 +223,6 @@ jobs:
         if: github.ref == 'refs/heads/main' && job.status == 'success'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          MAXIBOT_RELEASE_ADMIN_TOKEN: ${{ secrets.MAXIBOT_RELEASE_ADMIN_TOKEN }}
         run: python3 scripts/release_assets.py publish-prepare
 
   publish:

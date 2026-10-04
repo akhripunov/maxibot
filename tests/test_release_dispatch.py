@@ -221,13 +221,16 @@ def test_deploy_workflow_downloads_immutable_prepare_release_and_uses_portable_p
     assert "private_docker_rehearsal" in prepare
     assert '"native_image_id": native_image_id' in prepare
     assert 'ARCHIVE_CONFIG_ID=' in prepare
-    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in prepare
-    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in workflow
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" not in prepare
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" not in workflow
     assert "Publish complete Prepare artifacts" not in prepare
     assert "Publish branch rehearsal receipt" not in prepare
     assert '"release", "create"' in (ROOT / "scripts/release_assets.py").read_text()
     assert "application/octet-stream" in (ROOT / "scripts/prepared_artifact_cache.py").read_text()
-    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in (ROOT / "docs/RELEASE_AUTOMATION.md").read_text()
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" not in (ROOT / "docs/RELEASE_AUTOMATION.md").read_text()
+    assets = (ROOT / "scripts/release_assets.py").read_text()
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" not in assets
+    assert "verify_immutable_releases_enabled" not in assets
 
 
 def test_prepare_write_capability_is_unavailable_to_branch_dispatch():
@@ -554,7 +557,8 @@ def test_immutable_evidence_publication_failure_cannot_trigger_automatic_apply_r
     assert evidence_step > apply_step
     assert "continue-on-error: true" not in workflow[evidence_step:evidence_step + 240]
     assert "publication-recovery" in workflow
-    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in workflow[evidence_step:evidence_step + 400]
+    assert "GITHUB_TOKEN: ${{ github.token }}" in workflow[evidence_step:evidence_step + 400]
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" not in workflow
 
 
 def test_apply_wrapper_never_runs_without_owner_confirmation(monkeypatch, tmp_path):

@@ -123,28 +123,74 @@ def test_resolve_asset_rejects_draft_mutable_or_wrong_tag(changes):
         release_assets.resolve_asset("prepare", SHA, 1234, 2, "bundle.zip", get)
 
 
-def test_release_setting_must_be_confirmed_enabled_before_publish():
-    release_assets.verify_immutable_releases_enabled(lambda _route: {"enabled": True})
-    for value in ({"enabled": False}, {}, None):
-        with pytest.raises(release_assets.ReleaseAssetError, match="not confirmed enabled"):
-            release_assets.verify_immutable_releases_enabled(lambda _route, value=value: value)
-    with pytest.raises(release_assets.ReleaseAssetError, match="unavailable"):
-        release_assets.verify_immutable_releases_enabled(lambda _route: (_ for _ in ()).throw(PermissionError()))
-
-
-def test_publish_stops_before_tag_or_draft_if_immutable_setting_is_unavailable(monkeypatch, tmp_path):
+def test_publish_uses_workflow_token_and_requires_immutable_digest_readback(monkeypatch, tmp_path):
     asset = tmp_path / "bundle.zip"
     asset.write_bytes(b"bundle")
-    monkeypatch.setenv("GITHUB_TOKEN", "contents-only-token")
-    attempted_writes = []
-    monkeypatch.setattr(release_assets, "_github_json", lambda _route: {"enabled": False})
-    monkeypatch.setattr(release_assets, "_gh", lambda *args: attempted_writes.append(args))
-    with pytest.raises(release_assets.ReleaseAssetError, match="not confirmed enabled"):
-        release_assets._publish_release(
-            release_assets.release_tag("prepare", SHA, 1234, 2), SHA, "1234", "2",
-            asset, "bundle.zip", "prepare",
-        )
-    assert attempted_writes == []
+    monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+    monkeypatch.delenv("MAXIBOT_RELEASE_ADMIN_TOKEN", raising=False)
+    tag = release_assets.release_tag("prepare", SHA, 1234, 2)
+    writes = []
+    reads = []
+
+    def gh(*args):
+        writes.append(args)
+        return "ok"
+
+    def github(route):
+        reads.append(route)
+        if route == f"releases/tags/{tag}":
+            return {"tag_name": tag, "draft": False, "immutable": True, "assets": [{
+                "id": 17, "name": "bundle.zip", "state": "uploaded", "size": asset.stat().st_size,
+                "digest": "sha256:" + release_assets.checksum(asset),
+            }]}
+        if route == f"git/ref/tags/{tag}":
+            return {"object": {"type": "commit", "sha": SHA}}
+        raise AssertionError(f"unexpected API route: {route}")
+
+    monkeypatch.setattr(release_assets, "_gh", gh)
+    monkeypatch.setattr(release_assets, "_github_json", github)
+
+    resolved = release_assets._publish_release(tag, SHA, "1234", "2", asset, "bundle.zip", "prepare")
+
+    assert resolved["digest"] == "sha256:" + release_assets.checksum(asset)
+    assert reads == [f"releases/tags/{tag}", f"git/ref/tags/{tag}"]
+    assert [call[0:2] for call in writes] == [
+        ("api", "--method"), ("release", "create"), ("release", "upload"), ("release", "edit"),
+    ]
+
+
+@pytest.mark.parametrize("release_changes", [
+    {"immutable": False}, {"immutable": None}, {"immutable": "missing"}, {"draft": True},
+])
+def test_publish_fails_after_readback_when_release_is_mutable_or_not_published(
+    monkeypatch, tmp_path, release_changes
+):
+    asset = tmp_path / "bundle.zip"
+    asset.write_bytes(b"bundle")
+    monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+    monkeypatch.delenv("MAXIBOT_RELEASE_ADMIN_TOKEN", raising=False)
+    tag = release_assets.release_tag("prepare", SHA, 1234, 2)
+    writes = []
+
+    def github(route):
+        if route == f"releases/tags/{tag}":
+            release = {"tag_name": tag, "draft": False, "immutable": True, "assets": [{
+                "id": 17, "name": "bundle.zip", "state": "uploaded", "size": asset.stat().st_size,
+                "digest": "sha256:" + release_assets.checksum(asset),
+            }]}
+            if release_changes.get("immutable") == "missing":
+                release.pop("immutable")
+            else:
+                release.update(release_changes)
+            return release
+        return {"object": {"type": "commit", "sha": SHA}}
+
+    monkeypatch.setattr(release_assets, "_gh", lambda *args: writes.append(args) or "ok")
+    monkeypatch.setattr(release_assets, "_github_json", github)
+
+    with pytest.raises(release_assets.ReleaseAssetError, match="missing, draft, or mutable"):
+        release_assets._publish_release(tag, SHA, "1234", "2", asset, "bundle.zip", "prepare")
+    assert len(writes) == 4  # Tag/draft/upload/publish happened; failed readback blocks readiness.
 
 
 def test_prepare_bundle_validates_exact_sha_attempt_digest_labels_and_platform():

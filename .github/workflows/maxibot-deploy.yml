@@ -188,7 +188,6 @@ jobs:
         if: always()
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          MAXIBOT_RELEASE_ADMIN_TOKEN: ${{ secrets.MAXIBOT_RELEASE_ADMIN_TOKEN }}
           PREPARED_BUNDLE_DIRECTORY: ${{ runner.temp }}/maxibot-prepared-image
         run: '"$MAXIBOT_PYTHON" scripts/release_assets.py publish-evidence'
 
