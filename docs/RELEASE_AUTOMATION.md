@@ -14,12 +14,27 @@ production approval input по этому разрешению. Рискован
 
 Процесс оборачивает существующий `scripts/release_prod.sh`; он остаётся единственной production-командой. Workflow не управляет Direct/VK кампаниями, бюджетом, ставками, объявлениями или `ADS_*` master flags.
 
+## Статус миграции хранения
+
+Переход новых MAXIBOT Prepare bundles и Deploy evidence с Actions Artifacts на
+immutable GitHub Releases реализуется, но пока не прошёл реальный Prepare,
+Deploy preflight, asset read-back и Linear publication. Статус остаётся
+**PLANNED / NOT VERIFIED** до прохождения всей цепочки. Наличие кода само по
+себе не доказывает, что включена repository setting или работает публикация.
+
+Для проверки setting нужен secret `MAXIBOT_RELEASE_ADMIN_TOKEN` с минимальным
+GitHub `Administration: read`. Он используется только для
+`GET /repos/akhripunov/maxibot/immutable-releases`. Создание tag/Release выполняет
+ограниченный workflow `GITHUB_TOKEN` с `contents: write`. Если secret отсутствует,
+setting недоступен или `enabled` не равен `true`, publication fail-closed до
+создания tag или Release.
+
 ## Порядок для владельца
 
-1. Dev отправляет готовый commit в `origin/main`. GitHub запускает [MAXIBOT — Prepare](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-prepare.yml): полную pytest suite, frozen-path guard и единственную сборку exact `linux/amd64` image. Prepare использует pinned Docker 29.1.3 с containerd snapshotter, импортирует созданный archive в отдельный пустой Docker store с private containerd и изолированной сетью; проверяет manifest/config checksum, platform, source labels, rootfs diff IDs и native container `.Image`, а прежнее сравнение native ID с config digest обязано завершиться отказом. Обязательный receipt связывает PASS с SHA, Prepare run ID и checksum архива; старый receipt не допускается к Deploy. Prepare публикует image tar и manifest отдельным artifact, названным по SHA, run ID и attempt. Manifest содержит SHA-256 архива, image config digest, platform и source labels. Результат `CI_PASS` означает, что код и image прошли CI; он сам по себе ещё не разрешает выкладку.
-2. Dev сообщает полный SHA и точный Alembic target. В [MAXIBOT — Deploy](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-deploy.yml) владелец выбирает `main`, вставляет эти значения и запускает `preflight`. Runner требует artifact именно от последнего успешного Prepare для текущего `main`, скачивает и проверяет SHA-256, config digest, platform и source labels прямо внутри immutable Docker archive. Mac Docker daemon не загружает и не пересобирает image. Затем runner вызывает canonical `scripts/release_prod.sh SHA --dry-run` с production SSH identity, передавая ему проверенный archive. Результат `READY` / `SAFE_TO_RELEASE=YES` оставляет production без изменений.
-3. Владелец повторно запускает форму с тем же SHA и migration, выбирает `production`, отмечает **I authorize this exact candidate and Alembic target on MAXIBOT production** и нажимает **Run workflow**. Runner заново скачивает и проверяет тот же immutable image из Prepare run, повторяет provenance и dry-run, передаёт verified image archive в `scripts/release_prod.sh SHA --apply`. Canonical script импортирует archive только после этих проверок; на VPS он сверяет platform/source labels и API/worker parity, а native archive rehearsal выполняется в Prepare до production. Он не собирает image из исходников.
-4. `COMPLETE` означает, что canonical скрипт проверил production SHA, Alembic, API/worker image parity, `linux/amd64`, health и polling topology. После выкладки выполните требуемую QA/regression и живой продуктовый smoke. Workflow не включает рекламу и не создаёт ad writes.
+1. Dev отправляет commit в `origin/main`. GitHub запускает [MAXIBOT — Prepare](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-prepare.yml): полную pytest suite, frozen-path guard и единственную сборку exact `linux/amd64` image. Prepare использует pinned Docker 29.1.3 с private containerd rehearsal и изолированной сетью; проверяет config checksum, platform, source labels и различие native image ID/config digest. Receipt связывает PASS с SHA, Prepare run ID/attempt и checksum архива. После CI gates Prepare создаёт уникальный tag `maxibot-prepare-<sha>-<run>-<attempt>` и публикует `bundle.zip` с image archive, manifest и receipt. Затем Release metadata read-back обязан подтвердить published state, `immutable=true` и GitHub asset digest. Новые большие Prepare bundles не хранятся в Actions Artifacts. `CI_PASS` появляется в Linear только после завершения публикации.
+2. Dev сообщает полный SHA и Alembic target. Владелец запускает `preflight` в [MAXIBOT — Deploy](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-deploy.yml). Runner требует последний успешный Prepare именно для текущего `main`, exact run/attempt и опубликованный immutable Release/tag/asset. Он сверяет release digest, bundle receipt, manifest/config digest, platform и source labels. Mac Docker daemon не загружает и не пересобирает image. Затем runner вызывает canonical `scripts/release_prod.sh SHA --dry-run` с production SSH identity и передаёт проверенный image archive. `READY` / `SAFE_TO_RELEASE=YES` не меняет production.
+3. Владелец повторно запускает exact SHA/migration в режиме `production` с явным подтверждением. Runner заново валидирует Release metadata и те же image bytes, повторяет dry-run и вызывает `scripts/release_prod.sh SHA --apply`. Canonical script импортирует готовый archive; Deploy не пересобирает image на Mac/VPS.
+4. Результат и allowlisted preflight/apply evidence публикуются отдельным immutable Release `maxibot-evidence-<sha>-<run>-<attempt>`; Prepare Release остаётся неизменным. Linear читает immutable evidence новых workflow runs и сохраняет Actions Artifact fallback для истории. Если apply прошёл, а evidence publication упала, не запускайте `production` повторно. `publication-recovery` сверяет точный исходный run/attempt и выполняет только read-only preflight; он может опубликовать recovery evidence лишь при доказанном совпадении production image, DB head, health, rollback metadata и выключенных ADS flags.
 
 `FAILED_PRE_SWITCH` означает, что мутация production не началась. `RECOVERY_REQUIRED` означает, что после разрешения миграции apply не завершился доказанным `RELEASE_STATUS=PASS`: сначала выполнить read-only сверку и не повторять apply вслепую. При пропавшем Mac runner job останется в очереди, пока владелец не включит runner/Mac. Один и тот же SHA должен быть текущим `main` и иметь последний успешный Prepare; новый commit автоматически делает старую форму непригодной.
 
@@ -31,7 +46,7 @@ production approval input по этому разрешению. Рискован
 
 Publisher обновляет только именованные MAXIBOT release-блоки в Handoff и добавляет идемпотентные события в журнал; архитектурный контекст владельца сохраняется. Публикуются SHA, run, статус и безопасные migration/readback факты. Секреты, production `.env`, SSH key и пользовательские сообщения в Linear не передаются. Repository secret `LINEAR_API_KEY` доступен только шагам публикации.
 
-Повторные и неуспешные попытки сохраняются как отдельные GitHub artifacts и Linear journal events по `run_id`/`run_attempt`. Bookkeeping не коммитит и не отправляет `main`, а retry должен повторно использовать тот же exact candidate SHA и provenance artifact; новая сборка для retry не требуется.
+Повторные и неуспешные публикации сохраняются по `run_id`/`run_attempt`. Bookkeeping не коммитит и не отправляет `main`; публикационная сверка read-only и не вызывает runtime apply. Исторические Actions result artifacts остаются доступны для reconciliation; новые обязательные bundles/evidence хранятся в immutable Releases.
 
 ## Ограничения runner
 
@@ -44,14 +59,14 @@ Publisher обновляет только именованные MAXIBOT release
 ## Release performance and finalization
 
 Prepare exports the single verified linux/amd64 image as gzip level 1; the
-outer GitHub artifact ZIP uses compression level 0. Both Mac verification and
-VPS checksum verification use the same compressed bytes. Application images
-are never rebuilt by Deploy.
+outer immutable Release bundle ZIP uses stored entries. Mac verification and
+VPS checksum verification use the same image archive bytes. Deploy never
+rebuilds an application image.
 
-Artifact names contain candidate SHA, Prepare run ID and attempt. Before using
-`~/.cache/maxibot-release/artifacts`, Deploy checks fresh GitHub main/run/artifact
-metadata and the ZIP's published SHA-256. Missing/expired artifacts, changed
-attempts and mismatches fail closed. The cache retains at most three ZIPs / 1
+Release tags contain candidate SHA, Prepare run ID and attempt. Before using
+`~/.cache/maxibot-release/artifacts`, Deploy checks fresh GitHub main/run/Release
+metadata and the asset's published SHA-256. Missing/draft/mutable Releases,
+changed attempts and mismatches fail closed. The cache retains at most three ZIPs / 1
 GiB (a selected oversized ZIP is retained alone). Portable Python 3.12.10 uses
 a separate persistent project tool cache. No caches dirty the candidate checkout.
 
@@ -66,10 +81,9 @@ commit. The immutable release ref is pushed with a compare-and-swap lease;
 a pre-existing ref for another SHA blocks finalization. Branch names are never
 used as production identity. Backups and all safety gates remain mandatory.
 
-Deploy preserves runtime evidence before the separate Ubuntu Linear job.
-Publication failures remain visible failed workflows; they do not replace the
-runtime result. If runtime is already complete, retry the publication job
-instead of switching production again. All events and result artifacts include
-the GitHub attempt, preserving earlier history.
+Deploy publishes immutable runtime evidence before the separate Ubuntu Linear
+job. Publication failures remain visible failed workflows. `publication-recovery`
+rechecks live production read-only and cannot switch runtime. Events and evidence
+include the GitHub attempt, preserving earlier history.
 
 Проверка loaded image выполняется общим Python helper в Prepare и на VPS: читаются только manifest/config content blobs через ctr. Полный повторный docker save не выполняется; приложение в identity rehearsal не запускается. Измеренная длительность записывается в receipt.

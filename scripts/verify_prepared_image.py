@@ -24,6 +24,7 @@ def main() -> int:
     manifest_path = Path(os.environ.get("IMAGE_MANIFEST", ""))
     sha = os.environ.get("CANDIDATE_SHA", "")
     run_id = os.environ.get("PREPARE_RUN_ID", "")
+    attempt = os.environ.get("PREPARE_RUN_ATTEMPT", "")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         actual_hash = checksum(archive)
@@ -35,6 +36,7 @@ def main() -> int:
         if (manifest.get("schema") != "MAXIBOT_PREPARED_IMAGE_V1"
                 or manifest.get("candidate_sha") != sha
                 or manifest.get("prepare_run_id") != run_id
+                or str(manifest.get("prepare_run_attempt")) != attempt
                 or manifest.get("platform") != "linux/amd64"
                 or manifest.get("labels") != expected_labels
                 or manifest.get("archive_sha256") != actual_hash):

@@ -10,12 +10,15 @@ import json
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 from urllib.parse import urlparse
 import zipfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from sync_agents_to_linear import SyncError, _content_matches, graphql_request
+from release_assets import ReleaseAssetError, read_evidence, release_tag
 
 HANDOFF_ID = "6f799a5c-75b2-4fc1-a522-86bab4c1950b"
 HANDOFF_TITLE = "Архитектор — Handoff"
@@ -45,11 +48,38 @@ def github_json(path: str) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise SyncError("GitHub resource not found") from None
+        raise SyncError(f"GitHub current-state read failed: HTTP {exc.code}") from None
     except Exception as exc:
         raise SyncError(f"GitHub current-state read failed: {type(exc).__name__}") from exc
 
 
 def read_result_artifact(run: dict) -> dict:
+    sha = run.get("head_sha", "")
+    run_id = str(run.get("id", ""))
+    attempt = str(run.get("run_attempt", "1"))
+    if SHA_RE.fullmatch(sha) and run_id.isdigit() and attempt.isdigit():
+        tag = release_tag("evidence", sha, run_id, attempt)
+        try:
+            github_json(f"repos/{REPOSITORY}/releases/tags/{tag}")
+        except SyncError as exc:
+            # Historical Deploy runs predate immutable evidence Releases. Only a
+            # confirmed 404 may fall back to their original Actions result ZIP.
+            if str(exc) != "GitHub resource not found":
+                raise
+        else:
+            token = os.environ.get("GITHUB_TOKEN", "")
+            destination = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "maxibot-evidence-read" / f"{run_id}-{attempt}"
+            try:
+                read_evidence(
+                    sha, run_id, attempt, destination,
+                    lambda route: github_json(f"repos/{REPOSITORY}/{route}"), token,
+                )
+                return json.loads((destination / "result.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError, ReleaseAssetError) as exc:
+                raise SyncError("Immutable MAXIBOT Deploy evidence failed validation") from exc
     artifacts = github_json(f"repos/{REPOSITORY}/actions/runs/{run['id']}/artifacts").get("artifacts", [])
     artifacts = [a for a in artifacts if a.get("name", "").startswith(f"maxibot-release-result-{run['id']}-") and not a.get("expired")]
     if len(artifacts) != 1:
@@ -103,18 +133,27 @@ def current_state(event: dict | None = None) -> dict:
                           key=lambda r: (r.get("created_at", ""), r.get("run_attempt", 0), r.get("id", 0)), default=None)
     deploy_runs = latest_runs("maxibot-deploy.yml")
     production_runs = sorted((r for r in deploy_runs if r.get("conclusion") == "success" and
-                              "production " in (r.get("name") or r.get("display_title") or "").lower()),
+                              any(marker in (r.get("name") or r.get("display_title") or "").lower()
+                                  for marker in ("production ", "publication-recovery "))),
                              key=lambda r: r.get("created_at", ""), reverse=True)
     deployment = evidence = None
     for run in production_runs:
         result = read_result_artifact(run)
-        if result.get("mode") == "production" and result.get("status") == "COMPLETE":
+        mode = result.get("mode")
+        is_reconciliation = mode == "publication-recovery"
+        if ((mode == "production" or is_reconciliation) and result.get("status") == "COMPLETE"):
             if result.get("github_run_id") != str(run.get("id")):
                 raise SyncError("MAXIBOT production result artifact run identity mismatch")
             if result.get("final_runtime_sha") != result.get("candidate_sha"):
                 raise SyncError("MAXIBOT production result artifact SHA mismatch")
             if result.get("candidate_sha") != run.get("head_sha"):
                 raise SyncError("MAXIBOT production result artifact does not match its workflow head SHA")
+            if is_reconciliation and (
+                    result.get("production_changed") is not False
+                    or result.get("recovery") != "READ_ONLY_RECONCILIATION_PASS"
+                    or not str(result.get("reconciles_deploy_run_id", "")).isdigit()
+                    or not str(result.get("reconciles_deploy_run_attempt", "")).isdigit()):
+                raise SyncError("MAXIBOT read-only production reconciliation evidence is incomplete")
             deployment, evidence = run, result
             break
     if deployment is None:
@@ -127,6 +166,10 @@ def current_state(event: dict | None = None) -> dict:
         "main_checked_at": commit.get("commit", {}).get("committer", {}).get("date", "unknown"),
         "production_sha": prod_sha, "production_checked_at": deployment.get("updated_at", deployment.get("created_at", "unknown")),
         "production_status": evidence.get("status"), "in_sync": main_sha == prod_sha,
+        "production_changed": evidence.get("production_changed", evidence.get("mode") == "production"),
+        "reconciliation": evidence.get("mode") == "publication-recovery",
+        "reconciles_deploy_run_id": evidence.get("reconciles_deploy_run_id"),
+        "reconciles_deploy_run_attempt": evidence.get("reconciles_deploy_run_attempt"),
         "prepare": last_prepare, "current_prepare": current_prepare,
         "candidate": current_candidate_status(main_sha, current_prepare, event),
         "deploy": deployment, "evidence": evidence,
@@ -140,14 +183,38 @@ def render_current_state(state: dict) -> str:
     migration = evidence.get("final_migration") or evidence.get("target_migration") or "unconfirmed"
     # COMPLETE is emitted only after post-deploy API readiness, Worker heartbeat/restart
     # observation, and disabled ADS write flags pass in the canonical release script.
+    if state.get("reconciliation"):
+        production_line = (
+            f"Production: `{state['production_sha']}`; источник: read-only reconciliation run "
+            f"[#{deploy['id']}]({deploy['html_url']}); original Deploy run "
+            f"`#{state.get('reconciles_deploy_run_id')}` attempt `"
+            f"{state.get('reconciles_deploy_run_attempt')}`; проверка завершена `{timestamp}`; "
+            "canonical status **COMPLETE**, runtime не изменялся."
+        )
+        deploy_line = (
+            f"Последний подтверждённый production state: `{state['production_sha']}` / "
+            f"read-only reconciliation run `#{deploy['id']}` / **COMPLETE**."
+        )
+        evidence_description = "read-only reconciliation evidence Release"
+    else:
+        production_line = (
+            f"Production: `{state['production_sha']}`; source: MAXIBOT immutable Deploy evidence "
+            f"[#{deploy['id']}]({deploy['html_url']}); проверка завершена `{timestamp}`; "
+            f"canonical status **{state['production_status']}**."
+        )
+        deploy_line = (
+            f"Последний production Deploy: `{state['production_sha']}` / run `#{deploy['id']}` / "
+            f"**{state['production_status']}**."
+        )
+        evidence_description = "canonical production evidence Release"
     lines = [
         f"Синхронизировано: `{state['synced_at']}` UTC.",
         f"GitHub main: `{state['main_sha']}` (commit time `{state['main_checked_at']}`).",
-        f"Production: `{state['production_sha']}`; source: MAXIBOT Deploy result artifact [#{deploy['id']}]({deploy['html_url']}); проверка завершена `{timestamp}`; canonical status **{state['production_status']}**.",
+        production_line,
         f"Сверка SHA: **{relation}**.",
         f"Последний завершившийся успешный Prepare: `{prepare.get('head_sha', 'unknown')}` / run `#{prepare.get('id', 'unknown')}`; current-main run `#{(state['current_prepare'] or {}).get('id', 'unknown')}`: **{state['candidate']}**.",
-        f"Последний production Deploy: `{state['production_sha']}` / run `#{deploy['id']}` / **{state['production_status']}**.",
-        f"Alembic production head: `{migration}` (canonical production result artifact).",
+        deploy_line,
+        f"Alembic production head: `{migration}` ({evidence_description}).",
         f"Последнее подтверждённое API/Worker состояние: **PASS** в post-deploy checks, `{timestamp}`; это состояние на момент Deploy, не свежая независимая VPS-проверка.",
         f"ADS_AUTOPILOT_ENABLED: **FALSE**; ADS_WRITE_ACTIONS_ENABLED: **FALSE** (обязательные pre/post-deploy guards того же завершённого Deploy, `{timestamp}`).",
         "Пользовательская приёмка: **OWNER_ACCEPTANCE_NOT_RECORDED**; technical COMPLETE её не подтверждает.",

@@ -18,6 +18,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset, validate_prepare_directory
 
 
 MAX_BYTES = 4 * 1024 ** 3
@@ -85,6 +86,45 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def download_release(repo, asset_id, token, target):
+    """Download a GitHub Release asset without forwarding credentials to storage."""
+    def copy_bounded(response):
+        with response, target.open('wb') as output:
+            count = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                count += len(chunk)
+                if count > MAX_BYTES:
+                    raise RuntimeError('Release asset exceeds the bounded cache size')
+                output.write(chunk)
+
+    def fetch_asset():
+        request = urllib.request.Request(
+            f'https://api.github.com/repos/{repo}/releases/assets/{asset_id}',
+            headers={'Authorization': f'Bearer {token}',
+                     'Accept': 'application/octet-stream',
+                     'X-GitHub-Api-Version': '2022-11-28'})
+        try:
+            response = urllib.request.build_opener(NoRedirect).open(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            if error.code != 302:
+                raise
+            location = error.headers.get('Location', '')
+            try:
+                error.close()
+            except (AttributeError, KeyError):
+                pass
+            if not location.startswith('https://'):
+                raise RuntimeError('Release asset redirect must use HTTPS')
+            copy_bounded(urllib.request.urlopen(location, timeout=30))
+        else:
+            copy_bounded(response)
+
+    network_request(fetch_asset, 'release_asset_download')
+
+
 def download(repo, artifact_id, token, target):
     # Each bounded attempt obtains a fresh signed URL. Never forward the
     # GitHub token to blob storage or reuse a URL after a connection outage.
@@ -111,7 +151,10 @@ def download(repo, artifact_id, token, target):
             if error.code != 302:
                 raise
             location = error.headers.get('Location', '')
-            error.close()
+            try:
+                error.close()
+            except (AttributeError, KeyError):
+                pass
             if not location.startswith('https://'):
                 raise RuntimeError('Artifact redirect must use HTTPS')
             copy_bounded(urllib.request.urlopen(location, timeout=30))
@@ -129,7 +172,10 @@ def extract(archive, destination, expected):
         if sum(entry.file_size for entry in entries) > MAX_BYTES:
             raise RuntimeError('Expanded artifact exceeds size limit')
         for entry in entries:
-            if stat.S_ISLNK(entry.external_attr >> 16) or entry.is_dir():
+            parts = Path(entry.filename).parts
+            if (stat.S_ISLNK(entry.external_attr >> 16) or entry.is_dir()
+                    or entry.filename.startswith(('/', '\\')) or '..' in parts
+                    or len(parts) != 1):
                 raise RuntimeError('Artifact members must be regular files')
         destination.mkdir(parents=True, exist_ok=True)
         for entry in entries:
@@ -181,10 +227,12 @@ def main():
             f"maxibot-image-{os.environ['CANDIDATE_SHA']}.tar.gz",
             'maxibot-image-manifest.json', 'maxibot-prepare-result.json']),
     }
+    if repo not in projects:
+        raise RuntimeError('Unrecognized release repository')
     project, workflow, expected = projects[repo]
     sha, run_id = os.environ['CANDIDATE_SHA'], os.environ['PREPARE_RUN_ID']
-    attempt, artifact_id = os.environ['PREPARE_RUN_ATTEMPT'], os.environ['PREPARE_ARTIFACT_ID']
-    if not re.fullmatch(r'[a-f0-9]{40}', sha) or not all(x.isdigit() for x in (run_id, attempt, artifact_id)):
+    attempt = os.environ['PREPARE_RUN_ATTEMPT']
+    if not re.fullmatch(r'[a-f0-9]{40}', sha) or not all(x.isdigit() for x in (run_id, attempt)):
         raise RuntimeError('Invalid release identity')
     token = os.environ['GITHUB_TOKEN']
     stage = 'prepare_run_metadata'
@@ -198,21 +246,51 @@ def main():
     stage = 'current_main_ref'
     if github(repo, 'git/ref/heads/main', token, stage)['object']['sha'] != sha:
         raise RuntimeError('Candidate is no longer current main')
-    stage = 'artifact_metadata'
-    metadata = github(repo, f'actions/artifacts/{artifact_id}', token, stage)
-    name = f'gpoint-release-{sha}-{run_id}-{attempt}' if project == 'gpoint' else f'maxibot-image-{sha}-{run_id}-{attempt}'
-    if (metadata.get('expired') is not False or metadata.get('name') != name
-            or str(metadata.get('workflow_run', {}).get('id')) != run_id
-            or metadata.get('workflow_run', {}).get('head_sha') != sha):
-        raise RuntimeError('Artifact does not belong to the selected Prepare')
-    digest = metadata.get('digest', '')
-    if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
-        raise RuntimeError('GitHub artifact digest is unavailable')
+    if project == 'maxibot':
+        stage = 'immutable_release_metadata'
+        tag = release_tag('prepare', sha, run_id, attempt)
+        if os.environ.get('PREPARE_RELEASE_TAG') != tag:
+            raise RuntimeError('Selected Prepare Release tag differs from exact run identity')
+        try:
+            metadata = resolve_asset(
+                'prepare', sha, run_id, attempt, PREPARE_ASSET_NAME,
+                lambda route: github(repo, route, token, stage),
+            )
+        except ReleaseAssetError as error:
+            raise RuntimeError('Immutable Prepare Release provenance changed') from error
+        asset_id = str(metadata['id'])
+        digest = metadata.get('digest', '')
+        if (asset_id != os.environ.get('PREPARE_RELEASE_ASSET_ID')
+                or digest != 'sha256:' + os.environ.get('PREPARE_RELEASE_ASSET_SHA256', '')):
+            raise RuntimeError('Prepare Release asset identity changed after selection')
+        cache_id = asset_id
+        fetch = lambda path: download_release(repo, asset_id, token, path)
+    else:
+        # GPoint continues to use its own established Actions Artifact transport.
+        artifact_id = os.environ['PREPARE_ARTIFACT_ID']
+        if not artifact_id.isdigit():
+            raise RuntimeError('Invalid legacy artifact identity')
+        stage = 'artifact_metadata'
+        metadata = github(repo, f'actions/artifacts/{artifact_id}', token, stage)
+        name = f'gpoint-release-{sha}-{run_id}-{attempt}'
+        if (metadata.get('expired') is not False or metadata.get('name') != name
+                or str(metadata.get('workflow_run', {}).get('id')) != run_id
+                or metadata.get('workflow_run', {}).get('head_sha') != sha):
+            raise RuntimeError('Artifact does not belong to the selected Prepare')
+        digest = metadata.get('digest', '')
+        if not re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
+            raise RuntimeError('GitHub artifact digest is unavailable')
+        cache_id = artifact_id
+        fetch = lambda path: download(repo, artifact_id, token, path)
     cache = Path.home() / '.cache' / f'{project}-release' / 'artifacts'
     stage = 'artifact_cache_or_download'
-    result = materialize(cache, Path(os.environ['ARTIFACT_DESTINATION']), artifact_id,
-                         digest[7:], expected, lambda path: download(repo, artifact_id, token, path))
-    print(f'ARTIFACT_CACHE={result} ARTIFACT_ID={artifact_id} SHA={sha}', flush=True)
+    destination = Path(os.environ['ARTIFACT_DESTINATION'])
+    result = materialize(cache, destination, cache_id, digest[7:], expected, fetch)
+    if project == 'maxibot':
+        validate_prepare_directory(destination, sha, run_id, attempt)
+        print(f'RELEASE_BUNDLE_CACHE={result} RELEASE_ASSET_ID={cache_id} SHA={sha}', flush=True)
+    else:
+        print(f'ARTIFACT_CACHE={result} ARTIFACT_ID={cache_id} SHA={sha}', flush=True)
     print(f'STAGE_SECONDS_ARTIFACT_DOWNLOAD={time.monotonic() - started:.3f}', flush=True)
 
 

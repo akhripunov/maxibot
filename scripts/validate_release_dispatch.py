@@ -15,6 +15,7 @@ import urllib.request
 from typing import Any
 
 from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset
 
 REPO = "akhripunov/maxibot"
 WORKFLOW = "maxibot-prepare.yml"
@@ -75,8 +76,8 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
         raise ValidationError("Expected Prepare run ID and attempt must be supplied together")
     if not SHA_RE.fullmatch(sha):
         raise ValidationError("A full 40-character lowercase candidate SHA is required")
-    if mode not in {"preflight", "production"}:
-        raise ValidationError("An explicit preflight or production mode is required")
+    if mode not in {"preflight", "production", "publication-recovery"}:
+        raise ValidationError("An explicit preflight, production, or publication-recovery mode is required")
     if not MIGRATION_RE.fullmatch(migration):
         raise ValidationError("An explicit Alembic target revision is required")
     if approve not in {"true", "false"}:
@@ -85,6 +86,14 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
         raise ValidationError("Production mode requires explicit owner approval")
     if mode == "preflight" and approve == "true":
         raise ValidationError("Preflight must not carry production approval")
+    recovery_run_id = values.get("RECONCILES_DEPLOY_RUN_ID", "").strip()
+    recovery_attempt = values.get("RECONCILES_DEPLOY_RUN_ATTEMPT", "").strip()
+    if mode == "publication-recovery":
+        if (not recovery_run_id.isdigit() or not recovery_attempt.isdigit() or approve != "false"
+                or values.get("APPROVE_WORKER_BOOTSTRAP", "false").lower() != "false"):
+            raise ValidationError("Publication recovery requires an exact original Deploy run/attempt and no production approval")
+    elif recovery_run_id or recovery_attempt:
+        raise ValidationError("Original Deploy identity is only valid for publication recovery")
     if values.get("APPROVE_WORKER_BOOTSTRAP", "false").lower() not in {"true", "false"}:
         raise ValidationError("Worker bootstrap approval input is invalid")
     if not token:
@@ -113,20 +122,41 @@ def validate(values: dict[str, str], api_get=github_get) -> dict[str, str]:
         raise ValidationError(
             "Latest successful Prepare run/attempt changed after artifact selection; restart Deploy"
         )
-    artifact_name = f"maxibot-image-{sha}-{latest['id']}-{latest.get('run_attempt', 1)}"
-    artifacts = api_get(f"actions/runs/{latest['id']}/artifacts", token)
-    matches = [item for item in artifacts.get("artifacts", []) if item.get("name") == artifact_name and not item.get("expired")]
-    if len(matches) != 1 or not isinstance(matches[0].get("id"), int):
-        raise ValidationError("Exact prepared linux/amd64 image artifact is missing or expired")
+    attempt = latest.get("run_attempt", 1)
+    tag = release_tag("prepare", sha, latest_run_id, attempt)
+    try:
+        asset = resolve_asset(
+            "prepare", sha, latest_run_id, attempt, PREPARE_ASSET_NAME,
+            lambda route: api_get(route, token),
+        )
+    except (ReleaseAssetError, ValidationError) as exc:
+        raise ValidationError(f"Exact immutable Prepare Release is not valid: {exc}") from exc
+
+    if mode == "publication-recovery":
+        prior = api_get(f"actions/runs/{recovery_run_id}", token)
+        if (str(prior.get("id")) != recovery_run_id
+                or prior.get("head_sha") != sha
+                or prior.get("head_branch") != "main"
+                or prior.get("path") != ".github/workflows/maxibot-deploy.yml"
+                or str(prior.get("run_attempt", "1")) != recovery_attempt
+                or prior.get("event") != "workflow_dispatch"
+                or prior.get("status") != "completed"
+                or prior.get("conclusion") != "failure"
+                or not str(prior.get("display_title", "")).startswith(f"MAXIBOT production {sha} by ")):
+            raise ValidationError("Publication recovery does not match a failed prior trusted production Deploy for this exact SHA/attempt")
 
     return {
         "candidate": sha,
         "target_migration": migration,
         "mode": mode,
-        "prepare_artifact_id": str(matches[0]["id"]),
+        "prepare_release_tag": tag,
+        "prepare_release_asset_id": str(asset["id"]),
+        "prepare_release_asset_sha256": asset["digest"][7:],
         "prepare_run_id": latest_run_id,
         "prepare_run_attempt": latest_run_attempt,
         "prepare_url": str(latest.get("html_url", "")),
+        "reconciles_deploy_run_id": recovery_run_id,
+        "reconciles_deploy_run_attempt": recovery_attempt,
     }
 
 
@@ -142,7 +172,7 @@ def main() -> int:
                     raise ValidationError("GitHub output contains invalid line breaks")
                 output.write(f"{key}={value}\n")
             output.write(f"network_retry_budget_used_seconds={math.ceil(NETWORK_BUDGET.spent)}\n")
-        print(f"RELEASE_PROVENANCE=PASS SHA={result['candidate']} PREPARE_RUN={result['prepare_run_id']}")
+        print(f"RELEASE_PROVENANCE=PASS SHA={result['candidate']} PREPARE_RUN={result['prepare_run_id']} IMMUTABLE_RELEASE={result['prepare_release_tag']}")
         return 0
     except (ValidationError, OSError) as exc:
         print(f"RELEASE_PROVENANCE=BLOCKED REASON={exc}", file=sys.stderr)

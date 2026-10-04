@@ -17,7 +17,7 @@ on:
         required: true
         default: preflight
         type: choice
-        options: [preflight, production]
+        options: [preflight, production, publication-recovery]
       approve_production:
         description: 'I authorize this exact candidate and Alembic target on MAXIBOT production'
         required: true
@@ -29,6 +29,15 @@ on:
         required: true
         default: false
         type: boolean
+
+      reconciles_deploy_run_id:
+        description: 'Exact previous Deploy run whose failed publication is being reconciled (publication-recovery only)'
+        required: false
+        type: string
+      reconciles_deploy_run_attempt:
+        description: 'Exact previous Deploy attempt whose failed publication is being reconciled'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -46,10 +55,14 @@ jobs:
     outputs:
       candidate: ${{ steps.select.outputs.candidate }}
       target_migration: ${{ steps.select.outputs.target_migration }}
-      prepare_artifact_id: ${{ steps.select.outputs.prepare_artifact_id }}
+      prepare_release_tag: ${{ steps.select.outputs.prepare_release_tag }}
+      prepare_release_asset_id: ${{ steps.select.outputs.prepare_release_asset_id }}
+      prepare_release_asset_sha256: ${{ steps.select.outputs.prepare_release_asset_sha256 }}
       prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
       prepare_run_attempt: ${{ steps.select.outputs.prepare_run_attempt }}
       prepare_url: ${{ steps.select.outputs.prepare_url }}
+      reconciles_deploy_run_id: ${{ steps.select.outputs.reconciles_deploy_run_id }}
+      reconciles_deploy_run_attempt: ${{ steps.select.outputs.reconciles_deploy_run_attempt }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
     steps:
       - name: Initialize shared retry budget
@@ -71,6 +84,8 @@ jobs:
           RELEASE_MODE: ${{ inputs.mode }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
           APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
+          RECONCILES_DEPLOY_RUN_ID: ${{ inputs.reconciles_deploy_run_id }}
+          RECONCILES_DEPLOY_RUN_ATTEMPT: ${{ inputs.reconciles_deploy_run_attempt }}
         run: python3 scripts/validate_release_dispatch.py
 
   deploy:
@@ -84,15 +99,20 @@ jobs:
       preflight: ${{ steps.execute.outputs.preflight }}
       status: ${{ steps.execute.outputs.status }}
       execute_outcome: ${{ steps.execute.outcome }}
+      evidence_publication: ${{ steps.evidence.outcome }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
-      PREPARE_ARTIFACT_ID: ${{ needs.validate.outputs.prepare_artifact_id }}
+      PREPARE_RELEASE_TAG: ${{ needs.validate.outputs.prepare_release_tag }}
+      PREPARE_RELEASE_ASSET_ID: ${{ needs.validate.outputs.prepare_release_asset_id }}
+      PREPARE_RELEASE_ASSET_SHA256: ${{ needs.validate.outputs.prepare_release_asset_sha256 }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
       APPROVE_PRODUCTION: ${{ inputs.approve_production }}
       APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
+      RECONCILES_DEPLOY_RUN_ID: ${{ needs.validate.outputs.reconciles_deploy_run_id }}
+      RECONCILES_DEPLOY_RUN_ATTEMPT: ${{ needs.validate.outputs.reconciles_deploy_run_attempt }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Set result evidence path
@@ -137,7 +157,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py'
 
-      - name: Restore or download the verified immutable artifact
+      - name: Restore or download the verified immutable Release bundle
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ARTIFACT_DESTINATION: ${{ runner.temp }}/maxibot-prepared-image
@@ -163,14 +183,14 @@ jobs:
           IMAGE_RESULT: ${{ runner.temp }}/maxibot-prepared-image/maxibot-prepare-result.json
         run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
 
-      - name: Preserve exact release result
+      - name: Publish immutable Deploy evidence Release
+        id: evidence
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: maxibot-release-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.RELEASE_RESULT }}
-          if-no-files-found: warn
-          retention-days: 90
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAXIBOT_RELEASE_ADMIN_TOKEN: ${{ secrets.MAXIBOT_RELEASE_ADMIN_TOKEN }}
+          PREPARED_BUNDLE_DIRECTORY: ${{ runner.temp }}/maxibot-prepared-image
+        run: '"$MAXIBOT_PYTHON" scripts/release_assets.py publish-evidence'
 
   publish:
     needs: [validate, deploy]
@@ -188,16 +208,16 @@ jobs:
     steps:
       - name: Set publication evidence path
         shell: bash
-        run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/maxibot-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+        run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/result.json" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: Read saved release evidence
+      - name: Read immutable Release evidence
         if: needs.deploy.outputs.status != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: maxibot-release-result-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/release-evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVIDENCE_DESTINATION: ${{ runner.temp }}/release-evidence
+        run: python3 scripts/release_assets.py read-evidence
       - name: Publish preflight result to MAXIBOT Linear
         if: always()
         env:
@@ -207,10 +227,10 @@ jobs:
           RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PASS' && 'READY' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
         run: python3 scripts/publish_release_to_linear.py
       - name: Publish production result to MAXIBOT Linear
-        if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''
+        if: always() && (inputs.mode == 'production' || inputs.mode == 'publication-recovery') && needs.deploy.outputs.status != ''
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: production
-          RELEASE_STATUS: ${{ needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || (needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || needs.deploy.outputs.status || 'FAILED') }}
+          RELEASE_STATUS: ${{ needs.deploy.outputs.evidence_publication != 'success' && needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || (needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || (needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || needs.deploy.outputs.status || 'FAILED')) }}
         run: python3 scripts/publish_release_to_linear.py

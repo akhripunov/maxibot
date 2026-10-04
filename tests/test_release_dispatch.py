@@ -28,6 +28,7 @@ class FakeGitHub:
              "head_branch": "main", "html_url": "https://github.com/akhripunov/maxibot/actions/runs/14"}
         ]
         self.paths = []
+        self.release_enabled = True
 
     def __call__(self, path, token):
         self.paths.append(path)
@@ -35,10 +36,21 @@ class FakeGitHub:
             return {"object": {"sha": self.main_sha}}
         if path.startswith("actions/workflows/"):
             return {"workflow_runs": self.runs}
-        if path.startswith("actions/runs/") and path.endswith("/artifacts"):
-            run_id = path.split("/")[2]
-            attempt = next((run.get("run_attempt", 1) for run in self.runs if str(run["id"]) == run_id), 1)
-            return {"artifacts": [{"id": 123, "name": f"maxibot-image-{SHA}-{run_id}-{attempt}", "expired": False}]}
+        if path.startswith("releases/tags/"):
+            tag = path.split("/", 2)[2]
+            if not self.release_enabled:
+                raise ValidationError("not found")
+            return {"tag_name": tag, "draft": False, "immutable": True, "assets": [{
+                "id": 123, "name": "bundle.zip", "state": "uploaded", "size": 42,
+                "digest": "sha256:" + "a" * 64,
+            }]}
+        if path.startswith("git/ref/tags/"):
+            return {"object": {"type": "commit", "sha": SHA}}
+        if path == "actions/runs/777":
+            return {"id": 777, "head_sha": SHA, "head_branch": "main",
+                    "path": ".github/workflows/maxibot-deploy.yml",
+                    "run_attempt": 3, "event": "workflow_dispatch", "status": "completed",
+                    "conclusion": "failure", "display_title": f"MAXIBOT production {SHA} by owner"}
         raise AssertionError(path)
 
 
@@ -144,21 +156,47 @@ def test_dispatch_rejects_unfinished_or_failed_latest_prepare(status, conclusion
         validate(values(), FakeGitHub(runs=[run]))
 
 
-def test_dispatch_rejects_missing_or_expired_prepared_image_artifact():
-    class MissingArtifactGitHub(FakeGitHub):
+def test_dispatch_rejects_missing_immutable_prepare_release():
+    github = FakeGitHub()
+    github.release_enabled = False
+    with pytest.raises(ValidationError, match="immutable Prepare Release"):
+        validate(values(), github)
+
+
+def test_dispatch_rejects_release_tag_that_points_to_another_commit():
+    class ForeignTag(FakeGitHub):
         def __call__(self, path, token):
-            if path.startswith("actions/runs/"):
-                return {"artifacts": []}
+            if path.startswith("git/ref/tags/"):
+                return {"object": {"type": "commit", "sha": "b" * 40}}
             return super().__call__(path, token)
 
-    with pytest.raises(ValidationError, match="image artifact"):
-        validate(values(), MissingArtifactGitHub())
+    with pytest.raises(ValidationError, match="candidate SHA"):
+        validate(values(), ForeignTag())
 
 
-def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_python():
+def test_publication_recovery_requires_exact_prior_deploy_and_is_not_production_approval():
+    selected = validate(values(
+        RELEASE_MODE="publication-recovery", RECONCILES_DEPLOY_RUN_ID="777",
+        RECONCILES_DEPLOY_RUN_ATTEMPT="3",
+    ), FakeGitHub())
+    assert selected["mode"] == "publication-recovery"
+    assert selected["reconciles_deploy_run_id"] == "777"
+    assert selected["reconciles_deploy_run_attempt"] == "3"
+    with pytest.raises(ValidationError, match="prior trusted production Deploy"):
+        validate(values(
+            RELEASE_MODE="publication-recovery", RECONCILES_DEPLOY_RUN_ID="777",
+            RECONCILES_DEPLOY_RUN_ATTEMPT="2",
+        ), FakeGitHub())
+    with pytest.raises(ValidationError, match="owner approval"):
+        validate(values(RELEASE_MODE="production"), FakeGitHub())
+
+
+def test_deploy_workflow_downloads_immutable_prepare_release_and_uses_portable_pinned_python():
     workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
     assert "scripts/prepared_artifact_cache.py" in workflow
-    assert "PREPARE_ARTIFACT_ID: ${{ needs.validate.outputs.prepare_artifact_id }}" in workflow
+    assert "PREPARE_RELEASE_ASSET_ID: ${{ needs.validate.outputs.prepare_release_asset_id }}" in workflow
+    assert "PREPARE_RELEASE_TAG: ${{ needs.validate.outputs.prepare_release_tag }}" in workflow
+    assert "actions/download-artifact@v4" not in workflow
     assert "python scripts/" not in workflow
     assert '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py' in workflow
     assert "scripts/verify_prepared_image.py" in workflow
@@ -172,7 +210,9 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert 'git status --porcelain' in workflow
     assert "PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}" in workflow
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
-    assert "inputs.mode == 'production' && needs.deploy.outputs.status != ''" in workflow
+    assert "inputs.mode == 'publication-recovery'" in workflow
+    assert "evidence_publication: ${{ steps.evidence.outcome }}" in workflow
+    assert "Publish immutable Deploy evidence Release" in workflow
     assert "scripts/rehearse_prepared_image.py" not in workflow
     prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
     assert "scripts/rehearse_private_docker.py" in prepare
@@ -181,12 +221,20 @@ def test_deploy_workflow_downloads_prepare_artifact_and_uses_portable_pinned_pyt
     assert "private_docker_rehearsal" in prepare
     assert '"native_image_id": native_image_id' in prepare
     assert 'ARCHIVE_CONFIG_ID=' in prepare
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in prepare
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in workflow
+    assert "Publish complete Prepare artifacts" not in prepare
+    assert "Publish branch rehearsal receipt" not in prepare
+    assert '"release", "create"' in (ROOT / "scripts/release_assets.py").read_text()
+    assert "application/octet-stream" in (ROOT / "scripts/prepared_artifact_cache.py").read_text()
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in (ROOT / "docs/RELEASE_AUTOMATION.md").read_text()
 
 
-def test_prepare_allows_explicit_branch_rehearsal_without_linear_publish():
+def test_prepare_write_capability_is_unavailable_to_branch_dispatch():
     workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
-    assert "github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'" in workflow
-    assert "BRANCH_REHEARSAL_SHA=PASS" in workflow
+    assert "if: github.ref == 'refs/heads/main'" in workflow
+    assert "BRANCH_REHEARSAL_SHA=PASS" not in workflow
+    assert "Publish branch rehearsal receipt" not in workflow
     assert "always() && github.ref == 'refs/heads/main'" in workflow
 
 
@@ -202,8 +250,8 @@ def test_prepare_writes_valid_json_newline_to_image_manifest():
 )
 def test_linear_candidate_status_reflects_final_prepare_and_artifact_result(prepare_result, expected):
     workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
-    assert "Publish complete Prepare artifacts" in workflow
-    assert workflow.index("Publish complete Prepare artifacts") < workflow.index("Publish final Prepare result to MAXIBOT Linear")
+    assert "Publish immutable Prepare Release bundle" in workflow
+    assert workflow.index("Publish immutable Prepare Release bundle") < workflow.index("Publish final Prepare result to MAXIBOT Linear")
     assert "PREPARE_RESULT: ${{ needs.prepare.result }}" in workflow
     assert publish_release_to_linear.candidate_status(prepare_result) == expected
 
@@ -214,8 +262,8 @@ def test_preflight_only_does_not_record_production_event():
     assert "if: always() && github.ref == 'refs/heads/main'" in publisher
     assert "needs.validate.outputs.candidate || inputs.candidate || github.sha" in publisher
     assert "ref: ${{ github.sha }}" in publisher
-    step = workflow.split("- name: Publish production result to MAXIBOT Linear", 1)[1].split("- name: Preserve exact release result", 1)[0]
-    assert "if: always() && inputs.mode == 'production' && needs.deploy.outputs.status != ''" in step
+    step = workflow.split("- name: Publish production result to MAXIBOT Linear", 1)[1]
+    assert "inputs.mode == 'production' || inputs.mode == 'publication-recovery'" in step
     assert "RELEASE_PHASE: production" in step
     assert "RELEASE_PHASE: production" not in workflow.split("- name: Publish preflight result to MAXIBOT Linear", 1)[1].split("- name: Publish production result to MAXIBOT Linear", 1)[0]
 
@@ -247,6 +295,85 @@ def test_publisher_uses_only_maxibot_documents():
     assert 'JOURNAL_ID = "13df4e43-f252-424c-afca-fdb2a37eaf29"' in source
     assert "1d84a3c6-f297-40c2-b9e7-ab81bc749c48" not in source
     assert "56f7f9f5-c6e1-42b7-8c29-5b24e6c41a06" not in source
+
+
+def test_publisher_reads_legacy_actions_result_only_when_evidence_release_is_absent(monkeypatch):
+    import io
+    import zipfile
+
+    result = {"mode": "production", "status": "COMPLETE", "candidate_sha": SHA,
+              "github_run_id": "321", "github_run_attempt": "1", "final_runtime_sha": SHA}
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("maxibot-release-result-321-1.json", json.dumps(result))
+    run = {"id": 321, "run_attempt": 1, "head_sha": SHA}
+    calls = []
+
+    def api(path):
+        calls.append(path)
+        if "/releases/tags/" in path:
+            raise SyncError("GitHub resource not found")
+        if path.endswith("/artifacts"):
+            return {"artifacts": [{"name": "maxibot-release-result-321-1", "expired": False,
+                                   "archive_download_url": "https://api.github.com/result.zip"}]}
+        raise AssertionError(path)
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def read(self):
+            return payload.getvalue()
+
+    class FakeOpener:
+        def open(self, _request, timeout):
+            assert timeout == 30
+            return Response()
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(publish_release_to_linear, "github_json", api)
+    monkeypatch.setattr(publish_release_to_linear.urllib.request, "build_opener", lambda *_args: FakeOpener())
+    assert publish_release_to_linear.read_result_artifact(run) == result
+    assert any("/actions/runs/321/artifacts" in path for path in calls)
+
+
+def test_publisher_prefers_immutable_release_without_legacy_fallback(monkeypatch, tmp_path):
+    run = {"id": 322, "run_attempt": 2, "head_sha": SHA}
+    calls = []
+
+    def api(path):
+        calls.append(path)
+        return {"tag_name": "release"}
+
+    def read(sha, run_id, attempt, destination, github_get, token):
+        assert (sha, run_id, attempt) == (SHA, "322", "2")
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "result.json").write_text(json.dumps({"canonical": True}))
+        return {}
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setattr(publish_release_to_linear, "github_json", api)
+    monkeypatch.setattr(publish_release_to_linear, "read_evidence", read)
+    result = publish_release_to_linear.read_result_artifact(run)
+    assert result == {"canonical": True}
+    assert calls and all("actions/runs" not in call for call in calls)
+
+
+def test_publisher_does_not_fallback_when_existing_release_evidence_is_invalid(monkeypatch, tmp_path):
+    run = {"id": 323, "run_attempt": 1, "head_sha": SHA}
+    calls = []
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: calls.append(path) or {"tag_name": "exists"})
+    monkeypatch.setattr(
+        publish_release_to_linear, "read_evidence",
+        lambda *_args: (_ for _ in ()).throw(publish_release_to_linear.ReleaseAssetError("bad digest")),
+    )
+    with pytest.raises(SyncError, match="evidence failed validation"):
+        publish_release_to_linear.read_result_artifact(run)
+    assert calls and all("actions/runs" not in call for call in calls)
 
 
 def test_current_state_block_is_identical_idempotent_and_preserves_manual_handoff():
@@ -320,6 +447,53 @@ def test_prepare_failure_for_current_main_does_not_reuse_old_success(monkeypatch
     assert state["current_prepare"]["id"] == 2
 
 
+def test_read_only_publication_reconciliation_becomes_canonical_linear_state(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "test")
+    recovery_run = {
+        "id": 9, "head_sha": SHA, "status": "completed", "conclusion": "success",
+        "name": "publication-recovery " + SHA,
+        "html_url": "https://github.com/akhripunov/maxibot/actions/runs/9",
+        "created_at": "2026-10-04T09:00:00Z",
+    }
+    monkeypatch.setattr(publish_release_to_linear, "latest_runs", lambda workflow: (
+        [{"id": 4, "head_sha": SHA, "status": "completed", "conclusion": "success"}]
+        if "prepare" in workflow else [recovery_run]
+    ))
+    recovery_result = {
+        "mode": "publication-recovery", "status": "COMPLETE",
+        "github_run_id": "9", "github_run_attempt": "1",
+        "candidate_sha": SHA, "final_runtime_sha": SHA,
+        "target_migration": MIGRATION, "final_migration": MIGRATION,
+        "production_changed": False,
+        "recovery": "READ_ONLY_RECONCILIATION_PASS",
+        "reconciles_deploy_run_id": "8", "reconciles_deploy_run_attempt": "1",
+    }
+    monkeypatch.setattr(publish_release_to_linear, "read_result_artifact", lambda run: recovery_result)
+    monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: (
+        {"sha": SHA, "commit": {"committer": {"date": "t"}}}
+        if "commits/main" in path else {"workflow_runs": []}
+    ))
+
+    state = publish_release_to_linear.current_state()
+
+    assert state["deploy"] == recovery_run
+    assert state["production_sha"] == SHA
+    assert state["production_changed"] is False
+    assert state["reconciliation"] is True
+    rendered = publish_release_to_linear.render_current_state(state)
+    assert "read-only reconciliation" in rendered.lower()
+    assert "Последний production Deploy" not in rendered
+
+
+def test_prepare_write_permission_is_main_only():
+    workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+    assert "permissions:\n  contents: read\n  actions: read" in workflow
+    assert "    if: github.ref == 'refs/heads/main'" in workflow
+    prepare_permissions = workflow.split("  prepare:\n", 1)[1].split("    steps:\n", 1)[0]
+    assert "permissions:\n      contents: write\n      actions: read" in prepare_permissions
+    assert "Publish branch rehearsal receipt" not in workflow
+
+
 def test_release_apply_loads_verified_prepared_image_without_rebuilding():
     release = (ROOT / "scripts/release_prod.sh").read_text()
     assert 'docker load --input $REMOTE_IMAGE_TMP' in release
@@ -349,6 +523,40 @@ def test_dispatch_requires_exact_operator_confirmation_for_production():
     assert approved["mode"] == "production"
 
 
+def test_publication_recovery_is_read_only_and_cannot_repeat_apply():
+    wrapper = (ROOT / "scripts/run_release_workflow.py").read_text()
+    assert "mode == \"publication-recovery\"" in wrapper
+    recovery = wrapper.split('elif mode == "publication-recovery":', 1)[1].split("else:", 1)[0]
+    assert "--dry-run" not in recovery  # Dry-run happened above, before the branch.
+    assert "--apply" not in recovery
+    assert 'result["recovery"] = "READ_ONLY_RECONCILIATION_PASS"' in recovery
+
+
+def test_publication_recovery_rejects_prior_preflight_run():
+    class PriorPreflight(FakeGitHub):
+        def __call__(self, path, token):
+            result = super().__call__(path, token)
+            if path == "actions/runs/777":
+                result["display_title"] = f"MAXIBOT preflight {SHA} by owner"
+            return result
+
+    with pytest.raises(ValidationError, match="prior trusted production Deploy"):
+        validate(values(
+            RELEASE_MODE="publication-recovery", RECONCILES_DEPLOY_RUN_ID="777",
+            RECONCILES_DEPLOY_RUN_ATTEMPT="3",
+        ), PriorPreflight())
+
+
+def test_immutable_evidence_publication_failure_cannot_trigger_automatic_apply_retry():
+    workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+    apply_step = workflow.index("Run production preflight and requested release mode")
+    evidence_step = workflow.index("Publish immutable Deploy evidence Release")
+    assert evidence_step > apply_step
+    assert "continue-on-error: true" not in workflow[evidence_step:evidence_step + 240]
+    assert "publication-recovery" in workflow
+    assert "MAXIBOT_RELEASE_ADMIN_TOKEN" in workflow[evidence_step:evidence_step + 400]
+
+
 def test_apply_wrapper_never_runs_without_owner_confirmation(monkeypatch, tmp_path):
     result_path = tmp_path / "release-result.json"
     for key, value in {
@@ -373,12 +581,13 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
     result_path = tmp_path / "result.json"
     rehearsal_path = tmp_path / "prepare-result.json"
     archive.write_bytes(b"prepared")
-    manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
-    rehearsal_path.write_text(json.dumps({"private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES", "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123", "rehearsal_archive_sha256": "a" * 64}))
+    manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "prepare_run_attempt": "1", "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
+    rehearsal_path.write_text(json.dumps({"schema": "MAXIBOT_PREPARE_RECEIPT_V1", "candidate_sha": SHA, "github_run_id": "123", "github_run_attempt": "1", "status": "READY", "tests": "success", "frozen_path_guard": "success", "linux_amd64_image": "success", "private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES", "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123", "rehearsal_archive_sha256": "a" * 64}))
     for key, value in {
         "CANDIDATE_SHA": SHA, "TARGET_MIGRATION": MIGRATION, "RELEASE_MODE": "production",
         "APPROVE_PRODUCTION": "true", "RELEASE_RESULT": str(result_path), "GITHUB_RUN_ID": "123",
-        "PREPARE_RUN_ID": "123", "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
+        "GITHUB_RUN_ATTEMPT": "1", "PREPARE_RUN_ID": "123", "PREPARE_RUN_ATTEMPT": "1",
+        "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
         "IMAGE_RESULT": str(rehearsal_path),
     }.items():
         monkeypatch.setenv(key, value)

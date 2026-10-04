@@ -233,6 +233,32 @@ class ArtifactCacheTests(unittest.TestCase):
         self.assertEqual(opener.return_value.open.call_count,1)
         sleep.assert_not_called()
 
+    def test_release_download_uses_release_accept_header_and_strips_auth_on_redirect(self):
+        import io
+        requests = []
+        storage_urls = []
+        token = "test-release-token"
+
+        def api_open(request, timeout):
+            requests.append(request)
+            raise urllib.error.HTTPError(request.full_url, 302, "Found",
+                {"Location": "https://blob.example/release.zip?sig=short-lived"}, None)
+
+        def blob_open(location, timeout):
+            storage_urls.append(location)
+            return io.BytesIO(b"immutable release bytes")
+
+        with patch.object(CACHE.urllib.request, "build_opener") as opener, \
+             patch.object(CACHE.urllib.request, "urlopen", side_effect=blob_open), \
+             patch.object(CACHE, "network_request", side_effect=lambda op, _stage: op()):
+            opener.return_value.open.side_effect = api_open
+            target = self.root / "release.zip"
+            CACHE.download_release("owner/repo", 72, token, target)
+        self.assertEqual(requests[0].get_header("Authorization"), "Bearer " + token)
+        self.assertEqual(requests[0].get_header("Accept"), "application/octet-stream")
+        self.assertEqual(storage_urls, ["https://blob.example/release.zip?sig=short-lived"])
+        self.assertEqual(target.read_bytes(), b"immutable release bytes")
+
 
 if __name__ == '__main__':
     unittest.main()

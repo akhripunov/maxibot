@@ -23,6 +23,28 @@ except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+EVIDENCE_KEYS = {
+    "TARGET_SHA", "TARGET_MIGRATION", "TARGET_DOWN_REVISION", "IMAGE_READY",
+    "IMAGE_PLATFORM", "IMAGE_SOURCE_SHA", "IMAGE_CONFIG_DIGEST", "IMAGE_ARCHIVE_SHA256",
+    "API_WORKER_IMAGE_PARITY", "SSH_REMOTE_PREFLIGHT", "PROD_DB_HEAD", "PROD_READY",
+    "PROD_API_IMAGE", "PROD_WORKER_IMAGE", "PROD_WORKER_HEALTH", "PROD_WRITE_FLAGS",
+    "ROLLBACK_CONFIG", "MIGRATION_REHEARSAL", "ROLLBACK_READY", "PRODUCTION_REHEARSAL",
+    "SAFE_TO_RELEASE", "RELEASE_READY", "DRY_RUN_RESULT", "BACKUP", "BACKUP_VALIDATION",
+    "BACKUP_DISK_PREFLIGHT", "BACKUP_PATH", "CURRENT_PRODUCTION_SHA",
+    "CURRENT_PRODUCTION_DB_HEAD", "PRE_APPLY_API_IMAGE", "PRE_APPLY_WORKER_IMAGE",
+    "PRE_APPLY_IMAGE_PARITY", "MIGRATION_ALLOWED", "POSTDEPLOY_WORKER_HEALTH",
+    "FINAL_RUNTIME_SHA", "FINAL_MIGRATION", "POLLING_ROLES", "RELEASE_STATUS",
+}
+
+
+def safe_evidence(output: str) -> dict[str, str]:
+    """Keep a strict allowlist of canonical release facts; never store raw logs/env."""
+    facts = {}
+    for line in output.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in EVIDENCE_KEYS and "\n" not in value and "\r" not in value:
+            facts[key] = value[:500]
+    return facts
 
 
 def run(command: list[str], env: dict[str, str]) -> tuple[int, str]:
@@ -63,6 +85,9 @@ def main() -> int:
         "production_changed": False,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+        "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "reconciles_deploy_run_id": os.environ.get("RECONCILES_DEPLOY_RUN_ID", ""),
+        "reconciles_deploy_run_attempt": os.environ.get("RECONCILES_DEPLOY_RUN_ATTEMPT", ""),
         "github_actor": os.environ.get("GITHUB_ACTOR", ""),
     }
     try:
@@ -70,10 +95,13 @@ def main() -> int:
             raise ValueError("A full 40-character candidate SHA is required")
         if not MIGRATION_RE.fullmatch(migration):
             raise ValueError("An explicit target Alembic revision is required")
-        if mode not in {"preflight", "production"}:
-            raise ValueError("An explicit preflight or production mode is required")
+        if mode not in {"preflight", "production", "publication-recovery"}:
+            raise ValueError("An explicit preflight, production, or publication-recovery mode is required")
         if mode == "production" and not approved:
             raise ValueError("Production requires explicit owner approval")
+        if mode == "publication-recovery" and (
+                approved or os.environ.get("APPROVE_WORKER_BOOTSTRAP", "false").lower() == "true"):
+            raise ValueError("Publication recovery is read-only and cannot carry production/bootstrap approval")
         if not result_path:
             raise ValueError("RELEASE_RESULT path is required")
 
@@ -89,11 +117,23 @@ def main() -> int:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         image_result_path = Path(os.environ.get("IMAGE_RESULT", ""))
         rehearsal = json.loads(image_result_path.read_text(encoding="utf-8")) if image_result_path.is_file() else {}
-        required = {"private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES", "rehearsal_candidate_sha": sha, "rehearsal_prepare_run_id": os.environ.get("PREPARE_RUN_ID", ""), "rehearsal_archive_sha256": manifest.get("archive_sha256")}
-        if any(rehearsal.get(key) != value for key, value in required.items()):
+        prepare_attempt = os.environ.get("PREPARE_RUN_ATTEMPT", "")
+        required = {"schema": "MAXIBOT_PREPARE_RECEIPT_V1", "candidate_sha": sha,
+                    "github_run_id": os.environ.get("PREPARE_RUN_ID", ""),
+                    "github_run_attempt": prepare_attempt, "status": "READY", "tests": "success",
+                    "frozen_path_guard": "success", "linux_amd64_image": "success",
+                    "private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3",
+                    "private_store": "containerd", "private_snapshotter": "overlayfs",
+                    "private_network_isolated": "YES", "rehearsal_candidate_sha": sha,
+                    "rehearsal_prepare_run_id": os.environ.get("PREPARE_RUN_ID", ""),
+                    "rehearsal_archive_sha256": manifest.get("archive_sha256")}
+        if (any(rehearsal.get(key) != value for key, value in required.items())
+                or str(manifest.get("prepare_run_attempt")) != prepare_attempt):
             raise RuntimeError("Prepare private Docker rehearsal receipt is missing or failed")
         archive_sha256 = checksum(archive)
-        if manifest.get("candidate_sha") != sha or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID"):
+        if (manifest.get("candidate_sha") != sha
+                or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID")
+                or str(manifest.get("prepare_run_attempt")) != prepare_attempt):
             raise RuntimeError("Prepared image provenance does not match selected candidate/Prepare run")
         if manifest.get("archive_sha256") != archive_sha256 or manifest.get("platform") != "linux/amd64":
             raise RuntimeError("Prepared image archive digest/platform verification failed")
@@ -119,6 +159,7 @@ def main() -> int:
         env["TARGET_MIGRATION"] = migration
         preflight_started = time.monotonic()
         dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)
+        result["preflight_evidence"] = safe_evidence(dry_output)
         result["stage_seconds"] = {"PREFLIGHT": round(time.monotonic() - preflight_started, 3)}
         if dry_code != 0 or "SAFE_TO_RELEASE=YES" not in dry_output or "DRY_RUN_RESULT=PASS" not in dry_output:
             if "NETWORK_UNAVAILABLE" in dry_output:
@@ -130,10 +171,33 @@ def main() -> int:
 
         if mode == "preflight":
             result["status"] = "PLANNED"
+        elif mode == "publication-recovery":
+            if (not os.environ.get("RECONCILES_DEPLOY_RUN_ID", "").isdigit()
+                    or not os.environ.get("RECONCILES_DEPLOY_RUN_ATTEMPT", "").isdigit()):
+                raise ValueError("Publication recovery requires the original Deploy run and attempt")
+            evidence = result["preflight_evidence"]
+            expected_image = f"maxibot-vps-api:{sha}"
+            observed_flags = set(evidence.get("PROD_WRITE_FLAGS", "").split(","))
+            expected_flags = {"ADS_AUTOPILOT_ENABLED=false", "ADS_WRITE_ACTIONS_ENABLED=false"}
+            if (evidence.get("PROD_READY") != "ready"
+                    or evidence.get("PROD_DB_HEAD") != migration
+                    or evidence.get("PROD_API_IMAGE") != expected_image
+                    or evidence.get("PROD_WORKER_IMAGE") != expected_image
+                    or observed_flags != expected_flags
+                    or evidence.get("PROD_WORKER_HEALTH") in (None, "ERROR")
+                    or not evidence.get("ROLLBACK_CONFIG")
+                    or evidence.get("ROLLBACK_READY") != "PASS"):
+                raise RuntimeError("Read-only production reconciliation did not prove exact completed runtime state")
+            result["status"] = "COMPLETE"
+            result["production_changed"] = False
+            result["final_runtime_sha"] = sha
+            result["final_migration"] = migration
+            result["recovery"] = "READ_ONLY_RECONCILIATION_PASS"
         else:
             env["OWNER_APPROVED"] = "1"
             apply_started = time.monotonic()
             apply_code, apply_output = run(["bash", "scripts/release_prod.sh", sha, "--apply"], env)
+            result["production_evidence"] = safe_evidence(apply_output)
             result["stage_seconds"]["APPLY"] = round(time.monotonic() - apply_started, 3)
             for name, seconds in re.findall(r"STAGE_SECONDS_([A-Z_]+)=([0-9.]+)", apply_output):
                 result["stage_seconds"][name] = float(seconds)
