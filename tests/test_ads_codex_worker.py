@@ -52,6 +52,37 @@ def test_codex_exec_uses_neutral_temp_cwd_and_shared_schema():
     assert "TOKEN" in script and "print" not in script
 
 
+def test_codex_prompt_lists_only_exact_evidence_ids_from_safe_context():
+    from scripts.ads_codex_worker import allowed_evidence_ids, prompt
+    from app.ads.llm import evidence_registry
+
+    safe_context = {
+        "FACTS": {
+            "evidence": {
+                "FACT-001": {}, "FACT-002": {},
+                "MAXIBOT_CAMPAIGN_SPECIFIC_MEMBERSHIPS": {},
+            },
+            "campaign_specific_attribution": {"supported": True},
+            "V2_ANALYSIS": {
+                "evidence": {"V2-0123456789ab": {}},
+                "trends": {"findings": [{"trend_finding_id": "TREND-acde01234567"}]},
+            },
+            "DIRECTOLOGIST": {"evidence": {"V2-DIRECTOLOGISTCURRENT": {}}},
+        }
+    }
+    claim = {"safe_context": safe_context}
+
+    assert allowed_evidence_ids(safe_context) == [
+        "FACT-001", "FACT-002", "MAXIBOT_CAMPAIGN_SPECIFIC_MEMBERSHIPS",
+        "TREND-acde01234567", "V2-0123456789ab", "V2-DIRECTOLOGISTCURRENT",
+    ]
+    assert set(allowed_evidence_ids(safe_context)) == evidence_registry({"FACTS": safe_context["FACTS"]})
+    prompt_text = prompt(claim)
+    assert "Разрешённые evidence IDs (копируй только их, без хеширования и генерации):" in prompt_text
+    assert '"V2-0123456789ab"' in prompt_text
+    assert "V2-202373d7b1ab" not in prompt_text
+
+
 def test_production_polling_and_direct_writes_are_not_enabled_by_worker():
     script = (ROOT / "scripts" / "ads_codex_worker.py").read_text()
     assert "Yandex" not in script

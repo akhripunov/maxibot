@@ -8,10 +8,10 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import AdsAnalysisSnapshot, AdsCampaign, AdsDailyAggregate, AdsEntity, AdsObservation
+from app.db.models import AdsCampaign, AdsDailyAggregate
 from app.ads.facts import CampaignFactSet
 from app.ads.directologist import build_decision_pack, finalize_decision_pack
 from app.ads.trends import build_trend_features
@@ -61,6 +61,46 @@ def _metrics(values: dict[str, float], *, campaign: dict[str, float], history_da
         value = row.get(metric)
         row[f"{metric}_delta_pct"] = ((value / baseline) - 1) if value is not None and baseline not in (None, 0) else None
     return row
+
+
+def campaign_metrics_from_daily_aggregates(
+    rows: list[Any], *, period_to: date, days: int,
+) -> dict[str, Any]:
+    """Sum observed campaign buckets in a completed calendar window.
+
+    Missing dates stay missing: totals are known subtotals accompanied by
+    completeness metadata, never padded with synthetic zero-day rows.
+    ``aggregate_date`` is in the ADS domain's Europe/Moscow calendar.
+    """
+    period_from = period_to - timedelta(days=days - 1)
+    totals = {metric: 0.0 for metric in METRICS}
+    observed_dates: set[date] = set()
+    for row in rows:
+        day = getattr(row, "aggregate_date", None)
+        if (
+            getattr(row, "dimension_type", None) != "CAMPAIGN"
+            or getattr(row, "provider", "YANDEX_DIRECT") != "YANDEX_DIRECT"
+            or not isinstance(day, date)
+            or not period_from <= day <= period_to
+        ):
+            continue
+        observed_dates.add(day)
+        for metric in METRICS:
+            value = getattr(row, metric, None)
+            if value is not None:
+                totals[metric] += _number(value)
+    expected_days = days
+    return {
+        **totals,
+        "period": {
+            "from": period_from.isoformat(),
+            "to": period_to.isoformat(),
+            "timezone": "Europe/Moscow",
+        },
+        "days_present": len(observed_dates),
+        "expected_days": expected_days,
+        "complete": len(observed_dates) == expected_days,
+    }
 
 
 def _metrics_baseline_metric(metric: str, campaign: dict[str, float]) -> float | None:
@@ -494,37 +534,46 @@ async def build_v2_analysis_dataset(
     db: AsyncSession,
     *,
     campaign: AdsCampaign,
-    cutoff: date | None = None,
+    period_to: date | None = None,
     top_n: int = 10,
     previous_recommendations: list[dict[str, Any]] | None = None,
     measured_outcomes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    cutoff = cutoff or (datetime.now(timezone.utc).astimezone(__import__("zoneinfo").ZoneInfo("Europe/Moscow")).date() - timedelta(days=6))
-    rows = list((await db.scalars(
-        select(AdsObservation)
-        .outerjoin(AdsAnalysisSnapshot, AdsAnalysisSnapshot.id == AdsObservation.snapshot_id)
-        .outerjoin(AdsEntity, AdsEntity.id == AdsObservation.entity_id)
-        .where(or_(AdsAnalysisSnapshot.campaign_id == campaign.id, AdsEntity.campaign_id == campaign.id), AdsObservation.date_to >= cutoff)
-        .order_by(AdsObservation.created_at.desc())
+    moscow = __import__("zoneinfo").ZoneInfo("Europe/Moscow")
+    # ADS dates are campaign-local calendar dates (Europe/Moscow). Exclude
+    # today's partial bucket by default; callers may supply an explicit end.
+    period_to = period_to or (datetime.now(timezone.utc).astimezone(moscow).date() - timedelta(days=1))
+    period_from = period_to - timedelta(days=6)
+    daily_rows = list((await db.scalars(
+        select(AdsDailyAggregate).where(
+            AdsDailyAggregate.provider == "YANDEX_DIRECT",
+            AdsDailyAggregate.campaign_id == campaign.id,
+        ).order_by(AdsDailyAggregate.aggregate_date, AdsDailyAggregate.dimension_type)
     )).all())
-    latest: dict[tuple[Any, ...], AdsObservation] = {}
-    for row in rows:
-        key = (row.dimension_type, row.entity_id, row.dimension_value, row.date_from, row.date_to, row.window)
-        latest.setdefault(key, row)
-    campaign_windows: dict[str, dict[str, float]] = {}
-    for row in latest.values():
-        if row.dimension_type == "CAMPAIGN":
-            campaign_windows.setdefault(row.window, {metric: _number(getattr(row, metric)) for metric in METRICS})
-    campaign_summary = campaign_windows.get("7d") or campaign_windows.get("3d") or campaign_windows.get("1d")
-    campaign_summary = campaign_summary or {metric: 0.0 for metric in METRICS}
-    campaign_metrics = _metrics(campaign_summary, campaign=campaign_summary, history_days=max(0, (max((r.date_to for r in latest.values() if r.date_to), default=cutoff) - cutoff).days + 1))
-    grouped: dict[str, dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(lambda: {metric: 0.0 for metric in METRICS}))
-    for row in latest.values():
+    period_rows = [row for row in daily_rows if period_from <= row.aggregate_date <= period_to]
+    campaign_windows = {
+        f"{days}d": campaign_metrics_from_daily_aggregates(daily_rows, period_to=period_to, days=days)
+        for days in (1, 3, 7, 30)
+    }
+    campaign_summary = campaign_windows["7d"]
+    campaign_metrics = _metrics(
+        campaign_summary, campaign=campaign_summary,
+        history_days=campaign_summary["days_present"],
+    )
+    grouped: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in period_rows:
         if row.dimension_type not in DIMENSIONS or not row.dimension_value:
             continue
-        target = grouped[row.dimension_type][str(row.dimension_value)]
+        value = str(row.dimension_value)
+        target = grouped[row.dimension_type].setdefault(value, {
+            **{metric: 0.0 for metric in METRICS}, "aggregate_ids": [], "dates": set(),
+        })
         for metric in METRICS:
-            target[metric] += _number(getattr(row, metric))
+            metric_value = getattr(row, metric, None)
+            if metric_value is not None:
+                target[metric] += _number(metric_value)
+        target["aggregate_ids"].append(str(row.id))
+        target["dates"].add(row.aggregate_date)
     sections: dict[str, Any] = {}
     evidence: dict[str, Any] = {}
     limits = {
@@ -540,13 +589,15 @@ async def build_v2_analysis_dataset(
     for dimension in DIMENSIONS:
         calculated = []
         for value, values in grouped[dimension].items():
-            item = {"value": value, "label": value, **_metrics(values, campaign=campaign_summary, history_days=7)}
+            item = {"value": value, "label": value, **_metrics(values, campaign=campaign_summary, history_days=len(values["dates"]))}
             item["evidence_id"] = _evidence_id(dimension, value)
             evidence[item["evidence_id"]] = {
-                "source": "ADS_V2_OBSERVATION",
+                "source": "ADS_V2_DAILY_AGGREGATE",
                 "dimension": dimension,
                 "value": value,
                 "scope": "selected_ai_observation",
+                "aggregate_ids": sorted(values["aggregate_ids"]),
+                "dates": sorted(day.isoformat() for day in values["dates"]),
             }
             calculated.append(item)
         calculated.sort(key=lambda item: item["cost"], reverse=True)
@@ -572,10 +623,12 @@ async def build_v2_analysis_dataset(
         notable.sort(key=lambda item: (-item["cost"], str(item["value"])))
         for item in notable:
             evidence[item["evidence_id"]] = {
-                "source": "ADS_V2_OBSERVATION",
+                "source": "ADS_V2_DAILY_AGGREGATE",
                 "dimension": dimension,
                 "value": item["value"],
                 "scope": "selected_ai_observation",
+                "aggregate_ids": sorted(grouped[dimension][str(item["value"])]["aggregate_ids"]),
+                "dates": sorted(day.isoformat() for day in grouped[dimension][str(item["value"])]["dates"]),
             }
         sections[dimension.lower()] = {"total_rows_analyzed": len(calculated), "notable": notable}
         selection[dimension.lower()] = {
@@ -584,8 +637,9 @@ async def build_v2_analysis_dataset(
             "truncated": len(notable) < len(calculated), "selection_method": "deterministic_multi_rank_v1",
             "sufficiency_gate_version": "impressions>=30 OR clicks>=3 OR conversions>=1",
         }
-    daily_rows = list((await db.scalars(select(AdsDailyAggregate).where(AdsDailyAggregate.campaign_id == campaign.id).order_by(AdsDailyAggregate.aggregate_date, AdsDailyAggregate.dimension_type))).all())
-    decision_pack = await build_decision_pack(db, campaign=campaign, daily_rows=daily_rows)
+    decision_pack = await build_decision_pack(
+        db, campaign=campaign, daily_rows=daily_rows, today=period_to + timedelta(days=1),
+    )
     trend_rows = []
     trend_evidence: dict[str, Any] = {}
     for aggregate in daily_rows:
@@ -612,7 +666,7 @@ async def build_v2_analysis_dataset(
     # before the compactor had a chance to rank it.
     trends = build_trend_features(
         trend_rows,
-        current_day=datetime.now(timezone.utc).astimezone(__import__("zoneinfo").ZoneInfo("Europe/Moscow")).date(),
+        current_day=period_to + timedelta(days=1),
         max_findings=2000,
     )
     trends = _compact_trends(trends)
@@ -628,13 +682,13 @@ async def build_v2_analysis_dataset(
     dataset = {
         "dataset_version": "ads_canonical_analysis_v2",
         "campaign_id": campaign.id,
-        "period": {"from": cutoff.isoformat(), "to": max((r.date_to for r in latest.values() if r.date_to), default=cutoff).isoformat(), "timezone": "Europe/Moscow"},
+        "period": {"from": period_from.isoformat(), "to": period_to.isoformat(), "timezone": "Europe/Moscow", "current_day_excluded": (period_to + timedelta(days=1)).isoformat()},
         "data_cutoff": datetime.now(timezone.utc).isoformat(),
         "campaign_summary": {"windows": campaign_windows, "metrics": campaign_metrics},
         "sections": sections,
         "selection": selection,
-        "data_quality": {"rows_loaded": len(rows), "rows_after_dedupe": len(latest), "history_days": len({r.date_to for r in latest.values() if r.date_to}), "insufficient_history_for_trend": len({r.date_to for r in latest.values() if r.date_to}) < 3, "missing_dimensions": [dimension for dimension in DIMENSIONS if not grouped[dimension]], "source": "ADS_DATA_LAYER_V2"},
-        "provenance_summary": {"provider": "YANDEX_DIRECT", "normalized_only": True, "observation_rows_analyzed": len(latest)},
+        "data_quality": {"rows_loaded": len(daily_rows), "rows_after_dedupe": len(daily_rows), "history_days": len({r.aggregate_date for r in period_rows}), "current_window": campaign_windows["7d"], "baseline_window": (decision_pack.get("metrics") or {}).get("baseline"), "comparison_windows_ready": (decision_pack.get("metrics") or {}).get("status") == "READY", "insufficient_history_for_trend": (decision_pack.get("metrics") or {}).get("status") != "READY", "missing_dimensions": [dimension for dimension in DIMENSIONS if not grouped[dimension]], "source": "ADS_DATA_LAYER_V2", "timezone": "Europe/Moscow", "current_day_excluded": (period_to + timedelta(days=1)).isoformat()},
+        "provenance_summary": {"provider": "YANDEX_DIRECT", "normalized_only": True, "daily_aggregate_rows_analyzed": len(daily_rows)},
         "DIRECTOLOGIST": decision_pack,
         "evidence": {**evidence, **trend_evidence},
         "trends": trends,

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 from app.ads.directologist import (
@@ -19,6 +19,31 @@ def test_windows_exclude_partial_today_and_use_equal_seven_day_periods():
     assert windows["current"] == {"start": "2026-08-31", "end": "2026-09-06", "days": 7}
     assert windows["baseline"] == {"start": "2026-08-24", "end": "2026-08-30", "days": 7}
     assert windows["partial_day_guard"] == "PASS"
+
+
+def test_october_5_analysis_uses_only_the_previous_seven_completed_days():
+    windows = comparison_windows(today=date(2026, 10, 5))
+    assert windows["current"] == {"start": "2026-09-28", "end": "2026-10-04", "days": 7}
+    assert windows["baseline"] == {"start": "2026-09-21", "end": "2026-09-27", "days": 7}
+    assert windows["current_day_excluded"] == "2026-10-05"
+
+
+def test_incomplete_previous_window_keeps_known_subtotal_and_never_fills_missing_days_with_zero():
+    rows = [
+        SimpleNamespace(aggregate_date=date(2026, 9, 21), dimension_type="CAMPAIGN", impressions=10, clicks=1, cost=2, conversions=0),
+        SimpleNamespace(aggregate_date=date(2026, 9, 27), dimension_type="CAMPAIGN", impressions=20, clicks=2, cost=3, conversions=1),
+        *[
+            SimpleNamespace(aggregate_date=date(2026, 9, 28) + timedelta(days=offset), dimension_type="CAMPAIGN", impressions=100, clicks=10, cost=20, conversions=2)
+            for offset in range(7)
+        ],
+    ]
+    result = comparative_metrics(rows, comparison_windows(today=date(2026, 10, 5)))
+    assert result["current"]["complete"] is True
+    assert result["current"]["impressions"] == 700
+    assert result["baseline"]["complete"] is False
+    assert result["baseline"]["days_present"] == 2
+    assert result["baseline"]["impressions"] == 30
+    assert result["status"] == "INSUFFICIENT_DATA"
 
 
 def test_comparative_metrics_only_sum_campaign_dimension():

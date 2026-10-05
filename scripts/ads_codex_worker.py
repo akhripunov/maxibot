@@ -15,7 +15,27 @@ def halt(*_):
     global STOP; STOP=True
 def headers(): return {"Authorization":f"Bearer {TOKEN}"}
 logger.warning("ADS_CODEX_WORKER_START release_id=%s worker_id=%s python=%s", RELEASE_ID, WORKER, os.sys.version.split()[0])
-def prompt(claim): return "Проанализируй ТОЛЬКО переданный контекст MaxiBot Ads и bounded V2_ANALYSIS dataset. UNKNOWN не равно ZERO. Campaign totals — единственный общий итог; не суммируй разные dimensions между собой. Используй deterministic findings как ranked candidates: strong wording только для SUFFICIENT, WEAK_SIGNAL означает только сигнал, INSUFFICIENT не даёт вывода. MAXIBOT_QUALIFIED_MEMBERSHIP_RATE означает только конверсию визит → подтверждённая подписка: qualified_memberships / tracked_landing_visits. Не называй её attribution coverage, attribution quality, подтверждением конверсий Яндекса или matching coverage. Campaign-specific matching обрабатывай отдельно и показывай UNKNOWN как недоступное сопоставление с конкретной кампанией. Разделяй performance_confidence по данным Яндекса и confidence campaign-specific matching. Учитывай confidence, sample size и freshness. Используй только переданные FACT/V2 IDs. Если history недостаточна, явно укажи это и не выдумывай trend. Верни только JSON по campaign_diagnosis_schema_v1, без markdown. Поля summary, evidence.statement, recommendation.reason, do_not_change и memory_candidates.statement заполни на русском языке. diagnosis_code и recommendation.action_code оставь стабильными английскими кодами. Никогда не предлагай выполнение изменений или записи в Direct.\nCONTEXT:\n"+json.dumps(claim["safe_context"],ensure_ascii=False)
+def allowed_evidence_ids(safe_context):
+    """Mirror the backend evidence registry; never invent semantic IDs."""
+    facts = (safe_context or {}).get("FACTS") or {}
+    v2 = facts.get("V2_ANALYSIS") or {}
+    ids = set((facts.get("evidence") or {}).keys())
+    ids.update((v2.get("evidence") or {}).keys())
+    for trends in (facts.get("TRENDS") or {}, v2.get("trends") or {}):
+        ids.update(item.get("trend_finding_id") for item in trends.get("findings") or [] if item.get("trend_finding_id"))
+    if "MAXIBOT_QUALIFIED_MEMBERSHIP_RATE" in facts or "MAXIBOT_QUALIFIED_MEMBERSHIP_RATE" in v2:
+        ids.add("MAXIBOT_QUALIFIED_MEMBERSHIP_RATE")
+    ids.update((facts.get("DIRECTOLOGIST") or {}).get("evidence", {}).keys())
+    return sorted(item for item in ids if isinstance(item, str))
+
+def prompt(claim):
+    safe_context = claim["safe_context"]
+    allowed_ids = allowed_evidence_ids(safe_context)
+    instructions = """Проанализируй ТОЛЬКО переданный контекст MaxiBot Ads и bounded V2_ANALYSIS dataset. UNKNOWN не равно ZERO. Campaign totals — единственный общий итог; не суммируй разные dimensions между собой. Используй deterministic findings как ranked candidates: strong wording только для SUFFICIENT, WEAK_SIGNAL означает только сигнал, INSUFFICIENT не даёт вывода. MAXIBOT_QUALIFIED_MEMBERSHIP_RATE означает только конверсию визит → подтверждённая подписка: qualified_memberships / tracked_landing_visits. Не называй её attribution coverage, attribution quality, подтверждением конверсий Яндекса или matching coverage. Campaign-specific matching обрабатывай отдельно и показывай UNKNOWN как недоступное сопоставление с конкретной кампанией. Разделяй Direct conversions и подтверждённые MaxiBot memberships как разные источники. Разделяй performance_confidence по данным Яндекса и confidence campaign-specific matching. Учитывай confidence, sample size и freshness. Ссылайся ТОЛЬКО на точные evidence IDs из списка ниже: копируй без изменений, не хешируй, не сокращай и не придумывай IDs. Если в списке нет подходящего evidence ID, не добавляй ссылку и явно укажи ограничение в missing_data. Если history недостаточна, явно укажи это и не выдумывай trend. Верни только JSON по campaign_diagnosis_schema_v1, без markdown. Поля summary, evidence.statement, recommendation.reason, do_not_change и memory_candidates.statement заполни на русском языке. diagnosis_code и recommendation.action_code оставь стабильными английскими кодами. Никогда не предлагай выполнение изменений или записи в Direct.
+
+Разрешённые evidence IDs (копируй только их, без хеширования и генерации):
+"""
+    return instructions + json.dumps(allowed_ids, ensure_ascii=False) + "\nCONTEXT:\n" + json.dumps(safe_context, ensure_ascii=False)
 
 def findings_grounded(claim):
     facts = (claim.get("safe_context") or {}).get("FACTS") or {}

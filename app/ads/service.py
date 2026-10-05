@@ -405,6 +405,7 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
     dataset = await build_v2_analysis_dataset(
         db,
         campaign=campaign,
+        period_to=report_date_to,
         previous_recommendations=closed_loop["PREVIOUS_RECOMMENDATIONS"],
         measured_outcomes=closed_loop["MEASURED_OUTCOMES"],
     )
@@ -471,8 +472,14 @@ async def _run_campaign_check(db: AsyncSession, *, run: AdsCollectionRun, channe
         "window": "7d",
         "scope": "CHANNEL",
     }
-    facts["report_trace"] = {"source": "ADS Data Layer V2", "source_fields": ["Date", "Impressions", "Clicks", "Cost", "Conversions"], "date_from": report_date_from.isoformat(), "date_to": report_date_to.isoformat(), "report_timezone": "Europe/Moscow", "aggregation": "deterministic V2 dataset; dimensions analyzed independently", "snapshot_timestamp_utc": snapshot_at.isoformat(), "freshness": "based on latest persisted V2 observations"}
-    facts["current_day_quality"] = {"status": "POSSIBLY_INCOMPLETE_CURRENT_DAY", "window": "1d", "reason": "current calendar-day report values can be partial or delayed", "ai_guidance": "do not treat current-day zero cost/conversions as strong deterioration evidence; prefer confirmed 3d/7d data"}
+    facts["report_trace"] = {"source": "ADS Data Layer V2", "source_fields": ["Date", "Impressions", "Clicks", "Cost", "Conversions"], "date_from": report_date_from.isoformat(), "date_to": report_date_to.isoformat(), "report_timezone": "Europe/Moscow", "aggregation": "completed campaign-local calendar days from canonical daily aggregates; dimensions analyzed independently", "snapshot_timestamp_utc": snapshot_at.isoformat(), "freshness": "based on latest persisted V2 observations"}
+    facts["analysis_windows"] = {
+        "timezone": "Europe/Moscow",
+        "current_7d": dataset["campaign_summary"]["windows"]["7d"],
+        "previous_7d": dataset["DIRECTOLOGIST"].get("metrics", {}).get("baseline"),
+        "current_day_excluded": (report_date_to + timedelta(days=1)).isoformat(),
+    }
+    facts["current_day_quality"] = {"status": "EXCLUDED_FROM_ANALYSIS_WINDOW", "date": (report_date_to + timedelta(days=1)).isoformat(), "reason": "current calendar-day report values can be partial or delayed", "ai_guidance": "current day is excluded from analysis and is not part of any completed-day metric"}
     snapshot = AdsAnalysisSnapshot(channel_id=channel_id, promotion_object_type=object_type, promotion_object_id=object_id, destination_platform=destination_platform, campaign_id=campaign.id, source=snapshot_source, period_from=report_date_from, period_to=report_date_to, facts_json=json.dumps(facts, ensure_ascii=False))
     db.add(snapshot); await db.flush()
     snapshot.facts_json = json.dumps(facts, ensure_ascii=False)
@@ -556,7 +563,7 @@ async def run_check(db: AsyncSession, *, admin_external_id: str, channel_id: str
     profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == channel.id)); traffic = await traffic_stats_for_channels(db, [channel.id])
     mapped = await _mapped(db, channel.id)
     encrypted = await get_direct_encrypted_token(str(admin_external_id), channel.id, db=db); campaigns: list[AdsCampaign] = []; reports: dict[str, list[dict]] = {}; error = None
-    report_date_to = datetime.now(timezone.utc).astimezone(MOSCOW).date(); report_date_from = report_date_to - timedelta(days=6); report_fetched_at = datetime.now(timezone.utc)
+    report_date_to = datetime.now(timezone.utc).astimezone(MOSCOW).date() - timedelta(days=1); report_date_from = report_date_to - timedelta(days=6); report_fetched_at = datetime.now(timezone.utc)
     if encrypted:
         try: campaigns, reports = await _direct_sync(db, account=await _account(db, channel.admin_id), encrypted=encrypted, report_campaign_ids=set(mapped))
         except Exception as exc: error = type(exc).__name__
@@ -596,7 +603,7 @@ async def run_bot_check(db: AsyncSession, *, admin_external_id: str, bot_key: st
     campaigns = await campaigns_for_bot(db, profile.id)
     run = AdsCollectionRun(provider="INTERNAL", collection_type="MANUAL_AI_SYNC", run_type="MANUAL_AI_SYNC", trigger="MANUAL", scheduled_at=datetime.now(timezone.utc), slot_key=f"manual-ai-sync:BOT:{profile.id}:{datetime.now(timezone.utc).isoformat()}")
     db.add(run); await db.flush()
-    report_date_to = datetime.now(timezone.utc).astimezone(MOSCOW).date()
+    report_date_to = datetime.now(timezone.utc).astimezone(MOSCOW).date() - timedelta(days=1)
     report_date_from = report_date_to - timedelta(days=6)
     ai_runs = [await _run_campaign_check(
         db, run=run, channel=None, campaign=campaign, reports={}, traffic={},
