@@ -1,6 +1,12 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from fastapi import HTTPException
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from starlette.requests import Request
+
 from app.bot.menu import (
     FREE_TRIAL_INFO_TEXT,
     expired_trial_status_text,
@@ -11,10 +17,12 @@ from app.bot.menu import (
     free_trial_used_text,
 )
 from app.integrations.subscriptions import (
+    channel_promotion_entitlement,
     channel_promotion_entitlement_source,
     free_trial_status,
     service_entitlement_active,
 )
+from app.db.models import Admin, Base, Channel, FreeTrial, LandingPage, TrafficProfile, TrafficVisit
 
 
 def test_free_trial_copy_and_buttons_are_exactly_owner_facing():
@@ -60,6 +68,181 @@ def test_channel_promotion_predicate_allows_only_trial_channel_and_preserves_pai
     assert channel_promotion_entitlement_source(end, end, "channel-a", "channel-b", now=now) == "PAID"
     assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=end) == "NONE"
     assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=now) == "TRIAL"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "subscription_expires_at",
+    [None, datetime(2026, 9, 1, tzinfo=timezone.utc)],
+)
+async def test_canonical_owner_gets_only_own_channel_promotion_access_without_active_subscription(
+    monkeypatch, subscription_expires_at,
+):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr("app.integrations.subscriptions.settings.maxibot_owner_user_id", "configured-owner")
+    try:
+        async with sessions() as db:
+            owner = Admin(
+                external_id="configured-owner",
+                subscription_expires_at=subscription_expires_at,
+                subscription_tariff="start",
+                ai_promotion_expires_at=None,
+            )
+            ordinary = Admin(external_id="ordinary-user")
+            db.add_all([owner, ordinary])
+            await db.flush()
+            owner_channel = Channel(
+                admin_id=owner.id, external_id="owner-channel", title="Москва 365", public_slug="owner-channel",
+            )
+            ordinary_channel = Channel(
+                admin_id=ordinary.id, external_id="ordinary-channel", title="Москва 365", public_slug="ordinary-channel",
+            )
+            db.add_all([owner_channel, ordinary_channel])
+            await db.flush()
+            owner_landing = LandingPage(
+                channel_id=owner_channel.id,
+                public_id="owner-landing",
+                title="Owner landing",
+                description="test",
+            )
+            ordinary_landing = LandingPage(
+                channel_id=ordinary_channel.id,
+                public_id="ordinary-landing",
+                title="Ordinary landing",
+                description="test",
+            )
+            db.add_all([
+                owner_landing,
+                ordinary_landing,
+                TrafficProfile(
+                    channel_id=owner_channel.id,
+                    enabled=True,
+                    yandex_enabled=False,
+                    target_url="https://max.ru/owner-channel-invite",
+                ),
+            ])
+            db.add(FreeTrial(
+                admin_id=owner.id,
+                activated_channel_id=owner_channel.id,
+                status="EXPIRED",
+                trial_start_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                trial_end_at=datetime(2026, 8, 8, tzinfo=timezone.utc),
+            ))
+            await db.commit()
+
+            assert await channel_promotion_entitlement(db, owner.external_id, owner_channel.id) == "OWNER"
+            assert await channel_promotion_entitlement(db, owner.external_id, ordinary_channel.id) == "NONE"
+            assert await channel_promotion_entitlement(db, ordinary.external_id, ordinary_channel.id) == "NONE"
+            assert await channel_promotion_entitlement(db, owner.external_id, "missing-channel") == "NONE"
+
+            monkeypatch.setattr("app.integrations.subscriptions.settings.maxibot_owner_user_id", None)
+            assert await channel_promotion_entitlement(db, owner.external_id, owner_channel.id) == "NONE"
+            monkeypatch.setattr("app.integrations.subscriptions.settings.maxibot_owner_user_id", "configured-owner")
+
+            from app import main as main_module
+
+            monkeypatch.setattr(main_module.settings, "traffic_bot_attribution_enabled", False)
+
+            def request(path: str, *, cookie: str | None = None) -> Request:
+                headers = [(b"host", b"go.maxibot.pro"), (b"user-agent", b"pytest")]
+                if cookie:
+                    headers.append((b"cookie", cookie.encode()))
+                return Request({
+                    "type": "http",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "method": "GET",
+                    "scheme": "https",
+                    "path": path,
+                    "raw_path": path.encode(),
+                    "query_string": b"",
+                    "headers": headers,
+                    "server": ("go.maxibot.pro", 443),
+                    "client": ("test", 1),
+                })
+
+            landing_response = await main_module._landing_page(
+                owner_landing.public_id, request("/l/owner-landing"), db,
+            )
+            assert landing_response.status_code == 307
+            assert landing_response.headers["location"] == "https://max.ru/owner-channel-invite"
+            owner_visit = await db.scalar(select(TrafficVisit).where(
+                TrafficVisit.landing_page_id == owner_landing.id,
+            ))
+            assert owner_visit is not None
+            preview_response = await main_module._channel_preview(
+                owner_landing.public_id,
+                request("/landing/owner-landing", cookie=f"maxibot_traffic_visit={owner_visit.visit_token}"),
+                db,
+            )
+            assert preview_response.status_code == 200
+            redirect_response = await main_module._traffic_redirect(
+                owner_landing.public_id, owner_visit.visit_token, db,
+                request=request(f"/track/owner-landing/click?token={owner_visit.visit_token}"),
+            )
+            assert redirect_response.status_code == 307
+            assert redirect_response.headers["location"] == "https://max.ru/owner-channel-invite"
+
+            with pytest.raises(HTTPException) as blocked:
+                await main_module._landing_page(
+                    ordinary_landing.public_id, request("/l/ordinary-landing"), db,
+                )
+            assert blocked.value.status_code == 402
+            assert await db.scalar(select(TrafficVisit).where(
+                TrafficVisit.landing_page_id == ordinary_landing.id,
+            )) is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_owner_bypass_does_not_change_paid_or_trial_channel_entitlements(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr("app.integrations.subscriptions.settings.maxibot_owner_user_id", "configured-owner")
+    try:
+        async with sessions() as db:
+            paid = Admin(external_id="paid-user", subscription_expires_at=now + timedelta(days=3), subscription_tariff="pro")
+            trial = Admin(external_id="trial-user")
+            unentitled = Admin(external_id="unentitled-user")
+            db.add_all([paid, trial, unentitled])
+            await db.flush()
+            channels = [
+                Channel(
+                    admin_id=admin.id, external_id=f"{admin.external_id}-channel", title="Channel",
+                    public_slug=f"{admin.external_id}-channel",
+                )
+                for admin in (paid, trial, unentitled)
+            ]
+            db.add_all(channels)
+            await db.flush()
+            db.add(FreeTrial(
+                admin_id=trial.id,
+                activated_channel_id=channels[1].id,
+                status="ACTIVE",
+                trial_start_at=now - timedelta(days=1),
+                trial_end_at=now + timedelta(days=6),
+            ))
+            await db.commit()
+
+            assert await channel_promotion_entitlement(db, paid.external_id, channels[0].id) == "PAID"
+            assert await channel_promotion_entitlement(db, trial.external_id, channels[1].id) == "TRIAL"
+            assert await channel_promotion_entitlement(db, unentitled.external_id, channels[2].id) == "NONE"
+    finally:
+        await engine.dispose()
+
+
+def test_owner_channel_consumers_use_canonical_entitlement():
+    menu = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
+    reports = (Path(__file__).parents[1] / "app" / "daily_reports.py").read_text()
+    assert "resolve_channel_promotion_entitlement(db, external_id, channel.id)" in menu
+    assert "channel_promotion_entitlement(db, admin.external_id, channel.id)" in reports
 
 
 def test_second_channel_is_visible_but_paid_only_paths_use_the_canonical_gate():

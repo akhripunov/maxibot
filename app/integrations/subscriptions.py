@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
+from app.core.config import settings
+
 
 def add_subscription_months(
     current_expires_at: datetime | None,
@@ -91,11 +93,19 @@ def channel_promotion_entitlement_source(
 
 async def channel_promotion_entitlement(db, admin_external_id: str, channel_id: str) -> str:
     """Canonical owner/channel gate for paid promotion functionality."""
-    from app.db.models import Admin, FreeTrial
+    from app.db.models import Admin, Channel, FreeTrial
 
     admin = await db.scalar(select(Admin).where(Admin.external_id == str(admin_external_id)))
     if not admin:
         return "NONE"
+    channel = await db.scalar(
+        select(Channel).where(Channel.id == str(channel_id), Channel.admin_id == admin.id)
+    )
+    if not channel:
+        return "NONE"
+    configured_owner_id = (settings.maxibot_owner_user_id or "").strip()
+    if configured_owner_id and str(admin.external_id) == configured_owner_id:
+        return "OWNER"
     trial = await db.scalar(select(FreeTrial).where(FreeTrial.admin_id == admin.id))
     return channel_promotion_entitlement_source(
         admin.subscription_expires_at,
