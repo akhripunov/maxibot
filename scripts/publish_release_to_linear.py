@@ -29,7 +29,7 @@ MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 PHASES = {"candidate", "preflight", "production"}
 STATUSES = {
     "candidate": {"CI_PASS", "FAILED", "CANCELLED", "SKIPPED"},
-    "preflight": {"READY", "FAILED", "BLOCKED"},
+    "preflight": {"READY", "READY_FOR_OWNER", "FAILED", "BLOCKED"},
     "production": {"COMPLETE", "FAILED_PRE_SWITCH", "RECOVERY_REQUIRED", "FAILED"},
 }
 REPOSITORY = "akhripunov/maxibot"
@@ -335,6 +335,15 @@ def event_markdown(phase: str, status: str, sha: str, migration: str, run_id: st
                     lines.append(f"* {label}: `{value}`")
         except (OSError, ValueError, TypeError):
             lines.append("* Детали результата: смотрите GitHub run и его result artifact.")
+    if phase == "preflight" and status == "READY_FOR_OWNER":
+        lines.extend([
+            "",
+            f"**MAXIBOT SHA {sha} полностью готов к production. Все mandatory gates PASS. "
+            f"Target Alembic: {migration}. Разрешить production?**",
+            "",
+            "Approval должен подтвердить этот полный SHA и target; он запускает один canonical production workflow. "
+            "Этот preflight не менял production.",
+        ])
     return "\n".join(lines)
 
 
@@ -359,6 +368,13 @@ def publish(env: dict[str, str], state: dict | None = None) -> None:
         raise SyncError("MAXIBOT release identity is invalid")
     url = f"{server}/{repository}/actions/runs/{run_id}"
     block = event_markdown(phase, status, sha, migration, run_id, attempt, url, result_path)
+    metrics = ("GITHUB_HOSTED_JOB_COUNT", "GITHUB_HOSTED_RUNNER_SECONDS",
+               "SELF_HOSTED_JOB_COUNT", "SELF_HOSTED_RUNNER_SECONDS",
+               "DUPLICATE_HOSTED_WORK_REMOVED", "CACHE_PREVENTED_DOWNLOAD")
+    if any(env.get(key) for key in metrics):
+        block += "\n\n### Runner and artifact telemetry\n\n" + "\n".join(
+            f"* {key}: `{env.get(key, 'UNKNOWN')}`" for key in metrics
+        )
     state_block = render_current_state(state or current_state())
 
     current_handoff = read_document(HANDOFF_ID, HANDOFF_TITLE, api_key)

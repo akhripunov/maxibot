@@ -20,8 +20,9 @@ MIGRATION = "0098_durable_autopilot_execution_claim_v1"
 
 
 class FakeGitHub:
-    def __init__(self, main_sha=SHA, runs=None):
+    def __init__(self, main_sha=SHA, runs=None, deploy_runs=None):
         self.main_sha = main_sha
+        self.deploy_runs = deploy_runs if deploy_runs is not None else []
         self.runs = runs if runs is not None else [
             {"id": 14, "run_number": 4, "run_attempt": 1, "head_sha": SHA,
              "status": "completed", "conclusion": "success", "event": "push",
@@ -34,6 +35,8 @@ class FakeGitHub:
         self.paths.append(path)
         if path == "git/ref/heads/main":
             return {"object": {"sha": self.main_sha}}
+        if path.startswith("actions/workflows/maxibot-deploy.yml/"):
+            return {"workflow_runs": self.deploy_runs}
         if path.startswith("actions/workflows/"):
             return {"workflow_runs": self.runs}
         if path.startswith("releases/tags/"):
@@ -64,6 +67,24 @@ def values(**overrides):
     }
     result.update(overrides)
     return result
+
+
+def ready_evidence(sha, run_id, attempt, _token, _api_get):
+    return ({"candidate_sha": sha, "deploy_run_id": run_id,
+             "deploy_run_attempt": attempt, "prepare_run_id": "14",
+             "prepare_run_attempt": "1"},
+            {"candidate_sha": sha, "target_migration": MIGRATION,
+             "mode": "preflight", "status": "PLANNED",
+             "release_state": "READY_FOR_OWNER", "preflight": "PASS",
+             "production_changed": False, "prepare_run_id": "14",
+             "prepare_run_attempt": "1"})
+
+
+def ready_preflight_run(status="completed", conclusion="success", sha=SHA):
+    return {"id": 81, "run_number": 12, "run_attempt": 1, "head_sha": sha,
+            "head_branch": "main", "event": "workflow_dispatch", "path": ".github/workflows/maxibot-deploy.yml",
+            "status": status, "conclusion": conclusion,
+            "display_title": f"MAXIBOT preflight {sha} by owner"}
 
 
 def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
@@ -524,8 +545,46 @@ def test_dispatch_requires_exact_operator_confirmation_for_production():
         validate(values(RELEASE_MODE="production"), FakeGitHub())
     with pytest.raises(ValidationError, match="must not carry production approval"):
         validate(values(APPROVE_PRODUCTION="true"), FakeGitHub())
-    approved = validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"), FakeGitHub())
+    approved = validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                        FakeGitHub(deploy_runs=[ready_preflight_run()]), ready_evidence)
     assert approved["mode"] == "production"
+    assert approved["ready_preflight_run_id"] == "81"
+
+
+def test_production_requires_successful_ready_preflight_for_exact_sha():
+    with pytest.raises(ValidationError, match="successful READY_FOR_OWNER preflight"):
+        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"), FakeGitHub())
+
+
+def test_production_rejects_latest_failed_preflight_even_if_an_older_one_was_ready():
+    old_ready = ready_preflight_run()
+    newer_failed = {**ready_preflight_run("completed", "failure"), "id": 82,
+                    "run_number": 13}
+    with pytest.raises(ValidationError, match="Latest exact-SHA Deploy preflight"):
+        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                 FakeGitHub(deploy_runs=[old_ready, newer_failed]), ready_evidence)
+
+
+def test_production_rejects_ready_evidence_linked_to_another_prepare_attempt():
+    def wrong_prepare(sha, run_id, attempt, token, api_get):
+        manifest, result = ready_evidence(sha, run_id, attempt, token, api_get)
+        manifest["prepare_run_attempt"] = "2"
+        return manifest, result
+
+    with pytest.raises(ValidationError, match="does not match the selected candidate/Prepare run"):
+        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                 FakeGitHub(deploy_runs=[ready_preflight_run()]), wrong_prepare)
+
+
+def test_production_rejects_evidence_that_does_not_prove_ready_state():
+    def not_ready(sha, run_id, attempt, token, api_get):
+        manifest, result = ready_evidence(sha, run_id, attempt, token, api_get)
+        result["release_state"] = "PREFLIGHTING"
+        return manifest, result
+
+    with pytest.raises(ValidationError, match="does not prove READY_FOR_OWNER"):
+        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                 FakeGitHub(deploy_runs=[ready_preflight_run()]), not_ready)
 
 
 def test_publication_recovery_is_read_only_and_cannot_repeat_apply():

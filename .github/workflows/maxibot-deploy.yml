@@ -30,6 +30,19 @@ on:
         default: false
         type: boolean
 
+      prepare_run_id:
+        description: 'Exact Prepare run dispatched by the trusted automatic controller; blank only for diagnostics/recovery'
+        required: false
+        type: string
+      prepare_run_attempt:
+        description: 'Exact Prepare attempt paired with prepare_run_id'
+        required: false
+        type: string
+      orchestrator_run_id:
+        description: 'Automatic preflight controller run; telemetry only'
+        required: false
+        type: string
+
       reconciles_deploy_run_id:
         description: 'Exact previous Deploy run whose failed publication is being reconciled (publication-recovery only)'
         required: false
@@ -61,6 +74,9 @@ jobs:
       prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
       prepare_run_attempt: ${{ steps.select.outputs.prepare_run_attempt }}
       prepare_url: ${{ steps.select.outputs.prepare_url }}
+      orchestrator_run_id: ${{ steps.select.outputs.orchestrator_run_id }}
+      ready_preflight_run_id: ${{ steps.select.outputs.ready_preflight_run_id }}
+      ready_preflight_run_attempt: ${{ steps.select.outputs.ready_preflight_run_attempt }}
       reconciles_deploy_run_id: ${{ steps.select.outputs.reconciles_deploy_run_id }}
       reconciles_deploy_run_attempt: ${{ steps.select.outputs.reconciles_deploy_run_attempt }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
@@ -84,6 +100,9 @@ jobs:
           RELEASE_MODE: ${{ inputs.mode }}
           APPROVE_PRODUCTION: ${{ inputs.approve_production }}
           APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
+          ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
           RECONCILES_DEPLOY_RUN_ID: ${{ inputs.reconciles_deploy_run_id }}
           RECONCILES_DEPLOY_RUN_ATTEMPT: ${{ inputs.reconciles_deploy_run_attempt }}
         run: python3 scripts/validate_release_dispatch.py
@@ -100,6 +119,8 @@ jobs:
       status: ${{ steps.execute.outputs.status }}
       execute_outcome: ${{ steps.execute.outcome }}
       evidence_publication: ${{ steps.evidence.outcome }}
+      cache_prevented_download: ${{ steps.bundle.outputs.cache_prevented_download }}
+      bundle_download_seconds: ${{ steps.bundle.outputs.bundle_download_seconds }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
@@ -158,6 +179,7 @@ jobs:
         run: '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py'
 
       - name: Restore or download the verified immutable Release bundle
+        id: bundle
         env:
           GITHUB_TOKEN: ${{ github.token }}
           ARTIFACT_DESTINATION: ${{ runner.temp }}/maxibot-prepared-image
@@ -181,6 +203,8 @@ jobs:
           IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
           IMAGE_RESULT: ${{ runner.temp }}/maxibot-prepared-image/maxibot-prepare-result.json
+          CACHE_PREVENTED_DOWNLOAD: ${{ steps.bundle.outputs.cache_prevented_download }}
+          BUNDLE_DOWNLOAD_SECONDS: ${{ steps.bundle.outputs.bundle_download_seconds }}
         run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
 
       - name: Publish immutable Deploy evidence Release
@@ -208,6 +232,15 @@ jobs:
       - name: Set publication evidence path
         shell: bash
         run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/result.json" >> "$GITHUB_ENV"
+      - name: Measure release runner usage
+        id: telemetry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.prepare_run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
+          CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
+        run: |
+          python3 scripts/release_telemetry.py
+          cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
@@ -223,7 +256,8 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: preflight
-          RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PASS' && 'READY' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
+          RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PASS' && 'READY_FOR_OWNER' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
+          CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
         run: python3 scripts/publish_release_to_linear.py
       - name: Publish production result to MAXIBOT Linear
         if: always() && (inputs.mode == 'production' || inputs.mode == 'publication-recovery') && needs.deploy.outputs.status != ''

@@ -82,6 +82,9 @@ def main() -> int:
         "target_migration": migration,
         "mode": mode,
         "status": "FAILED",
+        "release_state": "PREFLIGHTING",
+        "authorization_mode": "EXACT_SHA",
+        "authorization_source": os.environ.get("GITHUB_ACTOR", ""),
         "production_changed": False,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),
@@ -89,6 +92,13 @@ def main() -> int:
         "reconciles_deploy_run_id": os.environ.get("RECONCILES_DEPLOY_RUN_ID", ""),
         "reconciles_deploy_run_attempt": os.environ.get("RECONCILES_DEPLOY_RUN_ATTEMPT", ""),
         "github_actor": os.environ.get("GITHUB_ACTOR", ""),
+        "prepare_run_id": os.environ.get("PREPARE_RUN_ID", ""),
+        "prepare_run_attempt": os.environ.get("PREPARE_RUN_ATTEMPT", ""),
+        "prepare_release_tag": os.environ.get("PREPARE_RELEASE_TAG", ""),
+        "prepare_release_asset_id": os.environ.get("PREPARE_RELEASE_ASSET_ID", ""),
+        "prepare_release_asset_sha256": os.environ.get("PREPARE_RELEASE_ASSET_SHA256", ""),
+        "cache_prevented_download": os.environ.get("CACHE_PREVENTED_DOWNLOAD", "NO"),
+        "bundle_download_seconds": os.environ.get("BUNDLE_DOWNLOAD_SECONDS", "0"),
     }
     try:
         if not SHA_RE.fullmatch(sha):
@@ -168,9 +178,12 @@ def main() -> int:
             raise RuntimeError("Canonical production preflight did not report SAFE_TO_RELEASE=YES")
         result["preflight"] = "PASS"
         result["production_changed"] = False
+        result["production_baseline_sha"] = result["preflight_evidence"].get("PROD_RELEASE_SHA", "")
+        result["db_migration_baseline"] = result["preflight_evidence"].get("PROD_DB_HEAD", "")
 
         if mode == "preflight":
             result["status"] = "PLANNED"
+            result["release_state"] = "READY_FOR_OWNER"
         elif mode == "publication-recovery":
             if (not os.environ.get("RECONCILES_DEPLOY_RUN_ID", "").isdigit()
                     or not os.environ.get("RECONCILES_DEPLOY_RUN_ATTEMPT", "").isdigit()):
@@ -194,7 +207,9 @@ def main() -> int:
             result["final_migration"] = migration
             result["recovery"] = "READ_ONLY_RECONCILIATION_PASS"
         else:
+            result["release_state"] = "APPROVED"
             env["OWNER_APPROVED"] = "1"
+            result["release_state"] = "DEPLOYING"
             apply_started = time.monotonic()
             apply_code, apply_output = run(["bash", "scripts/release_prod.sh", sha, "--apply"], env)
             result["production_evidence"] = safe_evidence(apply_output)
@@ -206,18 +221,22 @@ def main() -> int:
                 result["production_changed"] = False
             else:
                 result["status"] = "RECOVERY_REQUIRED"
+                result["release_state"] = "RECOVERY_REQUIRED"
                 result["production_changed"] = "POSSIBLE"
             if apply_code != 0 or "RELEASE_STATUS=PASS" not in apply_output:
                 if "NETWORK_UNAVAILABLE" in apply_output and result["status"] == "FAILED_PRE_SWITCH":
                     result["network_status"] = "NETWORK_UNAVAILABLE"
                 raise RuntimeError("Canonical apply did not report RELEASE_STATUS=PASS; reconcile live production")
             result["status"] = "COMPLETE"
+            result["release_state"] = "COMPLETE"
             result["production_changed"] = True
             result["final_runtime_sha"] = sha
             result["final_migration"] = migration
         return_code = 0
     except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError, KeyError) as exc:
         result["error"] = str(exc)
+        if result.get("release_state") not in {"RECOVERY_REQUIRED", "COMPLETE"}:
+            result["release_state"] = "FAILED_PRE_SWITCH"
         return_code = 1
     finally:
         if result_path:

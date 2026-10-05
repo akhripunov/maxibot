@@ -237,6 +237,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+      - name: Measure Prepare runner usage
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEMETRY_RUN_IDS: ${{ github.run_id }}
+          CACHE_PREVENTED_DOWNLOAD: NO
+        run: |
+          python3 scripts/release_telemetry.py
+          cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
       - name: Publish final Prepare result to MAXIBOT Linear
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
