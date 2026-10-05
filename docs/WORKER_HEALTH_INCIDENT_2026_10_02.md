@@ -8,7 +8,7 @@ The runtime writes an atomic heartbeat after a successful PRIMARY polling respon
 
 Legacy production lacks this primary heartbeat. Generic /updates log entries may belong to custom bots; therefore the strict gate reports primary_loop_unverified, rather than a false PASS. Initial adoption remains BLOCKED for production apply until an explicit, reviewed bootstrap/remediation procedure is approved. No health exception or legacy waiver is enabled in this candidate.
 
-Hosted Prepare additionally runs a network-isolated synthetic 320 MiB allocation in the candidate image, overriding the entrypoint (never runs app/poller or external integrations). Expected: 256 MiB budget -> Docker OOMKilled=true/exit 137; 512 MiB -> clean exit. This checks memory-budget containment, not production-data replay or proof of leak elimination. Local runtime tests use fake clients/DB and no production tokens.
+The original containment candidate also used a network-isolated synthetic 320 MiB allocation in the candidate image to compare 256 MiB and 512 MiB limits. That historical check did not replay the production Worker workload and is no longer a blocking Prepare gate. Release-time memory protection instead reads the deployed Worker's configured Docker limit and kernel cgroup limit (both must be exactly 512 MiB), OOM state, stable identity and restart count, and advancing primary heartbeat across the existing 35-second observation. The historical incident evidence and reason for raising the Worker limit remain documented above. Local runtime tests use fake clients/DB and no production tokens.
 
 ## Reviewed initial heartbeat adoption
 

@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 if 'read_heartbeat' not in globals():
-    from app.worker_health import read_heartbeat, evaluate_runtime
+    from app.worker_health import read_heartbeat, evaluate_runtime, WORKER_MEMORY_LIMIT_BYTES
     import json
     import time
 
@@ -27,10 +27,21 @@ def snapshot(container):
     release = item['Config'].get('Labels', {}).get('org.opencontainers.image.revision')
     if not isinstance(release, str) or len(release) != 40:
         raise ValueError('worker_source_unknown')
+    configured_memory_limit = item.get('HostConfig', {}).get('Memory')
+    if not isinstance(configured_memory_limit, int):
+        raise ValueError('worker_memory_limit_unreadable')
+    raw_memory_limit = command(['docker', 'exec', container, 'python', '-c',
+        'from pathlib import Path; paths=(Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"), Path("/sys/fs/cgroup/memory.limit_in_bytes")); print(next((p.read_text().strip() for p in paths if p.is_file()), "unavailable"))']).strip()
+    try:
+        runtime_memory_limit = int(raw_memory_limit)
+    except ValueError as exc:
+        raise ValueError('worker_memory_limit_unreadable') from exc
     return {'id': item['Id'], 'started_at': state['StartedAt'],
             'restart_count': item['RestartCount'], 'status': state['Status'],
             'oom_killed': state['OOMKilled'], 'paused': state['Paused'],
-            'dead': state['Dead'], 'release': release, 'pid': 1}
+            'dead': state['Dead'], 'release': release, 'pid': 1,
+            'configured_memory_limit_bytes': configured_memory_limit,
+            'memory_limit_bytes': runtime_memory_limit}
 
 
 LEGACY_BOOTSTRAP_SHA = '206a1a144be4e0c5de52238c273f89e908d4a84d'
@@ -69,13 +80,18 @@ def collect(container, interval, startup_grace, max_age, expected_release=None,
         absent(after)
         stable = all(sample['status'] == 'running' and not any(sample.get(k) for k in ('oom_killed', 'paused', 'dead'))
                      for sample in (before, after))
+        stable = stable and all(sample.get('configured_memory_limit_bytes') == WORKER_MEMORY_LIMIT_BYTES
+                                and sample.get('memory_limit_bytes') == WORKER_MEMORY_LIMIT_BYTES
+                                for sample in (before, after))
         stable = stable and all(before[k] == after[k] for k in ('id', 'started_at', 'restart_count', 'release'))
         return {'status': 'PASS' if stable else 'FAIL',
                 'reason': 'approved_legacy_bootstrap' if stable else 'bootstrap_worker_unstable',
                 'primary_loop_verified': False, 'bootstrap_from': bootstrap_from,
                 'interval_seconds': interval, 'restart_before': before['restart_count'],
                 'restart_after': after['restart_count'], 'restart_delta': after['restart_count']-before['restart_count'],
-                'release': before['release']}
+                'release': before['release'],
+                'configured_memory_limit_bytes': after.get('configured_memory_limit_bytes'),
+                'memory_limit_bytes': after.get('memory_limit_bytes')}
     deadline = clock_fn() + startup_grace
     while True:
         before = sample_fn(container)
@@ -104,7 +120,9 @@ def collect(container, interval, startup_grace, max_age, expected_release=None,
     result = {'status': 'PASS' if ok else 'FAIL', 'reason': reason,
               'interval_seconds': interval, 'restart_before': before['restart_count'],
               'restart_after': after['restart_count'], 'restart_delta': after['restart_count']-before['restart_count'],
-              'release': before['release'], 'heartbeat_age_seconds': round(second['age_seconds'], 3)}
+              'release': before['release'], 'heartbeat_age_seconds': round(second['age_seconds'], 3),
+              'configured_memory_limit_bytes': after.get('configured_memory_limit_bytes'),
+              'memory_limit_bytes': after.get('memory_limit_bytes')}
     return result
 
 

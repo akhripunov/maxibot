@@ -5,7 +5,9 @@ from app.worker_health import evaluate_runtime, read_heartbeat
 
 
 def snapshot(*, started="t0", restarts=0, status="running", oom=False, release="r1"):
-    return {"id": "container", "started_at": started, "restart_count": restarts, "status": status, "oom_killed": oom, "release": release, "pid": 12}
+    return {"id": "container", "started_at": started, "restart_count": restarts, "status": status, "oom_killed": oom, "release": release, "pid": 12,
+            "configured_memory_limit_bytes": 512 * 1024 * 1024,
+            "memory_limit_bytes": 512 * 1024 * 1024}
 
 
 def test_healthy_heartbeat_and_stable_identity():
@@ -51,6 +53,31 @@ def test_unstable_worker_and_current_oom_fail_closed():
         heartbeat={"version": 1, "timestamp": 100, "pid": 12}, legacy_success=False, expected_release="r1",
     )
     assert not ok and reason == "worker_oom_killed"
+
+
+def test_worker_memory_limit_must_match_512_mib_at_both_samples():
+    healthy = {"version": 1, "timestamp": 101, "pid": 12}
+    wrong_before = snapshot()
+    wrong_before["configured_memory_limit_bytes"] = 256 * 1024 * 1024
+    ok, reason = evaluate_runtime(before=wrong_before, after=snapshot(), heartbeat=healthy,
+                                  heartbeat_before={"timestamp": 100}, legacy_success=False,
+                                  expected_release="r1")
+    assert not ok and reason == "worker_memory_limit_mismatch"
+
+    wrong_actual = snapshot()
+    wrong_actual["memory_limit_bytes"] = 0
+    ok, reason = evaluate_runtime(before=snapshot(), after=wrong_actual, heartbeat=healthy,
+                                  heartbeat_before={"timestamp": 100}, legacy_success=False,
+                                  expected_release="r1")
+    assert not ok and reason == "worker_memory_limit_mismatch"
+
+
+def test_expected_worker_memory_limit_passes_with_other_runtime_guards():
+    ok, reason = evaluate_runtime(before=snapshot(), after=snapshot(),
+                                  heartbeat={"version": 1, "timestamp": 101, "pid": 12},
+                                  heartbeat_before={"timestamp": 100}, legacy_success=False,
+                                  expected_release="r1")
+    assert (ok, reason) == (True, "heartbeat")
 
 
 def test_legacy_worker_is_blocked_without_primary_heartbeat():

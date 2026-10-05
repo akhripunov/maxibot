@@ -10,7 +10,9 @@ import json
 def snap(*, started=None, restarts=0, oom=False, status="running", release="a" * 40, ident="cid"):
     return {"id": ident, "started_at": started or datetime.now(timezone.utc).isoformat(),
             "restart_count": restarts, "status": status, "oom_killed": oom,
-            "paused": False, "dead": False, "release": release, "pid": 1}
+            "paused": False, "dead": False, "release": release, "pid": 1,
+            "configured_memory_limit_bytes": 512 * 1024 * 1024,
+            "memory_limit_bytes": 512 * 1024 * 1024}
 
 
 def hb(ts, marker=1, release="a" * 40, pid=1):
@@ -43,6 +45,80 @@ def test_identity_restart_oom_and_unhealthy_state_fail_closed(after):
     started = datetime.now(timezone.utc).isoformat()
     result = run_collect([snap(started=started), {**after, "started_at": started}], [hb(100), hb(101)])
     assert result["status"] == "FAIL"
+
+
+@pytest.mark.parametrize("field", ["configured_memory_limit_bytes", "memory_limit_bytes"])
+def test_actual_or_configured_memory_limit_mismatch_fails_closed(field):
+    started = datetime.now(timezone.utc).isoformat()
+    after = snap(started=started)
+    after[field] = 256 * 1024 * 1024
+    result = run_collect([snap(started=started), after], [hb(100), hb(101)])
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "worker_memory_limit_mismatch"
+
+
+def test_missing_runtime_memory_limit_fails_closed():
+    started = datetime.now(timezone.utc).isoformat()
+    after = snap(started=started)
+    after["memory_limit_bytes"] = None
+    result = run_collect([snap(started=started), after], [hb(100), hb(101)])
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "worker_memory_limit_mismatch"
+
+
+def test_snapshot_reads_configured_and_kernel_cgroup_memory_limit(monkeypatch):
+    from scripts import worker_health_preflight
+    import json as json_module
+
+    item = {"Id": "c" * 64, "RestartCount": 3,
+            "State": {"StartedAt": "t0", "Status": "running", "OOMKilled": False,
+                      "Paused": False, "Dead": False},
+            "HostConfig": {"Memory": 512 * 1024 * 1024},
+            "Config": {"Env": ["ADS_AUTOPILOT_ENABLED=false", "ADS_WRITE_ACTIONS_ENABLED=false"],
+                       "Labels": {"org.opencontainers.image.revision": "a" * 40}}}
+    outputs = iter([json_module.dumps([item]), str(512 * 1024 * 1024)])
+    monkeypatch.setattr(worker_health_preflight, "command", lambda _args: next(outputs))
+
+    result = worker_health_preflight.snapshot("worker")
+
+    assert result["configured_memory_limit_bytes"] == 512 * 1024 * 1024
+    assert result["memory_limit_bytes"] == 512 * 1024 * 1024
+
+
+def test_snapshot_reports_actual_cgroup_limit_when_it_differs_from_configuration(monkeypatch):
+    from scripts import worker_health_preflight
+    import json as json_module
+
+    item = {"Id": "c" * 64, "RestartCount": 3,
+            "State": {"StartedAt": "t0", "Status": "running", "OOMKilled": False,
+                      "Paused": False, "Dead": False},
+            "HostConfig": {"Memory": 512 * 1024 * 1024},
+            "Config": {"Env": ["ADS_AUTOPILOT_ENABLED=false", "ADS_WRITE_ACTIONS_ENABLED=false"],
+                       "Labels": {"org.opencontainers.image.revision": "a" * 40}}}
+    outputs = iter([json_module.dumps([item]), str(256 * 1024 * 1024)])
+    monkeypatch.setattr(worker_health_preflight, "command", lambda _args: next(outputs))
+
+    result = worker_health_preflight.snapshot("worker")
+
+    assert result["configured_memory_limit_bytes"] == 512 * 1024 * 1024
+    assert result["memory_limit_bytes"] == 256 * 1024 * 1024
+
+
+def test_snapshot_rejects_unlimited_or_unreadable_cgroup_limit(monkeypatch):
+    from scripts import worker_health_preflight
+    import json as json_module
+
+    item = {"Id": "c" * 64, "RestartCount": 3,
+            "State": {"StartedAt": "t0", "Status": "running", "OOMKilled": False,
+                      "Paused": False, "Dead": False},
+            "HostConfig": {"Memory": 512 * 1024 * 1024},
+            "Config": {"Env": ["ADS_AUTOPILOT_ENABLED=false", "ADS_WRITE_ACTIONS_ENABLED=false"],
+                       "Labels": {"org.opencontainers.image.revision": "a" * 40}}}
+    outputs = iter([json_module.dumps([item]), "max"])
+    monkeypatch.setattr(worker_health_preflight, "command", lambda _args: next(outputs))
+
+    with pytest.raises(ValueError, match="worker_memory_limit_unreadable"):
+        worker_health_preflight.snapshot("worker")
 
 
 def test_stale_malformed_wrong_release_and_pid_heartbeats_fail_closed():
@@ -92,7 +168,9 @@ def test_bootstrap_only_known_legacy_absent_heartbeat_and_stable_process():
 
 @pytest.mark.parametrize('change', [{'restart_count':1},{'oom_killed':True},{'status':'restarting'},
                                    {'id':'other'},{'release':'b'*40},{'started_at':'other'},
-                                   {'paused':True},{'dead':True}])
+                                   {'paused':True},{'dead':True},
+                                   {'configured_memory_limit_bytes':256*1024*1024},
+                                   {'memory_limit_bytes':256*1024*1024}])
 def test_bootstrap_unstable_worker_is_blocked(change):
     from scripts.worker_health_preflight import LEGACY_BOOTSTRAP_SHA
     before=snap(release=LEGACY_BOOTSTRAP_SHA)

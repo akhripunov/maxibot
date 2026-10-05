@@ -11,6 +11,7 @@ from pathlib import Path
 
 HEARTBEAT_PATH = os.getenv("MAX_WORKER_HEARTBEAT_PATH", "/tmp/maxibot-worker-heartbeat.json")
 HEARTBEAT_MAX_AGE_SECONDS = 90
+WORKER_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
 
 
 def write_heartbeat(*, marker: int | None, release: str | None = None, now: float | None = None) -> None:
@@ -72,6 +73,10 @@ def evaluate_runtime(*, before: dict, after: dict, heartbeat: dict | None, legac
         return False, "worker_not_running"
     if after.get("oom_killed") is True:
         return False, "worker_oom_killed"
+    for sample in (before, after):
+        if (sample.get("configured_memory_limit_bytes") != WORKER_MEMORY_LIMIT_BYTES
+                or sample.get("memory_limit_bytes") != WORKER_MEMORY_LIMIT_BYTES):
+            return False, "worker_memory_limit_mismatch"
     if not expected_release or after.get("release") != expected_release:
         return False, "worker_release_mismatch"
     if before.get("id") != after.get("id") or before.get("started_at") != after.get("started_at"):

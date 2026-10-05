@@ -216,6 +216,8 @@ def test_deploy_workflow_downloads_immutable_prepare_release_and_uses_portable_p
     assert "scripts/rehearse_prepared_image.py" not in workflow
     prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
     assert "scripts/rehearse_private_docker.py" in prepare
+    assert "scripts/rehearse_worker_memory.py" not in prepare
+    assert "WORKER_MEMORY_BUDGET_REHEARSAL" not in prepare
     assert "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70" in prepare
     assert '"containerd-snapshotter":false' in prepare
     assert "private_docker_rehearsal" in prepare
