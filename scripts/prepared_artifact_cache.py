@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
@@ -44,7 +45,7 @@ def _retryable(error: BaseException) -> bool:
     return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
 
 
-def network_request(operation, stage: str, allow_redirect: bool = False):
+def network_request(operation, stage: str, allow_redirect: bool = False, budget=None):
     def request_once():
         try:
             return operation()
@@ -54,7 +55,7 @@ def network_request(operation, stage: str, allow_redirect: bool = False):
                 return error
             raise
     try:
-        return retry_network_read(request_once, stage, _retryable, budget=NETWORK_BUDGET)
+        return retry_network_read(request_once, stage, _retryable, budget=budget or NETWORK_BUDGET)
     except NetworkUnavailable:
         raise NetworkStageError(stage, "NETWORK_UNAVAILABLE") from None
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
@@ -69,6 +70,39 @@ def checksum(path):
         for chunk in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def download_ranges(size, target, fetch_range, *, workers=4, chunk_size=16 * 1024 * 1024):
+    """Fetch independent byte ranges, assemble atomically, and reject gaps/overlaps."""
+    if (not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > MAX_BYTES
+            or workers < 1 or chunk_size < 1):
+        raise ReleaseAssetError('Invalid ranged download bounds')
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ranges = [(start, min(start + chunk_size, size) - 1)
+              for start in range(0, size, chunk_size)]
+    with tempfile.TemporaryDirectory(prefix='ranges-', dir=target.parent) as directory:
+        temporary = Path(directory)
+        parts = [(start, end, temporary / f'{index:06d}.part')
+                 for index, (start, end) in enumerate(ranges)]
+
+        def receive(item):
+            start, end, path = item
+            fetch_range(start, end, path)
+            expected = end - start + 1
+            if path.is_symlink() or not path.is_file() or path.stat().st_size != expected:
+                raise ReleaseAssetError('Ranged download returned an incomplete chunk')
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            list(executor.map(receive, parts))
+        assembled = temporary / 'complete.zip'
+        with assembled.open('wb') as output:
+            for _start, _end, path in parts:
+                with path.open('rb') as source:
+                    shutil.copyfileobj(source, output, 1024 * 1024)
+        if assembled.stat().st_size != size:
+            raise ReleaseAssetError('Ranged download assembled an unexpected length')
+        os.replace(assembled, target)
 
 
 def github(repo, route, token, stage):
@@ -86,43 +120,77 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def download_release(repo, asset_id, token, target):
-    """Download a GitHub Release asset without forwarding credentials to storage."""
-    def copy_bounded(response):
-        with response, target.open('wb') as output:
-            count = 0
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                count += len(chunk)
-                if count > MAX_BYTES:
-                    raise RuntimeError('Release asset exceeds the bounded cache size')
-                output.write(chunk)
+def download_release(repo, asset_id, token, target, expected_size=None):
+    """Download an exact GitHub Release ZIP via parallel authenticated byte-range redirects."""
+    if not isinstance(expected_size, int) or isinstance(expected_size, bool) or not 0 < expected_size <= MAX_BYTES:
+        raise ReleaseAssetError('Release asset size is unavailable or out of bounds')
+    deadline = time.monotonic() + RetryBudget().seconds
 
-    def fetch_asset():
-        request = urllib.request.Request(
-            f'https://api.github.com/repos/{repo}/releases/assets/{asset_id}',
-            headers={'Authorization': f'Bearer {token}',
-                     'Accept': 'application/octet-stream',
-                     'X-GitHub-Api-Version': '2022-11-28'})
-        try:
-            response = urllib.request.build_opener(NoRedirect).open(request, timeout=30)
-        except urllib.error.HTTPError as error:
-            if error.code != 302:
-                raise
-            location = error.headers.get('Location', '')
+    def fetch_range(start, end, path):
+        expected_range = f'bytes {start}-{end}/{expected_size}'
+        range_header = f'bytes={start}-{end}'
+
+        def operation():
+            request = urllib.request.Request(
+                f'https://api.github.com/repos/{repo}/releases/assets/{asset_id}',
+                headers={'Authorization': f'Bearer {token}',
+                         'Accept': 'application/octet-stream',
+                         'X-GitHub-Api-Version': '2022-11-28',
+                         'Range': range_header})
             try:
-                error.close()
-            except (AttributeError, KeyError):
-                pass
-            if not location.startswith('https://'):
-                raise RuntimeError('Release asset redirect must use HTTPS')
-            copy_bounded(urllib.request.urlopen(location, timeout=30))
-        else:
-            copy_bounded(response)
+                response = urllib.request.build_opener(NoRedirect).open(request, timeout=30)
+            except urllib.error.HTTPError as error:
+                if error.code != 302:
+                    raise
+                location = error.headers.get('Location', '')
+                try:
+                    error.close()
+                except (AttributeError, KeyError):
+                    pass
+                if not location.startswith('https://'):
+                    raise ReleaseAssetError('Release asset redirect must use HTTPS')
+                # The bearer credential is never attached to the signed storage request.
+                response = urllib.request.urlopen(
+                    urllib.request.Request(location, headers={'Range': range_header}), timeout=30)
+            with response:
+                if response.getcode() != 206 or response.headers.get('Content-Range') != expected_range:
+                    raise ReleaseAssetError('Release asset did not honor the requested byte range')
+                content_length = response.headers.get('Content-Length')
+                if content_length is not None and content_length != str(end - start + 1):
+                    raise ReleaseAssetError('Release asset range length is inconsistent')
+                total = 0
+                with path.open('wb') as output:
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError('Release asset transfer deadline exceeded')
+                        sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+                        if sock is not None:
+                            sock.settimeout(min(30.0, remaining))
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > end - start + 1:
+                            raise ReleaseAssetError('Release asset range exceeded its bounds')
+                        output.write(chunk)
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError('Release asset transfer deadline exceeded')
+                if total != end - start + 1:
+                    raise ConnectionError('Release asset range was incomplete')
 
-    network_request(fetch_asset, 'release_asset_download')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise NetworkStageError('release_asset_download', 'NETWORK_UNAVAILABLE')
+        budget = RetryBudget(seconds=remaining)
+        network_request(operation, 'release_asset_download', budget=budget)
+
+    before = time.monotonic()
+    download_ranges(expected_size, target, fetch_range, workers=4)
+    elapsed = time.monotonic() - before
+    if time.monotonic() >= deadline:
+        raise NetworkStageError('release_asset_download', 'NETWORK_UNAVAILABLE')
+    print(f'RELEASE_ASSET_RANGE_WORKERS=4 RELEASE_ASSET_RANGE_SECONDS={elapsed:.3f}', flush=True)
 
 
 def download(repo, artifact_id, token, target):
@@ -207,14 +275,13 @@ def materialize(cache, destination, artifact_id, digest, expected, fetch, identi
     else:
         extract(archive, destination, expected)
     archive.touch()
-    # Only our immutable ZIPs are evicted. Job files and other projects are untouched.
-    older = sorted((p for p in cache.glob('v2-*.zip') if p != archive and not p.is_symlink()
-                    and re.fullmatch(r'v2-[a-f0-9]{64}\.zip', p.name)),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
-    retained_bytes = archive.stat().st_size
-    for index, path in enumerate(older):
-        retained_bytes += path.stat().st_size
-        if index >= 2 or retained_bytes > 1024 ** 3:
+    # Retain only this immutable bundle. Older V2 and legacy release ZIPs are
+    # reproducible downloads and can consume the space needed to inspect/load
+    # the current image. Never touch files outside this project cache or files
+    # whose names do not match a known release-asset identity.
+    release_zip = re.compile(r'(?:v2-[a-f0-9]{64}|[0-9]+-[a-f0-9]{64})\.zip')
+    for path in cache.iterdir():
+        if path != archive and not path.is_symlink() and path.is_file() and release_zip.fullmatch(path.name):
             path.unlink()
     return 'HIT' if hit else 'MISS'
 
@@ -266,8 +333,11 @@ def main():
         if (asset_id != os.environ.get('PREPARE_RELEASE_ASSET_ID')
                 or digest != 'sha256:' + os.environ.get('PREPARE_RELEASE_ASSET_SHA256', '')):
             raise RuntimeError('Prepare Release asset identity changed after selection')
+        asset_size = metadata.get('size')
+        if not isinstance(asset_size, int) or isinstance(asset_size, bool) or not 0 < asset_size <= MAX_BYTES:
+            raise RuntimeError('Prepare Release asset size is unavailable or out of bounds')
         cache_id = asset_id
-        fetch = lambda path: download_release(repo, asset_id, token, path)
+        fetch = lambda path: download_release(repo, asset_id, token, path, expected_size=asset_size)
         release_identity = {'project': project, 'candidate_sha': sha, 'release_tag': tag,
                             'prepare_run_id': run_id, 'prepare_run_attempt': attempt,
                             'asset_id': asset_id, 'asset_sha256': digest.removeprefix('sha256:')}
