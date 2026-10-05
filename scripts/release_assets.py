@@ -360,12 +360,12 @@ def _evidence_asset(sha: str, prepare_run_id: str, prepare_attempt: str,
                             EVIDENCE_ASSET_NAME, "evidence")
 
 
-def _download(repo: str, asset_id: int, token: str, target: Path) -> None:
+def _download(repo: str, asset_id: int, token: str, target: Path, expected_size: int) -> None:
     import prepared_artifact_cache as cache
     from release_network_retry import RetryBudget
     cache.NETWORK_BUDGET = RetryBudget()
     try:
-        cache.download_release(repo, asset_id, token, target)
+        cache.download_release(repo, asset_id, token, target, expected_size=expected_size)
     except Exception as exc:
         raise ReleaseAssetError("Immutable Release evidence download failed") from exc
 
@@ -377,7 +377,7 @@ def read_evidence(sha: str, deploy_run_id: str, deploy_attempt: str,
     target_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="maxibot-evidence-") as temporary:
         archive_path = Path(temporary) / EVIDENCE_ASSET_NAME
-        _download(REPOSITORY, asset["id"], token, archive_path)
+        _download(REPOSITORY, asset["id"], token, archive_path, expected_size=asset.get("size"))
         if checksum(archive_path) != asset["digest"][7:]:
             raise ReleaseAssetError("Downloaded immutable evidence digest mismatch")
         members = _safe_read_zip(archive_path, EVIDENCE_MEMBERS)

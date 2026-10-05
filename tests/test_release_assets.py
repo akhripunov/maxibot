@@ -280,3 +280,18 @@ def test_checksum_helper_streams_file(tmp_path):
     path = tmp_path / "bundle"
     path.write_bytes(b"release bytes")
     assert release_assets.checksum(path) == hashlib.sha256(b"release bytes").hexdigest()
+
+
+def test_evidence_download_passes_asset_size_to_bounded_range_reader(monkeypatch, tmp_path):
+    import importlib
+    import sys
+
+    monkeypatch.syspath_prepend(str(release_assets.Path(__file__).resolve().parents[1] / "scripts"))
+    cache = importlib.import_module("prepared_artifact_cache")
+    calls = []
+    monkeypatch.setattr(cache, "download_release", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    release_assets._download("akhripunov/maxibot", 72, "token", tmp_path / "evidence.zip", expected_size=1234)
+
+    assert calls[0][0] == ("akhripunov/maxibot", 72, "token", tmp_path / "evidence.zip")
+    assert calls[0][1] == {"expected_size": 1234}
