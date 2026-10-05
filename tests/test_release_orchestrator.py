@@ -122,6 +122,24 @@ class ReleaseOrchestratorTests(unittest.TestCase):
             "hosted_job_count": 1, "hosted_runner_seconds": 12,
             "self_hosted_job_count": 1, "self_hosted_runner_seconds": 30})
 
+    def test_failure_diagnostics_identify_safe_reason_without_api_body(self):
+        api_error = orchestrator.APIError(503, "Bearer secret-token response body", "git/refs")
+        detail = orchestrator.safe_failure_detail(api_error)
+        self.assertEqual(detail, "github_api_claim_create_http_503")
+        self.assertNotIn("secret-token", detail)
+
+        dispatch_error = orchestrator.OrchestrationError(
+            "Preflight dispatch failed after durable claim; publication recovery required")
+        dispatch_error.__cause__ = orchestrator.APIError(
+            422, "Bearer another-secret", "actions/workflows/maxibot-deploy.yml/dispatches")
+        detail = orchestrator.safe_failure_detail(dispatch_error)
+        self.assertEqual(detail, "dispatch_after_claim_github_api_preflight_dispatch_http_422")
+        self.assertNotIn("another-secret", detail)
+
+    def test_unrecognized_orchestration_error_does_not_emit_untrusted_message(self):
+        error = orchestrator.OrchestrationError("token=do-not-log")
+        self.assertEqual(orchestrator.safe_failure_detail(error), "orchestration_guard_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

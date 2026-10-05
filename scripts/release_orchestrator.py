@@ -27,10 +27,11 @@ class OrchestrationError(RuntimeError):
 
 
 class APIError(RuntimeError):
-    def __init__(self, status: int, response: str = ""):
+    def __init__(self, status: int, response: str = "", path: str = ""):
         super().__init__(status)
         self.status = status
         self.response = response
+        self.path = path
 
 
 class GitHubAPI:
@@ -53,7 +54,7 @@ class GitHubAPI:
                 raw = response.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as error:
-            raise APIError(error.code, error.read().decode("utf-8", "replace")) from None
+            raise APIError(error.code, error.read().decode("utf-8", "replace"), path) from None
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             raise OrchestrationError(f"GitHub API unavailable ({type(error).__name__})") from None
 
@@ -215,6 +216,59 @@ def runner_telemetry(jobs: list[dict]) -> dict:
     return result
 
 
+def safe_failure_detail(error: Exception) -> str:
+    """Return a bounded diagnostic category without API bodies or credentials."""
+    if isinstance(error, APIError):
+        route = error.path.split("?", 1)[0].strip("/")
+        route_labels = {
+            "git/refs": "claim_create",
+            "actions/workflows/maxibot-deploy.yml/dispatches": "preflight_dispatch",
+            "git/ref/heads/main": "main_ref_read",
+        }
+        if route.startswith("actions/runs/"):
+            route = "prepare_run_read"
+        elif route.startswith("releases/tags/") or route.startswith("repos/"):
+            route = "release_metadata_read"
+        else:
+            route = route_labels.get(route, "github_api_request")
+        return f"github_api_{route}_http_{error.status}"
+    if isinstance(error, OrchestrationError):
+        if str(error) == "Preflight dispatch failed after durable claim; publication recovery required":
+            cause = error.__cause__
+            if isinstance(cause, APIError):
+                return f"dispatch_after_claim_{safe_failure_detail(cause)}"
+            return "dispatch_after_claim_failed_recovery_required"
+        if str(error) == "Prepare immutable Release/asset provenance failed":
+            return "prepare_immutable_release_asset_provenance_failed"
+        if str(error).startswith("Atomic preflight claim failed (HTTP "):
+            status = re.search(r"HTTP (\d{3})", str(error))
+            return f"claim_create_http_{status.group(1)}" if status else "claim_create_failed"
+        if str(error).startswith("GitHub API unavailable ("):
+            kind = re.search(r"\(([A-Za-z]+)\)", str(error))
+            return f"github_api_unavailable_{kind.group(1).lower()}" if kind else "github_api_unavailable"
+        known = {
+            "GITHUB_TOKEN is required": "github_token_missing",
+            "Workflow event came from an unexpected repository": "event_repository_untrusted",
+            "workflow_run event payload is missing": "workflow_run_event_missing",
+            "Prepare event is not a successful trusted-main run": "prepare_event_untrusted_or_incomplete",
+            "Preflight claim conflict could not be verified": "claim_conflict_unverified",
+            "Existing preflight claim points to a different candidate": "claim_sha_mismatch",
+            "Prepare candidate is no longer exact current main": "prepare_sha_not_current_main",
+            "Prepare run metadata changed after completion event": "prepare_run_metadata_changed",
+            "Prepare attempt changed after completion event": "prepare_attempt_changed",
+            "A Deploy workflow is already active; automatic preflight is blocked": "deploy_already_active",
+            "Current Alembic target is not uniquely established": "alembic_target_not_unique",
+        }
+        return known.get(str(error), "orchestration_guard_failed")
+    if isinstance(error, KeyError):
+        return "required_event_or_environment_field_missing"
+    if isinstance(error, ValueError):
+        return "input_json_or_metadata_invalid"
+    if isinstance(error, OSError):
+        return "local_io_failed"
+    return "unexpected_failure"
+
+
 def main() -> int:
     started = time.monotonic()
     try:
@@ -237,7 +291,8 @@ def main() -> int:
         print(json.dumps(result, sort_keys=True))
         return 0
     except (KeyError, ValueError, OrchestrationError, APIError, OSError) as error:
-        print(f"AUTO_PREFLIGHT=BLOCKED TYPE={type(error).__name__}", file=sys.stderr)
+        detail = safe_failure_detail(error)
+        print(f"AUTO_PREFLIGHT=BLOCKED TYPE={type(error).__name__} REASON={detail}", file=sys.stderr)
         return 1
 
 

@@ -65,6 +65,13 @@ Publisher обновляет только именованные MAXIBOT release
 
 ## Release performance and finalization
 
+For a clean Release Orchestrator V2 benchmark, use a fresh main candidate and
+measure GitHub event/commit, Prepare, automatic controller, Deploy preflight,
+and Linear READY publication timestamps separately. Count workflow jobs and
+their measured runner seconds from the GitHub API; record cache hit/miss and
+download/build/test repeats. A valid clean run has one successful Prepare,
+one automatic preflight, and no manual retry or production apply.
+
 Prepare exports the single verified linux/amd64 image as gzip level 1; the
 outer immutable Release bundle ZIP uses stored entries. Mac verification and
 VPS checksum verification use the same image archive bytes. Deploy never
