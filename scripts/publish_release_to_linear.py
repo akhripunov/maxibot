@@ -226,6 +226,15 @@ def render_current_state(state: dict) -> str:
 def upsert_current_state(content: str, block: str, handoff: bool = False) -> str:
     start, end = f"<!-- {CURRENT_MARKER}_START -->", f"<!-- {CURRENT_MARKER}_END -->"
     starts, ends = content.count(start), content.count(end)
+    # Linear may preserve a duplicated adjacent closing marker from an older
+    # write. Repair only this unambiguous shape; all other marker mismatches
+    # remain fail-closed.
+    if starts == 1 and ends == 2 and end + end in content:
+        content = content.replace(end + end, end, 1)
+        ends = content.count(end)
+    elif starts == 0 and ends == 2 and end + end in content:
+        content = content.replace(end + end, "", 1)
+        ends = 0
     if starts != ends or starts > 1:
         raise SyncError("MAXIBOT CURRENT STATE markers are malformed")
     if starts:

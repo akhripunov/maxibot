@@ -434,6 +434,35 @@ def test_current_state_markers_fail_closed_on_duplicates():
         publish_release_to_linear.upsert_current_state(bad, block)
 
 
+def test_current_state_repairs_duplicate_adjacent_end_marker():
+    block = publish_release_to_linear.render_current_state({
+        "synced_at":"t", "main_sha":"a"*40, "main_checked_at":"t", "production_sha":"a"*40,
+        "production_checked_at":"t", "production_status":"COMPLETE", "in_sync":True,
+        "prepare":None, "current_prepare":None, "candidate":"READY", "deploy":{"id":1,"html_url":"url"},
+        "evidence":{"final_migration":"0098"},
+    })
+    existing = "<!-- MAXIBOT_CURRENT_STATE_START -->old<!-- MAXIBOT_CURRENT_STATE_END --><!-- MAXIBOT_CURRENT_STATE_END -->\nmanual"
+    repaired = publish_release_to_linear.upsert_current_state(existing, block, handoff=True)
+    assert repaired.count("<!-- MAXIBOT_CURRENT_STATE_START -->") == 1
+    assert repaired.count("<!-- MAXIBOT_CURRENT_STATE_END -->") == 1
+    assert repaired.endswith("\nmanual")
+    assert "<!-- MAXIBOT_CURRENT_STATE_START -->\n\nСинхронизировано:" in repaired
+
+
+def test_current_state_repairs_duplicate_orphaned_end_markers():
+    block = publish_release_to_linear.render_current_state({
+        "synced_at":"t", "main_sha":"a"*40, "main_checked_at":"t", "production_sha":"a"*40,
+        "production_checked_at":"t", "production_status":"COMPLETE", "in_sync":True,
+        "prepare":None, "current_prepare":None, "candidate":"READY", "deploy":{"id":1,"html_url":"url"},
+        "evidence":{"final_migration":"0098"},
+    })
+    existing = "manual\n<!-- MAXIBOT_CURRENT_STATE_END --><!-- MAXIBOT_CURRENT_STATE_END -->\nnotes"
+    repaired = publish_release_to_linear.upsert_current_state(existing, block, handoff=True)
+    assert repaired.count("<!-- MAXIBOT_CURRENT_STATE_START -->") == 1
+    assert repaired.count("<!-- MAXIBOT_CURRENT_STATE_END -->") == 1
+    assert "manual" in repaired and "notes" in repaired
+
+
 def test_self_run_in_progress_waits_for_workflow_run_reconciliation():
     run = {"id": 44, "head_sha":"a"*40, "status":"in_progress", "conclusion":None}
     event = {"sha":"a"*40,"run_id":"44","status":"CI_PASS"}
