@@ -232,6 +232,9 @@ jobs:
       - name: Set publication evidence path
         shell: bash
         run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/result.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - name: Measure release runner usage
         id: telemetry
         env:
@@ -241,9 +244,6 @@ jobs:
         run: |
           python3 scripts/release_telemetry.py
           cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
       - name: Read immutable Release evidence
         if: needs.deploy.outputs.status != ''
         env:
