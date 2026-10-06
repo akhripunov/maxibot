@@ -7,7 +7,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from release_runner_readiness import MIN_FREE_BYTES, RunnerReadinessError, ensure_free_disk, probe_deployment_ssh, release_artifact_cache_path, resolve_docker_os, validate_pre_docker_start, validate_runtime  # noqa: E402
+from release_runner_readiness import MIN_FREE_BYTES, RunnerReadinessError, ensure_free_disk, inspect_docker_runtime, probe_deployment_ssh, release_artifact_cache_path, resolve_docker_os, validate_pre_docker_start, validate_runtime  # noqa: E402
 
 SHA = "a" * 40
 
@@ -138,6 +138,23 @@ def test_docker_readiness_does_not_start_already_available_linux_engine():
     assert calls == [["docker", "info", "--format", "{{.OSType}}"]]
 
 
+def test_docker_probe_distinguishes_ready_stopped_and_unavailable_engines():
+    class Result:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def runner(result):
+        return lambda _command, **_kwargs: result
+
+    assert inspect_docker_runtime(run_command=runner(Result(0, "linux\n"))) == ("linux", "ready")
+    assert inspect_docker_runtime(run_command=runner(Result(
+        1, stderr="Cannot connect to the Docker daemon. Is the docker daemon running?"))) == ("", "stopped")
+    assert inspect_docker_runtime(run_command=runner(Result(
+        1, stderr="permission denied while connecting to the Docker daemon socket"))) == ("", "unavailable")
+
+
 def test_docker_readiness_starts_desktop_once_then_verifies_linux_engine():
     calls = []
     info_count = [0]
@@ -218,3 +235,30 @@ def test_docker_readiness_has_a_finite_engine_startup_wait():
     assert sum(command == ["docker", "desktop", "start"] for command, _timeout in calls) == 1
     assert all(timeout is not None and timeout <= (120 if command == ["docker", "desktop", "start"] else 15)
                for command, timeout in calls)
+
+
+def test_docker_readiness_caps_last_probe_and_does_not_wait_past_deadline():
+    clock = [0.0]
+    probe_timeouts = []
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "Cannot connect to the Docker daemon. Is the docker daemon running?"
+
+    def run_command(command, **kwargs):
+        if command == ["docker", "desktop", "start"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        probe_timeouts.append(kwargs["timeout"])
+        clock[0] += kwargs["timeout"]
+        return Result()
+
+    sleeps = []
+    result = resolve_docker_os(run_command=run_command, sleep=sleeps.append,
+                               monotonic=lambda: clock[0], startup_timeout_seconds=5,
+                               initial_probe=("", "stopped"))
+
+    assert result == ""
+    assert probe_timeouts == [5]
+    assert clock[0] == 5
+    assert sleeps == []

@@ -34,24 +34,31 @@ def ensure_free_disk(runner_temp: Path, reclaim_cache, measure=shutil.disk_usage
     return free_bytes
 
 
-def resolve_docker_os(run_command=subprocess.run, sleep=time.sleep, monotonic=time.monotonic,
-                      startup_timeout_seconds: int = 90) -> str:
-    """Use a running Linux Docker engine, or start installed Desktop once and verify it boundedly."""
+def inspect_docker_runtime(run_command=subprocess.run, timeout: float = 15) -> tuple[str, str]:
+    """Classify Docker without starting services or touching the release cache."""
     info_command = ["docker", "info", "--format", "{{.OSType}}"]
+    try:
+        result = run_command(info_command, check=False, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return "", "unavailable"
+    output = result.stdout.strip()
+    if result.returncode == 0:
+        return output, "ready" if output == "linux" else "wrong_platform"
+    error = result.stderr.strip().lower()
+    if "is the docker daemon running" in error or "cannot connect to the docker daemon" in error:
+        return "", "stopped"
+    return "", "unavailable"
 
-    def read_info(timeout: float) -> tuple[str, str]:
-        try:
-            result = run_command(info_command, check=False, capture_output=True, text=True, timeout=timeout)
-        except (OSError, subprocess.SubprocessError):
-            return "", ""
-        output = result.stdout.strip()
-        error = result.stderr.strip().lower()
-        return (output if result.returncode == 0 else ""), error
 
-    docker_os, error = read_info(timeout=15)
-    if docker_os:
-        return docker_os if docker_os == "linux" else ""
-    if "is the docker daemon running" not in error and "cannot connect to the docker daemon" not in error:
+def resolve_docker_os(run_command=subprocess.run, sleep=time.sleep, monotonic=time.monotonic,
+                      startup_timeout_seconds: int = 90,
+                      initial_probe: tuple[str, str] | None = None) -> str:
+    """Use a running Linux Docker engine, or start installed Desktop once and verify it boundedly."""
+    probe = initial_probe or inspect_docker_runtime(run_command=run_command)
+    docker_os, state = probe
+    if state == "ready":
+        return docker_os
+    if state != "stopped":
         return ""
 
     try:
@@ -64,12 +71,15 @@ def resolve_docker_os(run_command=subprocess.run, sleep=time.sleep, monotonic=ti
 
     deadline = monotonic() + max(0, startup_timeout_seconds)
     while monotonic() < deadline:
-        remaining = deadline - monotonic()
-        docker_os, error = read_info(timeout=min(5, remaining))
-        if docker_os:
-            return docker_os if docker_os == "linux" else ""
-        if error and "is the docker daemon running" not in error and "cannot connect to the docker daemon" not in error:
+        remaining = max(0, deadline - monotonic())
+        docker_os, state = inspect_docker_runtime(run_command=run_command, timeout=min(5, remaining))
+        if state == "ready":
+            return docker_os
+        if state != "stopped":
             return ""
+        remaining = max(0, deadline - monotonic())
+        if remaining <= 0:
+            break
         sleep(min(2, remaining))
     return ""
 
@@ -193,10 +203,13 @@ def run() -> dict[str, str]:
         active_conflict=conflict, paths_ready=paths_ready, tools_ready=tools_ready,
         network_ready=network_ready)
     validate_pre_docker_start(**pre_docker_args)
+    docker_probe = inspect_docker_runtime()
+    if docker_probe[1] not in {"ready", "stopped"}:
+        raise RunnerReadinessError("Required Docker runtime is unavailable")
     # Reclaim only our known release artifacts after identity/scope/conflict gates pass,
-    # and verify the free-space gate before starting the local Docker service.
+    # and verify Docker is usable or its installed Desktop is stopped before reclaiming.
     ensure_free_disk(runner_temp, lambda: prune_reclaimable_release_archives(artifact_cache))
-    docker = resolve_docker_os()
+    docker = resolve_docker_os(initial_probe=docker_probe)
     readiness_args = dict(
         runner_name=pre_docker_args["runner_name"], runner_os=pre_docker_args["runner_os"],
         runner_arch=pre_docker_args["runner_arch"],
