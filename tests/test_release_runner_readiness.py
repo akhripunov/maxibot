@@ -101,7 +101,7 @@ def test_disk_readiness_does_not_prune_cache_when_already_ready(tmp_path):
 def test_disk_readiness_stays_fail_closed_if_scoped_cache_reclaim_is_insufficient(tmp_path):
     measurements = iter([MIN_FREE_BYTES - 100, MIN_FREE_BYTES - 1])
 
-    with pytest.raises(RunnerReadinessError, match="Insufficient free disk"):
+    with pytest.raises(RunnerReadinessError, match=f"Insufficient free disk.*free_bytes={MIN_FREE_BYTES - 1}.*required_bytes={MIN_FREE_BYTES}"):
         ensure_free_disk(tmp_path, lambda: 1, lambda _path: SimpleNamespace(free=next(measurements)))
 
 

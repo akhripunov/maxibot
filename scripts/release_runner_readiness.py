@@ -30,7 +30,9 @@ def ensure_free_disk(runner_temp: Path, reclaim_cache, measure=shutil.disk_usage
         reclaim_cache()
         free_bytes = measure(runner_temp).free
     if free_bytes < MIN_FREE_BYTES:
-        raise RunnerReadinessError("Insufficient free disk for release bundle/runtime work")
+        raise RunnerReadinessError(
+            f"Insufficient free disk for release bundle/runtime work "
+            f"free_bytes={free_bytes} required_bytes={MIN_FREE_BYTES}")
     return free_bytes
 
 
