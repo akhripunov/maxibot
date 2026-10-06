@@ -13,11 +13,11 @@ on:
         required: true
         type: string
       mode:
-        description: 'preflight checks production; production applies the candidate'
+        description: 'preflight checks production; production applies with exact-SHA approval; task-scoped-auto uses a durable one-shot owner record'
         required: true
         default: preflight
         type: choice
-        options: [preflight, production, publication-recovery]
+        options: [preflight, production, task-scoped-auto, publication-recovery]
       approve_production:
         description: 'I authorize this exact candidate and Alembic target on MAXIBOT production'
         required: true
@@ -40,6 +40,10 @@ on:
         type: string
       orchestrator_run_id:
         description: 'Automatic preflight controller run; telemetry only'
+        required: false
+        type: string
+      task_authorization_id:
+        description: 'Durable TASK_SCOPED_AUTO authorization ID; required only for that mode'
         required: false
         type: string
 
@@ -80,6 +84,7 @@ jobs:
       reconciles_deploy_run_id: ${{ steps.select.outputs.reconciles_deploy_run_id }}
       reconciles_deploy_run_attempt: ${{ steps.select.outputs.reconciles_deploy_run_attempt }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
+      task_authorization_id: ${{ steps.select.outputs.task_authorization_id }}
     steps:
       - name: Initialize shared retry budget
         shell: bash
@@ -103,6 +108,7 @@ jobs:
           PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
           PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
           ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
+          TASK_AUTHORIZATION_ID: ${{ inputs.task_authorization_id }}
           RECONCILES_DEPLOY_RUN_ID: ${{ inputs.reconciles_deploy_run_id }}
           RECONCILES_DEPLOY_RUN_ATTEMPT: ${{ inputs.reconciles_deploy_run_attempt }}
         run: python3 scripts/validate_release_dispatch.py
@@ -134,6 +140,7 @@ jobs:
       APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
       RECONCILES_DEPLOY_RUN_ID: ${{ needs.validate.outputs.reconciles_deploy_run_id }}
       RECONCILES_DEPLOY_RUN_ATTEMPT: ${{ needs.validate.outputs.reconciles_deploy_run_attempt }}
+      TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Set result evidence path
@@ -154,6 +161,11 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
+
+      - name: Verify assigned runner before tools, bundle, or production checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_runner_readiness.py
 
       - name: Install uv
         uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
@@ -205,6 +217,8 @@ jobs:
           IMAGE_RESULT: ${{ runner.temp }}/maxibot-prepared-image/maxibot-prepare-result.json
           CACHE_PREVENTED_DOWNLOAD: ${{ steps.bundle.outputs.cache_prevented_download }}
           BUNDLE_DOWNLOAD_SECONDS: ${{ steps.bundle.outputs.bundle_download_seconds }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
         run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
 
       - name: Publish immutable Deploy evidence Release
@@ -237,6 +251,7 @@ jobs:
           ref: ${{ github.sha }}
       - name: Measure release runner usage
         id: telemetry
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.prepare_run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
@@ -244,6 +259,18 @@ jobs:
         run: |
           python3 scripts/release_telemetry.py
           cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
+      - name: Mark release telemetry unknown
+        if: always() && steps.telemetry.outcome != 'success'
+        shell: bash
+        run: |
+          {
+            echo 'GITHUB_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'GITHUB_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'SELF_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'SELF_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'DUPLICATE_HOSTED_WORK_REMOVED=UNKNOWN'
+            echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
+          } >> "$GITHUB_ENV"
       - name: Read immutable Release evidence
         if: needs.deploy.outputs.status != ''
         env:
@@ -257,10 +284,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: preflight
           RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PASS' && 'READY_FOR_OWNER' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
-          CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
         run: python3 scripts/publish_release_to_linear.py
       - name: Publish production result to MAXIBOT Linear
-        if: always() && (inputs.mode == 'production' || inputs.mode == 'publication-recovery') && needs.deploy.outputs.status != ''
+        if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto' || inputs.mode == 'publication-recovery') && needs.deploy.outputs.status != ''
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}

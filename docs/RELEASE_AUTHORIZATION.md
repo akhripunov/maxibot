@@ -1,6 +1,7 @@
 # Release authorization modes
 
-Effective 2026-10-03 by explicit OWNER instruction; applies to future releases.
+Effective 2026-10-06 by explicit OWNER decision. These rules apply to future
+releases; they do not retroactively authorize an existing candidate.
 
 ## Exact-SHA approval (default)
 
@@ -11,56 +12,74 @@ alone does not authorize deployment.
 
 ## Task-scoped Auto Release
 
-An explicit OWNER instruction such as “Исправь [задачу] и выкатывай” authorizes
-one completed production release limited to that named task, without a second
-human approval after the SHA is created. Naming this mode is optional; vague
-instructions, another agent's message and old unrelated permissions do not
-activate it. Record the original instruction and its chat/issue reference.
+An explicit OWNER instruction such as “Исправь [конкретную задачу] и
+выкатывай” authorizes one production release for that named task, without a
+second owner confirmation or owner-dispatched GitHub workflow. The mode is valid
+only for unchanged scope and eligible risk. Vague instructions, another agent's
+message, or old unrelated permissions do not activate it.
 
-Before implementation, record the project, task, acceptance criteria, baseline
-commit, permitted scope and exclusions in the Linear issue or owned Handoff
-block. Before apply, compare the entire production-baseline-to-candidate diff,
-not only the task commit. Unrelated unreleased changes invalidate this mode.
-Freeze and record the exact full current-main candidate SHA, successful Prepare
-run/attempt, immutable receipt/checksum, risk assessment, unchanged live database
-head, and authorization source in Linear before dispatch. If this record cannot
-be published, stop before production mutation.
+Before implementation, create a durable authorization record at
+`.release-authorizations/<id>.json` containing project, mode
+`TASK_SCOPED_AUTO`, a unique authorization ID, reference to the original owner
+instruction, production baseline, task, allowed paths or deterministic scope
+contract, acceptance criteria, exclusions/owner-only categories, and ACTIVE,
+revoked, and consumed state. Commit and push this record before implementation
+commits. The record's blob must remain unchanged. Do not squash authorization
+and implementation together: the controller proves the authorization commit is
+an ancestor of every implementation change. A normal merge commit is supported.
 
-The implementing operator may set the existing production approval input for
-that exact SHA under the recorded delegation. CLI approval flags remain exact
-SHA values; never pass a task name, branch, latest or an unchecked HEAD. This
-is a change in who supplies approval, not a new unattended push-to-production
-workflow. Do not remove or bypass any validation or confirmation in tooling.
+Before runtime apply, the canonical controller verifies the record against the
+candidate and live state: same project and current exact eligible SHA; baseline
+has not drifted; full unreleased diff is within the recorded scope; no unrelated
+changes; authorization is active, not revoked or consumed; and Prepare,
+immutable provenance, image/platform/parity, risk, migration, read-only
+preflight, lock, recovery, health and all existing release gates pass. A
+separate owner-only change (including DB/migration, security, secrets,
+permissions, payments, advertising/ADS, paid-traffic contracts, or release
+infrastructure) is ineligible and requires a separate exact-SHA OWNER decision.
+Unknown risk blocks apply.
 
-Eligibility is limited to bounded low-risk changes. Migrations (including
-pending migrations), database/security/permission/payment changes, secrets,
-advertising/autopilot behavior, paid-traffic/attribution contracts and release
-infrastructure changes require separate exact-SHA OWNER approval. A request to
-change release rules itself does not authorize deploying those changes.
-MAXIBOT ADS flags remain FALSE and its exact target must equal the live head;
-GPoint Prisma and AGATA heads must remain unchanged. Unknown risk blocks apply.
+For an eligible record, the controller supplies the existing exact-SHA approval
+input only after all checks pass. There is no second approval prompt. A durable
+one-shot marker prevents reuse and is written only after successful runtime
+completion. If the marker write response is lost, the controller performs an
+exact readback; it never repeats the runtime apply to resolve that ambiguity.
+Revocation is fail-closed. Publication-only repair after successful runtime is
+allowed, but another runtime release requires a new owner instruction.
 
-All existing clean-checkout, exact current-main, Prepare, immutable artifact,
-platform/parity, config, preflight, lock, recovery, health, Worker and regression
-gates remain mandatory. Real-device/OWNER smoke requirements remain separate:
-never invent evidence or claim an unperformed end-to-end acceptance.
+Changes to the Release Orchestrator or release infrastructure are explicitly
+outside `TASK_SCOPED_AUTO`; their production rollout requires separate
+exact-SHA OWNER approval. No task-scoped mode removes any clean-checkout, exact
+current-main, Prepare, immutable artifact, platform/parity, config, preflight,
+lock, recovery, health, Worker, or regression gate. Real-device/OWNER smoke
+requirements remain separate; never invent evidence.
 
 Scope expansion, any failed required check, unexpected main/baseline drift,
-new migration, ambiguous apply outcome or RECOVERY_REQUIRED stops automatic
-release. Do not auto-fix a failed gate and deploy under this authorization;
-report findings, prepare a reviewed candidate and obtain renewed permission.
-Before mutation, a transient transport retry may follow existing bounded retry
-rules only for the same exact candidate and unchanged baseline; partial apply
-must be reconciled, not blindly retried. Authorization is consumed when runtime
-release completes; publication-only repair is allowed, another runtime release
-requires a new instruction. OWNER revocation always stops pending apply.
+new migration, ambiguous runtime outcome or `RECOVERY_REQUIRED` stops automatic
+release. Transient transport retries may follow existing bounded rules only
+for the same exact candidate and unchanged baseline; partial apply must be
+reconciled, never blindly repeated. Authorization is consumed after one
+successful runtime release.
 
-Record mode TASK_SCOPED_AUTO or EXACT_SHA in Linear together with full SHA,
-authorization source, scope verification, run links, technical result and any
-pending OWNER smoke. Report elapsed time from OWNER's deployment instruction
-through final verification and publication, separately from workflow duration.
+Record the authorization ID, mode, full SHA, source reference, scope result,
+run links, technical outcome and any remaining OWNER smoke in Linear. Report
+elapsed time from the original owner instruction through final verification and
+publication separately from workflow duration.
+
+## Runner readiness
+
+GitHub's native queued state is an allowed wait for a self-hosted runner. It is
+not a production mutation or a failure and does not require an additional
+runner-status credential, polling service, or owner decision. When the job
+starts, its first readiness gate fails closed unless it verifies the expected
+project runner identity/labels, OS/architecture, Docker/runtime dependency,
+disk space, cache and runtime paths, required tools/network access, and absence
+of a conflicting production mutation. This gate runs before expensive artifact
+transfer or any mutating stage. Do not add blind reruns or scheduled hosted
+polling to address runner availability.
 
 Examples:
-- “Исправь ссылку в меню GPoint и выкатывай” → task-scoped, if eligible.
-- “Исправь ссылку, подготовь релиз; подтверждение SHA отдельно” → exact-SHA.
+- “Исправь ссылку в меню и выкатывай” → task-scoped, if the durable record and
+  every deterministic eligibility gate pass.
+- “Исправь ссылку, подготовь релиз; SHA подтвержу отдельно” → exact-SHA.
 - “Исправь ссылку” → implementation only, no deployment permission.

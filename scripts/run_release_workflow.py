@@ -13,6 +13,8 @@ except ModuleNotFoundError:
 import subprocess
 import time
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +22,10 @@ try:
     from scripts.prepared_image_archive import inspect_prepared_archive
 except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
     from prepared_image_archive import inspect_prepared_archive
+
+from release_authorization import (AuthorizationError, authorization_state_ref,
+                                   candidate_scope_diff, record_path,
+                                   validate_task_authorization, assert_task_scoped_no_migration)
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
@@ -70,6 +76,65 @@ def write_result(path: str, result: dict[str, object]) -> None:
     temporary.replace(target)
 
 
+def verify_task_authorization(authorization_id: str, candidate_sha: str,
+                              production_sha: str) -> dict[str, str]:
+    from validate_release_dispatch import ValidationError, github_get
+
+    record = json.loads(Path(record_path(authorization_id)).read_text(encoding="utf-8"))
+    main_sha = (github_get("git/ref/heads/main", os.environ["GITHUB_TOKEN"])
+                .get("object", {}).get("sha", ""))
+    changed_paths = candidate_scope_diff(Path(__file__).resolve().parents[1],
+                                         authorization_id,
+                                         record.get("production_baseline_sha", ""),
+                                         candidate_sha)
+    proof = validate_task_authorization(
+        record=record, project="maxibot", authorization_id=authorization_id,
+        candidate_sha=candidate_sha, current_main_sha=main_sha,
+        production_sha=production_sha, changed_paths=changed_paths)
+    for state in ("revoked", "consumed"):
+        ref = authorization_state_ref("maxibot", authorization_id, state).removeprefix("refs/tags/")
+        try:
+            github_get(f"git/ref/tags/{ref}", os.environ["GITHUB_TOKEN"])
+        except ValidationError as error:
+            if "HTTP 404" in str(error):
+                continue
+            raise
+        raise ValueError(f"Task authorization is already {state}")
+    proof["source_reference"] = record["source_reference"]
+    return proof
+
+
+def consume_task_authorization(authorization_id: str, candidate_sha: str) -> None:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        raise ValueError("Existing workflow GITHUB_TOKEN is unavailable for durable consumption record")
+    ref = authorization_state_ref("maxibot", authorization_id, "consumed")
+    request = urllib.request.Request(
+        "https://api.github.com/repos/akhripunov/maxibot/git/refs",
+        data=json.dumps({"ref": ref, "sha": candidate_sha}).encode("utf-8"), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if response.status != 201:
+                raise ValueError("Durable TASK_SCOPED_AUTO consumption record was not created")
+    except urllib.error.HTTPError as error:
+        if error.code != 422:
+            raise ValueError(f"TASK_SCOPED_AUTO consumption write failed (HTTP {error.code})") from None
+        from validate_release_dispatch import github_get
+        existing = github_get("git/ref/tags/" + ref.removeprefix("refs/tags/"), token)
+        if existing.get("object", {}).get("sha") != candidate_sha:
+            raise ValueError("TASK_SCOPED_AUTO consumption marker conflicts with candidate") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        try:
+            from validate_release_dispatch import github_get
+            existing = github_get("git/ref/tags/" + ref.removeprefix("refs/tags/"), token)
+        except Exception:
+            raise ValueError("TASK_SCOPED_AUTO consumption response was lost and marker readback failed") from None
+        if existing.get("object", {}).get("sha") != candidate_sha:
+            raise ValueError(f"TASK_SCOPED_AUTO consumption write failed ({type(error).__name__})") from None
+
+
 def main() -> int:
     sha = os.environ.get("CANDIDATE_SHA", "")
     migration = os.environ.get("TARGET_MIGRATION", "")
@@ -83,7 +148,8 @@ def main() -> int:
         "mode": mode,
         "status": "FAILED",
         "release_state": "PREFLIGHTING",
-        "authorization_mode": "EXACT_SHA",
+        "authorization_mode": "TASK_SCOPED_AUTO" if mode == "task-scoped-auto" else "EXACT_SHA",
+        "task_authorization_id": os.environ.get("TASK_AUTHORIZATION_ID", ""),
         "authorization_source": os.environ.get("GITHUB_ACTOR", ""),
         "production_changed": False,
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -105,10 +171,12 @@ def main() -> int:
             raise ValueError("A full 40-character candidate SHA is required")
         if not MIGRATION_RE.fullmatch(migration):
             raise ValueError("An explicit target Alembic revision is required")
-        if mode not in {"preflight", "production", "publication-recovery"}:
+        if mode not in {"preflight", "production", "task-scoped-auto", "publication-recovery"}:
             raise ValueError("An explicit preflight, production, or publication-recovery mode is required")
         if mode == "production" and not approved:
             raise ValueError("Production requires explicit owner approval")
+        if mode == "task-scoped-auto" and (approved or not os.environ.get("TASK_AUTHORIZATION_ID", "").strip()):
+            raise ValueError("TASK_SCOPED_AUTO requires a durable authorization ID and no exact-SHA approval input")
         if mode == "publication-recovery" and (
                 approved or os.environ.get("APPROVE_WORKER_BOOTSTRAP", "false").lower() == "true"):
             raise ValueError("Publication recovery is read-only and cannot carry production/bootstrap approval")
@@ -178,7 +246,11 @@ def main() -> int:
             raise RuntimeError("Canonical production preflight did not report SAFE_TO_RELEASE=YES")
         result["preflight"] = "PASS"
         result["production_changed"] = False
+        result["status"] = "FAILED_PRE_SWITCH"
+        result["release_state"] = "PRE_APPLY_VALIDATION"
         result["production_baseline_sha"] = result["preflight_evidence"].get("PROD_RELEASE_SHA", "")
+        if not result["production_baseline_sha"]:
+            result["production_baseline_sha"] = result["preflight_evidence"].get("CURRENT_PRODUCTION_SHA", "")
         result["db_migration_baseline"] = result["preflight_evidence"].get("PROD_DB_HEAD", "")
 
         if mode == "preflight":
@@ -207,6 +279,14 @@ def main() -> int:
             result["final_migration"] = migration
             result["recovery"] = "READ_ONLY_RECONCILIATION_PASS"
         else:
+            task_authorization = None
+            if mode == "task-scoped-auto":
+                assert_task_scoped_no_migration(migration, result["preflight_evidence"])
+                task_authorization = verify_task_authorization(
+                    os.environ["TASK_AUTHORIZATION_ID"], sha, result["production_baseline_sha"])
+                result["task_authorization_record_sha256"] = task_authorization["record_sha256"]
+                result["task_authorization_source"] = task_authorization["source_reference"]
+                result["task_authorization_changed_paths"] = task_authorization["changed_paths"]
             result["release_state"] = "APPROVED"
             env["OWNER_APPROVED"] = "1"
             result["release_state"] = "DEPLOYING"
@@ -232,6 +312,15 @@ def main() -> int:
             result["production_changed"] = True
             result["final_runtime_sha"] = sha
             result["final_migration"] = migration
+            if mode == "task-scoped-auto":
+                try:
+                    consume_task_authorization(os.environ["TASK_AUTHORIZATION_ID"], sha)
+                    result["task_authorization_state"] = "CONSUMED"
+                except ValueError:
+                    result["status"] = "RECOVERY_REQUIRED"
+                    result["release_state"] = "RECOVERY_REQUIRED"
+                    result["task_authorization_state"] = "CONSUMPTION_PENDING"
+                    raise RuntimeError("Production completed but durable TASK_SCOPED_AUTO consumption needs reconciliation") from None
         return_code = 0
     except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError, KeyError) as exc:
         result["error"] = str(exc)
