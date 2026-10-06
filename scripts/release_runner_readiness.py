@@ -23,7 +23,7 @@ class RunnerReadinessError(RuntimeError):
 def validate_runtime(*, runner_name: str, runner_os: str, runner_arch: str,
                      free_bytes: int, docker_available: bool, docker_os: str,
                      main_sha: str, candidate_sha: str, active_conflict: bool,
-                     paths_ready: bool, tools_ready: bool) -> dict[str, str]:
+                     paths_ready: bool, tools_ready: bool, network_ready: bool) -> dict[str, str]:
     if runner_name != EXPECTED_RUNNER or runner_os != "macOS" or runner_arch != "ARM64":
         raise RunnerReadinessError("Assigned runner identity/OS/architecture does not match MAXIBOT lane")
     if free_bytes < MIN_FREE_BYTES:
@@ -34,6 +34,8 @@ def validate_runtime(*, runner_name: str, runner_os: str, runner_arch: str,
         raise RunnerReadinessError("MAXIBOT cache/runtime paths are unavailable or unsafe")
     if not tools_ready:
         raise RunnerReadinessError("Required release command-line tools are unavailable")
+    if not network_ready:
+        raise RunnerReadinessError("Canonical deployment SSH network is unavailable")
     if not candidate_sha or main_sha != candidate_sha:
         raise RunnerReadinessError("Candidate is no longer exact current main")
     if active_conflict:
@@ -41,6 +43,19 @@ def validate_runtime(*, runner_name: str, runner_os: str, runner_arch: str,
     return {"runner": runner_name, "runner_os": runner_os, "runner_arch": runner_arch,
             "free_bytes": str(free_bytes), "docker": "READY", "network": "READY",
             "project_paths": "READY", "conflicting_production_mutation": "NO"}
+
+
+def probe_deployment_ssh(*, host: str, key: str, run_command=subprocess.run) -> bool:
+    if host != "135.106.166.46" or not key or not os.path.isfile(key) or not os.access(key, os.R_OK):
+        return False
+    try:
+        result = run_command(
+            ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             "-o", "ConnectionAttempts=1", f"root@{host}", "printf MAXIBOT_DEPLOYMENT_NETWORK_READY"],
+            check=False, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "MAXIBOT_DEPLOYMENT_NETWORK_READY"
 
 
 def _request(path: str, token: str) -> dict:
@@ -77,6 +92,10 @@ def run() -> dict[str, str]:
     cache = home / ".cache" / "maxibot-release"
     paths_ready = bool(runner_temp) and _safe_writable_path(runner_temp, home) and _safe_writable_path(cache, home)
     tools_ready = all(shutil.which(binary) for binary in ("git", "bash", "ssh", "scp"))
+    production_host = os.environ.get("PRODUCTION_HOST", os.environ.get("MAXIBOT_PRODUCTION_HOST", "135.106.166.46"))
+    ssh_key = os.environ.get("PRODUCTION_SSH_KEY", os.environ.get(
+        "MAXIBOT_PRODUCTION_SSH_KEY", "/Users/akhripuniov/.ssh/maxibot_selectel_ed25519"))
+    network_ready = probe_deployment_ssh(host=production_host, key=ssh_key)
     try:
         docker = subprocess.run(["docker", "info", "--format", "{{.OSType}}"], check=True,
                                 capture_output=True, text=True, timeout=20).stdout.strip()
@@ -94,7 +113,7 @@ def run() -> dict[str, str]:
         free_bytes=shutil.disk_usage(runner_temp).free if runner_temp.exists() else 0,
         docker_available=bool(docker), docker_os=docker, main_sha=main,
         candidate_sha=os.environ.get("CANDIDATE_SHA", ""), active_conflict=conflict,
-        paths_ready=paths_ready, tools_ready=tools_ready)
+        paths_ready=paths_ready, tools_ready=tools_ready, network_ready=network_ready)
     print("RELEASE_RUNNER_READINESS=PASS " + " ".join(f"{key.upper()}={value}" for key, value in facts.items()))
     return facts
 

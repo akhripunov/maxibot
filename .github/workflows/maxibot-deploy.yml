@@ -251,6 +251,7 @@ jobs:
           ref: ${{ github.sha }}
       - name: Measure release runner usage
         id: telemetry
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.prepare_run_id }},${{ needs.validate.outputs.ready_preflight_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
@@ -258,6 +259,18 @@ jobs:
         run: |
           python3 scripts/release_telemetry.py
           cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
+      - name: Mark release telemetry unknown
+        if: always() && steps.telemetry.outcome != 'success'
+        shell: bash
+        run: |
+          {
+            echo 'GITHUB_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'GITHUB_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'SELF_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'SELF_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'DUPLICATE_HOSTED_WORK_REMOVED=UNKNOWN'
+            echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
+          } >> "$GITHUB_ENV"
       - name: Read immutable Release evidence
         if: needs.deploy.outputs.status != ''
         env:
@@ -271,7 +284,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_PHASE: preflight
           RELEASE_STATUS: ${{ needs.deploy.outputs.preflight == 'PASS' && 'READY_FOR_OWNER' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED') }}
-          CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
         run: python3 scripts/publish_release_to_linear.py
       - name: Publish production result to MAXIBOT Linear
         if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto' || inputs.mode == 'publication-recovery') && needs.deploy.outputs.status != ''
