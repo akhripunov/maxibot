@@ -101,6 +101,39 @@ class ArtifactCacheTests(unittest.TestCase):
         self.assertEqual(self.restore(), 'MISS')
         self.assertEqual(self.downloads, 2)
 
+    def test_prune_reclaimable_release_archives_only_removes_known_regular_zip_identities(self):
+        cache = self.root / 'release-cache'
+        cache.mkdir()
+        known = cache / ('v2-' + 'a' * 64 + '.zip')
+        legacy = cache / ('123-' + 'b' * 64 + '.zip')
+        unknown = cache / 'manual-backup.zip'
+        known.write_bytes(b'old')
+        legacy.write_bytes(b'old')
+        unknown.write_bytes(b'keep')
+        link = cache / ('v2-' + 'c' * 64 + '.zip')
+        link.symlink_to(unknown)
+
+        reclaimed = CACHE.prune_reclaimable_release_archives(cache)
+
+        self.assertEqual(reclaimed, 6)
+        self.assertFalse(known.exists())
+        self.assertFalse(legacy.exists())
+        self.assertTrue(unknown.exists())
+        self.assertTrue(link.is_symlink())
+
+    def test_prune_can_preserve_the_current_exact_archive(self):
+        cache = self.root / 'release-cache'
+        cache.mkdir()
+        current = cache / ('v2-' + 'a' * 64 + '.zip')
+        stale = cache / ('v2-' + 'b' * 64 + '.zip')
+        current.write_bytes(b'current')
+        stale.write_bytes(b'stale')
+
+        CACHE.prune_reclaimable_release_archives(cache, keep=current)
+
+        self.assertTrue(current.exists())
+        self.assertFalse(stale.exists())
+
     def test_changed_artifact_id_cannot_reuse_another_attempt(self):
         self.restore('12')
         self.assertEqual(self.restore('13'), 'MISS')
