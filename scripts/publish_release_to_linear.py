@@ -379,7 +379,12 @@ def publish(env: dict[str, str], state: dict | None = None) -> None:
     block = event_markdown(phase, status, sha, migration, run_id, attempt, url, result_path)
     metrics = ("GITHUB_HOSTED_JOB_COUNT", "GITHUB_HOSTED_RUNNER_SECONDS",
                "SELF_HOSTED_JOB_COUNT", "SELF_HOSTED_RUNNER_SECONDS",
-               "DUPLICATE_HOSTED_WORK_REMOVED", "CACHE_PREVENTED_DOWNLOAD")
+               "DUPLICATE_HOSTED_WORK_REMOVED", "CACHE_PREVENTED_DOWNLOAD",
+               "BUNDLE_DOWNLOAD_SECONDS", "TIMELINE_EVIDENCE",
+               "COMMIT_TO_PREPARE_START_SECONDS", "PREPARE_DURATION_SECONDS",
+               "PREPARE_TO_PREFLIGHT_START_SECONDS", "PREFLIGHT_DURATION_SECONDS",
+               "COMMIT_TO_READY_SECONDS", "PREFLIGHT_TO_DEPLOY_START_SECONDS",
+               "DEPLOY_DURATION_SECONDS", "COMMIT_TO_COMPLETE_SECONDS")
     if any(env.get(key) for key in metrics):
         block += "\n\n### Runner and artifact telemetry\n\n" + "\n".join(
             f"* {key}: `{env.get(key, 'UNKNOWN')}`" for key in metrics
