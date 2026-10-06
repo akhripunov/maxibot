@@ -3,14 +3,15 @@
 ## Два режима разрешения выпуска
 
 Актуальные условия: [Release authorization modes](RELEASE_AUTHORIZATION.md).
-По умолчанию владелец подтверждает подготовленный exact SHA. Для небольшой
-конкретной задачи «Исправь [задачу] и выкатывай» разрешает один Task-scoped Auto
-Release без повторного запроса SHA. Dev фиксирует scope, полный unreleased diff,
-разрешение, exact SHA и проверки в Linear до apply и передаёт существующий
-production approval input по этому разрешению. Рискованные изменения, миграции,
-провал gates или расширение scope останавливают этот режим. Инструкции ручного
-согласования ниже описывают обычный Exact-SHA режим. Все технические проверки
-одинаковы в обоих режимах; это не автоматический deploy каждого push.
+По умолчанию владелец подтверждает подготовленный exact SHA. Конкретное
+поручение владельца «исправь [задачу] и выкатывай» разрешает один
+`TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации создаётся
+durable authorization record; controller проверяет baseline, полный scope,
+одноразовость, eligibility и все release gates до передачи существующего
+exact-SHA approval input. Release infrastructure и другие owner-only категории
+в этот режим не входят. Runner может штатно ждать в GitHub `Queued`; первый
+этап запущенного self-hosted job выполняет fail-closed readiness check.
+Подробности: [Release authorization modes](RELEASE_AUTHORIZATION.md).
 
 Процесс оборачивает существующий `scripts/release_prod.sh`; он остаётся единственной production-командой. Workflow не управляет Direct/VK кампаниями, бюджетом, ставками, объявлениями или `ADS_*` master flags.
 
@@ -59,7 +60,7 @@ Publisher обновляет только именованные MAXIBOT release
 
 Для MAXIBOT требуется отдельная repository-scoped регистрация runner с label `maxibot-production`. На этом Mac она может работать под тем же пользователем, что и GPoint. Использовать отдельную папку runner и work directory без пробелов, например `~/.local/share/maxibot-release-work`. Рабочие каталоги и runner не переиспользовать между регистрациями. MAXIBOT runner имеет доступ к `~/.ssh/maxibot_selectel_ed25519`; workflow назначает его только после проверки exact main SHA и успешного Prepare. Никогда не запускать на нём workflow из pull request/fork.
 
-Регистрировать runner следует из Settings → Actions → Runners в репозитории MAXIBOT; temporary registration token не сохранять. На GitHub проверить `maxibot-owner-mac` / `maxibot-production` = `Idle`. Если пользовательский сервис не работает, production job остаётся `Queued` — это не успешная выкладка.
+Регистрировать runner следует из Settings → Actions → Runners в репозитории MAXIBOT; temporary registration token не сохранять. Предварительный API опрос runner не требуется: GitHub `Queued` является штатным ожиданием и сам по себе не означает сбой. После старта job выполняется fail-closed readiness check runner identity/labels, macOS/ARM64, Docker Linux runtime, disk, cache/runtime paths, required tools/network и отсутствия конфликтующей production mutation до загрузки bundle или дорогих шагов. `Queued` не означает успешный preflight или выкладку.
 
 Проверки и runner используют Linux/macOS user environment с production MAX polling выключенным для тестов; единственный production poller остаётся на VPS `worker`. Production SSH key и `.env` остаются на Mac/VPS. Ветки PR, пользовательский Telegram smoke и реклама автоматикой не меняются.
 

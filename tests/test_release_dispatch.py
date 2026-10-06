@@ -817,6 +817,21 @@ def test_task_scoped_auto_applies_only_after_revalidation_and_consumes_once(monk
     assert result["production_changed"] is True
 
 
+def test_task_authorization_consumption_reconciles_lost_github_response_by_readback(monkeypatch):
+    calls = []
+    def lost_response(*_args, **_kwargs):
+        calls.append("write")
+        raise run_release_workflow.urllib.error.URLError("connection reset after request")
+    monkeypatch.setattr(run_release_workflow.urllib.request, "urlopen", lost_response)
+    def readback(path, token):
+        calls.append((path, token))
+        return {"object": {"sha": SHA}}
+    monkeypatch.setattr("validate_release_dispatch.github_get", readback)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    run_release_workflow.consume_task_authorization("maxibot-task-2026-10-06-001", SHA)
+    assert calls == ["write", ("git/ref/tags/maxibot-task-auth/maxibot-task-2026-10-06-001/consumed", "test-token")]
+
+
 def test_linear_owned_block_updates_in_place_and_preserves_architect_text():
     before = "Architect-owned opening.\n\n<!-- MB_RELEASE_START -->\nold\n<!-- MB_RELEASE_END -->\n\nArchitect-owned closing."
     after = upsert_block(before, "MB_RELEASE", "new release status")

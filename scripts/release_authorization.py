@@ -127,22 +127,37 @@ def candidate_scope_diff(repo_root: Path, authorization_id: str,
         subprocess.run(["git", "merge-base", "--is-ancestor", baseline_sha, candidate_sha],
                        cwd=repo_root, check=True, capture_output=True, timeout=20)
         commits = subprocess.check_output(
-            ["git", "rev-list", "--first-parent", "--reverse", "--ancestry-path", f"{baseline_sha}..{candidate_sha}"],
+            ["git", "rev-list", "--topo-order", "--reverse", "--ancestry-path", f"{baseline_sha}..{candidate_sha}"],
             cwd=repo_root, text=True, timeout=20).splitlines()
-        all_changes: list[tuple[int, str, str]] = []
-        for index, commit in enumerate(commits):
+        all_changes: list[tuple[str, bool, str, str]] = []
+        for commit in commits:
+            parents = subprocess.check_output(["git", "rev-list", "--parents", "-n", "1", commit],
+                                              cwd=repo_root, text=True, timeout=20).split()[1:]
             output = subprocess.check_output(
                 ["git", "diff-tree", "--root", "--first-parent", "--no-commit-id", "--name-status", "-r", commit],
                 cwd=repo_root, text=True, timeout=20)
             for line in output.splitlines():
                 status, _, changed = line.partition("\t")
                 if status and changed:
-                    all_changes.append((index, status, changed))
-        record_changes = [item for item in all_changes if item[2] == path]
-        scope_changes = [item for item in all_changes if item[2] != path]
-        if (len(record_changes) != 1 or record_changes[0][1] != "A"
-                or not scope_changes or record_changes[0][0] >= min(item[0] for item in scope_changes)):
-            raise AuthorizationError("Durable authorization record must be added before implementation and remain unchanged")
+                    all_changes.append((commit, len(parents) > 1, status, changed))
+        record_adds = [item for item in all_changes if item[3] == path and not item[1] and item[2] == "A"]
+        if len(record_adds) != 1 or any(item[3] == path and item[2] != "A" and not item[1] for item in all_changes):
+            raise AuthorizationError("Durable authorization record must be added once and remain unchanged")
+        authorization_commit = record_adds[0][0]
+        authorization_object = subprocess.check_output(
+            ["git", "rev-parse", f"{authorization_commit}:{path}"], cwd=repo_root, text=True, timeout=20).strip()
+        candidate_object = subprocess.check_output(
+            ["git", "rev-parse", f"{candidate_sha}:{path}"], cwd=repo_root, text=True, timeout=20).strip()
+        if authorization_object != candidate_object:
+            raise AuthorizationError("Durable authorization record changed after it was added")
+        scope_changes = [item for item in all_changes if item[3] != path]
+        for commit, _merge, _status, _changed in scope_changes:
+            if commit == authorization_commit:
+                raise AuthorizationError("Durable authorization record must precede every implementation change")
+            subprocess.run(["git", "merge-base", "--is-ancestor", authorization_commit, commit],
+                           cwd=repo_root, check=True, capture_output=True, timeout=20)
+        if not scope_changes:
+            raise AuthorizationError("Candidate has no implementation changes beyond the authorization record")
         changed_paths = subprocess.check_output(
             ["git", "diff", "--name-only", baseline_sha, candidate_sha],
             cwd=repo_root, text=True, timeout=20).splitlines()

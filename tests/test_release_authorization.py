@@ -138,5 +138,45 @@ def test_scope_diff_rejects_authorization_record_added_with_or_after_code(tmp_pa
     git("add", ".release-authorizations", "app/menu.py")
     git("commit", "-m", "implement and authorize together")
     candidate = git("rev-parse", "HEAD")
-    with pytest.raises(AuthorizationError, match="before implementation"):
+    with pytest.raises(AuthorizationError, match="precede every implementation change"):
+        candidate_scope_diff(tmp_path, AUTH_ID, baseline, candidate)
+
+
+def test_scope_diff_accepts_non_squashed_merge_with_record_committed_before_code(tmp_path):
+    git, baseline = make_git_repo(tmp_path)
+    git("branch", "base", baseline)
+    git("switch", "-c", "authorized-task")
+    auth_path = tmp_path / ".release-authorizations" / f"{AUTH_ID}.json"
+    auth_path.parent.mkdir()
+    auth_path.write_text("{}\n")
+    git("add", ".release-authorizations")
+    git("commit", "-m", "record task authorization")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "menu.py").write_text("updated\n")
+    git("add", "app/menu.py")
+    git("commit", "-m", "implement authorized task")
+    git("switch", "base")
+    git("merge", "--no-ff", "authorized-task", "-m", "merge authorized task")
+    candidate = git("rev-parse", "HEAD")
+    assert candidate_scope_diff(tmp_path, AUTH_ID, baseline, candidate) == ["app/menu.py"]
+
+
+def test_scope_diff_rejects_squash_merge_that_erases_record_order(tmp_path):
+    git, baseline = make_git_repo(tmp_path)
+    git("branch", "base", baseline)
+    git("switch", "-c", "authorized-task")
+    auth_path = tmp_path / ".release-authorizations" / f"{AUTH_ID}.json"
+    auth_path.parent.mkdir()
+    auth_path.write_text("{}\n")
+    git("add", ".release-authorizations")
+    git("commit", "-m", "record task authorization")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "menu.py").write_text("updated\n")
+    git("add", "app/menu.py")
+    git("commit", "-m", "implement authorized task")
+    git("switch", "base")
+    git("merge", "--squash", "authorized-task")
+    git("commit", "-m", "squash authorized task")
+    candidate = git("rev-parse", "HEAD")
+    with pytest.raises(AuthorizationError, match="precede every implementation change"):
         candidate_scope_diff(tmp_path, AUTH_ID, baseline, candidate)

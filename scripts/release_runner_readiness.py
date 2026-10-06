@@ -23,7 +23,7 @@ class RunnerReadinessError(RuntimeError):
 def validate_runtime(*, runner_name: str, runner_os: str, runner_arch: str,
                      free_bytes: int, docker_available: bool, docker_os: str,
                      main_sha: str, candidate_sha: str, active_conflict: bool,
-                     paths_ready: bool) -> dict[str, str]:
+                     paths_ready: bool, tools_ready: bool) -> dict[str, str]:
     if runner_name != EXPECTED_RUNNER or runner_os != "macOS" or runner_arch != "ARM64":
         raise RunnerReadinessError("Assigned runner identity/OS/architecture does not match MAXIBOT lane")
     if free_bytes < MIN_FREE_BYTES:
@@ -32,6 +32,8 @@ def validate_runtime(*, runner_name: str, runner_os: str, runner_arch: str,
         raise RunnerReadinessError("Required Docker runtime is unavailable")
     if not paths_ready:
         raise RunnerReadinessError("MAXIBOT cache/runtime paths are unavailable or unsafe")
+    if not tools_ready:
+        raise RunnerReadinessError("Required release command-line tools are unavailable")
     if not candidate_sha or main_sha != candidate_sha:
         raise RunnerReadinessError("Candidate is no longer exact current main")
     if active_conflict:
@@ -74,6 +76,7 @@ def run() -> dict[str, str]:
     runner_temp = Path(os.environ.get("RUNNER_TEMP", ""))
     cache = home / ".cache" / "maxibot-release"
     paths_ready = bool(runner_temp) and _safe_writable_path(runner_temp, home) and _safe_writable_path(cache, home)
+    tools_ready = all(shutil.which(binary) for binary in ("git", "bash", "ssh", "scp"))
     try:
         docker = subprocess.run(["docker", "info", "--format", "{{.OSType}}"], check=True,
                                 capture_output=True, text=True, timeout=20).stdout.strip()
@@ -91,7 +94,7 @@ def run() -> dict[str, str]:
         free_bytes=shutil.disk_usage(runner_temp).free if runner_temp.exists() else 0,
         docker_available=bool(docker), docker_os=docker, main_sha=main,
         candidate_sha=os.environ.get("CANDIDATE_SHA", ""), active_conflict=conflict,
-        paths_ready=paths_ready)
+        paths_ready=paths_ready, tools_ready=tools_ready)
     print("RELEASE_RUNNER_READINESS=PASS " + " ".join(f"{key.upper()}={value}" for key, value in facts.items()))
     return facts
 

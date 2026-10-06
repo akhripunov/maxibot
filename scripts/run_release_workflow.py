@@ -126,7 +126,13 @@ def consume_task_authorization(authorization_id: str, candidate_sha: str) -> Non
         if existing.get("object", {}).get("sha") != candidate_sha:
             raise ValueError("TASK_SCOPED_AUTO consumption marker conflicts with candidate") from None
     except (urllib.error.URLError, TimeoutError, OSError) as error:
-        raise ValueError(f"TASK_SCOPED_AUTO consumption write failed ({type(error).__name__})") from None
+        try:
+            from validate_release_dispatch import github_get
+            existing = github_get("git/ref/tags/" + ref.removeprefix("refs/tags/"), token)
+        except Exception:
+            raise ValueError("TASK_SCOPED_AUTO consumption response was lost and marker readback failed") from None
+        if existing.get("object", {}).get("sha") != candidate_sha:
+            raise ValueError(f"TASK_SCOPED_AUTO consumption write failed ({type(error).__name__})") from None
 
 
 def main() -> int:

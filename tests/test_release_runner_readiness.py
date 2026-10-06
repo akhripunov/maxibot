@@ -14,7 +14,8 @@ SHA = "a" * 40
 def ready(**overrides):
     values = {"runner_name": "maxibot-owner-mac", "runner_os": "macOS", "runner_arch": "ARM64",
               "free_bytes": MIN_FREE_BYTES, "docker_available": True, "docker_os": "linux",
-              "main_sha": SHA, "candidate_sha": SHA, "active_conflict": False, "paths_ready": True}
+              "main_sha": SHA, "candidate_sha": SHA, "active_conflict": False, "paths_ready": True,
+              "tools_ready": True}
     values.update(overrides)
     return validate_runtime(**values)
 
@@ -30,7 +31,7 @@ def test_runner_readiness_passes_for_exact_mac_lane_and_release_dependencies():
     {"runner_name": "other-mac"}, {"runner_os": "Linux"}, {"runner_arch": "X64"},
     {"free_bytes": MIN_FREE_BYTES - 1}, {"docker_available": False},
     {"docker_os": "windows"}, {"main_sha": "b" * 40}, {"active_conflict": True},
-    {"paths_ready": False},
+    {"paths_ready": False}, {"tools_ready": False},
 ])
 def test_runner_readiness_fails_closed_before_expensive_or_mutating_stages(overrides):
     with pytest.raises(RunnerReadinessError):
