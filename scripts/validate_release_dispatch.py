@@ -18,6 +18,9 @@ from typing import Any
 
 from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
 from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset
+from release_authorization import (AuthorizationError, authorization_state_ref,
+                                   candidate_scope_diff, record_path,
+                                   validate_task_authorization)
 
 REPO = "akhripunov/maxibot"
 WORKFLOW = "maxibot-prepare.yml"
@@ -85,7 +88,7 @@ def validate(values: dict[str, str], api_get=github_get,
         raise ValidationError("Expected Prepare run ID and attempt must be positive integers")
     if not SHA_RE.fullmatch(sha):
         raise ValidationError("A full 40-character lowercase candidate SHA is required")
-    if mode not in {"preflight", "production", "publication-recovery"}:
+    if mode not in {"preflight", "production", "task-scoped-auto", "publication-recovery"}:
         raise ValidationError("An explicit preflight, production, or publication-recovery mode is required")
     if not MIGRATION_RE.fullmatch(migration):
         raise ValidationError("An explicit Alembic target revision is required")
@@ -93,8 +96,15 @@ def validate(values: dict[str, str], api_get=github_get,
         raise ValidationError("Production approval input is invalid")
     if mode == "production" and approve != "true":
         raise ValidationError("Production mode requires explicit owner approval")
-    if mode == "preflight" and approve == "true":
+    if mode in {"preflight", "task-scoped-auto", "publication-recovery"} and approve == "true":
         raise ValidationError("Preflight must not carry production approval")
+    task_authorization_id = values.get("TASK_AUTHORIZATION_ID", "").strip()
+    task_authorization = None
+    if mode == "task-scoped-auto":
+        if approve != "false" or not task_authorization_id:
+            raise ValidationError("TASK_SCOPED_AUTO requires a durable authorization ID and no exact-SHA approval input")
+    elif task_authorization_id:
+        raise ValidationError("Task authorization ID is only valid for task-scoped-auto mode")
     recovery_run_id = values.get("RECONCILES_DEPLOY_RUN_ID", "").strip()
     recovery_attempt = values.get("RECONCILES_DEPLOY_RUN_ATTEMPT", "").strip()
     if mode == "publication-recovery":
@@ -112,6 +122,28 @@ def validate(values: dict[str, str], api_get=github_get,
     main_sha = (branch.get("object") or {}).get("sha", "")
     if main_sha != sha:
         raise ValidationError("Candidate must still be the exact current origin/main SHA")
+
+    if mode == "task-scoped-auto":
+        try:
+            authorization_file = Path(record_path(task_authorization_id))
+            record = json.loads(authorization_file.read_text(encoding="utf-8"))
+            baseline = record.get("production_baseline_sha", "")
+            changed_paths = candidate_scope_diff(Path.cwd(), task_authorization_id, baseline, sha)
+            task_authorization = validate_task_authorization(
+                record=record, project="maxibot", authorization_id=task_authorization_id,
+                candidate_sha=sha, current_main_sha=main_sha, production_sha=baseline,
+                changed_paths=changed_paths)
+            for state in ("revoked", "consumed"):
+                try:
+                    api_get("git/ref/tags/" + authorization_state_ref("maxibot", task_authorization_id, state)
+                            .removeprefix("refs/tags/"), token)
+                except ValidationError as error:
+                    if "HTTP 404" in str(error):
+                        continue
+                    raise
+                raise ValidationError(f"Task authorization is already {state}")
+        except (OSError, ValueError, AuthorizationError) as error:
+            raise ValidationError(f"TASK_SCOPED_AUTO authorization is invalid: {error}") from None
 
     runs = api_get(f"actions/workflows/{WORKFLOW}/runs?branch=main&head_sha={sha}&per_page=100", token)
     matching = [run for run in runs.get("workflow_runs", []) if run.get("head_sha") == sha]
@@ -142,7 +174,7 @@ def validate(values: dict[str, str], api_get=github_get,
         raise ValidationError(f"Exact immutable Prepare Release is not valid: {exc}") from exc
 
     preflight = None
-    if mode == "production":
+    if mode in {"production", "task-scoped-auto"}:
         preflight = _verify_ready_preflight(
             sha, migration, latest_run_id, latest_run_attempt, token, api_get,
             evidence_reader or _read_preflight_evidence,
@@ -176,6 +208,9 @@ def validate(values: dict[str, str], api_get=github_get,
         "ready_preflight_run_id": preflight["run_id"] if preflight else "",
         "ready_preflight_run_attempt": preflight["run_attempt"] if preflight else "",
         "orchestrator_run_id": orchestrator_run_id,
+        "task_authorization_id": task_authorization_id,
+        "task_authorization_record_sha256": task_authorization["record_sha256"] if task_authorization else "",
+        "task_authorization_changed_paths": task_authorization["changed_paths"] if task_authorization else "",
     }
 
 

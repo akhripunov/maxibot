@@ -30,6 +30,7 @@ class FakeGitHub:
         ]
         self.paths = []
         self.release_enabled = True
+        self.authorization_markers = set()
 
     def __call__(self, path, token):
         self.paths.append(path)
@@ -48,6 +49,10 @@ class FakeGitHub:
                 "digest": "sha256:" + "a" * 64,
             }]}
         if path.startswith("git/ref/tags/"):
+            if "-task-auth/" in path:
+                if path in self.authorization_markers:
+                    return {"object": {"type": "commit", "sha": SHA}}
+                raise ValidationError("GitHub release provenance request failed (HTTP 404)")
             return {"object": {"type": "commit", "sha": SHA}}
         if path == "actions/runs/777":
             return {"id": 777, "head_sha": SHA, "head_branch": "main",
@@ -289,7 +294,7 @@ def test_preflight_only_does_not_record_production_event():
     assert "needs.validate.outputs.candidate || inputs.candidate || github.sha" in publisher
     assert "ref: ${{ github.sha }}" in publisher
     step = workflow.split("- name: Publish production result to MAXIBOT Linear", 1)[1]
-    assert "inputs.mode == 'production' || inputs.mode == 'publication-recovery'" in step
+    assert "inputs.mode == 'production' || inputs.mode == 'task-scoped-auto' || inputs.mode == 'publication-recovery'" in step
     assert "RELEASE_PHASE: production" in step
     assert "RELEASE_PHASE: production" not in workflow.split("- name: Publish preflight result to MAXIBOT Linear", 1)[1].split("- name: Publish production result to MAXIBOT Linear", 1)[0]
 
@@ -580,6 +585,35 @@ def test_dispatch_requires_exact_operator_confirmation_for_production():
     assert approved["ready_preflight_run_id"] == "81"
 
 
+def test_task_scoped_auto_requires_durable_record_exact_ready_preflight_and_no_second_approval(monkeypatch, tmp_path):
+    record_path = tmp_path / "task-auth.json"
+    record_path.write_text(json.dumps({
+        "schema_version": 1, "project": "maxibot", "authorization_mode": "TASK_SCOPED_AUTO",
+        "authorization_id": "maxibot-task-2026-10-06-001",
+        "source_reference": "linear:release-orchestrator-handoff#owner-instruction-2026-10-06",
+        "production_baseline_sha": SHA, "task": "Change one user-facing menu link",
+        "allowed_paths": ["app/bot/menu.py"], "acceptance_criteria": ["menu opens the configured website"],
+        "exclusions": ["database", "migrations", "security", "secrets", "payments", "ads", "paid_traffic", "release_infrastructure"],
+        "state": "ACTIVE", "revoked": False, "consumed": False,
+    }))
+    monkeypatch.setattr("validate_release_dispatch.record_path", lambda _authorization_id: str(record_path))
+    monkeypatch.setattr("validate_release_dispatch.candidate_scope_diff", lambda *_args: ["app/bot/menu.py"])
+    github = FakeGitHub(deploy_runs=[ready_preflight_run()])
+    selected = validate(values(RELEASE_MODE="task-scoped-auto", TASK_AUTHORIZATION_ID="maxibot-task-2026-10-06-001"),
+                        github, ready_evidence)
+    assert selected["mode"] == "task-scoped-auto"
+    assert selected["task_authorization_id"] == "maxibot-task-2026-10-06-001"
+    assert selected["task_authorization_changed_paths"] == "app/bot/menu.py"
+    assert selected["ready_preflight_run_id"] == "81"
+    assert any("/revoked" in path for path in github.paths)
+    assert any("/consumed" in path for path in github.paths)
+    with pytest.raises(ValidationError, match="durable authorization ID"):
+        validate(values(RELEASE_MODE="task-scoped-auto"), github, ready_evidence)
+    with pytest.raises(ValidationError, match="must not carry production approval"):
+        validate(values(RELEASE_MODE="task-scoped-auto", APPROVE_PRODUCTION="true",
+                        TASK_AUTHORIZATION_ID="maxibot-task-2026-10-06-001"), github, ready_evidence)
+
+
 def test_production_requires_successful_ready_preflight_for_exact_sha():
     with pytest.raises(ValidationError, match="successful READY_FOR_OWNER preflight"):
         validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"), FakeGitHub())
@@ -713,6 +747,74 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
     assert all(env["RELEASE_IMAGE_ID"] == "sha256:"+"1"*64 for _, env in commands)
     assert all(command[1] in ("rev-parse", "status") for command in git_commands)
     assert archive.read_bytes() == b"prepared"
+
+
+def _setup_task_scoped_wrapper(monkeypatch, tmp_path, migration_head):
+    archive = tmp_path / "image.tar.gz"
+    manifest = tmp_path / "manifest.json"
+    result_path = tmp_path / "result.json"
+    rehearsal_path = tmp_path / "prepare-result.json"
+    archive.write_bytes(b"prepared")
+    manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "prepare_run_attempt": "1",
+        "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
+    rehearsal_path.write_text(json.dumps({"schema": "MAXIBOT_PREPARE_RECEIPT_V1", "candidate_sha": SHA,
+        "github_run_id": "123", "github_run_attempt": "1", "status": "READY", "tests": "success",
+        "frozen_path_guard": "success", "linux_amd64_image": "success", "private_docker_rehearsal": "PASS",
+        "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs",
+        "private_network_isolated": "YES", "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123",
+        "rehearsal_archive_sha256": "a" * 64}))
+    for key, value in {"CANDIDATE_SHA": SHA, "TARGET_MIGRATION": MIGRATION,
+        "RELEASE_MODE": "task-scoped-auto", "APPROVE_PRODUCTION": "false",
+        "TASK_AUTHORIZATION_ID": "maxibot-task-2026-10-06-001", "RELEASE_RESULT": str(result_path),
+        "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "PREPARE_RUN_ID": "123",
+        "PREPARE_RUN_ATTEMPT": "1", "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
+        "IMAGE_RESULT": str(rehearsal_path), "GITHUB_TOKEN": "test-token"}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(run_release_workflow.subprocess, "check_output",
+        lambda command, **kwargs: SHA if command[:2] == ["git", "rev-parse"] else "")
+    monkeypatch.setattr(run_release_workflow, "checksum", lambda _: "a" * 64)
+    monkeypatch.setattr(run_release_workflow, "inspect_prepared_archive",
+        lambda *_: ("sha256:" + "1" * 64, "linux/amd64"))
+    return result_path, migration_head
+
+
+def test_task_scoped_auto_blocks_before_apply_when_migration_head_would_change(monkeypatch, tmp_path):
+    result_path, migration_head = _setup_task_scoped_wrapper(monkeypatch, tmp_path, "different-head")
+    commands = []
+    def execute(command, env):
+        commands.append(command)
+        return 0, f"SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration_head}\n" if command[-1] == "--dry-run" else pytest.fail("apply must not run")
+    monkeypatch.setattr(run_release_workflow, "run", execute)
+    monkeypatch.setattr(run_release_workflow, "verify_task_authorization",
+                        lambda *_: pytest.fail("authorization cannot advance to apply when migration safety fails"))
+    assert run_release_workflow.main() == 1
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "FAILED_PRE_SWITCH"
+    assert result["production_changed"] is False
+    assert len(commands) == 1 and commands[0][-1] == "--dry-run"
+
+
+def test_task_scoped_auto_applies_only_after_revalidation_and_consumes_once(monkeypatch, tmp_path):
+    result_path, migration_head = _setup_task_scoped_wrapper(monkeypatch, tmp_path, MIGRATION)
+    events = []
+    def verify(*_args):
+        events.append("revalidate")
+        return {"record_sha256": "b" * 64, "source_reference": "linear:task#owner", "changed_paths": "app/bot/menu.py"}
+    def consume(*_args):
+        events.append("consume")
+    monkeypatch.setattr(run_release_workflow, "verify_task_authorization", verify)
+    monkeypatch.setattr(run_release_workflow, "consume_task_authorization", consume)
+    def execute(command, _env):
+        events.append("dry-run" if command[-1] == "--dry-run" else "apply")
+        output = f"SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration_head}\n"
+        return 0, output if command[-1] == "--dry-run" else "MIGRATION_ALLOWED=YES\nRELEASE_STATUS=PASS\n"
+    monkeypatch.setattr(run_release_workflow, "run", execute)
+    assert run_release_workflow.main() == 0
+    result = json.loads(result_path.read_text())
+    assert events == ["dry-run", "revalidate", "apply", "consume"]
+    assert result["status"] == "COMPLETE"
+    assert result["task_authorization_state"] == "CONSUMED"
+    assert result["production_changed"] is True
 
 
 def test_linear_owned_block_updates_in_place_and_preserves_architect_text():
