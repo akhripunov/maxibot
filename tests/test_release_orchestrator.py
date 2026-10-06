@@ -77,6 +77,35 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         self.assertEqual(call[2]["inputs"]["prepare_run_attempt"], "2")
         self.assertEqual(call[2]["inputs"]["orchestrator_run_id"], "987")
 
+    def test_accepted_but_timed_out_preflight_dispatch_is_read_back_without_second_post(self):
+        class AcceptedButTimedOut(FakeAPI):
+            def post(inner, path, body):
+                inner.calls.append(("POST", path, body))
+                if path.endswith("/dispatches"):
+                    inner.release_patch["dispatched_run"] = {
+                        "id": 789, "run_attempt": 1, "head_sha": SHA, "head_branch": "main",
+                        "status": "queued", "event": "workflow_dispatch",
+                        "path": ".github/workflows/maxibot-deploy.yml",
+                        "display_title": "MAXIBOT preflight %s prepare/123-2 controller/987" % SHA,
+                    }
+                    raise orchestrator.APIError(503)
+                return FakeAPI.post(inner, path, body)
+
+            def get(inner, path):
+                if path.startswith("actions/workflows/maxibot-deploy.yml/runs?"):
+                    inner.calls.append(("GET", path))
+                    run = inner.release_patch.get("dispatched_run")
+                    return {"workflow_runs": [run] if run else []}
+                return FakeAPI.get(inner, path)
+
+        api = AcceptedButTimedOut()
+        result = orchestrator.dispatch_prepare(event(), api, repo_root=self.root,
+                                               migration="0098_test", orchestrator_run_id="987",
+                                               sleep=lambda _: None)
+        self.assertEqual(result["state"], "PREFLIGHT_DISPATCH_RECONCILED")
+        self.assertEqual(result["deploy_run_id"], "789")
+        self.assertEqual(sum(c[0] == "POST" and c[1].endswith("/dispatches") for c in api.calls), 1)
+
     def test_failed_or_untrusted_prepare_never_dispatches(self):
         for overrides in ({"conclusion": "failure"}, {"head_branch": "feature"},
                           {"head_sha": "c" * 40}, {"status": "in_progress"},

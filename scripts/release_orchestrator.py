@@ -110,8 +110,26 @@ def _active_deploy(api) -> bool:
                for run in data.get("workflow_runs", []))
 
 
+def _matching_preflight_dispatch(api, sha: str, prepare_run_id: str,
+                                 prepare_attempt: str, controller_run_id: str):
+    """Read back one accepted dispatch using unique trusted run-name correlation."""
+    data = api.get(f"actions/workflows/{DEPLOY_WORKFLOW}/runs?branch=main&head_sha={sha}&per_page=100")
+    title = (f"MAXIBOT preflight {sha} prepare/{prepare_run_id}-{prepare_attempt} "
+             f"controller/{controller_run_id}")
+    matches = [run for run in data.get("workflow_runs", [])
+               if run.get("head_sha") == sha and run.get("head_branch") == "main"
+               and run.get("event") == "workflow_dispatch"
+               and run.get("path") == f".github/workflows/{DEPLOY_WORKFLOW}"
+               and run.get("display_title", "").startswith(title)
+               and str(run.get("id", "")).isdigit()
+               and str(run.get("run_attempt", "")).isdigit()]
+    if len(matches) > 1:
+        raise OrchestrationError("Multiple preflight runs match one controller dispatch")
+    return matches[0] if matches else None
+
+
 def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | None = None,
-                     orchestrator_run_id: str = "") -> dict:
+                     orchestrator_run_id: str = "", sleep=time.sleep) -> dict:
     sha, event_run = _event_run(payload)
     run_id, attempt = str(event_run["id"]), str(event_run["run_attempt"])
     main = api.get("git/ref/heads/main").get("object", {}).get("sha")
@@ -149,8 +167,24 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
     try:
         api.post(f"actions/workflows/{DEPLOY_WORKFLOW}/dispatches", body)
     except (APIError, OrchestrationError) as error:
-        # Claim is deliberately retained: an uncertain dispatch is recovery work, not a blind retry.
-        raise OrchestrationError("Preflight dispatch failed after durable claim; publication recovery required") from error
+        # The durable claim prevents a second POST. Read-only bounded reconciliation
+        # can prove that GitHub accepted the first request despite a lost response.
+        for attempt_index in range(3):
+            try:
+                existing = _matching_preflight_dispatch(api, sha, run_id, attempt,
+                                                        orchestrator_run_id)
+            except (APIError, OrchestrationError):
+                existing = None
+            if existing:
+                return {"state": "PREFLIGHT_DISPATCH_RECONCILED", "candidate_sha": sha,
+                        "prepare_run_id": run_id, "prepare_run_attempt": attempt,
+                        "deploy_run_id": str(existing["id"]),
+                        "deploy_run_attempt": str(existing["run_attempt"]),
+                        "release_tag": tag, "asset_id": str(asset["id"]),
+                        "asset_sha256": asset["digest"].removeprefix("sha256:")}
+            if attempt_index < 2:
+                sleep(2)
+        raise OrchestrationError("Preflight dispatch outcome is uncertain; no blind retry is allowed") from error
     return {"state": "PREFLIGHT_DISPATCHED", "candidate_sha": sha,
             "prepare_run_id": run_id, "prepare_run_attempt": attempt,
             "release_tag": tag, "asset_id": str(asset["id"]),

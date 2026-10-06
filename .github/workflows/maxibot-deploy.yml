@@ -1,5 +1,5 @@
 name: MAXIBOT — Deploy
-run-name: MAXIBOT ${{ inputs.mode }} ${{ inputs.candidate }} by ${{ github.actor }}
+run-name: MAXIBOT ${{ inputs.mode }} ${{ inputs.candidate }} prepare/${{ inputs.prepare_run_id }}-${{ inputs.prepare_run_attempt }} controller/${{ inputs.orchestrator_run_id }} by ${{ github.actor }}
 
 on:
   workflow_dispatch:

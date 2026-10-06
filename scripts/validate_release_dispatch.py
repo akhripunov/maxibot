@@ -205,7 +205,7 @@ def _verify_ready_preflight(sha: str, migration: str, prepare_run_id: str,
                   if run.get("head_sha") == sha and run.get("head_branch") == "main"
                   and run.get("path") == ".github/workflows/maxibot-deploy.yml"
                   and run.get("event") == "workflow_dispatch"
-                  and str(run.get("display_title", "")).startswith(f"MAXIBOT preflight {sha} by ")]
+                  and str(run.get("display_title", "")).startswith(f"MAXIBOT preflight {sha} prepare/")]
     if not candidates:
         raise ValidationError("Production requires a successful READY_FOR_OWNER preflight for this exact SHA")
     latest = max(candidates, key=lambda run: (run.get("run_number", 0), run.get("run_attempt", 0)))
