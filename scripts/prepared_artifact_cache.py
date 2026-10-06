@@ -72,6 +72,32 @@ def checksum(path):
     return digest.hexdigest()
 
 
+RELEASE_CACHE_ARCHIVE = re.compile(r'(?:v2-[a-f0-9]{64}|[0-9]+-[a-f0-9]{64})\.zip')
+
+
+def prune_reclaimable_release_archives(cache, keep=None):
+    """Remove only regular, recognized, superseded release bundles in this project cache."""
+    cache = Path(cache)
+    keep = Path(keep) if keep is not None else None
+    try:
+        if cache.is_symlink() or not cache.is_dir():
+            return 0
+        reclaimed = 0
+        for archive in cache.iterdir():
+            if archive == keep or not RELEASE_CACHE_ARCHIVE.fullmatch(archive.name):
+                continue
+            try:
+                metadata = archive.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                reclaimed += metadata.st_size
+                archive.unlink()
+        return reclaimed
+    except OSError as error:
+        raise RuntimeError('Unable to safely prune superseded release cache archives') from error
+
+
 def download_ranges(size, target, fetch_range, *, workers=4, chunk_size=16 * 1024 * 1024):
     """Fetch independent byte ranges, assemble atomically, and reject gaps/overlaps."""
     if (not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > MAX_BYTES
@@ -279,10 +305,7 @@ def materialize(cache, destination, artifact_id, digest, expected, fetch, identi
     # reproducible downloads and can consume the space needed to inspect/load
     # the current image. Never touch files outside this project cache or files
     # whose names do not match a known release-asset identity.
-    release_zip = re.compile(r'(?:v2-[a-f0-9]{64}|[0-9]+-[a-f0-9]{64})\.zip')
-    for path in cache.iterdir():
-        if path != archive and not path.is_symlink() and path.is_file() and release_zip.fullmatch(path.name):
-            path.unlink()
+    prune_reclaimable_release_archives(cache, keep=archive)
     return 'HIT' if hit else 'MISS'
 
 

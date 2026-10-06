@@ -10,6 +10,8 @@ import tempfile
 import urllib.error
 import urllib.request
 
+from prepared_artifact_cache import prune_reclaimable_release_archives
+
 REPOSITORY = "akhripunov/maxibot"
 DEPLOY_WORKFLOW = "maxibot-deploy.yml"
 EXPECTED_RUNNER = "maxibot-owner-mac"
@@ -18,6 +20,17 @@ MIN_FREE_BYTES = 5 * 1024**3
 
 class RunnerReadinessError(RuntimeError):
     pass
+
+
+def ensure_free_disk(runner_temp: Path, reclaim_cache, measure=shutil.disk_usage) -> int:
+    """Reclaim only reproducible project release ZIPs, and only when disk is below the hard gate."""
+    free_bytes = measure(runner_temp).free
+    if free_bytes < MIN_FREE_BYTES:
+        reclaim_cache()
+        free_bytes = measure(runner_temp).free
+    if free_bytes < MIN_FREE_BYTES:
+        raise RunnerReadinessError("Insufficient free disk for release bundle/runtime work")
+    return free_bytes
 
 
 def validate_runtime(*, runner_name: str, runner_os: str, runner_arch: str,
@@ -83,6 +96,23 @@ def _safe_writable_path(path: Path, home: Path) -> bool:
         return False
 
 
+def release_artifact_cache_path(home: Path) -> Path:
+    """Resolve the canonical cache path while rejecting symlinks in every component."""
+    try:
+        current = home.resolve(strict=True)
+        for component in (".cache", "maxibot-release", "artifacts"):
+            current = current / component
+            try:
+                current.lstat()
+            except FileNotFoundError:
+                return current
+            if current.is_symlink() or not current.is_dir():
+                raise RunnerReadinessError("MAXIBOT release cache path contains an unsafe symlink or non-directory")
+        return current
+    except OSError as error:
+        raise RunnerReadinessError("MAXIBOT release cache path is unavailable") from error
+
+
 def run() -> dict[str, str]:
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
@@ -90,6 +120,7 @@ def run() -> dict[str, str]:
     home = Path.home()
     runner_temp = Path(os.environ.get("RUNNER_TEMP", ""))
     cache = home / ".cache" / "maxibot-release"
+    artifact_cache = release_artifact_cache_path(home)
     paths_ready = bool(runner_temp) and _safe_writable_path(runner_temp, home) and _safe_writable_path(cache, home)
     tools_ready = all(shutil.which(binary) for binary in ("git", "bash", "ssh", "scp"))
     production_host = os.environ.get("PRODUCTION_HOST", os.environ.get("MAXIBOT_PRODUCTION_HOST", "135.106.166.46"))
@@ -107,13 +138,18 @@ def run() -> dict[str, str]:
     conflict = any(str(run.get("id")) != this_run and run.get("status") in
                    {"queued", "in_progress", "waiting", "pending"}
                    for run in active.get("workflow_runs", []))
-    facts = validate_runtime(
+    readiness_args = dict(
         runner_name=os.environ.get("RUNNER_NAME", ""), runner_os=os.environ.get("RUNNER_OS", ""),
         runner_arch=os.environ.get("RUNNER_ARCH", ""),
-        free_bytes=shutil.disk_usage(runner_temp).free if runner_temp.exists() else 0,
         docker_available=bool(docker), docker_os=docker, main_sha=main,
         candidate_sha=os.environ.get("CANDIDATE_SHA", ""), active_conflict=conflict,
         paths_ready=paths_ready, tools_ready=tools_ready, network_ready=network_ready)
+    # Validate runner identity, dependencies, exact candidate and conflicts
+    # before touching even the bounded, reproducible release cache.
+    validate_runtime(free_bytes=MIN_FREE_BYTES, **readiness_args)
+    free_bytes = ensure_free_disk(
+        runner_temp, lambda: prune_reclaimable_release_archives(artifact_cache))
+    facts = validate_runtime(free_bytes=free_bytes, **readiness_args)
     print("RELEASE_RUNNER_READINESS=PASS " + " ".join(f"{key.upper()}={value}" for key, value in facts.items()))
     return facts
 
