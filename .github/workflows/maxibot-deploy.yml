@@ -173,6 +173,9 @@ jobs:
       - name: Verify Python runtime
         run: '"$MAXIBOT_PYTHON" --version | grep -Fx "Python 3.12.10"'
 
+      - name: Verify release runner readiness before artifact use
+        run: '"$MAXIBOT_PYTHON" scripts/release_runner_readiness.py'
+
       - name: Recheck current main and Prepare provenance on the Mac
         env:
           GITHUB_TOKEN: ${{ github.token }}
