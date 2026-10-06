@@ -1,14 +1,16 @@
 name: MAXIBOT — Prepare
-run-name: Prepare MAXIBOT ${{ inputs.candidate || github.sha }}
+run-name: Prepare MAXIBOT ${{ inputs.candidate || github.sha }} coalescer/${{ inputs.orchestrator_run_id }}
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       candidate:
         description: 'Exact full SHA to re-check (must still be current main)'
         required: true
+        type: string
+      orchestrator_run_id:
+        description: 'Coalescer run that selected this stable candidate'
+        required: false
         type: string
       owner_approved_task:
         description: 'Linear issue or task authorizing a frozen production path change, if applicable'

@@ -1,0 +1,34 @@
+name: MAXIBOT — Candidate coalescer
+run-name: Coalesce MAXIBOT candidate ${{ github.event.after }}
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: maxibot-candidate-coalescer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coalesce:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, maxibot-production]
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout trusted coalescer code
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+      - name: Wait for stable main and dispatch only the latest Prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 scripts/release_coalescing.py
