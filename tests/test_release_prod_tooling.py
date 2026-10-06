@@ -231,6 +231,15 @@ def test_release_tooling_contains_required_safety_gates():
         assert marker in source
 
 
+def test_post_switch_failure_never_blindly_rolls_back_runtime():
+    source = SCRIPT.read_text()
+    failure_block = source[source.index('echo "POSTDEPLOY_HEALTH=FAIL"'):source.index('# A fresh baseline follows the intentional runtime switch.')]
+    assert 'AUTO_ROLLBACK NOT_SAFE_TO_AUTOMATE' in failure_block
+    assert 'ROLLBACK_RESULT NOT_RUN' in failure_block
+    assert 'explicit reconciliation' in failure_block
+    assert 'docker compose' not in failure_block
+
+
 def test_loaded_archive_identity_and_native_runtime_rehearsal_are_fail_closed():
     source = SCRIPT.read_text()
     assert '[[ "$REMOTE_LOADED_IMAGE_ID" == "$RELEASE_IMAGE_ID" ]]' not in source

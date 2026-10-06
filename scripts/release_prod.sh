@@ -638,8 +638,9 @@ while true; do
   sleep $HEALTH_POLL_INTERVAL_SECONDS
 done"; then
   echo "POSTDEPLOY_HEALTH=FAIL" >&2
-  [[ -n "$PREVIOUS_CONFIG" ]] && remote "docker compose -p maxibot-vps -f $PREVIOUS_CONFIG up -d --no-build --force-recreate api worker" || true
-  die "runtime rollback attempted; DB rollback remains a separate safety decision"
+  say AUTO_ROLLBACK NOT_SAFE_TO_AUTOMATE
+  say ROLLBACK_RESULT NOT_RUN
+  die "post-switch health failed; runtime/database state requires explicit reconciliation"
 fi
 # A fresh baseline follows the intentional runtime switch. No restart waiver.
 WORKER_HEALTH_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/maxibot-worker-health.XXXXXX")
