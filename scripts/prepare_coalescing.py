@@ -41,7 +41,9 @@ def read_current_main_sha(token, opener=urllib.request.urlopen):
         raise CoalescingError(f"GitHub main SHA lookup failed (HTTP {error.code})") from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         raise CoalescingError("GitHub main SHA lookup failed") from None
-    sha = payload.get("object", {}).get("sha")
+    if not isinstance(payload, dict) or not isinstance(payload.get("object"), dict):
+        raise CoalescingError("GitHub returned an invalid main reference")
+    sha = payload["object"].get("sha")
     if not _valid_sha(sha):
         raise CoalescingError("GitHub returned an invalid main SHA")
     return sha
