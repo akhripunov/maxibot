@@ -5,40 +5,34 @@
 ```text
 OWNER
   ↓
-ARCHITECT SOL (external Product/System Architect)
+ARCHITECT / ARCHITECT SOL (external ChatGPT Product/System Architect)
   ↓
 MASTER TASK
   ↓
-ARCHITECT CODEX (local technical Architect + orchestrator)
-  ├── DEV
+DEV (primary autonomous technical implementer and task owner)
+  ├── optional DEV specialists
   ├── WEBDEV
   ├── ДИРЕКТОЛОГ
   ├── QA / ТЕСТИРОВЩИК
   └── SYSADMIN
   ↓
-FINAL ARCHITECT REPORT
+DEV FINAL REPORT
   ↓
-ARCHITECT SOL
+ARCHITECT / ARCHITECT SOL and OWNER
 ```
 
-ARCHITECT SOL defines product intent, desired behavior, business rules,
-architectural and safety constraints, and acceptance criteria. ARCHITECT CODEX
-defines implementation approach from the verified repository and remains the
-final technical decision owner inside the Codex team.
+ARCHITECT / ARCHITECT SOL defines product intent, desired behavior, business rules, system constraints, and acceptance criteria. DEV owns routine technical decisions, implementation approach, task state, integration, and technical closeout inside the approved scope. There is no separate ARCHITECT CODEX role or chat prerequisite. DEV proceeds without a separate ARCHITECT CODEX chat and escalates only for a real product or architecture conflict, material scope/behavior change, or protected authorization.
 
-`ARCHITECT_CODEX_REQUIRED = YES` for cross-role and release work.
-`ARCHITECT CODEX` is the local technical architect, orchestrator, and single
-technical window; `ARCHITECT SOL` is the product/system architect.
+`ARCHITECT SOL` is a compatibility alias for the external ARCHITECT.
 
 ## Minimum required roles / FAST_PATH
 
-ARCHITECT CODEX selects the shortest safe execution route. The default is one
+DEV selects the shortest safe execution route. The default is one
 primary implementer; additional roles are added only for actual domain scope,
 real blockers, or mandatory independent validation. Existing roles must not be
 involved ceremonially. Narrow direct specialist handoffs are allowed.
 
-ARCHITECT CODEX remains the single window and task-state owner, but need not
-relay every narrow specialist message. QA is advisory for release readiness.
+DEV remains the single window and task-state owner, but need not relay every narrow specialist message. QA is advisory for release readiness.
 SYSADMIN is not mandatory for every deployment;
 deterministic automated infrastructure guards are preferred for routine
 releases, with human SYSADMIN involvement reserved for infrastructure risks,
@@ -53,7 +47,7 @@ other implementation assumptions as facts until the repository is checked.
 
 ## Mandatory repository preflight
 
-Before any substantial task, ARCHITECT CODEX records:
+Before any substantial task, DEV records:
 
 - project root, Git repository status, branch, HEAD, and working tree;
 - applicable `AGENTS.md` files and architecture/configuration;
@@ -82,19 +76,15 @@ explicit Architect decision and recorded reason.
 
 ## Autonomous Codex execution
 
-Once OWNER or ARCHITECT SOL has approved a task's scope and acceptance criteria,
-ARCHITECT CODEX or the assigned implementer carries it through implementation,
+Once OWNER or ARCHITECT / ARCHITECT SOL has approved a task's scope and acceptance criteria,
+DEV or the assigned implementer carries it through implementation,
 tests, review, and fixes. The agent resolves ordinary reversible technical
 choices, answers routine questions from specialists, and does not ask OWNER to
 re-approve decisions already made. It continues until acceptance passes or a
 specific protected authorization, missing evidence, external dependency, or
 product/architecture decision objectively blocks progress.
 
-One primary agent is the default. Codex subagents may handle bounded technical
-tasks when that materially improves the result; they are not substitutes for a
-registered project-role chat or a required independent QA gate. The main agent
-owns technical decisions, resolves conflicts, integrates work, and verifies the
-complete result. Do not create or involve agents ceremonially.
+One primary implementer is the default. DEV may use bounded subagents when materially useful and available; they do not substitute for required independent QA. DEV owns technical decisions within scope, integration, and verification. No separate architect chat is required.
 
 This autonomy does not grant new permission to deploy, change paid traffic,
 write to external providers, alter secrets/access controls, bypass frozen-path
@@ -113,7 +103,7 @@ decision.
 ## Explicit role initialization for new Codex chats
 
 At the start of a specialized chat, select a role explicitly using a `ROLE=`
-marker for one role in `docs/ROLE_REGISTRY.md`: `ARCHITECT_CODEX`, `DEV`,
+marker for one role in `docs/ROLE_REGISTRY.md`: `DEV`,
 `WEBDEV`, `DIRECTOLOG`, `QA`, or `SYSADMIN`. Do not infer the role from chat
 title, model, prior task history, or the person who opened the chat. With no
 selected role, ordinary research and assistance are allowed, but role-specific
@@ -123,9 +113,9 @@ After role selection, read this protocol, the role registry, the selected
 role's applicable repository instructions, and only the relevant canonical
 Linear context. Keep role-specific histories separate and keep the role for
 the chat unless OWNER explicitly changes it. Recommend a new chat when
-specialization changes; never silently repurpose a role chat. `ARCHITECT SOL`
-continues as external product/system architect; this bootstrap does not assign
-or change that role.
+specialization changes; never silently repurpose a role chat. `ARCHITECT / ARCHITECT SOL`
+is the external product/system architect; this bootstrap does not assign or
+change that role.
 
 The supported project default is `gpt-6-luna` with `medium` reasoning for the
 primary Codex agent and subagents, configured in `.codex/config.toml`. Project
@@ -150,29 +140,29 @@ the active runtime model in a new chat rather than treating the file as proof.
 
 | Task type | Role(s) | QA required | Deployment possible | Final owner |
 |---|---|---:|---:|---|
-| Architecture-only analysis | ARCHITECT CODEX, optional consultants | Usually no | No | ARCHITECT CODEX |
-| Bot/backend/DB/API/worker | DEV | Yes | Gated | ARCHITECT CODEX |
-| Site/landing/frontend/browser flow | WEBDEV | Yes when executable behavior changes | Gated | ARCHITECT CODEX |
-| Direct/Metrika/attribution interpretation | ДИРЕКТОЛОГ | Depends on code impact | Advertising writes forbidden by default | ARCHITECT CODEX |
-| Backend + web | DEV + WEBDEV | Yes | Gated | ARCHITECT CODEX |
-| Backend + advertising/attribution | DEV + ДИРЕКТОЛОГ | Yes | Gated | ARCHITECT CODEX |
-| Web + Metrika | WEBDEV + ДИРЕКТОЛОГ | Yes | Gated | ARCHITECT CODEX |
-| Full attribution flow | DEV + WEBDEV + ДИРЕКТОЛОГ | Yes | Gated | ARCHITECT CODEX |
-| Advertising runtime diagnosis | Existing Ads Codex Worker flow | Per existing runtime gate | No automatic advertising write | ARCHITECT CODEX for product decisions |
+| Architecture-only analysis | ARCHITECT / ARCHITECT SOL for product/system decisions; DEV for technical analysis | Usually no | No | DEV |
+| Bot/backend/DB/API/worker | DEV | Yes | Gated | DEV |
+| Site/landing/frontend/browser flow | WEBDEV | Yes when executable behavior changes | Gated | DEV |
+| Direct/Metrika/attribution interpretation | ДИРЕКТОЛОГ | Depends on code impact | Advertising writes forbidden by default | DEV |
+| Backend + web | DEV + WEBDEV | Yes | Gated | DEV |
+| Backend + advertising/attribution | DEV + ДИРЕКТОЛОГ | Yes | Gated | DEV |
+| Web + Metrika | WEBDEV + ДИРЕКТОЛОГ | Yes | Gated | DEV |
+| Full attribution flow | DEV + WEBDEV + ДИРЕКТОЛОГ | Yes | Gated | DEV |
+| Advertising runtime diagnosis | Existing Ads Codex Worker flow | Per existing runtime gate | No automatic advertising write | DEV for product decisions |
 
 ## Deployment handoff
 
 Executable release flow is fixed:
 
 ```text
-ARCHITECT CODEX exact SHA
+DEV exact SHA
   → deterministic tests + exact-SHA technical gates
   → predeploy snapshot/platform/source guard
   → canonical linux/amd64 build
   → SYSADMIN replacement
   → SYSADMIN postdeploy health/polling/errors/parity
   → CHANNEL regression
-  → ARCHITECT CODEX final verdict
+  → DEV final verdict
 ```
 
 SYSADMIN may block or roll back a release but cannot approve architecture,
@@ -181,7 +171,7 @@ platform/source guard blocks replacement before any production container is
 recreated.
 
 Do not invoke every role automatically. Specialist roles submit proposals and
-structured handoffs; ARCHITECT CODEX accepts, modifies, or rejects them.
+structured handoffs; DEV accepts, modifies, or rejects them.
 
 ## Frozen production path governance
 
@@ -209,16 +199,17 @@ bindings:
 | QA | `019ffb88-32db-76f1-bdc2-1373b29fca13` | `DYNAMIC` |
 | SYSADMIN | `NONE` | `MANUAL_HANDOFF_REQUIRED` |
 
-Before every specialist delegation, ARCHITECT CODEX must resolve the current
+Before every specialist delegation, DEV must resolve the current
 project chat for the requested role and compare it with the last-known ID. The
 selection rule is: current MAXIBOT project membership, canonical role name or
 marker, available/non-archived state, and the latest owner-established current
 chat. If the selected ID changes, update the routing state before delegating.
-If no match exists, delegation is `ROUTING_BLOCKED`; if multiple matches are
-ambiguous, delegation is `ROUTING_AMBIGUOUS`. Never auto-create a replacement,
-use an internal subagent as a role substitute, or select a historical task only
-because its ID is documented. An explicit owner statement that a new chat
-replaces a role is authoritative.
+If no match exists or matches are ambiguous, record
+`MANUAL_HANDOFF_REQUIRED` for that specialist and continue independent work.
+Do not auto-create a role chat or select a historical task only because its ID
+is documented. DEV may use bounded technical subagents where supported; they
+do not replace an independent QA gate. An explicit OWNER statement that a new
+chat replaces a role is authoritative.
 
 ## Specialist handoff
 
@@ -237,12 +228,11 @@ EVIDENCE =
 RISKS =
 DEVIATIONS_FROM_PLAN =
 OPEN_QUESTIONS =
-RECOMMENDATION_TO_ARCHITECT =
+RECOMMENDATION_TO_DEV =
 ```
 
 Consultative roles may replace `FILES_CHANGED` with `ANALYSIS` and return
-`EVIDENCE` and `RECOMMENDATION`. A developer proposal to change architecture
-must return to ARCHITECT CODEX before implementation.
+`EVIDENCE` and `RECOMMENDATION`. A material product or system architecture change must return to ARCHITECT / ARCHITECT SOL before implementation; routine reversible technical choices remain with DEV.
 
 ## QA and integration review
 
@@ -254,12 +244,10 @@ canonical QA thread
 `019ffb88-32db-76f1-bdc2-1373b29fca13`. Do not create a new QA chat unless the
 OWNER explicitly changes the canonical thread.
 
-This direct QA handoff does not remove ARCHITECT CODEX from orchestration.
-ARCHITECT CODEX remains the single window for task state, integration review,
-exact candidate SHA, release readiness, and final technical reporting.
+This direct QA handoff is the canonical independent validation path. DEV owns task state, integration review, exact candidate SHA, release readiness, and final technical reporting.
 
 ```text
-ARCHITECT SOL → DEV → QA → DEV
+ARCHITECT / ARCHITECT SOL → DEV → QA → DEV
 ```
 
 `QA = NO_GO` returns findings directly to DEV; DEV fixes only the reported
@@ -267,26 +255,24 @@ issue and resubmits to QA. After `QA = GO`, the gated sequence is:
 
 ```text
 QA → DEV → SYSADMIN predeploy → DEV deploy → SYSADMIN postdeploy
-  → DEV final report → ARCHITECT SOL / OWNER
+  → DEV final report → ARCHITECT / ARCHITECT SOL / OWNER
 ```
 
 DEV may route a routine candidate directly to QA and receive its verdict, while
-keeping ARCHITECT CODEX informed. QA remains independent and returns only `GO`
-or `NO_GO` as its validation verdict. Commit, deployment, and release
-orchestration remain under the canonical Architect-controlled gates.
+QA remains independent and returns its validation verdict. Commit, deployment, and release actions remain subject to canonical repository and OWNER gates.
 
 ### Cross-role lead implementation
 
-For a task involving multiple implementation roles, `ARCHITECT SOL` explicitly
-assigns one `LEAD_IMPLEMENTER` (`DEV`, `WEBDEV`, or another suitable specialist)
-and records each role's scope. The lead coordinates narrow specialist handoffs,
+For a task involving multiple implementation roles, ARCHITECT / ARCHITECT SOL may
+name one `LEAD_IMPLEMENTER` only when needed; otherwise DEV remains lead. The
+lead (`DEV`, `WEBDEV`, or another suitable specialist) records each role's scope and coordinates narrow specialist handoffs,
 assembles the unified candidate, sends it to QA, and owns technical closeout.
 
 DEV and WEBDEV may hand off directly to each other when the architecture is
 already approved. Specialists may coordinate implementation but may not silently
 redefine product behavior, core architecture, attribution semantics, or security
 policy. A material mismatch must be returned as
-`ARCHITECTURE_BLOCKER = YES` directly to `ARCHITECT SOL`.
+`ARCHITECTURE_BLOCKER = YES` directly to external `ARCHITECT / ARCHITECT SOL`.
 
 The canonical QA contract is defined by [QA_ROLE.md](../QA_ROLE.md),
 [QA_PROCESS.md](../QA_PROCESS.md), [qa/TEST_CASES.md](../qa/TEST_CASES.md),
@@ -299,13 +285,13 @@ After implementation, the required flow for applicable code/runtime work is:
 ```text
 IMPLEMENTER SELF-TEST
   ↓
-ARCHITECT CODEX PRELIMINARY INTEGRATION REVIEW
+DEV SELF-REVIEW
   ↓
 QA → canonical QA process → QA_VERDICT = GO / NO_GO
   ↓
-ARCHITECT CODEX FINAL INTEGRATION REVIEW
+DEV FINAL REVIEW
   ↓
-FINAL_ARCHITECT_REPORT
+DEV_FINAL_REPORT
 ```
 
 The canonical full QA command is `./scripts/qa_check.sh`. Applicable staging
@@ -328,15 +314,14 @@ priority, and critical-regression rules.
 
 QA may repair QA tooling within the existing policy, but must not rewrite
 application business logic to make a gate pass. If application changes are
-needed, QA returns `NO_GO` or `BLOCKED` and ARCHITECT CODEX routes a separate
-implementation task.
+needed, QA returns `NO_GO` or `BLOCKED` and DEV fixes the reported issue within the approved scope.
 
 Production credentials are not used in staging by default. If a read-only check
 cannot run without them, QA reports `PRODUCTION_CREDENTIAL_REQUIRED=YES` and
-ARCHITECT CODEX chooses the safe method. Production writes from staging remain
+DEV chooses the safe method. Production writes from staging remain
 forbidden without explicit owner authorization.
 
-After handoffs, ARCHITECT CODEX reviews actual implementation, full diff when
+After handoffs, DEV reviews actual implementation, full diff when
 Git is available, unexpected files, duplicate architecture, migrations,
 schemas, tests, advisory QA findings, regression, secrets, auth, permissions,
 destructive behavior, runtime configuration, production impact, rollback, and
@@ -345,11 +330,11 @@ BLOCKED.
 
 ## Final report and status semantics
 
-The final report is a single `FINAL_ARCHITECT_REPORT` containing MASTER_TASK,
+The final report is a single `DEV_FINAL_REPORT` containing MASTER_TASK,
 STATUS, PREFLIGHT, DELEGATION, CONSULTATIONS, IMPLEMENTED, FILES_CHANGED,
 DATABASE, CONFIG, TESTS, QA, SECURITY, REGRESSION, PRODUCTION, GIT_DIFF_REVIEW,
 ACCEPTANCE_CRITERIA, DEVIATIONS_FROM_MASTER_TASK, BLOCKERS, RISKS,
-ARCHITECT_DECISIONS, PROJECT_STATE_IMPACT, RECOMMENDED_NEXT_STEP,
+TECHNICAL_DECISIONS, PROJECT_STATE_IMPACT, RECOMMENDED_NEXT_STEP,
 CHANGES_MADE_BY_ARCHITECT_DIRECTLY, and FINAL_NOTE.
 
 Allowed final statuses:
@@ -390,7 +375,7 @@ PRECHECK_DONE = YES / NO
 PRIMARY_ROLE_SELECTED = YES / NO / MANUAL_HANDOFF_REQUIRED
 LEGACY_ROLE_AVOIDED = YES / NO / NOT_APPLICABLE
 QA_GATE_EXECUTED = YES / NO / MANUAL_HANDOFF_REQUIRED
-ARCHITECT_INTEGRATION_REVIEW = PASS / FAIL / UNVERIFIED
+DEV_INTEGRATION_REVIEW = PASS / FAIL / UNVERIFIED
 ```
 
 If the Codex environment cannot invoke a specific task programmatically, state

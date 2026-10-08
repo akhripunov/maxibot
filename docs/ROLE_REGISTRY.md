@@ -1,32 +1,32 @@
 # MAXIBOT canonical role registry
 
-This is the repository-level registry for the six working Codex roles. Old
-Codex tasks or chats are coordination records, not additional roles.
-
-`ARCHITECT_CODEX_REQUIRED = YES` for cross-role and release work.
-`ARCHITECT CODEX` is the local technical architect, orchestrator, and single
-technical window. `ARCHITECT SOL` is the product/system architect.
+`ARCHITECT / ARCHITECT SOL` is the external ChatGPT project architect. `ARCHITECT SOL` is a compatibility alias for `ARCHITECT`. `DEV` is the primary autonomous technical implementer and owns task state, repository preflight, routine technical decisions, implementation, tests, self-review, integration, and closeout for approved work. There is no required or active `ARCHITECT CODEX` role or chat. OWNER approval remains required for protected actions.
 
 ## Minimum required roles / FAST_PATH
 
-ARCHITECT CODEX selects the shortest safe execution route. One primary
-implementer is preferred by default; additional specialists are added only for
-actual scope needs, real blockers, or mandatory independent technical gates. Roles must
-not participate ceremonially. Narrow direct specialist handoffs are allowed.
-ARCHITECT CODEX owns global task state as the single window but is not a
-mandatory message relay between every specialist interaction. QA is advisory
-for release readiness. SYSADMIN is required for
-actual infrastructure risks, incidents, secrets/runtime injection, or deploy
-blockers, not automatically for every release.
+DEV chooses the shortest safe execution route for the approved scope. One implementer is the default. Specialists and independent QA are added only when the actual domain scope or an applicable gate requires them. Narrow direct handoffs are allowed; roles do not participate ceremonially. DEV proceeds without a separate ARCHITECT CODEX chat. DEV must escalate only for a real product or architecture conflict, a material behavior/scope change, or a protected authorization. OWNER-only actions and deterministic release gates remain unchanged.
 
 | Name | Status | Purpose | Owner scope | Write scope | Delegation rule | Reports to | Can approve architecture | Can deploy | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| ARCHITECT CODEX | ACTIVE / ORCHESTRATOR | Audit the repository, decompose MASTER TASKs, select roles, coordinate work, review integration, and issue the final technical status | Whole MAXIBOT technical solution | May coordinate approved work; no product intent changes by itself | Selects the minimum sufficient team and owns all specialist routing | ARCHITECT SOL | YES, final technical decision inside Codex | May authorize a gated deployment plan; does not bypass QA or owner approval | Local technical Architect; not Product Owner |
-| DEV | ACTIVE | Backend, bot, Python, database, migrations, API, services, workers, business logic, and MAX integrations | Server/application implementation | Code, migrations, runtime implementation, and routine direct QA handoff for delegated work | Receives implementation tasks from the governing Architect; may submit a DEV_PROPOSAL for architecture changes; may send candidates directly to canonical QA | ARCHITECT SOL for product/architecture; QA directly for validation verdict | NO | Only through the project release gates | One working role; historical task duplication does not create another role |
-| WEBDEV | ACTIVE | maxibot.pro, landing, frontend, HTML/CSS/JS, browser flow, web UX, and web tracking implementation | Website and web-specific implementation | Web code only when explicitly delegated | Receives web tasks from ARCHITECT CODEX | ARCHITECT CODEX | NO | Only through the project release gates | Does not own backend or product architecture |
-| ДИРЕКТОЛОГ | ACTIVE / CONSULTATIVE | Yandex Direct, Metrika, goals, yclid, ClientID, UTM, offline conversions, attribution, and advertising diagnostics | Advertising interpretation and bounded related technical analysis | No advertising writes by default; no Direct/VK writes without explicit owner authorization | Gives analysis/proposals; is not implementation owner | ARCHITECT CODEX | NO | NO | Recommendations must distinguish evidence from inference |
-| QA / ТЕСТИРОВЩИК | ACTIVE / ADVISORY | Independent tests, regression, E2E, acceptance criteria, and findings | Advisory candidate validation | Tests, fixtures, smoke checks, and release tooling; no business-logic changes just to make a gate green | Reviews candidates received directly from DEV in the canonical QA thread when requested | DEV for routine handoff; ARCHITECT SOL / OWNER for product escalation | NO | NO | GO/NO_GO/NOT_RUN/TIMEOUT are informational; deterministic release gates decide readiness |
-| SYSADMIN | ACTIVE / INFRASTRUCTURE GATE | VPS, infrastructure, Docker, health, polling, duplicate-process checks, backups, errors, image architecture, and pre/post-deploy verification | Production operations only | Deployment tooling/configuration, rollback snapshots, health and platform guards; no feature or business-logic changes | ARCHITECT CODEX | NO | Only an Architect-authorized gated deployment | Not an architect, feature developer, QA replacement, release owner, or advertising operator |
+| ARCHITECT / ARCHITECT SOL | EXTERNAL / PRODUCT-SYSTEM ARCHITECT | Defines product intent, system architecture, approved task scope, constraints, and acceptance criteria | Product and system intent | Issues approved specifications; no repository edits by this role contract | Receives genuine product/architecture conflicts and completed technical handoff | OWNER | YES, product/system intent | NO | external ChatGPT project architect; ARCHITECT SOL is a compatibility alias |
+| DEV | ACTIVE / PRIMARY IMPLEMENTER | Backend, bot, Python, database, migrations, API, services, workers, business logic, and MAX integrations | Approved technical task and implementation | Code and tests within accepted scope; routine technical decisions; candidate preparation | Owns preflight through verified closeout; routes specialists and canonical QA only when required | ARCHITECT / ARCHITECT SOL for genuine product or architecture decisions; OWNER for protected approvals | NO, implements approved architecture | Only through project release gates and explicit authorization | DEV is the primary autonomous technical implementer; no separate ARCHITECT CODEX chat prerequisite |
+| WEBDEV | ACTIVE / OPTIONAL SPECIALIST | maxibot.pro, landing, frontend, HTML/CSS/JS, browser flow, web UX, and web tracking | Explicitly delegated web scope | Web code within delegated scope | Narrow direct handoff from DEV when web expertise is needed | DEV | NO | Only through project release gates | Does not own backend or product architecture |
+| ДИРЕКТОЛОГ | ACTIVE / CONSULTATIVE | Yandex Direct, Metrika, goals, yclid, ClientID, UTM, offline conversions, attribution, and advertising diagnostics | Advertising interpretation and bounded related technical analysis | No advertising writes by default; no Direct/VK writes without explicit OWNER authorization | Consulted only when campaign or attribution expertise is in scope | DEV; ARCHITECT / ARCHITECT SOL for product decisions | NO | NO | Recommendations distinguish evidence from inference |
+| QA / ТЕСТИРОВЩИК | ACTIVE / OPTIONAL INDEPENDENT GATE | Independent tests, regression, E2E, acceptance criteria, and findings | Candidate validation under applicable QA policy | Tests, fixtures, smoke checks, and QA tooling; no business-logic changes just to make a gate green | Existing canonical QA thread; DEV sends candidate and receives verdict directly when required | DEV for findings; ARCHITECT / ARCHITECT SOL or OWNER for product escalation | NO | NO | Required only when release/task policy requires; deterministic gates remain authoritative |
+| SYSADMIN | ACTIVE / OPTIONAL INFRASTRUCTURE GATE | VPS, infrastructure, Docker, health, polling, duplicate-process checks, backups, errors, image architecture, and pre/post-deploy verification | Infrastructure and deployment checks | Deployment tooling/configuration, rollback snapshots, health and platform guards within authorization | DEV routes only for real infrastructure, secret/runtime, incident, or deployment blocker | DEV; OWNER for protected production authorization | NO | Only as explicitly authorized by canonical release procedure | Not an architect, feature developer, or advertising operator |
+
+## Canonical Linear context by role
+
+Load only the relevant canonical project context for the current task. A document link is not proof that its contents were loaded. If Linear is unavailable, record the exact access failure and mark required context `NOT_VERIFIED`; do not invent role-specific documents.
+
+| Role | Canonical Linear context |
+|---|---|
+| ARCHITECT / ARCHITECT SOL | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [MAXIBOT release rules](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588) when release scope applies |
+| DEV | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1) for worker scope |
+| WEBDEV | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95) |
+| ДИРЕКТОЛОГ | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1) only for Ads Worker scope |
+| QA | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [QA](https://linear.app/bestuzhev/document/qa-7a34fcf9286c) |
+| SYSADMIN | [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [MAXIBOT release rules](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588) when deployment scope applies |
 
 ## Separate runtime subsystem
 
@@ -39,8 +39,7 @@ decisions, or perform Direct/VK writes.
 ## Role identity and task records
 
 The project may contain several historical Codex tasks with similar titles.
-They must not be counted as separate roles. The role is the ownership contract
-above; task selection is a coordination detail owned by ARCHITECT CODEX.
+They must not be counted as separate roles. The role is the ownership contract above; task selection is a coordination detail owned by DEV.
 
 ## Dynamic chat routing registry
 
@@ -87,19 +86,16 @@ CURRENT_STATUS=ACTIVE
 
 ## Cross-role lead and escalation rules
 
-`ARCHITECT SOL` назначает `LEAD_IMPLEMENTER` для multi-role задач. Lead
-implementer координирует narrow specialist handoffs, собирает unified candidate,
-направляет его в QA и закрывает техническую часть задачи. Примеры: backend-heavy
-→ DEV, frontend-heavy → WEBDEV.
+DEV ведёт multi-role задачу. Внешний `ARCHITECT / ARCHITECT SOL` может назвать
+`LEAD_IMPLEMENTER` только если это действительно нужно; иначе DEV остаётся lead.
+Lead координирует узкие specialist handoff'ы, собирает candidate, направляет его
+в QA и закрывает техническую часть задачи. Примеры: backend-heavy → DEV,
+frontend-heavy → WEBDEV.
 
 DEV и WEBDEV могут обмениваться прямыми implementation handoff'ами по уже
 утверждённой архитектуре. Они не могут самостоятельно переопределять product
 behavior, core architecture, attribution semantics или security policy. При
 необходимости существенного изменения возвращается `ARCHITECTURE_BLOCKER = YES`
-напрямую `ARCHITECT SOL`.
+напрямую внешнему `ARCHITECT / ARCHITECT SOL`.
 
-If an owner replaces a role chat, the latest owner-established matching
-project chat wins. If no current match exists, block routing; if multiple
-matches are ambiguous, block and report. Do not create a replacement chat or
-use an internal subagent. Historical chats remain preserved but never receive
-new tasks.
+Before optional specialist delegation, resolve an existing project chat using current project metadata. If unavailable or ambiguous, report `MANUAL_HANDOFF_REQUIRED` and continue independent work; do not create a replacement role chat. DEV may use bounded subagents for technical tasks when available, but they do not replace a required independent QA gate. Historical chats remain preserved.

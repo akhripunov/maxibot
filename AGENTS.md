@@ -26,8 +26,8 @@
 ## Role selection and orchestration
 
 - Initialize a new specialized chat with an explicit `ROLE=` from `docs/ROLE_REGISTRY.md`. A chat title does not select a role. Without a selected role, ordinary research and assistance are allowed; do not automatically start a specialist workflow. Keep one selected role for the chat; for a specialization change, recommend a new chat. Do not mix role histories.
-- `ARCHITECT CODEX` is the local technical architect/orchestrator; `ARCHITECT SOL` remains the external product/system architect. Preserve the existing `DEV`, `WEBDEV`, `ДИРЕКТОЛОГ`, `QA`, and `SYSADMIN` boundaries and DEV↔QA handoff in the registry and orchestration protocol.
-- `.codex/config.toml` sets Luna/Medium project defaults for the primary Codex and subagents. It is a default, not proof of the active runtime model; verify a new chat when that claim matters. Do not change global Codex settings or the `ARCHITECT SOL` product role.
+- `ARCHITECT` is the external ChatGPT project architect; `ARCHITECT SOL` is its compatibility alias. `DEV` is the primary autonomous technical implementer and task-state owner for approved work. No separate `ARCHITECT CODEX` chat or role is required. Preserve `WEBDEV`, `ДИРЕКТОЛОГ`, `QA`, and `SYSADMIN` boundaries and the direct DEV↔canonical-QA handoff. Escalate to ARCHITECT only for a real product or architecture conflict, or scope change.
+- `.codex/config.toml` sets Luna/Medium project defaults for the primary Codex and subagents. It is a default, not proof of the active runtime model; verify a new chat when that claim matters. Do not change global Codex settings or the external `ARCHITECT` product role.
 
 ## MAXIBOT release boundaries
 

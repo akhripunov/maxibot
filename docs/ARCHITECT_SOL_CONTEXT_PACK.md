@@ -1,6 +1,7 @@
-# MAXIBOT Architect Sol Context Pack V1
+# MAXIBOT external Architect Context Pack V1
 
-Read-only export for `ARCHITECT SOL`.
+Read-only export for the external ChatGPT `ARCHITECT`; `ARCHITECT SOL` is a
+compatibility alias for that project/system architect.
 
 This document describes the repository and the operational contracts that must
 be preserved when planning or reviewing MAXIBOT changes. It intentionally omits
@@ -430,6 +431,13 @@ Dangerous areas:
 34. Unit tests are necessary but do not establish production PASS alone.
 
 ## DEV role bootstrap
+
+DEV is the primary autonomous technical implementer and task owner for approved
+work. This bootstrap does not require a separate ARCHITECT CODEX chat. DEV
+resolves routine technical choices, implements and verifies the accepted scope,
+and escalates only a real product/system architecture conflict, scope change,
+or protected authorization. Optional specialists and canonical QA are routed
+directly when actual scope or an applicable gate requires them.
 
 After explicitly selecting `ROLE=DEV`, read in this order:
 
