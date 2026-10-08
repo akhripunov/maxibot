@@ -36,12 +36,14 @@
 - A task to implement alone does not authorize production apply. For protected or ambiguous actions, use the MAXIBOT authorization record and approval gates; never borrow a GPoint approval. Do not perform a production deploy for changes to `AGENTS.md`.
 - Release workflows are dispatched and monitored only through the authorized CLI/API or GitHub API/MCP workflow tools, never browser UI. Check for active runs before dispatch; do not duplicate, cancel, or rerun a release unnecessarily. The repository-scoped `maxibot-production` runner is for trusted release jobs only, never untrusted PR/fork jobs.
 
-## GitHub instruction publication
+## GitHub instruction publication — OWNER decision 2026-10-08
 
-- Prepare changes on an isolated branch from exact current `origin/main`; commit, push, open a PR, run required checks, then verify the result. Do not reset, switch, or update another active chat's branch.
-- Changes to autonomy, authority, security, approval gates, or release rules require explicit OWNER approval before merge; green CI alone is not approval. Do not bypass branch protection. Ordinary documentation changes use existing permissions and repository gates.
+- Once the OWNER has approved the task, DEV may publish scoped edits to `AGENTS.md`, Codex instructions, and role/bootstrap documents directly to exact current `origin/main` without a mandatory PR or separate approval per ordinary instruction commit, **only when current repository controls permit direct writes**. A PR is optional or used when technically required, not a general instruction-publication gate. Do not reset, switch, stash, overwrite, or update another active chat's branch/worktree.
+- Read the exact current main file/blob SHA and applicable policies before editing. Preserve concurrent changes, run relevant syntax, policy, security, frozen-path and independent QA gates where applicable, and record the exact published commit SHA. Never bypass branch protection or required reviews/checks; on a blocked direct write, stop and report a compliant alternative.
+- An explicit, scope-specific OWNER authorization is still required for material changes to agent authority/autonomy, safety, OWNER-only operations, release rules, protected paths, access controls and other protected policies. The decision to eliminate mandatory PRs is **not** blanket approval for unrelated protected changes or production apply. Preserve MAXIBOT-only exact-SHA/TASK_SCOPED_AUTO rules and all independent gates.
+- After publishing, verify `origin/main` via fresh readback; synchronize the corresponding Linear mirror/policy and safely refresh authorized Mac instructions without disturbing existing Codex chats. Prove actual role/profile/subagent/model loading separately; static config is not runtime proof. A push may trigger Prepare/read-only preflight but never authorizes production Deploy. No production Deploy for instruction-only changes.
 
 ## Task completion
 
 - Run relevant tests and the full applicable suite; run frozen-path and QA gates when affected. Distinguish code/test evidence from real device, production, and OWNER acceptance; report `NOT_VERIFIED` where evidence is missing.
-- Leave the task worktree clean with committed/pushed changes and a reviewable PR. Report changed files, verification, exact commit/PR, remaining gates, and production state. Never merge governance changes or deploy production without the required authorization.
+- Leave the task worktree clean with committed/published changes or report remaining files, exact commit/optional PR and blocking gates. Never perform protected policy changes without their scope-specific OWNER authorization or deploy production for instruction changes.
