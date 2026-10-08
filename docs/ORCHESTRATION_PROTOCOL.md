@@ -80,6 +80,72 @@ mechanism, configuration, or test abstraction, search for and reuse or extend
 the existing implementation. Do not create parallel architecture without an
 explicit Architect decision and recorded reason.
 
+## Autonomous Codex execution
+
+Once OWNER or ARCHITECT SOL has approved a task's scope and acceptance criteria,
+ARCHITECT CODEX or the assigned implementer carries it through implementation,
+tests, review, and fixes. The agent resolves ordinary reversible technical
+choices, answers routine questions from specialists, and does not ask OWNER to
+re-approve decisions already made. It continues until acceptance passes or a
+specific protected authorization, missing evidence, external dependency, or
+product/architecture decision objectively blocks progress.
+
+One primary agent is the default. Codex subagents may handle bounded technical
+tasks when that materially improves the result; they are not substitutes for a
+registered project-role chat or a required independent QA gate. The main agent
+owns technical decisions, resolves conflicts, integrates work, and verifies the
+complete result. Do not create or involve agents ceremonially.
+
+This autonomy does not grant new permission to deploy, change paid traffic,
+write to external providers, alter secrets/access controls, bypass frozen-path
+or QA gates, or expand an approved task. Existing owner-only and release gates
+remain controlling.
+
+An explicit OWNER task authorizes only the minimum implementation within its
+named scope, even when a task necessarily touches a protected path; the relevant
+frozen-path regression and independent gates still apply. Implementation-only
+requests do not authorize release. When the branch, worktree, HEAD, or baseline
+changes, re-run preflight before reusing a blocker or previous environment
+result. New direct OWNER instructions supersede unrelated unfinished task
+context; complete already-authorized reversible work before asking about a new
+decision.
+
+## Explicit role initialization for new Codex chats
+
+At the start of a specialized chat, select a role explicitly using a `ROLE=`
+marker for one role in `docs/ROLE_REGISTRY.md`: `ARCHITECT_CODEX`, `DEV`,
+`WEBDEV`, `DIRECTOLOG`, `QA`, or `SYSADMIN`. Do not infer the role from chat
+title, model, prior task history, or the person who opened the chat. With no
+selected role, ordinary research and assistance are allowed, but role-specific
+workflows and delegations do not start automatically.
+
+After role selection, read this protocol, the role registry, the selected
+role's applicable repository instructions, and only the relevant canonical
+Linear context. Keep role-specific histories separate and keep the role for
+the chat unless OWNER explicitly changes it. Recommend a new chat when
+specialization changes; never silently repurpose a role chat. `ARCHITECT SOL`
+continues as external product/system architect; this bootstrap does not assign
+or change that role.
+
+The supported project default is `gpt-6-luna` with `medium` reasoning for the
+primary Codex agent and subagents, configured in `.codex/config.toml`. Project
+config is loaded only when the repository is trusted and sets defaults; verify
+the active runtime model in a new chat rather than treating the file as proof.
+
+## Negative authorization scenarios
+
+- A request to edit or optimize an ad campaign without explicit action-specific
+  OWNER authorization is blocked; no campaign/provider write is attempted.
+- A change touching a frozen BOT/CHANNEL path without the required scoped
+  approval and regression evidence is blocked; no guard bypass is accepted.
+- A GPoint release approval presented for MAXIBOT (or vice versa) is rejected;
+  fetch and apply only the target repository's own authorization and evidence.
+- Production dispatch without the applicable exact-SHA or eligible,
+  unconsumed `TASK_SCOPED_AUTO` authorization and `READY_FOR_OWNER` evidence is
+  blocked before apply.
+- Missing real-device mobile smoke remains `BLOCKED`/`NOT_VERIFIED`; a unit
+  test or headless browser result cannot be reported as device acceptance.
+
 ## Minimum sufficient delegation and routing
 
 | Task type | Role(s) | QA required | Deployment possible | Final owner |
