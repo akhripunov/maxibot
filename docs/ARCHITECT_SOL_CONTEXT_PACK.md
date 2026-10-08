@@ -1,6 +1,7 @@
-# MAXIBOT Architect Sol Context Pack V1
+# MAXIBOT external Architect Context Pack V1
 
-Read-only export for `ARCHITECT SOL`.
+Read-only export for the external ChatGPT `ARCHITECT`; `ARCHITECT SOL` is a
+compatibility alias for that project/system architect.
 
 This document describes the repository and the operational contracts that must
 be preserved when planning or reviewing MAXIBOT changes. It intentionally omits
@@ -157,7 +158,9 @@ Safety invariants:
 - `scripts/ads_codex_worker_launchd.sh` and
   `scripts/ads_codex_worker_launchd_runtime.sh` — local worker wrappers.
 - `alembic/versions/` — database migrations; avoid for UI-only work.
-- `research/MAXIBOT_SINGLE_POLLER_RUNBOOK.md` — single-poller contract.
+- `tests/regression/test_single_poller_safety.py` and
+  `docker-compose*.yml` — executable single-poller contract; the topology and
+  current invariant are summarized in this context pack above.
 - `docs/ORCHESTRATION_PROTOCOL.md` — preflight, delegation, QA and release
   rules.
 - `docs/ROLE_REGISTRY.md` — canonical role ownership.
@@ -427,14 +430,22 @@ Dangerous areas:
 33. No secrets, raw contexts, cookies or PII in logs/handoffs.
 34. Unit tests are necessary but do not establish production PASS alone.
 
-## New Dev bootstrap
+## DEV role bootstrap
 
-Read in this order:
+DEV is the primary autonomous technical implementer and task owner for approved
+work. This bootstrap does not require a separate ARCHITECT CODEX chat. DEV
+resolves routine technical choices, implements and verifies the accepted scope,
+and escalates only a real product/system architecture conflict, scope change,
+or protected authorization. Optional specialists and canonical QA are routed
+directly when actual scope or an applicable gate requires them.
+
+After explicitly selecting `ROLE=DEV`, read in this order:
 
 1. `AGENTS.md`.
 2. `docs/ORCHESTRATION_PROTOCOL.md`.
 3. `docs/ROLE_REGISTRY.md`.
-4. `research/MAXIBOT_SINGLE_POLLER_RUNBOOK.md`.
+4. `tests/regression/test_single_poller_safety.py` and the relevant Compose
+   topology (`docker-compose.yml`, `docker-compose.vps.yml`).
 5. `app/bot/runtime.py` and `app/bot/menu.py`.
 6. `app/ads/service.py` and `scripts/ads_codex_worker.py`.
 7. `app/traffic/deep_link.py`, `attribution.py` and `metrica_sender.py`.

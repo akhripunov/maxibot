@@ -33,7 +33,10 @@ The registry is built over the existing tests, but a passing regression suite do
 
 The latest runtime delta was specifically added to coverage: promoting the clicked callback message MID to the canonical service panel and duplicate inbound message suppression are covered by `TC-BOT-006` and `TC-BOT-007`.
 
-The single-poller safety improvement is covered by `TC-OPS-001`, with the operational rule in `research/MAXIBOT_SINGLE_POLLER_RUNBOOK.md` and the mandatory project instruction in `AGENTS.md`.
+The single-poller safety improvement is covered by `TC-OPS-001` and
+`tests/regression/test_single_poller_safety.py`; the operational contract is
+documented in `docs/ARCHITECT_SOL_CONTEXT_PACK.md` and the mandatory project
+instruction in `AGENTS.md`.
 
 Manual MAX join/member confirmation remains `MANUAL` because it requires a dedicated MAX account/channel and owner approval.
 
