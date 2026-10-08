@@ -15,12 +15,22 @@ exact-SHA approval input. Release infrastructure и другие owner-only ка
 
 Процесс оборачивает существующий `scripts/release_prod.sh`; он остаётся единственной production-командой. Workflow не управляет Direct/VK кампаниями, бюджетом, ставками, объявлениями или `ADS_*` master flags.
 
-## Статус миграции хранения
+## Статус миграции хранения — подтверждён 07.10.2026
 
-Переход новых MAXIBOT Prepare bundles и Deploy evidence с Actions Artifacts на
-immutable GitHub Releases ещё не прошёл полный реальный Prepare и Deploy
-preflight. До фактического PASS цепочки статус **NOT VERIFIED**; наличие кода
-само по себе не доказывает, что Release становится immutable.
+**PASS / VERIFIED для проверенной цепочки MAXIBOT:** на SHA
+`44c19ab59571ccb663ebf5c6d4de49fa5a866239` завершены Prepare
+[#37631234823](https://github.com/akhripunov/maxibot/actions/runs/37631234823),
+automatic controller
+[#37632023233](https://github.com/akhripunov/maxibot/actions/runs/37632023233)
+и read-only preflight
+[#37632079388](https://github.com/akhripunov/maxibot/actions/runs/37632079388)
+со статусом `READY_FOR_OWNER`. Публичное состояние проверенных GitHub Releases:
+`draft=false`, `immutable=true`, published bundle/evidence asset с GitHub SHA-256
+digest. Подробности и ограничения proof — в текущем каноническом разделе
+[Правила релиза MAXIBOT](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588).
+Production apply для указанного SHA не выполнялся и не требуется только ради proof.
+Каждый **следующий** candidate независимо проходит immutable/identity/approval
+gates; эта запись не является бессрочным разрешением Deploy.
 
 Публикатор использует штатный workflow `GITHUB_TOKEN` (`contents: write`) для
 создания тега, черновика, загрузки bundle и публикации Release. После публикации
@@ -32,8 +42,7 @@ preflight. До фактического PASS цепочки статус **NOT 
 bundle без успешного Prepare и повторного immutable read-back. Внутренний receipt
 отражает только результаты CI/build/rehearsal и сам по себе не разрешает Deploy.
 Это требует включить repository immutable Releases пользователю с
-`Administration: write`; checksum и workflow token эту проверку не заменяют. До
-подтверждения нового маршрута не считать production release readiness доказанной.
+`Administration: write`; checksum и workflow token эту проверку не заменяют. Без успешных проверок нового конкретного кандидата не считать его production release readiness доказанной.
 
 ## Порядок для владельца
 
