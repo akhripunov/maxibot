@@ -89,6 +89,12 @@ class AgentPolicyContractTests(unittest.TestCase):
         self.assertTrue("unit tests" in lower, "unit-only production readiness block missing")
         self.assertTrue("research/maxibot_single_poller_runbook.md" not in lower, "broken runbook link remains")
 
+    def test_single_poller_sources_do_not_reference_missing_runbook(self) -> None:
+        audit = (ROOT / "qa/TEST_AUDIT.md").read_text().lower()
+        self.assertIn("tests/regression/test_single_poller_safety.py", audit)
+        self.assertIn("docs/architect_sol_context_pack.md", audit)
+        self.assertNotIn("research/maxibot_single_poller_runbook.md", audit)
+
 
 if __name__ == "__main__":
     unittest.main()
