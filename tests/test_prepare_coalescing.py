@@ -130,11 +130,13 @@ class PrepareCoalescingTests(unittest.TestCase):
         gate = "steps.coalesce.outputs.result == 'WINNER'"
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", workflow)
         self.assertLess(workflow.index("id: coalesce"), workflow.index("actions/setup-python"))
-        self.assertLess(workflow.index("id: coalesce"), workflow.index("Run complete MAXIBOT test suite"))
+        self.assertLess(workflow.index("id: coalesce"), workflow.index("Run V3 exact-candidate required test suite"))
         for expensive in (
             "Set deterministic Python runtime",
             "Pin Docker build version",
-            "Run complete MAXIBOT test suite",
+            "Plan MAXIBOT V3 from immutable production evidence",
+            "Run V3 exact-candidate required test suite",
+            "Enable BuildKit cross-run cache",
             "Build and verify canonical linux/amd64 candidate image",
             "Rehearse archive import in private Docker/containerd",
         ):
