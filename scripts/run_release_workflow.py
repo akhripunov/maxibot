@@ -208,6 +208,21 @@ def main() -> int:
         if (any(rehearsal.get(key) != value for key, value in required.items())
                 or str(manifest.get("prepare_run_attempt")) != prepare_attempt):
             raise RuntimeError("Prepare private Docker rehearsal receipt is missing or failed")
+        # The Prepare receipt is immutable, but a UI-only selection must
+        # prove unchanged backend sources again in the Deploy checkout.
+        test_scope = rehearsal.get("test_scope", "FULL")  # Old V2 receipts mean FULL.
+        if test_scope == "UI_ONLY":
+            from maxibot_impact_v3 import verify_plan
+            impact = rehearsal.get("impact_v3")
+            if not isinstance(impact, dict):
+                raise RuntimeError("UI_ONLY release missing immutable V3 impact evidence")
+            try:
+                assert verify_plan(impact, checkout, sha) == "UI_ONLY"
+            except (ValueError, OSError, AssertionError) as exc:
+                raise RuntimeError("V3 targeted Prepare scope was not independently verified") from exc
+        elif test_scope != "FULL":
+            raise RuntimeError("Unrecognized V3 regression coverage mode")
+        result["test_scope"] = test_scope
         archive_sha256 = checksum(archive)
         if (manifest.get("candidate_sha") != sha
                 or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID")
@@ -238,6 +253,12 @@ def main() -> int:
         preflight_started = time.monotonic()
         dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)
         result["preflight_evidence"] = safe_evidence(dry_output)
+        if test_scope == "UI_ONLY":
+            # Another release won after Prepare: do not enter production apply.
+            baseline = impact["production_sha"]
+            current = result["preflight_evidence"].get("CURRENT_PRODUCTION_SHA")
+            if current != baseline:
+                raise RuntimeError("V3 production baseline moved after targeted Prepare")
         result["stage_seconds"] = {"PREFLIGHT": round(time.monotonic() - preflight_started, 3)}
         if dry_code != 0 or "SAFE_TO_RELEASE=YES" not in dry_output or "DRY_RUN_RESULT=PASS" not in dry_output:
             if "NETWORK_UNAVAILABLE" in dry_output:
