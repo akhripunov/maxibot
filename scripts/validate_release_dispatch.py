@@ -157,6 +157,33 @@ def validate(values: dict[str, str], api_get=github_get,
         except (OSError, ValueError, AuthorizationError) as error:
             raise ValidationError(f"TASK_SCOPED_AUTO authorization is invalid: {error}") from None
 
+    if mode in {"production", "task-scoped-auto"}:
+        current_run_id = values.get("GITHUB_RUN_ID", "").strip()
+        deploy_runs = api_get(
+            f"actions/workflows/maxibot-deploy.yml/runs?branch=main&head_sha={sha}&per_page=100",
+            token,
+        )
+        observed_deploy_runs = deploy_runs.get("workflow_runs")
+        total_deploy_runs = deploy_runs.get("total_count")
+        if (not isinstance(observed_deploy_runs, list)
+                or isinstance(total_deploy_runs, bool)
+                or not isinstance(total_deploy_runs, int)
+                or total_deploy_runs != len(observed_deploy_runs)):
+            raise ValidationError("Candidate production run history is incomplete; reconcile before dispatch")
+        for run in observed_deploy_runs:
+            title = str(run.get("display_title", ""))
+            prior_apply_title = any(
+                title.startswith(f"MAXIBOT {prior_mode} {sha} by ")
+                for prior_mode in ("production", "task-scoped-auto")
+            )
+            if (run.get("head_sha") == sha
+                    and run.get("path") == ".github/workflows/maxibot-deploy.yml"
+                    and prior_apply_title
+                    and str(run.get("id", "")) != current_run_id):
+                raise ValidationError(
+                    "Candidate already has a production run; reconcile that exact run before another dispatch"
+                )
+
     runs = api_get(f"actions/workflows/{WORKFLOW}/runs?branch=main&head_sha={sha}&per_page=100", token)
     matching = [run for run in runs.get("workflow_runs", []) if run.get("head_sha") == sha]
     if not matching:

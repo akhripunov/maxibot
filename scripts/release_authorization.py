@@ -9,11 +9,17 @@ from pathlib import Path
 from typing import Any
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+OWNER_INSTRUCTION_ID_RE = re.compile(r"^OWNER_TASK_[A-Z0-9_]{8,96}$")
 AUTH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 REQUIRED_EXCLUSIONS = {
     "database", "migrations", "security", "secrets", "payments",
-    "ads", "paid_traffic", "release_infrastructure",
+    "ads", "paid_traffic",
+}
+RELEASE_INFRASTRUCTURE_GATES = {
+    "exact_candidate", "complete_scope", "prepare_provenance", "immutable_artifact",
+    "security_review", "preflight", "rollback_readiness", "worker_compatibility",
+    "postdeploy_health", "reconciliation",
 }
 OWNER_ONLY_PREFIXES = (
     ".github/", "alembic/", "migrations/", "db/", "deploy/", "docker/",
@@ -30,8 +36,50 @@ class AuthorizationError(ValueError):
     pass
 
 
+def owner_task_commitment(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the canonical task/risk scope bound to the OWNER instruction."""
+    return {
+        "schema": 1,
+        "authorization_id": record.get("authorization_id"),
+        "project": record.get("project"),
+        "environment": record.get("environment"),
+        "source_instruction_identifier": record.get("source_instruction_identifier"),
+        "owner_task_reference": record.get("owner_task_reference"),
+        "owner_instruction_scope": record.get("owner_instruction_scope"),
+        "production_baseline_sha": record.get("production_baseline_sha"),
+        "candidate_selection_rule": record.get("candidate_selection_rule"),
+        "task": record.get("task"),
+        "allowed_paths": sorted(record.get("allowed_paths", [])),
+        "allowed_operations": sorted(record.get("allowed_operations", [])),
+        "preauthorized_commits": sorted(record.get("preauthorized_commits", [])),
+        "preauthorized_paths": sorted(record.get("preauthorized_paths", [])),
+        "acceptance_criteria": sorted(record.get("acceptance_criteria", [])),
+        "exclusions": sorted(record.get("exclusions", [])),
+        "risk_contracts": record.get("risk_contracts", {}),
+    }
+
+
+def owner_task_commitment_sha256(record: dict[str, Any]) -> str:
+    canonical = json.dumps(owner_task_commitment(record), sort_keys=True,
+                           separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def verify_owner_task_record(record: dict[str, Any]) -> dict[str, str]:
+    """Verify the direct OWNER instruction identity and its committed scope."""
+    identifier = record.get("source_instruction_identifier", "")
+    if not isinstance(identifier, str) or not OWNER_INSTRUCTION_ID_RE.fullmatch(identifier):
+        raise AuthorizationError("Direct OWNER source instruction identifier is missing or invalid")
+    expected_commitment = owner_task_commitment_sha256(record)
+    if record.get("owner_task_commitment_sha256") != expected_commitment:
+        raise AuthorizationError("Direct OWNER task scope commitment does not match the durable record")
+    return {"source_instruction_identifier": identifier,
+            "commitment_sha256": expected_commitment}
+
+
 def _migration_contract(record: dict[str, Any], path: str) -> dict[str, Any]:
-    contract = record.get("risk_contracts", {}).get("database_migration")
+    risk_contracts = record.get("risk_contracts")
+    contract = risk_contracts.get("database_migration") if isinstance(risk_contracts, dict) else None
     gates = {"migration_rehearsal", "backup_before_migration", "rollback_readiness", "postdeploy_health"}
     if (not isinstance(contract, dict) or not re.fullmatch(r"alembic/versions/[^/]+\.py", path)
             or path not in contract.get("allowed_paths", [])
@@ -97,6 +145,46 @@ def _owner_only(path: str) -> bool:
                    for prefix in OWNER_ONLY_PREFIXES))
 
 
+def _release_infrastructure(path: str) -> bool:
+    normalized = path.lower()
+    if (normalized.startswith(".github/") or normalized.startswith("docs/release/")
+            or normalized in {"docs/release_authorization.md", "docs/release_automation.md"}):
+        return True
+    if not normalized.startswith("scripts/"):
+        return False
+    return bool(re.search(r"(?:release|prepare|ghcr|oci|artifact|coalesc|worker.*guard)",
+                          normalized.removeprefix("scripts/")))
+
+
+def _release_infrastructure_contract(record: dict[str, Any], path: str) -> None:
+    risk_contracts = record.get("risk_contracts")
+    contract = risk_contracts.get("release_infrastructure") if isinstance(risk_contracts, dict) else None
+    required_operations = {"integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"}
+    contract_paths = contract.get("allowed_paths") if isinstance(contract, dict) else None
+    record_paths = record.get("allowed_paths")
+    operations = contract.get("allowed_operations") if isinstance(contract, dict) else None
+    gates = contract.get("required_gates") if isinstance(contract, dict) else None
+    conditions = contract.get("stop_conditions") if isinstance(contract, dict) else None
+    if (not isinstance(contract, dict)
+            or not isinstance(contract_paths, list) or path not in contract_paths
+            or not isinstance(record_paths, list) or not _in_scope(path, record_paths)
+            or contract.get("baseline_sha") != record.get("production_baseline_sha")
+            or not isinstance(contract.get("risk_description"), str)
+            or len(contract["risk_description"].strip()) < 20
+            or not isinstance(operations, list)
+            or not required_operations.issubset(set(operations))
+            or not isinstance(gates, list)
+            or not RELEASE_INFRASTRUCTURE_GATES.issubset(set(gates))
+            or not isinstance(contract.get("backup_plan"), str)
+            or len(contract["backup_plan"].strip()) < 20
+            or not isinstance(contract.get("rollback_plan"), str)
+            or len(contract["rollback_plan"].strip()) < 20
+            or not isinstance(conditions, list)
+            or len(conditions) < 2
+            or any(not isinstance(item, str) or len(item.strip()) < 8 for item in conditions)):
+        raise AuthorizationError("release infrastructure requires a complete explicit pre-approved risk contract")
+
+
 def validate_task_authorization(*, record: dict[str, Any], project: str,
                                 authorization_id: str, candidate_sha: str,
                                 current_main_sha: str, production_sha: str,
@@ -112,19 +200,38 @@ def validate_task_authorization(*, record: dict[str, Any], project: str,
         raise AuthorizationError("authorization ID does not match durable record")
     if record.get("project") != project or record.get("authorization_mode") != "TASK_SCOPED_AUTO":
         raise AuthorizationError("Authorization project or mode does not match")
+    if record.get("environment") != "production":
+        raise AuthorizationError("Task authorization is not bound to the production environment")
     if record.get("state") != "ACTIVE" or record.get("revoked") is not False or record.get("consumed") is not False:
         raise AuthorizationError("Task authorization is revoked, consumed, or inactive")
-    if not isinstance(record.get("source_reference"), str) or not re.match(
-            r"^(linear:|https://linear\.app/)", record["source_reference"].strip(), re.IGNORECASE):
-        raise AuthorizationError("A verifiable Linear owner-instruction reference is required")
+    source_instruction = verify_owner_task_record(record)
+    if "selected_candidate_sha" in record:
+        raise AuthorizationError("Durable authorization must not pin a candidate SHA before integration")
+    if any(isinstance(contract, dict) and "selected_candidate_sha" in contract
+           for contract in (record.get("risk_contracts") or {}).values()):
+        raise AuthorizationError("Durable authorization risk contracts must not pin a stale candidate SHA")
+    if record.get("candidate_selection_rule") != "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE":
+        raise AuthorizationError("Unsupported candidate selection rule")
+    if not isinstance(record.get("owner_task_reference"), str) or len(record["owner_task_reference"].strip()) < 20:
+        raise AuthorizationError("Original OWNER release task reference is required")
     if not isinstance(record.get("task"), str) or not record["task"].strip():
         raise AuthorizationError("Task description is required")
     criteria = record.get("acceptance_criteria")
     if not isinstance(criteria, list) or not criteria or any(not isinstance(x, str) or not x.strip() for x in criteria):
         raise AuthorizationError("Acceptance criteria are required")
+    operations = record.get("allowed_operations")
+    if not isinstance(operations, list) or not {"integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"}.issubset(set(operations)):
+        raise AuthorizationError("Full release operations are not authorized by the OWNER task")
     exclusions = record.get("exclusions")
     if not isinstance(exclusions, list) or not REQUIRED_EXCLUSIONS.issubset(set(exclusions)):
         raise AuthorizationError("Required owner-only exclusions are missing")
+    risk_contracts = record.get("risk_contracts")
+    if not isinstance(risk_contracts, dict):
+        risk_contracts = {}
+    if risk_contracts.get("release_infrastructure") and "release_infrastructure" in exclusions:
+        raise AuthorizationError("Release infrastructure scope conflicts with its exclusion")
+    if not risk_contracts.get("release_infrastructure") and "release_infrastructure" not in exclusions:
+        raise AuthorizationError("Release infrastructure must be excluded without its risk contract")
     allowed = record.get("allowed_paths")
     if not isinstance(allowed, list) or not allowed or any(
             not isinstance(x, str) or not x.strip() or x.startswith("/") or ".." in x.split("/")
@@ -142,12 +249,15 @@ def validate_task_authorization(*, record: dict[str, Any], project: str,
     for path in changed_paths:
         if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/"):
             raise AuthorizationError("Candidate diff contains an invalid path")
+        if path.startswith("alembic/versions/"):
+            if path not in allowed:
+                raise AuthorizationError("Migration path is outside the durable authorized scope")
+            _migration_contract(record, path)
+            continue
+        if _release_infrastructure(path):
+            _release_infrastructure_contract(record, path)
+            continue
         if _owner_only(path):
-            if path.startswith("alembic/versions/"):
-                if path not in allowed:
-                    raise AuthorizationError("Migration path is outside the durable authorized scope")
-                _migration_contract(record, path)
-                continue
             raise AuthorizationError("Candidate path is owner-only and cannot use TASK_SCOPED_AUTO")
         if not _in_scope(path, allowed):
             raise AuthorizationError(f"Candidate path is outside authorized scope: {path}")
@@ -155,7 +265,10 @@ def validate_task_authorization(*, record: dict[str, Any], project: str,
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return {"authorization_id": authorization_id, "candidate_sha": candidate_sha,
-            "production_baseline_sha": baseline, "record_sha256": record_digest,
+            "production_baseline_sha": baseline,
+            "source_instruction_identifier": source_instruction["source_instruction_identifier"],
+            "owner_task_commitment_sha256": source_instruction["commitment_sha256"],
+            "record_sha256": record_digest,
             "changed_paths": ",".join(sorted(set(changed_paths)))}
 
 
@@ -197,11 +310,36 @@ def candidate_scope_diff(repo_root: Path, authorization_id: str,
         if authorization_object != candidate_object:
             raise AuthorizationError("Durable authorization record changed after it was added")
         scope_changes = [item for item in all_changes if item[3] != path]
+        authorization_index = commits.index(authorization_commit)
+        prepared_before_authorization = [item for item in scope_changes
+                                         if commits.index(item[0]) < authorization_index]
+        try:
+            record = json.loads(subprocess.check_output(
+                ["git", "show", f"{candidate_sha}:{path}"], cwd=repo_root, text=True, timeout=20))
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as error:
+            raise AuthorizationError("Durable authorization record is unreadable") from error
+        actual_prepared_commits = sorted({item[0] for item in prepared_before_authorization})
+        actual_prepared_paths = sorted({item[3] for item in prepared_before_authorization})
+        declared_prepared_commits = record.get("preauthorized_commits")
+        declared_prepared_paths = record.get("preauthorized_paths")
+        if (not isinstance(record, dict) or not isinstance(declared_prepared_commits, list)
+                or not isinstance(declared_prepared_paths, list)
+                or not isinstance(record.get("allowed_paths"), list)):
+            raise AuthorizationError("Pre-authorization scope record is incomplete")
+        declared_prepared_commits = sorted(declared_prepared_commits)
+        declared_prepared_paths = sorted(declared_prepared_paths)
+        if (any(item[1] for item in prepared_before_authorization)
+                or actual_prepared_commits != declared_prepared_commits
+                or actual_prepared_paths != declared_prepared_paths
+                or any(not _in_scope(item, record.get("allowed_paths", []))
+                       for item in actual_prepared_paths)):
+            raise AuthorizationError("Pre-authorization candidate history is not exactly listed in the release task record")
         for commit, _merge, _status, _changed in scope_changes:
             if commit == authorization_commit:
                 raise AuthorizationError("Durable authorization record must precede every implementation change")
-            subprocess.run(["git", "merge-base", "--is-ancestor", authorization_commit, commit],
-                           cwd=repo_root, check=True, capture_output=True, timeout=20)
+            if commits.index(commit) > authorization_index:
+                subprocess.run(["git", "merge-base", "--is-ancestor", authorization_commit, commit],
+                               cwd=repo_root, check=True, capture_output=True, timeout=20)
         if not scope_changes:
             raise AuthorizationError("Candidate has no implementation changes beyond the authorization record")
         changed_paths = subprocess.check_output(

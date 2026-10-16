@@ -33,7 +33,7 @@ def main() -> int:
             "org.opencontainers.image.source-sha": sha,
             "org.maxibot.release.sha": sha,
         }
-        if (manifest.get("schema") != "MAXIBOT_PREPARED_IMAGE_V1"
+        if (manifest.get("schema") not in {"MAXIBOT_PREPARED_IMAGE_V1", "MAXIBOT_PREPARED_IMAGE_V2"}
                 or manifest.get("candidate_sha") != sha
                 or manifest.get("prepare_run_id") != run_id
                 or str(manifest.get("prepare_run_attempt")) != attempt
@@ -41,6 +41,14 @@ def main() -> int:
                 or manifest.get("labels") != expected_labels
                 or manifest.get("archive_sha256") != actual_hash):
             raise ValueError("prepared image manifest/archive provenance mismatch")
+        if manifest.get("schema") == "MAXIBOT_PREPARED_IMAGE_V2":
+            try:
+                from scripts.maxibot_ghcr import validate_oci_image
+            except ModuleNotFoundError:
+                from maxibot_ghcr import validate_oci_image
+            validate_oci_image(manifest, sha, run_id, attempt)
+            if manifest.get("config_digest") != manifest.get("image_id"):
+                raise ValueError("GHCR config digest differs from archive identity")
         image = manifest.get("image", "")
         if image != f"maxibot-vps-api:{sha}":
             raise ValueError("prepared image tag does not match candidate SHA")

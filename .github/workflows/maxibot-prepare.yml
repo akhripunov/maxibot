@@ -28,17 +28,42 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
+  coalesce:
+    # Keep the bounded quiet wait on the trusted MAXIBOT Mac runner. If this
+    # runner is offline, the paid Ubuntu Prepare remains skipped.
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, macOS, maxibot-production]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.coalesce.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Wait for a quiet main and verify the exact candidate
+        id: coalesce
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/prepare_coalescing.py
+
   prepare:
     # This job needs a write-capable GITHUB_TOKEN to publish the immutable
     # Release. Never execute a branch-selected workflow with that permission.
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && needs.coalesce.result == 'success' && needs.coalesce.outputs.result == 'WINNER'
+    needs: coalesce
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
-      coalescing: ${{ steps.coalesce.outputs.result }}
+      coalescing: ${{ needs.coalesce.outputs.result }}
     permissions:
       contents: write
       actions: read
+      packages: write
     env:
       CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
       OWNER_APPROVED_TASK: ${{ inputs.owner_approved_task }}
@@ -53,28 +78,43 @@ jobs:
         with:
           ref: ${{ inputs.candidate || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Wait for a quiet main and verify the exact candidate
-        id: coalesce
+      - name: Verify exact current main SHA
+        if: needs.coalesce.outputs.result == 'WINNER'
         env:
           CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/prepare_coalescing.py
-
-      - name: Verify exact current main SHA
-        if: steps.coalesce.outputs.result == 'WINNER'
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          git fetch origin main --quiet
-          test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          candidate_sha = os.environ["CANDIDATE_SHA"]
+          repository = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repository}/git/ref/heads/main",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=15) as response:
+              main_sha = json.load(response)["object"]["sha"]
+          if main_sha != candidate_sha:
+              raise SystemExit("candidate is no longer current main")
+          PY
           echo "EXACT_SHA=PASS ($CANDIDATE_SHA)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set deterministic Python runtime
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -82,7 +122,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Validate patch and frozen paid-traffic paths
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         id: frozen
         run: |
           set -euo pipefail
@@ -103,7 +143,7 @@ jobs:
           echo "FROZEN_PATH_GUARD=PASS" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Plan MAXIBOT V3 from immutable production evidence
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         id: impact
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -112,7 +152,7 @@ jobs:
           python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --output "$RUNNER_TEMP/maxibot-v3-impact.json"
 
       - name: Install isolated test dependencies
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         run: |
           set -euo pipefail
           python3 - <<'PY' > "$RUNNER_TEMP/maxibot-test-requirements.txt"
@@ -125,7 +165,7 @@ jobs:
           python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/maxibot-test-requirements.txt"
 
       - name: Pin Docker build version; rehearse production store separately
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70
         with:
           version: v29.1.3
@@ -134,18 +174,20 @@ jobs:
             {"features":{"containerd-snapshotter":false}}
 
       - name: Run V3 exact-candidate required test suite
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         id: tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --run-tests "$RUNNER_TEMP/maxibot-v3-impact.json"
+        run: |
+          python3 -B -m unittest tests.test_unified_release_v1
+          python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --run-tests "$RUNNER_TEMP/maxibot-v3-impact.json"
 
       - name: Enable BuildKit cross-run cache (no image identity reuse)
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and verify canonical linux/amd64 candidate image
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         id: image
         env:
           IMAGE: maxibot-vps-api:${{ inputs.candidate || github.sha }}
@@ -197,8 +239,21 @@ jobs:
           echo "IMAGE_ARCHIVE_SHA256=$ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
           echo "LINUX_AMD64_CANDIDATE=PASS" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Authenticate trusted MAXIBOT Prepare for GHCR publication
+        if: needs.coalesce.outputs.result == 'WINNER'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable image manifest digest
+        if: needs.coalesce.outputs.result == 'WINNER'
+        env:
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: python3 scripts/publish_maxibot_ghcr.py
+
       - name: Rehearse archive import in private Docker/containerd
-        if: steps.coalesce.outputs.result == 'WINNER'
+        if: needs.coalesce.outputs.result == 'WINNER'
         id: rehearsal
         env:
           IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-image/maxibot-image-${{ inputs.candidate || github.sha }}.tar.gz
@@ -213,7 +268,7 @@ jobs:
           IMAGE_STATUS: ${{ steps.image.outcome }}
           FROZEN_STATUS: ${{ steps.frozen.outcome }}
           REHEARSAL_STATUS: ${{ steps.rehearsal.outcome }}
-          COALESCING_RESULT: ${{ steps.coalesce.outputs.result }}
+          COALESCING_RESULT: ${{ needs.coalesce.outputs.result }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -272,14 +327,14 @@ jobs:
           PY
 
       - name: Publish immutable Prepare Release bundle
-        if: github.ref == 'refs/heads/main' && job.status == 'success' && steps.coalesce.outputs.result == 'WINNER'
+        if: github.ref == 'refs/heads/main' && job.status == 'success' && needs.coalesce.outputs.result == 'WINNER'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/release_assets.py publish-prepare
 
   publish:
-    needs: prepare
-    if: always() && github.ref == 'refs/heads/main' && needs.prepare.result != 'cancelled' && needs.prepare.outputs.coalescing != 'SUPERSEDED'
+    needs: [coalesce, prepare]
+    if: always() && github.ref == 'refs/heads/main' && needs.coalesce.result == 'success' && needs.coalesce.outputs.result == 'WINNER' && needs.prepare.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:

@@ -127,9 +127,18 @@ class PrepareCoalescingTests(unittest.TestCase):
 
     def test_all_expensive_prepare_steps_are_gated_before_execution(self):
         workflow = (ROOT / ".github" / "workflows" / "maxibot-prepare.yml").read_text()
-        gate = "steps.coalesce.outputs.result == 'WINNER'"
+        gate = "needs.coalesce.outputs.result == 'WINNER'"
+        coalesce = workflow[workflow.index("  coalesce:"):workflow.index("  prepare:")]
+        prepare = workflow[workflow.index("  prepare:"):workflow.index("  publish:")]
+        self.assertIn("runs-on: [self-hosted, macOS, maxibot-production]", coalesce)
+        self.assertIn("permissions:\n      contents: read", coalesce)
+        self.assertNotIn("GHCR", coalesce)
+        self.assertNotIn("LINEAR_API_KEY", coalesce)
+        self.assertIn("needs: coalesce", prepare)
+        self.assertIn("if: github.ref == 'refs/heads/main' && needs.coalesce.result == 'success'", prepare)
+        self.assertNotIn("python3 scripts/prepare_coalescing.py", prepare)
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'push' }}", workflow)
-        self.assertLess(workflow.index("id: coalesce"), workflow.index("actions/setup-python"))
+        self.assertLess(workflow.index("  coalesce:"), workflow.index("actions/setup-python"))
         self.assertLess(workflow.index("id: coalesce"), workflow.index("Run V3 exact-candidate required test suite"))
         for expensive in (
             "Set deterministic Python runtime",
@@ -145,10 +154,12 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertIn("github.event.workflow_run.head_sha == github.sha", (
             ROOT / ".github" / "workflows" / "maxibot-auto-preflight.yml"
         ).read_text())
-        publish_if = workflow[workflow.index("needs: prepare"):workflow.index("runs-on: ubuntu-latest", workflow.index("needs: prepare"))]
+        publish_if = workflow[workflow.index("  publish:"):workflow.index("runs-on: ubuntu-latest", workflow.index("  publish:"))]
         self.assertIn("always() && github.ref == 'refs/heads/main'", publish_if)
-        self.assertIn("needs.prepare.outputs.coalescing != 'SUPERSEDED'", publish_if)
+        self.assertIn("needs.coalesce.outputs.result == 'WINNER'", publish_if)
+        self.assertIn("needs.coalesce.result == 'success'", publish_if)
         self.assertIn("needs.prepare.result != 'cancelled'", publish_if)
+        self.assertIn("options: [prepared, ghcr-oci, archive]", (ROOT / ".github" / "workflows" / "maxibot-deploy.yml").read_text())
         dispatch_validator = (ROOT / "scripts" / "validate_release_dispatch.py").read_text()
         self.assertIn("if main_sha != sha:", dispatch_validator)
         self.assertIn("current origin/main SHA", dispatch_validator)

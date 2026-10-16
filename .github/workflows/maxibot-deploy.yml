@@ -46,6 +46,12 @@ on:
         description: 'Durable TASK_SCOPED_AUTO authorization ID; required only for that mode'
         required: false
         type: string
+      image_transport:
+        description: 'Use the immutable Prepare transport, or explicitly select the already verified archive fallback for a GHCR receipt'
+        required: true
+        default: prepared
+        type: choice
+        options: [prepared, ghcr-oci, archive]
 
       reconciles_deploy_run_id:
         description: 'Exact previous Deploy run whose failed publication is being reconciled (publication-recovery only)'
@@ -159,6 +165,7 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify assigned runner before tools, bundle, or production checks
         env:
@@ -213,6 +220,8 @@ jobs:
           IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
           IMAGE_RESULT: ${{ runner.temp }}/maxibot-prepared-image/maxibot-prepare-result.json
+          IMAGE_TRANSPORT: ${{ inputs.image_transport }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
           CACHE_PREVENTED_DOWNLOAD: ${{ steps.bundle.outputs.cache_prevented_download }}
           BUNDLE_DOWNLOAD_SECONDS: ${{ steps.bundle.outputs.bundle_download_seconds }}
           GITHUB_TOKEN: ${{ github.token }}

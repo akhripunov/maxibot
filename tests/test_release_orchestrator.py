@@ -6,9 +6,10 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-import release_orchestrator as orchestrator
-import run_release_workflow
-from validate_release_dispatch import ValidationError
+import release_orchestrator as orchestrator  # noqa: E402
+import run_release_workflow  # noqa: E402
+from release_authorization import owner_task_commitment_sha256  # noqa: E402
+from validate_release_dispatch import ValidationError  # noqa: E402
 
 SHA = "a" * 40
 
@@ -93,6 +94,29 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         self.assertEqual(call[2]["inputs"]["prepare_run_attempt"], "2")
         self.assertEqual(call[2]["inputs"]["orchestrator_run_id"], "987")
 
+    def test_authorization_lookup_does_not_query_linear(self):
+        authorization_id = "maxibot-task-2026-10-16-001"
+        record_dir = self.root / ".release-authorizations"
+        record_dir.mkdir()
+        (record_dir / f"{authorization_id}.json").write_text("{}", encoding="utf-8")
+        api_calls = []
+
+        class StateAPI:
+            def get(self, route):
+                api_calls.append(route)
+                raise orchestrator.APIError(404)
+
+        with patch.object(orchestrator, "candidate_scope_diff", return_value=["app/bot/menu.py"]), \
+             patch.object(orchestrator, "validate_task_authorization", return_value={
+                 "owner_task_commitment_sha256": "c" * 64,
+             }):
+            selected = orchestrator._find_task_authorization(self.root, SHA, StateAPI())
+
+        self.assertEqual(selected["authorization_id"], authorization_id)
+        self.assertEqual(selected["ambiguous"], "false")
+        self.assertTrue(api_calls)
+        self.assertTrue(all("linear" not in route.lower() for route in api_calls))
+
     def test_failed_or_untrusted_prepare_never_dispatches(self):
         for overrides in ({"conclusion": "failure"}, {"head_branch": "feature"},
                           {"head_sha": "c" * 40}, {"status": "in_progress"},
@@ -129,9 +153,9 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         self.assertFalse(any(c[0] == "POST" and c[1].endswith("/dispatches") for c in self.api.calls))
 
     def test_mutable_and_draft_release_are_rejected(self):
-        for patch in ({"immutable": False}, {"draft": True}):
+        for release_override in ({"immutable": False}, {"draft": True}):
             api = FakeAPI()
-            api.release_patch = patch
+            api.release_patch = release_override
             with self.subTest(patch=patch), self.assertRaisesRegex(orchestrator.OrchestrationError, "immutable"):
                 orchestrator.dispatch_prepare(event(), api, repo_root=self.root, migration="0098_test")
 
@@ -172,16 +196,21 @@ class ReleaseOrchestratorTests(unittest.TestCase):
     def test_preflight_authorization_requires_no_claim_but_task_deploy_requires_exact_claim(self):
         authorization_id = "maxibot-task-2026-10-16-001"
         record = {
-            "schema_version": 3, "project": "maxibot",
+            "schema_version": 3, "project": "maxibot", "environment": "production",
             "authorization_mode": "TASK_SCOPED_AUTO", "authorization_id": authorization_id,
             "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
-            "source_reference": "linear:ME-31/owner-instruction",
+            "source_instruction_identifier": "OWNER_TASK_UNIFIED_RELEASE_V1_2026_10_16",
+            "source_issue_identifier": "ME-37", "source_comment_id": "00000000-0000-4000-8000-000000000001",
+            "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+            "owner_task_reference": "OWNER release task: complete the scoped MAXIBOT release after required gates.",
             "production_baseline_sha": "d" * 40, "task": "Bounded product task",
+            "allowed_operations": ["integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"],
             "allowed_paths": ["app/bot/menu.py"], "acceptance_criteria": ["menu works"],
             "exclusions": ["database", "migrations", "security", "secrets", "payments",
                            "ads", "paid_traffic", "release_infrastructure"],
             "state": "ACTIVE", "revoked": False, "consumed": False,
         }
+        record["owner_task_commitment_sha256"] = owner_task_commitment_sha256(record)
         claim_ref = "git/ref/tags/maxibot-task-auth/" + authorization_id + "/claimed"
         absent = ValidationError("GitHub release provenance request failed (HTTP 404)")
 
