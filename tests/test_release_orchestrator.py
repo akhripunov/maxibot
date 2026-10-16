@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-import release_orchestrator as orchestrator
-import run_release_workflow
+import release_orchestrator as orchestrator  # noqa: E402
+import run_release_workflow  # noqa: E402
 from release_authorization import owner_task_commitment_sha256  # noqa: E402
-from validate_release_dispatch import ValidationError
+from validate_release_dispatch import ValidationError  # noqa: E402
 
 SHA = "a" * 40
 

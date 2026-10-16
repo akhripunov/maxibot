@@ -8,7 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from release_authorization import (AuthorizationError, candidate_scope_diff,
+from release_authorization import (AuthorizationError, candidate_scope_diff,  # noqa: E402
                                    owner_task_commitment_sha256,
                                    validate_task_authorization,
                                    assert_task_scoped_no_migration)  # noqa: E402

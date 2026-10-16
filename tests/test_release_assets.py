@@ -303,7 +303,6 @@ def test_checksum_helper_streams_file(tmp_path):
 
 def test_evidence_download_passes_asset_size_to_bounded_range_reader(monkeypatch, tmp_path):
     import importlib
-    import sys
 
     monkeypatch.syspath_prepend(str(release_assets.Path(__file__).resolve().parents[1] / "scripts"))
     cache = importlib.import_module("prepared_artifact_cache")
