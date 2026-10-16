@@ -16,7 +16,7 @@ import urllib.request
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset
 from release_authorization import (AuthorizationError, authorization_state_ref,
-                                   candidate_scope_diff, record_path,
+                                   candidate_scope_diff,
                                    validate_task_authorization)
 
 REPOSITORY = "akhripunov/maxibot"
@@ -132,7 +132,8 @@ def _find_task_authorization(repo_root: Path, candidate_sha: str, api) -> dict[s
             # Invalid/stale records cannot authorize a release; absent authorization remains exact-SHA only.
             continue
     if len(matches) == 1:
-        return {"authorization_id": matches[0][0], "ambiguous": "false"}
+        return {"authorization_id": matches[0][0], "ambiguous": "false",
+                "owner_task_commitment_sha256": matches[0][1]["owner_task_commitment_sha256"]}
     return {"authorization_id": "", "ambiguous": str(len(matches) > 1).lower()}
 
 

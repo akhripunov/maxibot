@@ -3,18 +3,17 @@
 ## Два режима разрешения выпуска
 
 Актуальные условия: [Release authorization modes](RELEASE_AUTHORIZATION.md).
-По умолчанию владелец подтверждает подготовленный exact SHA. Конкретное
-поручение владельца «исправь [задачу] и выкатывай» разрешает один
-`TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации
-фиксируется schema-v3 durable authorization record. После exact-SHA Prepare
-existing controller перепроверяет baseline/scope, атомарно claim-ит разрешение
-и вызывает существующий Deploy workflow. Этот Deploy выполняет read-only
-preflight непосредственно перед Apply; отдельный обязательный preflight-run не
-создаётся. Без разрешения сохраняется exact-SHA approval path. Release infrastructure и
-неподдержанные owner-only категории остаются за отдельным exact-SHA approval;
-DB-миграция допускается только с конкретным риск-контрактом и всеми штатными
-миграционными gates. Runner может штатно ждать в `Queued`; readiness check
-остаётся fail-closed.
+OWNER task, прямо разрешающее полный выпуск подготовленных изменений до
+production, является одноразовой авторизацией на штатный цикл в границах
+scope и перечисленных рисков. Финальный SHA определяется после интеграции. До
+изменений фиксируется schema-v3 durable authorization record. Разработка без
+поручения о выпуске не разрешает Deploy. После exact-SHA Prepare controller
+повторно проверяет baseline, полный scope и одноразовость, атомарно claim-ит
+authorization и вызывает тот же Deploy workflow в `task-scoped-auto` режиме,
+без промежуточного запроса OWNER. Read-only preflight проходит внутри Deploy
+перед Apply. Критичные категории допускаются только при явном risk contract в
+исходном OWNER release task и durable record; без контракта выпуск блокируется.
+Runner может штатно ждать в `Queued`; readiness check остаётся fail-closed.
 Подробности: [Release authorization modes](RELEASE_AUTHORIZATION.md).
 
 Процесс оборачивает существующий `scripts/release_prod.sh`; он остаётся единственной production-командой. Workflow не управляет Direct/VK кампаниями, бюджетом, ставками, объявлениями или `ADS_*` master flags.
@@ -51,7 +50,7 @@ bundle без успешного Prepare и повторного immutable read-
 ## Порядок для владельца
 
 1. Dev отправляет commit в `origin/main`. GitHub запускает [MAXIBOT — Prepare](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-prepare.yml): полную pytest suite, frozen-path guard и единственную сборку exact `linux/amd64` image. Prepare использует pinned Docker 29.1.3 с private containerd archive-import rehearsal; проверяет config checksum, platform, source labels и различие native image ID/config digest. Synthetic 256/320/512 MiB allocation больше не является blocking Prepare gate: обязательная memory-защита выполняется read-only на реальном Worker во время preflight/postdeploy и требует Docker и kernel cgroup лимит ровно 512 MiB, `OOMKilled=false`, неизменный restart count и advancing primary heartbeat за 35 секунд. Receipt связывает PASS с SHA, Prepare run ID/attempt и checksum архива. После CI gates Prepare создаёт уникальный tag `maxibot-prepare-<sha>-<run>-<attempt>` и публикует `bundle.zip` с image archive, manifest и receipt. Затем Release metadata read-back обязан подтвердить published state, `immutable=true` и GitHub asset digest. Новые большие Prepare bundles не хранятся в Actions Artifacts. `CI_PASS` появляется в Linear только после завершения публикации.
-2. После успешного exact-main Prepare `workflow_run` controller на уже существующем MAXIBOT Mac runner проверяет SHA, immutable Release/tag/asset/digest и отсутствие активного Deploy. Если единственная валидная durable authorization покрывает весь diff и baseline, controller атомарно claim-ит её и вызывает существующий `MAXIBOT — Deploy` в `task-scoped-auto`. Без неё он оставляет обычный exact-SHA approval path и ничего не применяет. Новые hosted controller jobs и повторные tests/builds не создаются.
+2. После успешного exact-main Prepare `workflow_run` controller на уже существующем MAXIBOT Mac runner проверяет SHA, immutable Release/tag/asset/digest и отсутствие активного Deploy. Если единственная валидная durable authorization покрывает весь diff и baseline, controller атомарно claim-ит её и вызывает существующий `MAXIBOT — Deploy` в `task-scoped-auto`, без повторного OWNER approval. Без неё он оставляет обычный exact-SHA approval path и ничего не применяет. Новые hosted controller jobs и повторные tests/builds не создаются.
 3. Deploy validator проверяет successful exact-SHA Prepare, immutable artifact/provenance, разрешение (если task-auto), baseline и защиту от повторного запуска. После runner readiness и artifact verification он выполняет canonical `scripts/release_prod.sh SHA --dry-run` как read-only preflight непосредственно перед Apply. При PASS критичные условия повторно проверяются под production lock, затем вызывается `scripts/release_prod.sh SHA --apply`. Image не пересобирается на Mac/VPS.
 4. Ручной `preflight` режим остаётся диагностическим и при успехе публикует `READY_FOR_OWNER`; внутренний preflight production/task-auto публикует `PASS`, не READY. Результат и allowlisted preflight/apply evidence публикуются отдельным immutable Release `maxibot-evidence-<sha>-<run>-<attempt>`; Prepare Release остаётся неизменным. Если apply прошёл, а evidence publication упала, не запускайте `production` повторно. `publication-recovery` сверяет точный исходный run/attempt и выполняет только read-only сверку; повторное применение запрещено.
 

@@ -15,7 +15,7 @@ SHA = "a" * 40
 
 
 def prepare_members(sha=SHA, run_id="1234", attempt="2", embedded_labels=None,
-                    platform=("linux", "amd64")):
+                    platform=("linux", "amd64"), oci=False):
     image = f"maxibot-vps-api:{sha}"
     labels = {
         "org.opencontainers.image.revision": sha,
@@ -43,6 +43,12 @@ def prepare_members(sha=SHA, run_id="1234", attempt="2", embedded_labels=None,
         "native_image_id": "sha256:" + "b" * 64,
         "archive_sha256": archive_digest, "platform": "linux/amd64", "labels": labels,
     }
+    if oci:
+        manifest.update({"schema": "MAXIBOT_PREPARED_IMAGE_V2",
+                         "repository": "ghcr.io/akhripunov/maxibot-vps-api",
+                         "manifest_digest": "sha256:" + "d" * 64,
+                         "config_digest": manifest["image_id"], "source_sha": sha,
+                         "transport": "ghcr-oci"})
     receipt = {
         "schema": "MAXIBOT_PREPARE_RECEIPT_V1", "candidate_sha": sha,
         "github_run_id": run_id, "github_run_attempt": attempt, "status": "READY",
@@ -63,6 +69,19 @@ def zipped(members):
         for name, body in members.items():
             archive.writestr(name, body)
     return result.getvalue()
+
+
+def test_v2_oci_manifest_is_bound_to_exact_prepare_and_archive_identity():
+    members = prepare_members(oci=True)
+    proof = release_assets.validate_prepare_bundle(members, SHA, "1234", "2", inspect_image=False)
+    assert proof["manifest"]["transport"] == "ghcr-oci"
+    assert proof["manifest"]["config_digest"] == proof["manifest"]["image_id"]
+    bad = dict(members)
+    manifest = json.loads(bad["maxibot-image-manifest.json"])
+    manifest["source_sha"] = "f" * 40
+    bad["maxibot-image-manifest.json"] = json.dumps(manifest).encode()
+    with pytest.raises(release_assets.ReleaseAssetError, match="GHCR"):
+        release_assets.validate_prepare_bundle(bad, SHA, "1234", "2", inspect_image=False)
 
 
 @pytest.mark.parametrize("kind", ["prepare", "evidence"])
