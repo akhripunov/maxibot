@@ -77,7 +77,7 @@ def write_result(path: str, result: dict[str, object]) -> None:
 
 
 def verify_task_authorization(authorization_id: str, candidate_sha: str,
-                              production_sha: str) -> dict[str, str]:
+                              production_sha: str, *, require_claim: bool) -> dict[str, str]:
     from validate_release_dispatch import ValidationError, github_get
 
     record = json.loads(Path(record_path(authorization_id)).read_text(encoding="utf-8"))
@@ -100,7 +100,20 @@ def verify_task_authorization(authorization_id: str, candidate_sha: str,
                 continue
             raise
         raise ValueError(f"Task authorization is already {state}")
+    claim_ref = authorization_state_ref("maxibot", authorization_id, "claimed").removeprefix("refs/tags/")
+    try:
+        claim = github_get(f"git/ref/tags/{claim_ref}", os.environ["GITHUB_TOKEN"])
+    except ValidationError as error:
+        if "HTTP 404" not in str(error):
+            raise
+        claim = None
+    if require_claim and (claim is None or claim.get("object", {}).get("sha") != candidate_sha):
+        raise ValueError("Task authorization has no exact-candidate atomic Deploy claim")
+    if not require_claim and claim is not None:
+        raise ValueError("Task authorization already has a production claim")
     proof["source_reference"] = record["source_reference"]
+    proof["_record"] = record
+    proof["_changed_paths_list"] = changed_paths
     return proof
 
 
@@ -150,6 +163,7 @@ def main() -> int:
         "release_state": "PREFLIGHTING",
         "authorization_mode": "TASK_SCOPED_AUTO" if mode == "task-scoped-auto" else "EXACT_SHA",
         "task_authorization_id": os.environ.get("TASK_AUTHORIZATION_ID", ""),
+        "authorization_consumed": False,
         "authorization_source": os.environ.get("GITHUB_ACTOR", ""),
         "production_changed": False,
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -273,6 +287,15 @@ def main() -> int:
         if not result["production_baseline_sha"]:
             result["production_baseline_sha"] = result["preflight_evidence"].get("CURRENT_PRODUCTION_SHA", "")
         result["db_migration_baseline"] = result["preflight_evidence"].get("PROD_DB_HEAD", "")
+        if mode == "preflight" and os.environ.get("TASK_AUTHORIZATION_ID", "").strip():
+            linked = verify_task_authorization(os.environ["TASK_AUTHORIZATION_ID"], sha,
+                                               result["production_baseline_sha"], require_claim=False)
+            assert_task_scoped_no_migration(migration, result["preflight_evidence"],
+                                            record=linked["_record"],
+                                            changed_paths=linked["_changed_paths_list"])
+            result["task_authorization_record_sha256"] = linked["record_sha256"]
+            result["task_authorization_source"] = linked["source_reference"]
+            result["task_authorization_changed_paths"] = linked["changed_paths"]
 
         if mode == "preflight":
             result["status"] = "PLANNED"
@@ -302,9 +325,12 @@ def main() -> int:
         else:
             task_authorization = None
             if mode == "task-scoped-auto":
-                assert_task_scoped_no_migration(migration, result["preflight_evidence"])
                 task_authorization = verify_task_authorization(
-                    os.environ["TASK_AUTHORIZATION_ID"], sha, result["production_baseline_sha"])
+                    os.environ["TASK_AUTHORIZATION_ID"], sha, result["production_baseline_sha"],
+                    require_claim=True)
+                assert_task_scoped_no_migration(migration, result["preflight_evidence"],
+                                                record=task_authorization["_record"],
+                                                changed_paths=task_authorization["_changed_paths_list"])
                 result["task_authorization_record_sha256"] = task_authorization["record_sha256"]
                 result["task_authorization_source"] = task_authorization["source_reference"]
                 result["task_authorization_changed_paths"] = task_authorization["changed_paths"]
@@ -337,6 +363,7 @@ def main() -> int:
                 try:
                     consume_task_authorization(os.environ["TASK_AUTHORIZATION_ID"], sha)
                     result["task_authorization_state"] = "CONSUMED"
+                    result["authorization_consumed"] = True
                 except ValueError:
                     result["status"] = "RECOVERY_REQUIRED"
                     result["release_state"] = "RECOVERY_REQUIRED"

@@ -2,10 +2,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import release_orchestrator as orchestrator
+import run_release_workflow
+from validate_release_dispatch import ValidationError
 
 SHA = "a" * 40
 
@@ -23,6 +26,7 @@ class FakeAPI:
         self.calls = []
         self.claimed = False
         self.release_patch = {}
+        self.evidence_result = None
 
     def get(self, path):
         self.calls.append(("GET", path))
@@ -139,6 +143,154 @@ class ReleaseOrchestratorTests(unittest.TestCase):
     def test_unrecognized_orchestration_error_does_not_emit_untrusted_message(self):
         error = orchestrator.OrchestrationError("token=do-not-log")
         self.assertEqual(orchestrator.safe_failure_detail(error), "orchestration_guard_failed")
+
+    def test_ready_preflight_dispatches_existing_task_scoped_deploy_once(self):
+        ready = {"candidate_sha": SHA, "mode": "preflight", "preflight": "PASS",
+                 "release_state": "READY_FOR_OWNER", "status": "PLANNED",
+                 "production_changed": False, "task_authorization_id": "maxibot-task-2026-10-16-001",
+                 "authorization_mode": "EXACT_SHA", "authorization_consumed": False,
+                 "production_baseline_sha": "d" * 40,
+                 "target_migration": "0098_test", "prepare_run_id": "123",
+                 "prepare_run_attempt": "2", "github_run_id": "456", "github_run_attempt": "1"}
+        receipt = orchestrator.dispatch_task_scoped_auto(
+            ready, self.api, current_main_sha=SHA,
+            validate_authorization=lambda result: {"authorization_id": result["task_authorization_id"]},
+            preflight_run_id="456", preflight_run_attempt="1")
+        self.assertEqual(receipt["state"], "TASK_SCOPED_AUTO_DISPATCHED")
+        dispatch = next(call for call in self.api.calls if call[0] == "POST" and call[1].endswith("/dispatches"))
+        self.assertEqual(dispatch[2], {"ref": "main", "inputs": {
+            "candidate": SHA, "target_migration": "0098_test", "mode": "task-scoped-auto",
+            "approve_production": "false", "approve_worker_bootstrap": "false",
+            "prepare_run_id": "123", "prepare_run_attempt": "2", "orchestrator_run_id": "456",
+            "task_authorization_id": "maxibot-task-2026-10-16-001"}})
+
+    def test_task_scoped_dispatch_rejects_nonready_or_ambiguous_evidence(self):
+        base = {"candidate_sha": SHA, "mode": "preflight", "preflight": "PASS",
+                "release_state": "READY_FOR_OWNER", "status": "PLANNED", "production_changed": False,
+                "authorization_mode": "EXACT_SHA", "authorization_consumed": False,
+                "task_authorization_id": "maxibot-task-2026-10-16-001", "target_migration": "0098_test",
+                "production_baseline_sha": "d" * 40,
+                "prepare_run_id": "123", "prepare_run_attempt": "2", "github_run_id": "456",
+                "github_run_attempt": "1"}
+        for change in ({"preflight": "FAILED"}, {"release_state": "BLOCKED"},
+                       {"production_changed": True}, {"task_authorization_id": ""},
+                       {"mode": "production"}):
+            api = FakeAPI()
+            with self.subTest(change=change), self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.dispatch_task_scoped_auto(
+                    {**base, **change}, api, current_main_sha=SHA,
+                    validate_authorization=lambda result: {"authorization_id": result["task_authorization_id"]},
+                    preflight_run_id="456", preflight_run_attempt="1")
+            self.assertFalse(any(call[0] == "POST" and call[1].endswith("/dispatches") for call in api.calls))
+
+    def test_task_scoped_dispatch_stops_on_main_drift_or_invalid_scope(self):
+        ready = {"candidate_sha": SHA, "mode": "preflight", "preflight": "PASS",
+                 "release_state": "READY_FOR_OWNER", "status": "PLANNED", "production_changed": False,
+                 "authorization_mode": "EXACT_SHA", "authorization_consumed": False,
+                 "task_authorization_id": "maxibot-task-2026-10-16-001", "target_migration": "0098_test",
+                 "production_baseline_sha": "d" * 40,
+                 "prepare_run_id": "123", "prepare_run_attempt": "2", "github_run_id": "456",
+                 "github_run_attempt": "1"}
+        for current, validator in (("c" * 40, lambda _: {}), (SHA, lambda _: (_ for _ in ()).throw(
+                orchestrator.OrchestrationError("scope or baseline mismatch")))):
+            api = FakeAPI()
+            with self.subTest(current=current), self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator.dispatch_task_scoped_auto(ready, api, current_main_sha=current,
+                                                       validate_authorization=validator,
+                                                       preflight_run_id="456", preflight_run_attempt="1")
+            self.assertFalse(any(call[0] == "POST" and call[1].endswith("/dispatches") for call in api.calls))
+
+    def test_two_ready_events_cannot_dispatch_twice_for_one_authorization(self):
+        ready = {"candidate_sha": SHA, "mode": "preflight", "preflight": "PASS",
+                 "release_state": "READY_FOR_OWNER", "status": "PLANNED", "production_changed": False,
+                 "task_authorization_id": "maxibot-task-2026-10-16-001", "target_migration": "0098_test",
+                 "authorization_mode": "EXACT_SHA", "authorization_consumed": False,
+                 "production_baseline_sha": "d" * 40, "prepare_run_id": "123", "prepare_run_attempt": "2",
+                 "github_run_id": "456", "github_run_attempt": "1"}
+        validate = lambda result: {"authorization_id": result["task_authorization_id"]}
+        first = orchestrator.dispatch_task_scoped_auto(
+            ready, self.api, current_main_sha=SHA, validate_authorization=validate,
+            preflight_run_id="456", preflight_run_attempt="1")
+        second_ready = {**ready, "github_run_id": "457"}
+        second = orchestrator.dispatch_task_scoped_auto(
+            second_ready, self.api, current_main_sha=SHA, validate_authorization=validate,
+            preflight_run_id="457", preflight_run_attempt="1")
+        self.assertEqual(first["state"], "TASK_SCOPED_AUTO_DISPATCHED")
+        self.assertEqual(second["state"], "TASK_SCOPED_AUTO_ALREADY_CLAIMED")
+        self.assertEqual(sum(call[0] == "POST" and call[1].endswith("/dispatches") for call in self.api.calls), 1)
+
+    def test_preflight_authorization_requires_no_claim_but_task_deploy_requires_exact_claim(self):
+        authorization_id = "maxibot-task-2026-10-16-001"
+        record = {
+            "schema_version": 3, "project": "maxibot",
+            "authorization_mode": "TASK_SCOPED_AUTO", "authorization_id": authorization_id,
+            "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+            "source_reference": "linear:ME-31/owner-instruction",
+            "production_baseline_sha": "d" * 40, "task": "Bounded product task",
+            "allowed_paths": ["app/bot/menu.py"], "acceptance_criteria": ["menu works"],
+            "exclusions": ["database", "migrations", "security", "secrets", "payments",
+                           "ads", "paid_traffic", "release_infrastructure"],
+            "state": "ACTIVE", "revoked": False, "consumed": False,
+        }
+        claim_ref = "git/ref/tags/maxibot-task-auth/" + authorization_id + "/claimed"
+        absent = ValidationError("GitHub release provenance request failed (HTTP 404)")
+
+        def lookup_without_claim(path, _token):
+            if path == "git/ref/heads/main":
+                return {"object": {"sha": SHA}}
+            if path == claim_ref:
+                raise absent
+            if "/revoked" in path or "/consumed" in path:
+                raise ValidationError("GitHub release provenance request failed (HTTP 404)")
+            raise AssertionError(path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            auth_file = Path(directory) / "auth.json"
+            auth_file.write_text(__import__("json").dumps(record))
+            with patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}), \
+                    patch.object(run_release_workflow, "record_path", return_value=str(auth_file)), \
+                    patch.object(run_release_workflow, "candidate_scope_diff", return_value=["app/bot/menu.py"]), \
+                    patch("validate_release_dispatch.github_get", side_effect=lookup_without_claim):
+                ready = run_release_workflow.verify_task_authorization(
+                    authorization_id, SHA, "d" * 40, require_claim=False)
+                self.assertEqual(ready["authorization_id"], authorization_id)
+                with self.assertRaisesRegex(ValueError, "no exact-candidate atomic Deploy claim"):
+                    run_release_workflow.verify_task_authorization(
+                        authorization_id, SHA, "d" * 40, require_claim=True)
+
+                def lookup_with_claim(path, _token):
+                    if path == claim_ref:
+                        return {"object": {"sha": SHA}}
+                    return lookup_without_claim(path, _token)
+
+                with patch("validate_release_dispatch.github_get", side_effect=lookup_with_claim):
+                    deployed = run_release_workflow.verify_task_authorization(
+                        authorization_id, SHA, "d" * 40, require_claim=True)
+                self.assertEqual(deployed["authorization_id"], authorization_id)
+
+                def lookup_with_foreign_claim(path, _token):
+                    if path == claim_ref:
+                        return {"object": {"sha": "b" * 40}}
+                    return lookup_without_claim(path, _token)
+
+                with patch("validate_release_dispatch.github_get", side_effect=lookup_with_foreign_claim):
+                    with self.assertRaisesRegex(ValueError, "no exact-candidate atomic Deploy claim"):
+                        run_release_workflow.verify_task_authorization(
+                            authorization_id, SHA, "d" * 40, require_claim=True)
+
+    def test_only_successful_trusted_exact_preflight_event_is_accepted(self):
+        run = {"id": 456, "run_attempt": 1, "head_sha": SHA, "head_branch": "main",
+               "status": "completed", "conclusion": "success", "event": "workflow_dispatch",
+               "path": ".github/workflows/maxibot-deploy.yml",
+               "display_title": f"MAXIBOT preflight {SHA} by owner"}
+        payload = {"repository": {"full_name": "akhripunov/maxibot"}, "workflow_run": run}
+        self.assertEqual(orchestrator._validate_ready_preflight_event(payload), run)
+        for update in ({"conclusion": "failure"}, {"head_branch": "feature"},
+                       {"path": ".github/workflows/maxibot-prepare.yml"},
+                       {"display_title": f"MAXIBOT production {SHA} by owner"}):
+            with self.subTest(update=update), self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator._validate_ready_preflight_event(
+                    {"repository": {"full_name": "akhripunov/maxibot"}, "workflow_run": {**run, **update}})
 
 
 if __name__ == "__main__":

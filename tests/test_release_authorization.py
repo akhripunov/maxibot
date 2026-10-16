@@ -19,7 +19,8 @@ CANDIDATE = "b" * 40
 
 def record(**overrides):
     value = {
-        "schema_version": 1,
+        "schema_version": 3,
+        "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
         "project": "maxibot",
         "authorization_mode": "TASK_SCOPED_AUTO",
         "authorization_id": AUTH_ID,
@@ -53,6 +54,13 @@ def test_task_authorization_accepts_exact_candidate_baseline_and_scoped_paths():
     assert result["authorization_id"] == AUTH_ID
     assert result["candidate_sha"] == CANDIDATE
     assert result["production_baseline_sha"] == BASELINE
+
+
+def test_task_authorization_requires_explicit_full_cycle_owner_intent():
+    with pytest.raises(AuthorizationError, match="explicitly authorize the full production cycle"):
+        validate(record=record(owner_instruction_scope="PREPARE_ONLY"))
+    with pytest.raises(AuthorizationError, match="Unsupported task authorization record"):
+        validate(record=record(schema_version=1))
 
 
 @pytest.mark.parametrize("path", [
@@ -96,8 +104,56 @@ def test_task_authorization_rejects_wrong_project_or_authorization_id():
 
 def test_task_scoped_auto_cannot_change_or_reconcile_database_migration_head():
     assert_task_scoped_no_migration("head_0098", {"PROD_DB_HEAD": "head_0098"})
-    with pytest.raises(AuthorizationError, match="cannot apply or reconcile database migrations"):
+    with pytest.raises(AuthorizationError, match="cannot apply database migrations"):
         assert_task_scoped_no_migration("head_0098", {"PROD_DB_HEAD": "head_0097"})
+
+
+def test_task_authorization_allows_only_a_complete_preapproved_migration_contract():
+    migration = "alembic/versions/0099_safe_change.py"
+    contract = {"allowed_paths": [migration], "target_migration": "0099_safe_change",
+                "production_db_head": "0098_old", "risk_description": "Add one nullable indexed field.",
+                "backup_plan": "Create and verify the canonical database backup before migration.",
+                "rollback_plan": "Restore the verified backup or stop for forward repair.",
+                "stop_conditions": ["Stop if baseline differs.", "Stop if backup validation fails."],
+                "required_gates": ["migration_rehearsal", "backup_before_migration",
+                                   "rollback_readiness", "postdeploy_health"]}
+    proof = validate(record=record(allowed_paths=[migration], risk_contracts={"database_migration": contract}),
+                     changed_paths=[migration])
+    assert proof["changed_paths"] == migration
+    with pytest.raises(AuthorizationError, match="complete pre-approved database risk contract"):
+        validate(record=record(allowed_paths=[migration]), changed_paths=[migration])
+    with pytest.raises(AuthorizationError, match="outside the durable authorized scope"):
+        validate(record=record(allowed_paths=[migration], risk_contracts={"database_migration": contract}),
+                 changed_paths=[migration, "alembic/versions/0100_extra.py"])
+
+
+def test_task_scoped_migration_requires_target_baseline_rehearsal_and_rollback_evidence():
+    contract = {"target_migration": "0099_safe_change", "production_db_head": "0098_old",
+                "risk_description": "Add one nullable indexed field.",
+                "backup_plan": "Create and verify the canonical database backup before migration.",
+                "rollback_plan": "Restore the verified backup or stop for forward repair.",
+                "stop_conditions": ["Stop if baseline differs.", "Stop if backup validation fails."],
+                "required_gates": ["migration_rehearsal", "backup_before_migration",
+                                   "rollback_readiness", "postdeploy_health"],
+                "allowed_paths": ["alembic/versions/0099_safe_change.py"]}
+    evidence = {"PROD_DB_HEAD": "0098_old", "MIGRATION_REHEARSAL": "PASS PATH=0098_old->0099_safe_change",
+                "ROLLBACK_READY": "PASS", "PROD_READY": "ready"}
+    assert_task_scoped_no_migration("0099_safe_change", evidence,
+                                    record=record(risk_contracts={"database_migration": contract}),
+                                    changed_paths=contract["allowed_paths"])
+    for change in ({"PROD_DB_HEAD": "0097_old"}, {"MIGRATION_REHEARSAL": "BLOCKED"},
+                   {"ROLLBACK_READY": "METADATA_REQUIRED"}):
+        with pytest.raises(AuthorizationError):
+            assert_task_scoped_no_migration("0099_safe_change", {**evidence, **change},
+                                            record=record(risk_contracts={"database_migration": contract}),
+                                            changed_paths=contract["allowed_paths"])
+
+
+def test_authorization_claim_marker_is_project_scoped_and_one_shot():
+    from release_authorization import authorization_state_ref
+    assert authorization_state_ref("maxibot", AUTH_ID, "claimed") == f"refs/tags/maxibot-task-auth/{AUTH_ID}/claimed"
+    with pytest.raises(AuthorizationError):
+        authorization_state_ref("gpoint", AUTH_ID, "claimed")
 
 
 def make_git_repo(root: Path):

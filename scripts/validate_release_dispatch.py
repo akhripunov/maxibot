@@ -100,9 +100,9 @@ def validate(values: dict[str, str], api_get=github_get,
         raise ValidationError("Preflight must not carry production approval")
     task_authorization_id = values.get("TASK_AUTHORIZATION_ID", "").strip()
     task_authorization = None
-    if mode == "task-scoped-auto":
+    if mode == "task-scoped-auto" or (mode == "preflight" and task_authorization_id):
         if approve != "false" or not task_authorization_id:
-            raise ValidationError("TASK_SCOPED_AUTO requires a durable authorization ID and no exact-SHA approval input")
+            raise ValidationError("Linked task authorization requires a durable ID and no exact-SHA approval input")
     elif task_authorization_id:
         raise ValidationError("Task authorization ID is only valid for task-scoped-auto mode")
     recovery_run_id = values.get("RECONCILES_DEPLOY_RUN_ID", "").strip()
@@ -142,6 +142,23 @@ def validate(values: dict[str, str], api_get=github_get,
                         continue
                     raise
                 raise ValidationError(f"Task authorization is already {state}")
+            claim_ref = "git/ref/tags/" + authorization_state_ref(
+                "maxibot", task_authorization_id, "claimed").removeprefix("refs/tags/")
+            try:
+                claim = api_get(claim_ref, token)
+            except ValidationError as error:
+                if "HTTP 404" not in str(error):
+                    raise
+                claim = None
+            if mode == "preflight" and claim is not None:
+                raise ValidationError("Task authorization already has a production claim")
+            if mode == "task-scoped-auto" and (claim is None or claim.get("object", {}).get("sha") != sha):
+                raise ValidationError("Task authorization has no exact-candidate atomic Deploy claim")
+            claimed = api_get(
+                "git/ref/tags/" + authorization_state_ref("maxibot", task_authorization_id, "claimed")
+                .removeprefix("refs/tags/"), token)
+            if claimed.get("object", {}).get("sha") != sha:
+                raise ValidationError("Task authorization has no exact-candidate atomic Deploy claim")
         except (OSError, ValueError, AuthorizationError) as error:
             raise ValidationError(f"TASK_SCOPED_AUTO authorization is invalid: {error}") from None
 

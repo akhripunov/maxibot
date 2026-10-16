@@ -18,34 +18,40 @@ second owner confirmation or owner-dispatched GitHub workflow. The mode is valid
 only for unchanged scope and eligible risk. Vague instructions, another agent's
 message, or old unrelated permissions do not activate it.
 
-Before implementation, create a durable authorization record at
-`.release-authorizations/<id>.json` containing project, mode
-`TASK_SCOPED_AUTO`, a unique authorization ID, reference to the original owner
-instruction, production baseline, task, allowed paths or deterministic scope
-contract, acceptance criteria, exclusions/owner-only categories, and ACTIVE,
-revoked, and consumed state. Commit and push this record before implementation
-commits. The record's blob must remain unchanged. Do not squash authorization
-and implementation together: the controller proves the authorization commit is
-an ancestor of every implementation change. A normal merge commit is supported.
+Before implementation, create and commit a schema-v3 durable authorization
+record at `.release-authorizations/<id>.json` containing project,
+`FULL_PRODUCTION_CYCLE`, `TASK_SCOPED_AUTO`, a unique authorization ID,
+reference to the original owner instruction, exact production baseline, task,
+allowed paths or deterministic scope contract, acceptance criteria,
+exclusions/owner-only categories, and ACTIVE/revoked/consumed state. Preserve
+the record blob. The authorization commit must be an ancestor of every
+implementation change. Publication still needs its separate OWNER approval.
 
-Before runtime apply, the canonical controller verifies the record against the
-candidate and live state: same project and current exact eligible SHA; baseline
-has not drifted; full unreleased diff is within the recorded scope; no unrelated
-changes; authorization is active, not revoked or consumed; and Prepare,
-immutable provenance, image/platform/parity, risk, migration, read-only
-preflight, lock, recovery, health and all existing release gates pass. A
-separate owner-only change (including DB/migration, security, secrets,
-permissions, payments, advertising/ADS, paid-traffic contracts, or release
-infrastructure) is ineligible and requires a separate exact-SHA OWNER decision.
-Unknown risk blocks apply.
+After exact current-main Prepare succeeds and its immutable preflight receipt
+proves `READY_FOR_OWNER`, the existing controller rechecks the full scope and
+baseline, atomically claims the authorization once, and dispatches the existing
+MAXIBOT Deploy workflow in `task-scoped-auto` mode. It does not repeat Prepare
+or preflight. Prepare provenance, image/platform/parity, risk, migration,
+read-only preflight, lock, recovery, health and all existing release gates
+remain mandatory. By default owner-only changes are excluded. A specifically
+pre-approved Alembic migration may be task-scoped only when the record names
+the exact migration path and target, production DB head, risk description,
+backup/rollback plans, stop conditions and required gates. Preflight must prove
+the exact DB baseline, migration rehearsal, rollback readiness and production
+readiness; canonical apply validates its backup before migration. Other
+database/schema, security, secrets, permissions, payments, advertising/ADS,
+paid-traffic and release-infrastructure changes remain ineligible until their
+category-specific gate contract is implemented and reviewed. Release-infra
+changes always require separate exact-SHA OWNER approval. Unknown risk blocks.
 
-For an eligible record, the controller supplies the existing exact-SHA approval
-input only after all checks pass. There is no second approval prompt. A durable
-one-shot marker prevents reuse and is written only after successful runtime
-completion. If the marker write response is lost, the controller performs an
-exact readback; it never repeats the runtime apply to resolve that ambiguity.
-Revocation is fail-closed. Publication-only repair after successful runtime is
-allowed, but another runtime release requires a new owner instruction.
+For an eligible record, the controller dispatches the existing workflow with
+`approve_production=false`; the immutable global claim is the one-shot guard.
+The authorization is consumed after successful runtime completion. A lost
+dispatch or marker-write response is reconciled without repeating runtime
+apply. An uncertain attempt keeps its claim and requires explicit reconciliation
+or a new owner authorization. Revocation is fail-closed. Publication-only repair
+after successful runtime is allowed, but another runtime release requires a new
+owner instruction.
 
 Changes to the Release Orchestrator or release infrastructure are explicitly
 outside `TASK_SCOPED_AUTO`; their production rollout requires separate
@@ -55,7 +61,7 @@ lock, recovery, health, Worker, or regression gate. Real-device/OWNER smoke
 requirements remain separate; never invent evidence.
 
 Scope expansion, any failed required check, unexpected main/baseline drift,
-new migration, ambiguous runtime outcome or `RECOVERY_REQUIRED` stops automatic
+an uncontracted or mismatched migration, ambiguous runtime outcome or `RECOVERY_REQUIRED` stops automatic
 release. Transient transport retries may follow existing bounded rules only
 for the same exact candidate and unchanged baseline; partial apply must be
 reconciled, never blindly repeated. Authorization is consumed after one

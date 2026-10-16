@@ -10,6 +10,7 @@ from typing import Any
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 AUTH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
+MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 REQUIRED_EXCLUSIONS = {
     "database", "migrations", "security", "secrets", "payments",
     "ads", "paid_traffic", "release_infrastructure",
@@ -29,17 +30,55 @@ class AuthorizationError(ValueError):
     pass
 
 
-def assert_task_scoped_no_migration(target_migration: str, evidence: dict[str, str]) -> None:
-    """TASK_SCOPED_AUTO is limited to releases with no database migration."""
-    if not target_migration or evidence.get("PROD_DB_HEAD") != target_migration:
-        raise AuthorizationError("TASK_SCOPED_AUTO cannot apply or reconcile database migrations")
+def _migration_contract(record: dict[str, Any], path: str) -> dict[str, Any]:
+    contract = record.get("risk_contracts", {}).get("database_migration")
+    gates = {"migration_rehearsal", "backup_before_migration", "rollback_readiness", "postdeploy_health"}
+    if (not isinstance(contract, dict) or not re.fullmatch(r"alembic/versions/[^/]+\.py", path)
+            or path not in contract.get("allowed_paths", [])
+            or not isinstance(contract.get("target_migration"), str)
+            or not MIGRATION_RE.fullmatch(contract["target_migration"])
+            or not isinstance(contract.get("production_db_head"), str)
+            or not MIGRATION_RE.fullmatch(contract["production_db_head"])
+            or not isinstance(contract.get("risk_description"), str) or len(contract["risk_description"].strip()) < 20
+            or not isinstance(contract.get("backup_plan"), str) or len(contract["backup_plan"].strip()) < 20
+            or not isinstance(contract.get("rollback_plan"), str) or len(contract["rollback_plan"].strip()) < 20
+            or not isinstance(contract.get("stop_conditions"), list) or len(contract["stop_conditions"]) < 2
+            or any(not isinstance(item, str) or len(item.strip()) < 8 for item in contract["stop_conditions"])
+            or not isinstance(contract.get("required_gates"), list) or not gates.issubset(contract["required_gates"])):
+        raise AuthorizationError("Owner-only migration requires a complete pre-approved database risk contract")
+    return contract
+
+
+def assert_task_scoped_no_migration(target_migration: str, evidence: dict[str, str], *,
+                                    record: dict[str, Any] | None = None,
+                                    changed_paths: list[str] | None = None) -> dict[str, str]:
+    """Allow pending migration only with a path/target-bound contract and canonical evidence."""
+    paths = [path for path in (changed_paths or []) if path.startswith("alembic/versions/")]
+    live_head = evidence.get("PROD_DB_HEAD", "")
+    if not paths and target_migration and live_head == target_migration:
+        return {"state": "NO_MIGRATION_CHANGE"}
+    if not record or not paths:
+        raise AuthorizationError("TASK_SCOPED_AUTO cannot apply database migrations without the exact pre-approved risk contract")
+    contracts = [_migration_contract(record, path) for path in paths]
+    if any(path not in record.get("allowed_paths", []) for path in paths):
+        raise AuthorizationError("Migration changed path is outside the durable authorized scope")
+    contract = contracts[0]
+    if any(item != contract for item in contracts[1:]):
+        raise AuthorizationError("Changed migrations do not share one exact risk contract")
+    if (contract["target_migration"] != target_migration
+            or contract["production_db_head"] != live_head
+            or not str(evidence.get("MIGRATION_REHEARSAL", "")).startswith("PASS")
+            or evidence.get("ROLLBACK_READY") != "PASS"
+            or evidence.get("PROD_READY") != "ready"):
+        raise AuthorizationError("Preflight migration target, production baseline or required safety evidence differs from the pre-approved contract")
+    return {"state": "PREAPPROVED_MIGRATION", "target_migration": target_migration}
 
 
 def authorization_state_ref(project: str, authorization_id: str, state: str) -> str:
     project = project.lower()
     if project not in {"maxibot", "gpoint"} or not AUTH_ID_RE.fullmatch(authorization_id):
         raise AuthorizationError("Invalid project-scoped authorization ID")
-    if state not in {"revoked", "consumed"}:
+    if state not in {"revoked", "consumed", "claimed"}:
         raise AuthorizationError("Invalid authorization state marker")
     return f"refs/tags/{project}-task-auth/{authorization_id}/{state}"
 
@@ -65,8 +104,10 @@ def validate_task_authorization(*, record: dict[str, Any], project: str,
     """Fail closed unless the candidate is the exact active task and scope."""
     if not AUTH_ID_RE.fullmatch(authorization_id):
         raise AuthorizationError("Invalid task authorization ID")
-    if not isinstance(record, dict) or record.get("schema_version") != 1:
+    if not isinstance(record, dict) or record.get("schema_version") != 3:
         raise AuthorizationError("Unsupported task authorization record")
+    if record.get("owner_instruction_scope") != "FULL_PRODUCTION_CYCLE":
+        raise AuthorizationError("Original owner instruction must explicitly authorize the full production cycle")
     if record.get("authorization_id") != authorization_id:
         raise AuthorizationError("authorization ID does not match durable record")
     if record.get("project") != project or record.get("authorization_mode") != "TASK_SCOPED_AUTO":
@@ -102,7 +143,10 @@ def validate_task_authorization(*, record: dict[str, Any], project: str,
         if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/"):
             raise AuthorizationError("Candidate diff contains an invalid path")
         if _owner_only(path):
-            raise AuthorizationError(f"Candidate touches owner-only path: {path}")
+            _migration_contract(record, path)
+            if path not in allowed:
+                raise AuthorizationError("Migration path is not explicitly allowed")
+            continue
         if not _in_scope(path, allowed):
             raise AuthorizationError(f"Candidate path is outside authorized scope: {path}")
     record_digest = hashlib.sha256(
