@@ -130,7 +130,7 @@ def validate_prepare_bundle(members: dict[str, bytes], sha: str, run_id: str | i
         "org.opencontainers.image.source-sha": sha,
         "org.maxibot.release.sha": sha,
     }
-    if (manifest.get("schema") != "MAXIBOT_PREPARED_IMAGE_V1"
+    if (manifest.get("schema") not in {"MAXIBOT_PREPARED_IMAGE_V1", "MAXIBOT_PREPARED_IMAGE_V2"}
             or manifest.get("candidate_sha") != sha
             or str(manifest.get("prepare_run_id")) != str(run_id)
             or str(manifest.get("prepare_run_attempt")) != str(attempt)
@@ -140,6 +140,17 @@ def validate_prepare_bundle(members: dict[str, bytes], sha: str, run_id: str | i
             or manifest.get("archive_sha256") != digest
             or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(manifest.get("image_id", "")))):
         raise ReleaseAssetError("Prepared image manifest provenance or checksum mismatch")
+    if manifest.get("schema") == "MAXIBOT_PREPARED_IMAGE_V2":
+        try:
+            from scripts.maxibot_ghcr import validate_oci_image
+        except ModuleNotFoundError:
+            from maxibot_ghcr import validate_oci_image
+        try:
+            validate_oci_image(manifest, sha, str(run_id), str(attempt))
+        except ValueError as exc:
+            raise ReleaseAssetError("GHCR image digest provenance mismatch") from exc
+        if manifest.get("config_digest") != manifest.get("image_id"):
+            raise ReleaseAssetError("GHCR config digest differs from prepared archive identity")
     if (receipt.get("schema") != "MAXIBOT_PREPARE_RECEIPT_V1"
             or receipt.get("candidate_sha") != sha
             or str(receipt.get("github_run_id")) != str(run_id)
@@ -182,7 +193,7 @@ def validate_prepare_directory(directory: Path, sha: str, run_id: str | int,
         "org.opencontainers.image.source-sha": sha,
         "org.maxibot.release.sha": sha,
     }
-    if (manifest.get("schema") != "MAXIBOT_PREPARED_IMAGE_V1"
+    if (manifest.get("schema") not in {"MAXIBOT_PREPARED_IMAGE_V1", "MAXIBOT_PREPARED_IMAGE_V2"}
             or manifest.get("candidate_sha") != sha
             or str(manifest.get("prepare_run_id")) != str(run_id)
             or str(manifest.get("prepare_run_attempt")) != str(attempt)
@@ -192,6 +203,17 @@ def validate_prepare_directory(directory: Path, sha: str, run_id: str | int,
             or manifest.get("archive_sha256") != digest
             or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(manifest.get("image_id", "")))):
         raise ReleaseAssetError("Prepared image manifest provenance or checksum mismatch")
+    if manifest.get("schema") == "MAXIBOT_PREPARED_IMAGE_V2":
+        try:
+            from scripts.maxibot_ghcr import validate_oci_image
+        except ModuleNotFoundError:
+            from maxibot_ghcr import validate_oci_image
+        try:
+            validate_oci_image(manifest, sha, str(run_id), str(attempt))
+        except ValueError as exc:
+            raise ReleaseAssetError("GHCR image digest provenance mismatch") from exc
+        if manifest.get("config_digest") != manifest.get("image_id"):
+            raise ReleaseAssetError("GHCR config digest differs from prepared archive identity")
     if (receipt.get("schema") != "MAXIBOT_PREPARE_RECEIPT_V1"
             or receipt.get("candidate_sha") != sha
             or str(receipt.get("github_run_id")) != str(run_id)

@@ -26,6 +26,10 @@ except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
                                    validate_task_authorization, assert_task_scoped_no_migration)
+try:
+    from scripts.maxibot_ghcr import select_image_transport
+except ModuleNotFoundError:
+    from maxibot_ghcr import select_image_transport
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
@@ -40,6 +44,10 @@ EVIDENCE_KEYS = {
     "CURRENT_PRODUCTION_DB_HEAD", "PRE_APPLY_API_IMAGE", "PRE_APPLY_WORKER_IMAGE",
     "PRE_APPLY_IMAGE_PARITY", "MIGRATION_ALLOWED", "POSTDEPLOY_WORKER_HEALTH",
     "FINAL_RUNTIME_SHA", "FINAL_MIGRATION", "POLLING_ROLES", "RELEASE_STATUS",
+    "GHCR_PULL_BY_DIGEST", "GHCR_ALREADY_PRESENT_LAYERS", "IMAGE_TRANSPORT",
+    "IMAGE_MANIFEST_DIGEST", "PREVIOUS_IMAGE_ID", "PREVIOUS_IMAGE_PLATFORM",
+    "PREVIOUS_IMAGE_REPO_DIGESTS", "ROLLBACK_IMAGE_ID", "ROLLBACK_IMAGE_IDENTITY",
+    "ROLLBACK_IMAGE_AVAILABILITY",
 }
 
 
@@ -51,6 +59,28 @@ def safe_evidence(output: str) -> dict[str, str]:
         if sep and key in EVIDENCE_KEYS and "\n" not in value and "\r" not in value:
             facts[key] = value[:500]
     return facts
+
+
+def validate_transport_credentials(selected_transport: str, environment: dict[str, str],
+                                   manifest: dict | None = None, opener=None) -> None:
+    """Authenticate exact GHCR digest access before preflight may publish readiness."""
+    if selected_transport != "ghcr-oci":
+        return
+    token = environment.get("GHCR_READ_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("GHCR read credential is unavailable for the selected transport")
+    if not isinstance(manifest, dict):
+        raise RuntimeError("GHCR manifest evidence is unavailable for the selected transport")
+    try:
+        from scripts.maxibot_ghcr import verify_ghcr_digest_access
+    except ModuleNotFoundError:
+        from maxibot_ghcr import verify_ghcr_digest_access
+    repository = manifest.get("repository", "")
+    username = environment.get("GHCR_READ_USERNAME", "").strip()
+    if not username and isinstance(repository, str):
+        username = repository.split("/")[1] if len(repository.split("/")) > 1 else ""
+    verify_ghcr_digest_access(repository, manifest.get("manifest_digest", ""), username, token,
+                              opener=opener)
 
 
 def run(command: list[str], env: dict[str, str]) -> tuple[int, str]:
@@ -254,10 +284,27 @@ def main() -> int:
         env["RELEASE_IMAGE_ARCHIVE"] = str(archive)
         env["RELEASE_IMAGE_ID"] = manifest["image_id"]
         env["RELEASE_IMAGE_ARCHIVE_SHA256"] = archive_sha256
+        selected_transport = select_image_transport(
+            manifest, os.environ.get("IMAGE_TRANSPORT", "prepared"))
+        validate_transport_credentials(selected_transport, env, manifest)
+        env["RELEASE_IMAGE_TRANSPORT"] = selected_transport
+        env["RELEASE_IMAGE_MANIFEST_PATH"] = str(manifest_path)
+        if manifest.get("transport") == "ghcr-oci":
+            from maxibot_ghcr import validate_oci_image
+            validate_oci_image(manifest, sha, os.environ.get("PREPARE_RUN_ID", ""), prepare_attempt)
+            if manifest.get("config_digest") != manifest.get("image_id"):
+                raise RuntimeError("GHCR config digest differs from archive config identity")
+            if selected_transport == "ghcr-oci":
+                env["RELEASE_IMAGE_REPOSITORY"] = manifest["repository"]
+                env["RELEASE_IMAGE_DIGEST"] = manifest["manifest_digest"]
         result["image_platform"] = "linux/amd64"
         result["image_source_sha"] = sha
         result["image_config_digest"] = manifest["image_id"]
         result["image_archive_sha256"] = archive_sha256
+        result["image_transport"] = selected_transport
+        if selected_transport == "ghcr-oci":
+            result["image_repository"] = manifest["repository"]
+            result["image_manifest_digest"] = manifest["manifest_digest"]
 
         bootstrap = os.environ.get("APPROVE_WORKER_BOOTSTRAP", "false").lower()
         if bootstrap not in {"true", "false"}:
@@ -266,7 +313,8 @@ def main() -> int:
         result["worker_bootstrap_approved"] = bootstrap == "true"
         env["TARGET_MIGRATION"] = migration
         preflight_started = time.monotonic()
-        dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], env)
+        dry_env = {key: value for key, value in env.items() if key != "GHCR_READ_TOKEN"}
+        dry_code, dry_output = run(["bash", "scripts/release_prod.sh", sha, "--dry-run"], dry_env)
         result["preflight_evidence"] = safe_evidence(dry_output)
         if test_scope == "UI_ONLY":
             # Another release won after Prepare: do not enter production apply.

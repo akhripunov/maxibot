@@ -390,6 +390,16 @@ RELEASE_IMAGE_ID=${RELEASE_IMAGE_ID:-}
 [[ "$RELEASE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_ID must be the verified image config digest"
 RELEASE_IMAGE_ARCHIVE_SHA256=${RELEASE_IMAGE_ARCHIVE_SHA256:-}
 [[ "$RELEASE_IMAGE_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_ARCHIVE_SHA256 must be the verified archive checksum"
+RELEASE_IMAGE_TRANSPORT=${RELEASE_IMAGE_TRANSPORT:-archive}
+[[ "$RELEASE_IMAGE_TRANSPORT" == archive || "$RELEASE_IMAGE_TRANSPORT" == ghcr-oci ]] || die "unsupported prepared image transport"
+if [[ "$RELEASE_IMAGE_TRANSPORT" == ghcr-oci ]]; then
+  [[ -r "${RELEASE_IMAGE_MANIFEST_PATH:-}" ]] || die "GHCR Prepare manifest is unavailable"
+  [[ "${RELEASE_IMAGE_REPOSITORY:-}" == ghcr.io/akhripunov/maxibot-vps-api ]] || die "GHCR repository is not allowlisted"
+  [[ "${RELEASE_IMAGE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] || die "GHCR manifest digest is invalid"
+  if [[ "$MODE" == APPLY ]]; then
+    [[ -n "${GHCR_READ_TOKEN:-}" ]] || die "read-only GHCR credential is unavailable"
+  fi
+fi
 
 PRODUCTION_SSH_USER=root
 PRODUCTION_TARGET="$PRODUCTION_SSH_USER@$PRODUCTION_HOST"
@@ -407,6 +417,10 @@ cleanup_release() {
 }
 trap cleanup_release EXIT
 remote() { "${SSH[@]}" "$@"; }
+remote_with_stdin() {
+  local command=$1 payload=$2
+  printf '%s' "$payload" | ssh "${SSH_OPTIONS[@]}" "$PRODUCTION_TARGET" "$command"
+}
 remote_read() {
   local stage=$1
   shift
@@ -539,18 +553,45 @@ s = re.sub(r'MAXIBOT_COMMIT_SHA: "[^"]+"', f'MAXIBOT_COMMIT_SHA: "{sha}"', s)
 p.write_text(s)
 PY
 cat > "$WORK/release-manifest.json" <<EOF
-{"release_id":"$TARGET_SHA","target_sha":"$TARGET_SHA","target_migration":"$TARGET_MIGRATION","down_revision":"$TARGET_DOWN","env_file":"/opt/maxibot/.env","image":"maxibot-vps-api:$TARGET_SHA","platform":"linux/amd64","prepared_image_config_digest":"$RELEASE_IMAGE_ID","image_archive_sha256":"$RELEASE_IMAGE_ARCHIVE_SHA256"}
+{"release_id":"$TARGET_SHA","target_sha":"$TARGET_SHA","target_migration":"$TARGET_MIGRATION","down_revision":"$TARGET_DOWN","env_file":"/opt/maxibot/.env","image":"maxibot-vps-api:$TARGET_SHA","platform":"linux/amd64","prepared_image_config_digest":"$RELEASE_IMAGE_ID","image_archive_sha256":"$RELEASE_IMAGE_ARCHIVE_SHA256","image_transport":"$RELEASE_IMAGE_TRANSPORT","image_repository":"${RELEASE_IMAGE_REPOSITORY:-}","image_manifest_digest":"${RELEASE_IMAGE_DIGEST:-}"}
 EOF
 ARCHIVE="$WORK/../maxibot-release-$TARGET_SHA.tar"
 tar --exclude='._*' --exclude='.DS_Store' --exclude='__MACOSX' -cf "$ARCHIVE" -C "$WORK" .
+IMAGE_REUSE=NO
+if [[ "$RELEASE_IMAGE_TRANSPORT" == ghcr-oci ]]; then
+  GHCR_PULL_SCRIPT=$(python3 - "$RELEASE_IMAGE_MANIFEST_PATH" "$TARGET_SHA" "${PREPARE_RUN_ID:-}" "${PREPARE_RUN_ATTEMPT:-}" <<'PY'
+import json, sys
+from pathlib import Path
+from scripts.maxibot_ghcr import validate_oci_image, create_vps_pull_script
+proof = json.loads(Path(sys.argv[1]).read_text())
+validated = validate_oci_image(proof, sys.argv[2], sys.argv[3], sys.argv[4])
+print(create_vps_pull_script(validated, sys.argv[2]))
+PY
+  ) || die "GHCR pull command proof could not be generated"
+  GHCR_PULL_OUTPUT=$(remote_with_stdin "$GHCR_PULL_SCRIPT" "$GHCR_READ_TOKEN") || die "GHCR exact-digest pull failed before production mutation"
+  grep -q '^MAXIBOT_GHCR_IMAGE_VERIFIED=YES$' <<< "$GHCR_PULL_OUTPUT" || die "GHCR exact-digest verification marker missing"
+  say GHCR_LAYER_REUSE NOT_MEASURED
+  say GHCR_BYTES_TRANSFERRED NOT_MEASURED
+  say GHCR_PULL_BY_DIGEST PASS
+  say IMAGE_TRANSPORT ghcr-oci
+  say IMAGE_MANIFEST_DIGEST "$RELEASE_IMAGE_DIGEST"
+else
+  IMAGE_REUSE=$(remote "if test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.sha256 && test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config && test \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.sha256)\" = $RELEASE_IMAGE_ARCHIVE_SHA256 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}' 2>/dev/null)\" = \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config)\" && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; then echo YES; else echo NO; fi")
+  say IMAGE_REUSED "$IMAGE_REUSE"
+  say IMAGE_TRANSPORT archive
+fi
+
+# Stage release files only after an OCI pull has succeeded and its exact digest
+# has been checked. Registry failure must not create a candidate release tree.
 REMOTE_TMP="/tmp/maxibot-release-$TARGET_SHA.tar"
 timed_stage SOURCE_UPLOAD "${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP"
-
 remote "set -eu; test -r $PRODUCTION_ROOT/.env; mkdir -p $PRODUCTION_ROOT/releases/$TARGET_SHA; tar -xf $REMOTE_TMP -C $PRODUCTION_ROOT/releases/$TARGET_SHA; find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -exec rm -rf {} +; if find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -print -quit | grep -q .; then echo 'AppleDouble or macOS metadata remains in remote release context' >&2; exit 1; fi"
 remote "rm -f $REMOTE_TMP"
-IMAGE_REUSE=$(remote "if test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.sha256 && test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config && test \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.sha256)\" = $RELEASE_IMAGE_ARCHIVE_SHA256 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}' 2>/dev/null)\" = \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config)\" && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; then echo YES; else echo NO; fi")
-say IMAGE_REUSED "$IMAGE_REUSE"
-if [[ "$IMAGE_REUSE" != YES ]]; then
+if [[ "$RELEASE_IMAGE_TRANSPORT" == ghcr-oci ]]; then
+  remote "printf '%s\\n' '$RELEASE_IMAGE_DIGEST' > $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.oci; docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}' > $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config"
+  remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fx '$RELEASE_IMAGE_REPOSITORY@$RELEASE_IMAGE_DIGEST'"
+fi
+if [[ "$RELEASE_IMAGE_TRANSPORT" == archive && "$IMAGE_REUSE" != YES ]]; then
 REMOTE_IMAGE_TMP="/tmp/maxibot-image-$TARGET_SHA.tar.gz"
 timed_stage IMAGE_UPLOAD "${SCP[@]}" "$IMAGE_ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_IMAGE_TMP"
 
@@ -560,6 +601,9 @@ fi
 REMOTE_LOADED_IMAGE_ID=$(remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}'")
 [[ "$REMOTE_LOADED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "loaded VPS image config digest is unavailable"
 remote "python3 $PRODUCTION_ROOT/releases/$TARGET_SHA/scripts/verify_loaded_prepared_image.py maxibot-vps-api:$TARGET_SHA $RELEASE_IMAGE_ID $TARGET_SHA"
+if [[ "$RELEASE_IMAGE_TRANSPORT" == ghcr-oci ]]; then
+  remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fx '$RELEASE_IMAGE_REPOSITORY@$RELEASE_IMAGE_DIGEST'"
+fi
 say LOADED_IMAGE_CONTENT_PROOF PASS
 say PREPARED_IMAGE_CONFIG_DIGEST "$RELEASE_IMAGE_ID"
 say VPS_LOADED_IMAGE_CONFIG_DIGEST "$REMOTE_LOADED_IMAGE_ID"
@@ -569,9 +613,37 @@ PREVIOUS_SHA=$(remote "docker inspect maxibot-vps-api-1 --format '{{range .Confi
 PREVIOUS_IMAGE=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'")
 CURRENT_ALEMBIC=$(remote "docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'")
 [[ "$PREVIOUS_SHA" =~ ^[0-9a-f]{40}$ && -n "$PREVIOUS_IMAGE" && -n "$CURRENT_ALEMBIC" ]] || die "rollback metadata incomplete"
+[[ "$PREVIOUS_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ ]] || die "rollback image reference is invalid"
+PREVIOUS_IMAGE_ID=$(remote "docker inspect maxibot-vps-api-1 --format '{{.Image}}'")
+PREVIOUS_TAG_IMAGE_ID=$(remote "docker image inspect '$PREVIOUS_IMAGE' --format '{{.Id}}'")
+PREVIOUS_IMAGE_PLATFORM=$(remote "docker image inspect '$PREVIOUS_IMAGE' --format '{{.Os}}/{{.Architecture}}'")
+PREVIOUS_IMAGE_REPO_DIGESTS_RAW=$(remote "docker image inspect '$PREVIOUS_IMAGE' --format '{{json .RepoDigests}}'")
+PREVIOUS_IMAGE_PROOF=$(python3 - "$PREVIOUS_IMAGE_ID" "$PREVIOUS_TAG_IMAGE_ID" "$PREVIOUS_IMAGE_PLATFORM" "$PREVIOUS_IMAGE_REPO_DIGESTS_RAW" <<'PY'
+import json
+import sys
+from scripts.maxibot_ghcr import validate_rollback_image_identity
+
+try:
+    proof = validate_rollback_image_identity(
+        sys.argv[1], sys.argv[2], sys.argv[3], json.loads(sys.argv[4]))
+except (ValueError, json.JSONDecodeError) as error:
+    print(f"ROLLBACK_IMAGE_PROOF=BLOCKED reason={error}", file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps(proof, sort_keys=True, separators=(",", ":")))
+PY
+) || die "previous production image identity is not provable"
+PREVIOUS_IMAGE_IDENTITY=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["rollback_identity"])' "$PREVIOUS_IMAGE_PROOF")
+PREVIOUS_IMAGE_REPO_DIGESTS=$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["repo_digests"],separators=(",",":")))' "$PREVIOUS_IMAGE_PROOF")
+[[ "$PREVIOUS_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ && "$PREVIOUS_TAG_IMAGE_ID" == "$PREVIOUS_IMAGE_ID" ]] || die "running rollback image is not retained by its exact local image reference"
+remote "test \"\$(docker image inspect '$PREVIOUS_IMAGE_ID' --format '{{.Id}}')\" = '$PREVIOUS_IMAGE_ID' && test \"\$(docker image inspect '$PREVIOUS_IMAGE' --format '{{.Id}}')\" = '$PREVIOUS_IMAGE_ID'" || die "rollback image is not locally available by its exact identity"
 remote "set -eu; cp \"$PREVIOUS_CONFIG\" \"$PRODUCTION_ROOT/releases/$TARGET_SHA/rollback-compose.vps.yml\""
 say PRE_DEPLOY_SHA "$PREVIOUS_SHA"
 say PRE_DEPLOY_ALEMBIC_HEAD "$CURRENT_ALEMBIC"
+say PREVIOUS_IMAGE_ID "$PREVIOUS_IMAGE_ID"
+say PREVIOUS_IMAGE_PLATFORM "$PREVIOUS_IMAGE_PLATFORM"
+say PREVIOUS_IMAGE_REPO_DIGESTS "$PREVIOUS_IMAGE_REPO_DIGESTS"
+say ROLLBACK_IMAGE_IDENTITY "$PREVIOUS_IMAGE_IDENTITY"
+say ROLLBACK_IMAGE_AVAILABILITY PASS
 
 # A migration is not allowed to start until a validated, restricted, bounded
 # database backup exists. The custom pg_dump format is compressed by postgres
@@ -661,6 +733,10 @@ WORKER_POLLING=$(remote "docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLI
 WORKER_WRITE_FLAGS=$(remote "docker inspect maxibot-vps-worker-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^(ADS_AUTOPILOT_ENABLED|ADS_WRITE_ACTIONS_ENABLED)=' | paste -sd, - || true")
 [[ "$FINAL_SHA" == "$TARGET_SHA" && "$FINAL_ALEMBIC" == "$TARGET_MIGRATION" ]] || die "postdeploy parity failed"
 [[ "$API_IMAGE" == "$WORKER_IMAGE" && "$API_IMAGE" == "maxibot-vps-api:$TARGET_SHA" ]] || die "API/worker image parity failed"
+if [[ "$RELEASE_IMAGE_TRANSPORT" == ghcr-oci ]]; then
+  remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fx '$RELEASE_IMAGE_REPOSITORY@$RELEASE_IMAGE_DIGEST'" || die "postdeploy OCI digest parity failed"
+fi
+remote "test \"\$(docker image inspect '$PREVIOUS_IMAGE_ID' --format '{{.Id}}')\" = '$PREVIOUS_IMAGE_ID' && test \"\$(docker image inspect '$PREVIOUS_IMAGE' --format '{{.Id}}')\" = '$PREVIOUS_IMAGE_ID'" || die "rollback image identity changed or disappeared during apply"
 [[ "$API_POLLING" == false && "$WORKER_POLLING" == true ]] || die "polling role check failed"
 [[ "$WORKER_WRITE_FLAGS" == *"ADS_AUTOPILOT_ENABLED=false"* && "$WORKER_WRITE_FLAGS" == *"ADS_WRITE_ACTIONS_ENABLED=false"* ]] || die "worker ADS write flags are not disabled"
 remote "cat > $PRODUCTION_ROOT/releases/$TARGET_SHA/release-report.env <<EOF
@@ -672,6 +748,11 @@ PREPARED_IMAGE_CONFIG_DIGEST=$RELEASE_IMAGE_ID
 VPS_LOADED_IMAGE_CONFIG_DIGEST=$REMOTE_LOADED_IMAGE_ID
 IMAGE_ARCHIVE_SHA256=$RELEASE_IMAGE_ARCHIVE_SHA256
 PREVIOUS_IMAGE=$PREVIOUS_IMAGE
+PREVIOUS_IMAGE_ID=$PREVIOUS_IMAGE_ID
+PREVIOUS_IMAGE_PLATFORM=$PREVIOUS_IMAGE_PLATFORM
+PREVIOUS_IMAGE_REPO_DIGESTS=$PREVIOUS_IMAGE_REPO_DIGESTS
+ROLLBACK_IMAGE_IDENTITY=$PREVIOUS_IMAGE_IDENTITY
+ROLLBACK_IMAGE_AVAILABILITY=PASS
 MIGRATION_FROM=$CURRENT_ALEMBIC
 MIGRATION_TO=$TARGET_MIGRATION
 MIGRATION_RESULT=PASS
@@ -698,4 +779,7 @@ say FINAL_RUNTIME_SHA "$FINAL_SHA"
 say FINAL_ALEMBIC_HEAD "$FINAL_ALEMBIC"
 say API_WORKER_IMAGE_PARITY PASS
 say POLLING_ROLES PASS
+say ROLLBACK_IMAGE_ID "$PREVIOUS_IMAGE_ID"
+say ROLLBACK_IMAGE_IDENTITY "$PREVIOUS_IMAGE_IDENTITY"
+say ROLLBACK_IMAGE_AVAILABILITY PASS
 say RELEASE_STATUS PASS
