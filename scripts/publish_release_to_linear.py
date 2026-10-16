@@ -29,7 +29,7 @@ MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 PHASES = {"candidate", "preflight", "production"}
 STATUSES = {
     "candidate": {"CI_PASS", "FAILED", "CANCELLED", "SKIPPED"},
-    "preflight": {"READY", "READY_FOR_OWNER", "FAILED", "BLOCKED"},
+    "preflight": {"PASS", "READY", "READY_FOR_OWNER", "FAILED", "BLOCKED"},
     "production": {"COMPLETE", "FAILED_PRE_SWITCH", "RECOVERY_REQUIRED", "FAILED"},
 }
 REPOSITORY = "akhripunov/maxibot"
@@ -352,6 +352,11 @@ def event_markdown(phase: str, status: str, sha: str, migration: str, run_id: st
             "",
             "Approval должен подтвердить этот полный SHA и target; он запускает один canonical production workflow. "
             "Этот preflight не менял production.",
+        ])
+    elif phase == "preflight" and status == "PASS":
+        lines.extend([
+            "",
+            "Read-only preflight прошёл внутри этого Deploy до Apply. Статус READY_FOR_OWNER не публикуется для уже выполняемого автоматического production цикла.",
         ])
     return "\n".join(lines)
 

@@ -27,13 +27,16 @@ exclusions/owner-only categories, and ACTIVE/revoked/consumed state. Preserve
 the record blob. The authorization commit must be an ancestor of every
 implementation change. Publication still needs its separate OWNER approval.
 
-After exact current-main Prepare succeeds and its immutable preflight receipt
-proves `READY_FOR_OWNER`, the existing controller rechecks the full scope and
-baseline, atomically claims the authorization once, and dispatches the existing
-MAXIBOT Deploy workflow in `task-scoped-auto` mode. It does not repeat Prepare
-or preflight. Prepare provenance, image/platform/parity, risk, migration,
-read-only preflight, lock, recovery, health and all existing release gates
-remain mandatory. By default owner-only changes are excluded. A specifically
+After exact current-main Prepare succeeds, the existing controller rechecks the
+full scope and baseline, atomically claims the authorization once, and dispatches
+the existing MAXIBOT Deploy workflow directly in `task-scoped-auto` mode. That
+Deploy performs the read-only preflight immediately before apply, then rechecks
+critical live conditions under the release lock. No separate preflight workflow
+is required. Without a valid full-cycle authorization, no automatic Deploy is
+dispatched; the normal exact-SHA approval path remains. Prepare provenance,
+image/platform/parity, risk, migration, read-only preflight, lock, recovery,
+health and all existing release gates remain mandatory. By default owner-only
+changes are excluded. A specifically
 pre-approved Alembic migration may be task-scoped only when the record names
 the exact migration path and target, production DB head, risk description,
 backup/rollback plans, stop conditions and required gates. Preflight must prove
@@ -57,7 +60,9 @@ Changes to the Release Orchestrator or release infrastructure are explicitly
 outside `TASK_SCOPED_AUTO`; their production rollout requires separate
 exact-SHA OWNER approval. No task-scoped mode removes any clean-checkout, exact
 current-main, Prepare, immutable artifact, platform/parity, config, preflight,
-lock, recovery, health, Worker, or regression gate. Real-device/OWNER smoke
+lock, recovery, health, Worker, or regression gate. A manual diagnostic
+preflight remains available; its `READY_FOR_OWNER` status is distinct from the
+`PASS` preflight result inside a production Deploy. Real-device/OWNER smoke
 requirements remain separate; never invent evidence.
 
 Scope expansion, any failed required check, unexpected main/baseline drift,

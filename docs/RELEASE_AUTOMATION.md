@@ -7,9 +7,10 @@
 поручение владельца «исправь [задачу] и выкатывай» разрешает один
 `TASK_SCOPED_AUTO` release без повторного подтверждения. До реализации
 фиксируется schema-v3 durable authorization record. После exact-SHA Prepare
-и immutable `READY_FOR_OWNER` preflight existing controller повторно проверяет
-baseline/scope, атомарно claim-ит разрешение и вызывает существующий Deploy
-workflow. Он не создаёт новый Prepare или preflight. Release infrastructure и
+existing controller перепроверяет baseline/scope, атомарно claim-ит разрешение
+и вызывает существующий Deploy workflow. Этот Deploy выполняет read-only
+preflight непосредственно перед Apply; отдельный обязательный preflight-run не
+создаётся. Без разрешения сохраняется exact-SHA approval path. Release infrastructure и
 неподдержанные owner-only категории остаются за отдельным exact-SHA approval;
 DB-миграция допускается только с конкретным риск-контрактом и всеми штатными
 миграционными gates. Runner может штатно ждать в `Queued`; readiness check
@@ -50,12 +51,11 @@ bundle без успешного Prepare и повторного immutable read-
 ## Порядок для владельца
 
 1. Dev отправляет commit в `origin/main`. GitHub запускает [MAXIBOT — Prepare](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-prepare.yml): полную pytest suite, frozen-path guard и единственную сборку exact `linux/amd64` image. Prepare использует pinned Docker 29.1.3 с private containerd archive-import rehearsal; проверяет config checksum, platform, source labels и различие native image ID/config digest. Synthetic 256/320/512 MiB allocation больше не является blocking Prepare gate: обязательная memory-защита выполняется read-only на реальном Worker во время preflight/postdeploy и требует Docker и kernel cgroup лимит ровно 512 MiB, `OOMKilled=false`, неизменный restart count и advancing primary heartbeat за 35 секунд. Receipt связывает PASS с SHA, Prepare run ID/attempt и checksum архива. После CI gates Prepare создаёт уникальный tag `maxibot-prepare-<sha>-<run>-<attempt>` и публикует `bundle.zip` с image archive, manifest и receipt. Затем Release metadata read-back обязан подтвердить published state, `immutable=true` и GitHub asset digest. Новые большие Prepare bundles не хранятся в Actions Artifacts. `CI_PASS` появляется в Linear только после завершения публикации.
-2. После успешного exact-main Prepare `workflow_run` controller на уже существующем MAXIBOT Mac runner проверяет SHA, immutable Release/tag/asset/digest, отсутствие Deploy и атомарно дедуплицирует пару SHA + Prepare run/attempt. Он вызывает только существующий `MAXIBOT — Deploy` в `preflight` с production approval=false. Этот runner — небольшой self-hosted controller; новый hosted controller job и повторные tests/builds не создаются. Preflight повторно проверяет provenance, verified cache и canonical `scripts/release_prod.sh SHA --dry-run` с production SSH identity. При полном PASS публикуется immutable `READY_FOR_OWNER`; production не меняется.
-3. Если исходное OWNER поручение явно разрешило полный production cycle, durable authorization остаётся активной, baseline/scope/risk contracts совпали, а все обязательные gates PASS, существующий controller атомарно claim-ит эту авторизацию и автоматически вызывает тот же Deploy workflow в `task-scoped-auto`. В остальных случаях требуется отдельный exact-SHA approval владельца и обычный `production` dispatch. READY без действующей авторизации не запускает production.
-4. Validator требует последний exact-SHA `READY_FOR_OWNER` immutable evidence и тот же Prepare run/attempt. Runner повторяет непосредственный drift/dry-run guard, проверяет cache identity без повторного download при совпадении, затем вызывает `scripts/release_prod.sh SHA --apply`. Canonical script импортирует готовый archive; Deploy не пересобирает image на Mac/VPS.
-5. Результат и allowlisted preflight/apply evidence публикуются отдельным immutable Release `maxibot-evidence-<sha>-<run>-<attempt>`; Prepare Release остаётся неизменным. Linear читает immutable evidence новых workflow runs и сохраняет Actions Artifact fallback для истории. Если apply прошёл, а evidence publication упала, не запускайте `production` повторно. `publication-recovery` сверяет точный исходный run/attempt и выполняет только read-only preflight; он может опубликовать recovery evidence лишь при доказанном совпадении production image, DB head, health, rollback metadata и выключенных ADS flags.
+2. После успешного exact-main Prepare `workflow_run` controller на уже существующем MAXIBOT Mac runner проверяет SHA, immutable Release/tag/asset/digest и отсутствие активного Deploy. Если единственная валидная durable authorization покрывает весь diff и baseline, controller атомарно claim-ит её и вызывает существующий `MAXIBOT — Deploy` в `task-scoped-auto`. Без неё он оставляет обычный exact-SHA approval path и ничего не применяет. Новые hosted controller jobs и повторные tests/builds не создаются.
+3. Deploy validator проверяет successful exact-SHA Prepare, immutable artifact/provenance, разрешение (если task-auto), baseline и защиту от повторного запуска. После runner readiness и artifact verification он выполняет canonical `scripts/release_prod.sh SHA --dry-run` как read-only preflight непосредственно перед Apply. При PASS критичные условия повторно проверяются под production lock, затем вызывается `scripts/release_prod.sh SHA --apply`. Image не пересобирается на Mac/VPS.
+4. Ручной `preflight` режим остаётся диагностическим и при успехе публикует `READY_FOR_OWNER`; внутренний preflight production/task-auto публикует `PASS`, не READY. Результат и allowlisted preflight/apply evidence публикуются отдельным immutable Release `maxibot-evidence-<sha>-<run>-<attempt>`; Prepare Release остаётся неизменным. Если apply прошёл, а evidence publication упала, не запускайте `production` повторно. `publication-recovery` сверяет точный исходный run/attempt и выполняет только read-only сверку; повторное применение запрещено.
 
-State machine сохраняет `PREPARING → PREFLIGHTING → READY_FOR_OWNER → APPROVED → DEPLOYING → VERIFYING → COMPLETE`; ошибки переходят в `PREPARE_FAILED`, `PREFLIGHT_FAILED`, `FAILED_PRE_SWITCH`, `RECOVERY_REQUIRED` или `PUBLICATION_RECOVERY_REQUIRED`. Claim refs дедуплицируют automatic preflight, concurrency lock сериализует Deploy, а неопределённый dispatch оставляет claim для recovery вместо blind retry. `FAILED_PRE_SWITCH` означает, что мутация production не началась. `RECOVERY_REQUIRED` требует read-only сверки; apply вслепую не повторяется. При пропавшем Mac runner job останется в очереди, пока владелец не включит runner/Mac.
+State machine: без предварительной auth — `PREPARING → READY_FOR_OWNER` после отдельного ручного диагностического preflight либо ожидание exact-SHA approval; с валидной task-auto — `PREPARING → DEPLOYING → VERIFYING → COMPLETE`, причём Deploy включает `PREFLIGHTING` до любого Apply. Ошибки переходят в `PREPARE_FAILED`, `PREFLIGHT_FAILED`, `FAILED_PRE_SWITCH`, `RECOVERY_REQUIRED` или `PUBLICATION_RECOVERY_REQUIRED`. Claim refs защищают от повторного Deploy, concurrency lock сериализует runtime apply, а неопределённый dispatch оставляет claim для reconciliation. `FAILED_PRE_SWITCH` означает, что production mutation не началась. `RECOVERY_REQUIRED` требует read-only сверки; apply вслепую не повторяется. При пропавшем Mac runner job останется в очереди.
 
 Runner telemetry публикует hosted/self-hosted job count и измеренные wall-clock seconds (не billable minutes), `DUPLICATE_HOSTED_WORK_REMOVED` и `CACHE_PREVENTED_DOWNLOAD`. Pipeline controller использует существующий self-hosted runner; Prepare и image build выполняются один раз, Deploy использует persistent project cache и проверяет release metadata/hash при каждом чтении.
 
@@ -79,12 +79,13 @@ Publisher обновляет только именованные MAXIBOT release
 
 ## Release performance and finalization
 
-For a clean Release Orchestrator V2 benchmark, use a fresh main candidate and
-measure GitHub event/commit, Prepare, automatic controller, Deploy preflight,
-and Linear READY publication timestamps separately. Count workflow jobs and
-their measured runner seconds from the GitHub API; record cache hit/miss and
-download/build/test repeats. A valid clean run has one successful Prepare,
-one automatic preflight, and no manual retry or production apply.
+For a clean release benchmark, use comparable candidates and measure
+commit/push, Prepare, automatic controller, Deploy preflight/apply/verify, and
+Linear publication timestamps separately. Count workflow jobs and measured
+runner seconds from the GitHub API; record cache hit/miss and repeated work.
+An exact-SHA-only preparation run may include a manual diagnostic preflight;
+an authorized task-auto production run must contain one in-Deploy preflight
+before Apply and no separate mandatory preflight run.
 
 Prepare exports the single verified linux/amd64 image as gzip level 1; the
 outer immutable Release bundle ZIP uses stored entries. Mac verification and

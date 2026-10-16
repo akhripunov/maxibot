@@ -139,13 +139,15 @@ def test_task_scoped_migration_requires_target_baseline_rehearsal_and_rollback_e
     evidence = {"PROD_DB_HEAD": "0098_old", "MIGRATION_REHEARSAL": "PASS PATH=0098_old->0099_safe_change",
                 "ROLLBACK_READY": "PASS", "PROD_READY": "ready"}
     assert_task_scoped_no_migration("0099_safe_change", evidence,
-                                    record=record(risk_contracts={"database_migration": contract}),
+                                    record=record(allowed_paths=contract["allowed_paths"],
+                                                  risk_contracts={"database_migration": contract}),
                                     changed_paths=contract["allowed_paths"])
     for change in ({"PROD_DB_HEAD": "0097_old"}, {"MIGRATION_REHEARSAL": "BLOCKED"},
                    {"ROLLBACK_READY": "METADATA_REQUIRED"}):
         with pytest.raises(AuthorizationError):
             assert_task_scoped_no_migration("0099_safe_change", {**evidence, **change},
-                                            record=record(risk_contracts={"database_migration": contract}),
+                                            record=record(allowed_paths=contract["allowed_paths"],
+                                                          risk_contracts={"database_migration": contract}),
                                             changed_paths=contract["allowed_paths"])
 
 

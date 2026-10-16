@@ -45,7 +45,7 @@ def _migration_contract(record: dict[str, Any], path: str) -> dict[str, Any]:
             or not isinstance(contract.get("stop_conditions"), list) or len(contract["stop_conditions"]) < 2
             or any(not isinstance(item, str) or len(item.strip()) < 8 for item in contract["stop_conditions"])
             or not isinstance(contract.get("required_gates"), list) or not gates.issubset(contract["required_gates"])):
-        raise AuthorizationError("Owner-only migration requires a complete pre-approved database risk contract")
+        raise AuthorizationError("owner-only migration requires a complete pre-approved database risk contract")
     return contract
 
 
@@ -76,7 +76,7 @@ def assert_task_scoped_no_migration(target_migration: str, evidence: dict[str, s
 
 def authorization_state_ref(project: str, authorization_id: str, state: str) -> str:
     project = project.lower()
-    if project not in {"maxibot", "gpoint"} or not AUTH_ID_RE.fullmatch(authorization_id):
+    if project != "maxibot" or not AUTH_ID_RE.fullmatch(authorization_id):
         raise AuthorizationError("Invalid project-scoped authorization ID")
     if state not in {"revoked", "consumed", "claimed"}:
         raise AuthorizationError("Invalid authorization state marker")
@@ -143,10 +143,12 @@ def validate_task_authorization(*, record: dict[str, Any], project: str,
         if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/"):
             raise AuthorizationError("Candidate diff contains an invalid path")
         if _owner_only(path):
-            _migration_contract(record, path)
-            if path not in allowed:
-                raise AuthorizationError("Migration path is not explicitly allowed")
-            continue
+            if path.startswith("alembic/versions/"):
+                if path not in allowed:
+                    raise AuthorizationError("Migration path is outside the durable authorized scope")
+                _migration_contract(record, path)
+                continue
+            raise AuthorizationError("Candidate path is owner-only and cannot use TASK_SCOPED_AUTO")
         if not _in_scope(path, allowed):
             raise AuthorizationError(f"Candidate path is outside authorized scope: {path}")
     record_digest = hashlib.sha256(

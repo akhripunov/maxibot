@@ -161,6 +161,7 @@ def main() -> int:
         "mode": mode,
         "status": "FAILED",
         "release_state": "PREFLIGHTING",
+        "preflight": "BLOCKED",
         "authorization_mode": "TASK_SCOPED_AUTO" if mode == "task-scoped-auto" else "EXACT_SHA",
         "task_authorization_id": os.environ.get("TASK_AUTHORIZATION_ID", ""),
         "authorization_consumed": False,
@@ -275,6 +276,7 @@ def main() -> int:
                 raise RuntimeError("V3 production baseline moved after targeted Prepare")
         result["stage_seconds"] = {"PREFLIGHT": round(time.monotonic() - preflight_started, 3)}
         if dry_code != 0 or "SAFE_TO_RELEASE=YES" not in dry_output or "DRY_RUN_RESULT=PASS" not in dry_output:
+            result["preflight"] = "FAILED"
             if "NETWORK_UNAVAILABLE" in dry_output:
                 result["network_status"] = "NETWORK_UNAVAILABLE"
                 raise RuntimeError("NETWORK_UNAVAILABLE during canonical production preflight")

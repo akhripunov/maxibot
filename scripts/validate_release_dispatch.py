@@ -10,7 +10,6 @@ import re
 import socket
 import ssl
 import sys
-import tempfile
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -123,7 +122,7 @@ def validate(values: dict[str, str], api_get=github_get,
     if main_sha != sha:
         raise ValidationError("Candidate must still be the exact current origin/main SHA")
 
-    if mode == "task-scoped-auto":
+    if mode == "task-scoped-auto" or (mode == "preflight" and task_authorization_id):
         try:
             authorization_file = Path(record_path(task_authorization_id))
             record = json.loads(authorization_file.read_text(encoding="utf-8"))
@@ -150,14 +149,10 @@ def validate(values: dict[str, str], api_get=github_get,
                 if "HTTP 404" not in str(error):
                     raise
                 claim = None
-            if mode == "preflight" and claim is not None:
-                raise ValidationError("Task authorization already has a production claim")
-            if mode == "task-scoped-auto" and (claim is None or claim.get("object", {}).get("sha") != sha):
-                raise ValidationError("Task authorization has no exact-candidate atomic Deploy claim")
-            claimed = api_get(
-                "git/ref/tags/" + authorization_state_ref("maxibot", task_authorization_id, "claimed")
-                .removeprefix("refs/tags/"), token)
-            if claimed.get("object", {}).get("sha") != sha:
+            if mode == "preflight":
+                if claim is not None:
+                    raise ValidationError("Task authorization already has a production claim")
+            elif claim is None or claim.get("object", {}).get("sha") != sha:
                 raise ValidationError("Task authorization has no exact-candidate atomic Deploy claim")
         except (OSError, ValueError, AuthorizationError) as error:
             raise ValidationError(f"TASK_SCOPED_AUTO authorization is invalid: {error}") from None
@@ -190,13 +185,8 @@ def validate(values: dict[str, str], api_get=github_get,
     except (ReleaseAssetError, ValidationError) as exc:
         raise ValidationError(f"Exact immutable Prepare Release is not valid: {exc}") from exc
 
-    preflight = None
-    if mode in {"production", "task-scoped-auto"}:
-        preflight = _verify_ready_preflight(
-            sha, migration, latest_run_id, latest_run_attempt, token, api_get,
-            evidence_reader or _read_preflight_evidence,
-        )
-
+    # Production modes execute the full read-only preflight inside Deploy,
+    # immediately before apply. A prior diagnostic preflight is optional.
     if mode == "publication-recovery":
         prior = api_get(f"actions/runs/{recovery_run_id}", token)
         if (str(prior.get("id")) != recovery_run_id
@@ -222,68 +212,11 @@ def validate(values: dict[str, str], api_get=github_get,
         "prepare_url": str(latest.get("html_url", "")),
         "reconciles_deploy_run_id": recovery_run_id,
         "reconciles_deploy_run_attempt": recovery_attempt,
-        "ready_preflight_run_id": preflight["run_id"] if preflight else "",
-        "ready_preflight_run_attempt": preflight["run_attempt"] if preflight else "",
         "orchestrator_run_id": orchestrator_run_id,
         "task_authorization_id": task_authorization_id,
         "task_authorization_record_sha256": task_authorization["record_sha256"] if task_authorization else "",
         "task_authorization_changed_paths": task_authorization["changed_paths"] if task_authorization else "",
     }
-
-
-def _read_preflight_evidence(sha: str, run_id: str, attempt: str, token: str,
-                             api_get) -> tuple[dict, dict]:
-    """Read and verify the immutable evidence for one completed Deploy run."""
-    try:
-        from release_assets import read_evidence
-        with tempfile.TemporaryDirectory(prefix="maxibot-ready-preflight-") as directory:
-            manifest = read_evidence(sha, run_id, attempt, Path(directory),
-                                     lambda route: api_get(route, token), token)
-            result = json.loads((Path(directory) / "result.json").read_text(encoding="utf-8"))
-            return manifest, result
-    except (ReleaseAssetError, OSError, ValueError, KeyError) as exc:
-        raise ValidationError("Immutable READY preflight evidence is missing or invalid") from exc
-
-
-def _verify_ready_preflight(sha: str, migration: str, prepare_run_id: str,
-                            prepare_attempt: str, token: str, api_get,
-                            evidence_reader) -> dict[str, str]:
-    """Require the latest exact-SHA Deploy preflight to be the published READY state."""
-    runs = api_get(
-        f"actions/workflows/maxibot-deploy.yml/runs?branch=main&head_sha={sha}&per_page=100",
-        token,
-    )
-    candidates = [run for run in runs.get("workflow_runs", [])
-                  if run.get("head_sha") == sha and run.get("head_branch") == "main"
-                  and run.get("path") == ".github/workflows/maxibot-deploy.yml"
-                  and run.get("event") == "workflow_dispatch"
-                  and str(run.get("display_title", "")).startswith(f"MAXIBOT preflight {sha} by ")]
-    if not candidates:
-        raise ValidationError("Production requires a successful READY_FOR_OWNER preflight for this exact SHA")
-    latest = max(candidates, key=lambda run: (run.get("run_number", 0), run.get("run_attempt", 0)))
-    if latest.get("status") != "completed" or latest.get("conclusion") != "success":
-        raise ValidationError("Latest exact-SHA Deploy preflight is not successful")
-    run_id, attempt = str(latest.get("id", "")), str(latest.get("run_attempt", 1))
-    if not run_id.isdigit() or not attempt.isdigit():
-        raise ValidationError("READY preflight run identity is invalid")
-    manifest, result = evidence_reader(sha, run_id, attempt, token, api_get)
-    if (manifest.get("candidate_sha") != sha
-            or str(manifest.get("deploy_run_id")) != run_id
-            or str(manifest.get("deploy_run_attempt")) != attempt
-            or str(manifest.get("prepare_run_id")) != prepare_run_id
-            or str(manifest.get("prepare_run_attempt")) != prepare_attempt):
-        raise ValidationError("READY preflight evidence does not match the selected candidate/Prepare run")
-    if (result.get("mode") != "preflight"
-            or result.get("status") != "PLANNED"
-            or result.get("release_state") != "READY_FOR_OWNER"
-            or result.get("preflight") != "PASS"
-            or result.get("production_changed") is not False
-            or result.get("candidate_sha") != sha
-            or result.get("target_migration") != migration
-            or str(result.get("prepare_run_id")) != prepare_run_id
-            or str(result.get("prepare_run_attempt")) != prepare_attempt):
-        raise ValidationError("Immutable Deploy evidence does not prove READY_FOR_OWNER for this exact release")
-    return {"run_id": run_id, "run_attempt": attempt}
 
 
 def main() -> int:

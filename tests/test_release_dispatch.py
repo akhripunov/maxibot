@@ -580,16 +580,16 @@ def test_dispatch_requires_exact_operator_confirmation_for_production():
     with pytest.raises(ValidationError, match="must not carry production approval"):
         validate(values(APPROVE_PRODUCTION="true"), FakeGitHub())
     approved = validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
-                        FakeGitHub(deploy_runs=[ready_preflight_run()]), ready_evidence)
+                        FakeGitHub(), lambda *_args: pytest.fail("prior preflight must not be required"))
     assert approved["mode"] == "production"
-    assert approved["ready_preflight_run_id"] == "81"
 
 
-def test_task_scoped_auto_requires_durable_record_exact_ready_preflight_and_no_second_approval(monkeypatch, tmp_path):
+def test_task_scoped_auto_requires_durable_record_but_runs_preflight_inside_deploy(monkeypatch, tmp_path):
     record_path = tmp_path / "task-auth.json"
     record_path.write_text(json.dumps({
-        "schema_version": 1, "project": "maxibot", "authorization_mode": "TASK_SCOPED_AUTO",
+        "schema_version": 3, "project": "maxibot", "authorization_mode": "TASK_SCOPED_AUTO",
         "authorization_id": "maxibot-task-2026-10-06-001",
+        "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
         "source_reference": "linear:release-orchestrator-handoff#owner-instruction-2026-10-06",
         "production_baseline_sha": SHA, "task": "Change one user-facing menu link",
         "allowed_paths": ["app/bot/menu.py"], "acceptance_criteria": ["menu opens the configured website"],
@@ -598,56 +598,80 @@ def test_task_scoped_auto_requires_durable_record_exact_ready_preflight_and_no_s
     }))
     monkeypatch.setattr("validate_release_dispatch.record_path", lambda _authorization_id: str(record_path))
     monkeypatch.setattr("validate_release_dispatch.candidate_scope_diff", lambda *_args: ["app/bot/menu.py"])
-    github = FakeGitHub(deploy_runs=[ready_preflight_run()])
+    github = FakeGitHub()
+    github.authorization_markers.add(
+        "git/ref/tags/maxibot-task-auth/maxibot-task-2026-10-06-001/claimed")
     selected = validate(values(RELEASE_MODE="task-scoped-auto", TASK_AUTHORIZATION_ID="maxibot-task-2026-10-06-001"),
-                        github, ready_evidence)
+                        github, lambda *_args: pytest.fail("prior preflight must not be required"))
     assert selected["mode"] == "task-scoped-auto"
     assert selected["task_authorization_id"] == "maxibot-task-2026-10-06-001"
     assert selected["task_authorization_changed_paths"] == "app/bot/menu.py"
-    assert selected["ready_preflight_run_id"] == "81"
+    assert not any(path.startswith("actions/workflows/maxibot-deploy.yml/") for path in github.paths)
     assert any("/revoked" in path for path in github.paths)
     assert any("/consumed" in path for path in github.paths)
-    with pytest.raises(ValidationError, match="durable authorization ID"):
+    with pytest.raises(ValidationError, match="durable ID"):
         validate(values(RELEASE_MODE="task-scoped-auto"), github, ready_evidence)
     with pytest.raises(ValidationError, match="must not carry production approval"):
         validate(values(RELEASE_MODE="task-scoped-auto", APPROVE_PRODUCTION="true",
                         TASK_AUTHORIZATION_ID="maxibot-task-2026-10-06-001"), github, ready_evidence)
 
 
-def test_production_requires_successful_ready_preflight_for_exact_sha():
-    with pytest.raises(ValidationError, match="successful READY_FOR_OWNER preflight"):
-        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"), FakeGitHub())
+def test_manual_diagnostic_preflight_with_linked_authorization_does_not_require_a_claim(monkeypatch, tmp_path):
+    record_path = tmp_path / "task-auth.json"
+    record_path.write_text(json.dumps({
+        "schema_version": 3, "project": "maxibot", "authorization_mode": "TASK_SCOPED_AUTO",
+        "authorization_id": "maxibot-task-2026-10-06-001",
+        "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+        "source_reference": "linear:ME-31/owner-instruction",
+        "production_baseline_sha": SHA, "task": "Change a scoped menu link",
+        "allowed_paths": ["app/bot/menu.py"], "acceptance_criteria": ["menu opens"],
+        "exclusions": ["database", "migrations", "security", "secrets", "payments",
+                       "ads", "paid_traffic", "release_infrastructure"],
+        "state": "ACTIVE", "revoked": False, "consumed": False,
+    }))
+    monkeypatch.setattr("validate_release_dispatch.record_path", lambda _authorization_id: str(record_path))
+    monkeypatch.setattr("validate_release_dispatch.candidate_scope_diff", lambda *_args: ["app/bot/menu.py"])
+    github = FakeGitHub()
+    selected = validate(values(RELEASE_MODE="preflight", TASK_AUTHORIZATION_ID="maxibot-task-2026-10-06-001"),
+                        github)
+    assert selected["mode"] == "preflight"
+    assert any(path.endswith("/revoked") for path in github.paths)
+    assert any(path.endswith("/consumed") for path in github.paths)
+    assert any(path.endswith("/claimed") for path in github.paths)
 
 
-def test_production_rejects_latest_failed_preflight_even_if_an_older_one_was_ready():
-    old_ready = ready_preflight_run()
-    newer_failed = {**ready_preflight_run("completed", "failure"), "id": 82,
-                    "run_number": 13}
-    with pytest.raises(ValidationError, match="Latest exact-SHA Deploy preflight"):
-        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
-                 FakeGitHub(deploy_runs=[old_ready, newer_failed]), ready_evidence)
+def test_production_requires_exact_successful_prepare_and_does_not_require_separate_preflight():
+    selected = validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                        FakeGitHub(), lambda *_args: pytest.fail("prior preflight must not be required"))
+    assert selected["prepare_run_id"] == "14"
+    assert selected["prepare_run_attempt"] == "1"
 
 
-def test_production_rejects_ready_evidence_linked_to_another_prepare_attempt():
-    def wrong_prepare(sha, run_id, attempt, token, api_get):
-        manifest, result = ready_evidence(sha, run_id, attempt, token, api_get)
-        manifest["prepare_run_attempt"] = "2"
-        return manifest, result
+def test_deploy_workflow_keeps_diagnostic_ready_distinct_from_internal_preflight_pass():
+    workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+    controller = (ROOT / ".github/workflows/maxibot-auto-preflight.yml").read_text()
+    publication = workflow.split("- name: Publish preflight result to MAXIBOT Linear", 1)[1]
+    assert "inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PASS' && 'READY_FOR_OWNER'" in publication
+    assert "needs.deploy.outputs.preflight == 'PASS' && 'PASS'" in publication
+    assert 'workflows: ["MAXIBOT — Prepare"]' in controller
+    assert '"mode": "task-scoped-auto"' in (ROOT / "scripts/release_orchestrator.py").read_text()
+    assert '"preflight", "production", "task-scoped-auto"' in (ROOT / "scripts/run_release_workflow.py").read_text()
 
-    with pytest.raises(ValidationError, match="does not match the selected candidate/Prepare run"):
-        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
-                 FakeGitHub(deploy_runs=[ready_preflight_run()]), wrong_prepare)
 
-
-def test_production_rejects_evidence_that_does_not_prove_ready_state():
-    def not_ready(sha, run_id, attempt, token, api_get):
-        manifest, result = ready_evidence(sha, run_id, attempt, token, api_get)
-        result["release_state"] = "PREFLIGHTING"
-        return manifest, result
-
-    with pytest.raises(ValidationError, match="does not prove READY_FOR_OWNER"):
-        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
-                 FakeGitHub(deploy_runs=[ready_preflight_run()]), not_ready)
+def test_failed_in_deploy_preflight_never_reaches_production_apply(monkeypatch, tmp_path):
+    result_path, _ = _setup_task_scoped_wrapper(monkeypatch, tmp_path, MIGRATION)
+    commands = []
+    def execute(command, _env):
+        commands.append(command)
+        return 1, "SAFE_TO_RELEASE=NO\nDRY_RUN_RESULT=FAILED\n"
+    monkeypatch.setattr(run_release_workflow, "run", execute)
+    monkeypatch.setattr(run_release_workflow, "verify_task_authorization",
+                        lambda *_: pytest.fail("failed preflight must stop before authorization/apply"))
+    assert run_release_workflow.main() == 1
+    result = json.loads(result_path.read_text())
+    assert len(commands) == 1 and commands[0][-1] == "--dry-run"
+    assert result["preflight"] == "FAILED"
+    assert result["production_changed"] is False
 
 
 def test_publication_recovery_is_read_only_and_cannot_repeat_apply():
@@ -786,8 +810,12 @@ def test_task_scoped_auto_blocks_before_apply_when_migration_head_would_change(m
         return 0, f"SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration_head}\n" if command[-1] == "--dry-run" else pytest.fail("apply must not run")
     monkeypatch.setattr(run_release_workflow, "run", execute)
     monkeypatch.setattr(run_release_workflow, "verify_task_authorization",
-                        lambda *_: pytest.fail("authorization cannot advance to apply when migration safety fails"))
+                        lambda *_args, **_kwargs: {"_record": {}, "_changed_paths_list": []})
     assert run_release_workflow.main() == 1
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "FAILED_PRE_SWITCH"
+    assert result["preflight"] == "PASS"
+    assert len(commands) == 1 and commands[0][-1] == "--dry-run"
     result = json.loads(result_path.read_text())
     assert result["status"] == "FAILED_PRE_SWITCH"
     assert result["production_changed"] is False
@@ -797,9 +825,10 @@ def test_task_scoped_auto_blocks_before_apply_when_migration_head_would_change(m
 def test_task_scoped_auto_applies_only_after_revalidation_and_consumes_once(monkeypatch, tmp_path):
     result_path, migration_head = _setup_task_scoped_wrapper(monkeypatch, tmp_path, MIGRATION)
     events = []
-    def verify(*_args):
+    def verify(*_args, **_kwargs):
         events.append("revalidate")
-        return {"record_sha256": "b" * 64, "source_reference": "linear:task#owner", "changed_paths": "app/bot/menu.py"}
+        return {"record_sha256": "b" * 64, "source_reference": "linear:task#owner",
+                "changed_paths": "app/bot/menu.py", "_record": {}, "_changed_paths_list": []}
     def consume(*_args):
         events.append("consume")
     monkeypatch.setattr(run_release_workflow, "verify_task_authorization", verify)

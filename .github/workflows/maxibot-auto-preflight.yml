@@ -1,9 +1,9 @@
-name: MAXIBOT — Automatic preflight controller
-run-name: Auto preflight MAXIBOT ${{ github.event.workflow_run.head_sha }}
+name: MAXIBOT — Automatic release controller
+run-name: Auto release MAXIBOT ${{ github.event.workflow_run.head_sha }}
 
 on:
   workflow_run:
-    workflows: ["MAXIBOT — Prepare", "MAXIBOT — Deploy"]
+    workflows: ["MAXIBOT — Prepare"]
     types: [completed]
 
 permissions:
@@ -11,18 +11,16 @@ permissions:
   actions: read
 
 concurrency:
-  group: maxibot-auto-preflight-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: maxibot-auto-release-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
   cancel-in-progress: false
 
 jobs:
-  dispatch-preflight:
+  dispatch-authorized-deploy:
     if: >-
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_sha == github.sha &&
-      (github.event.workflow_run.path == '.github/workflows/maxibot-prepare.yml' ||
-       (github.event.workflow_run.path == '.github/workflows/maxibot-deploy.yml' &&
-        startsWith(github.event.workflow_run.display_title, format('MAXIBOT preflight {0} by ', github.event.workflow_run.head_sha))))
+      github.event.workflow_run.path == '.github/workflows/maxibot-prepare.yml'
     runs-on: [self-hosted, macOS, maxibot-production]
     timeout-minutes: 3
     permissions:
@@ -39,7 +37,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
         run: python3 scripts/release_runner_readiness.py
-      - name: Continue exact Prepare or READY preflight through the existing release workflow
+      - name: Dispatch one authorized Deploy or leave exact-SHA approval required
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PYTHONDONTWRITEBYTECODE: '1'
