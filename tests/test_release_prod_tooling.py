@@ -15,6 +15,16 @@ IMAGE_PREFLIGHT = ROOT / "scripts" / "release_image_preflight.py"
 APPROVED_SHA = "a" * 40
 
 
+def test_task_scoped_apply_rechecks_revocation_before_migration_and_runtime_switch():
+    source = SCRIPT.read_text(encoding="utf-8")
+    migration = source.index('timed_stage MIGRATION remote')
+    runtime_switch = source.index('timed_stage RUNTIME_SWITCH remote')
+    calls = [match.start() for match in re.finditer(r'verify_task_authorization_before_mutation', source)]
+    assert len(calls) >= 3  # function definition plus the two mutation-boundary calls
+    assert any(position < migration for position in calls[1:])
+    assert any(migration < position < runtime_switch for position in calls[1:])
+
+
 def _run_image_preflight(tmp_path, api="good", worker="good", platform="linux/amd64"):
     docker = tmp_path / "docker"
     docker.write_text(

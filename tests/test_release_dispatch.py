@@ -693,6 +693,32 @@ def test_task_scoped_auto_requires_durable_record_but_runs_preflight_inside_depl
                         TASK_AUTHORIZATION_ID="maxibot-task-2026-10-06-001"), github, ready_evidence)
 
 
+def test_task_authorization_revalidation_observes_revocation_after_initial_pass(monkeypatch):
+    import validate_release_dispatch
+
+    authorization_id = "maxibot-unified-release-v1-20261016"
+    candidate = __import__("subprocess").check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    record = json.loads((ROOT / ".release-authorizations" / f"{authorization_id}.json").read_text())
+    markers = {f"git/ref/tags/maxibot-task-auth/{authorization_id}/claimed"}
+
+    def github_get(path, _token):
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": candidate}}
+        if path in markers:
+            return {"object": {"sha": candidate}}
+        raise ValidationError("authorization marker read failed (HTTP 404)")
+
+    monkeypatch.setattr(validate_release_dispatch, "github_get", github_get)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    assert run_release_workflow.verify_task_authorization(
+        authorization_id, candidate, record["production_baseline_sha"], require_claim=True)
+    markers.add(f"git/ref/tags/maxibot-task-auth/{authorization_id}/revoked")
+    with pytest.raises(ValueError, match="already revoked"):
+        run_release_workflow.verify_task_authorization(
+            authorization_id, candidate, record["production_baseline_sha"], require_claim=True)
+
+
 def test_manual_diagnostic_preflight_with_linked_authorization_does_not_require_a_claim(monkeypatch, tmp_path):
     record_path = tmp_path / "task-auth.json"
     record = {

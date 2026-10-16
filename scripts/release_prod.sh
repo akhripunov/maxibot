@@ -447,6 +447,29 @@ CURRENT_PRODUCTION_DB_HEAD=$(remote_read production_db_head "docker exec maxibot
 [[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
 say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"
 say CURRENT_PRODUCTION_DB_HEAD "$CURRENT_PRODUCTION_DB_HEAD"
+verify_task_authorization_before_mutation() {
+  [[ "${RELEASE_MODE:-}" == "task-scoped-auto" ]] || return 0
+  [[ -n "${TASK_AUTHORIZATION_ID:-}" && -n "${GITHUB_TOKEN:-}" && -n "${MAXIBOT_PYTHON:-}" ]] \
+    || die "TASK_SCOPED_AUTO authorization context is unavailable before production mutation"
+  CURRENT_PRODUCTION_SHA="$CURRENT_PRODUCTION_SHA" TARGET_SHA="$TARGET_SHA" "$MAXIBOT_PYTHON" - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+try:
+    sys.path.insert(0, str(Path.cwd() / "scripts"))
+    from scripts.run_release_workflow import verify_task_authorization
+    verify_task_authorization(os.environ["TASK_AUTHORIZATION_ID"],
+                             os.environ["TARGET_SHA"],
+                             os.environ["CURRENT_PRODUCTION_SHA"],
+                             require_claim=True)
+except Exception:
+    print("TASK_AUTHORIZATION_MUTATION_GATE=BLOCKED", file=sys.stderr)
+    raise SystemExit(1)
+print("TASK_AUTHORIZATION_MUTATION_GATE=PASS")
+PY
+  [[ "$?" == 0 ]] || die "TASK_SCOPED_AUTO authorization revalidation failed before production mutation"
+}
 if [[ -n "$WORKER_BOOTSTRAP_FROM" ]]; then
   [[ "$CURRENT_PRODUCTION_SHA" == "$WORKER_BOOTSTRAP_FROM" && "$CURRENT_PRODUCTION_DB_HEAD" == "$TARGET_MIGRATION" ]] || die "worker bootstrap forbids changed legacy SHA or pending migrations"
 fi
@@ -685,7 +708,9 @@ say PRE_APPLY_IMAGE_PARITY PASS
 remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic heads | grep -q '^$TARGET_MIGRATION'"
 say MIGRATION_ALLOWED YES
 
+verify_task_authorization_before_mutation
 timed_stage MIGRATION remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic upgrade $TARGET_MIGRATION"
+verify_task_authorization_before_mutation
 timed_stage RUNTIME_SWITCH remote "set -eu; docker compose -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d --no-build --force-recreate api worker"
 if ! timed_stage HEALTH remote "set -Eeuo pipefail
 deadline=\$((\$(date +%s) + $HEALTH_TIMEOUT_SECONDS))
