@@ -37,7 +37,7 @@ class FakeGitHub:
         if path == "git/ref/heads/main":
             return {"object": {"sha": self.main_sha}}
         if path.startswith("actions/workflows/maxibot-deploy.yml/"):
-            return {"workflow_runs": self.deploy_runs}
+            return {"total_count": len(self.deploy_runs), "workflow_runs": self.deploy_runs}
         if path.startswith("actions/workflows/"):
             return {"workflow_runs": self.runs}
         if path.startswith("releases/tags/"):
@@ -100,6 +100,53 @@ def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
     assert selected["prepare_run_id"] == "14"
     assert selected["prepare_run_attempt"] == "1"
     assert any(f"head_sha={SHA}" in path for path in github.paths)
+
+
+def test_production_dispatch_rejects_a_prior_successful_apply_for_same_sha():
+    for mode, status, conclusion in (("production", "completed", "success"),
+                                     ("task-scoped-auto", "in_progress", None),
+                                     ("production", "completed", "failure")):
+        prior = {"id": 88, "run_attempt": 1, "head_sha": SHA,
+                 "head_branch": "main", "event": "workflow_dispatch", "status": status,
+                 "conclusion": conclusion, "path": ".github/workflows/maxibot-deploy.yml",
+                 "display_title": f"MAXIBOT {mode} {SHA} by owner"}
+        with pytest.raises(ValidationError, match="already has a production run"):
+            validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                     FakeGitHub(deploy_runs=[prior]))
+
+
+@pytest.mark.parametrize("history", [
+    {"total_count": 101, "workflow_runs": []},
+    {"total_count": "unknown", "workflow_runs": []},
+    {"workflow_runs": []},
+    {"total_count": 1, "workflow_runs": []},
+])
+def test_production_dispatch_fails_closed_when_exact_sha_run_history_is_incomplete(history):
+    class IncompleteHistory(FakeGitHub):
+        def __call__(self, path, token):
+            if path.startswith("actions/workflows/maxibot-deploy.yml/"):
+                self.paths.append(path)
+                return history
+            return super().__call__(path, token)
+
+    with pytest.raises(ValidationError, match="history is incomplete"):
+        validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"), IncompleteHistory())
+
+
+def test_production_dispatch_ignores_other_sha_and_read_only_preflight_runs():
+    other_sha = "b" * 40
+    prior = {"id": 88, "run_attempt": 1, "head_sha": other_sha,
+             "head_branch": "main", "event": "workflow_dispatch", "status": "completed",
+             "conclusion": "success", "path": ".github/workflows/maxibot-deploy.yml",
+             "display_title": f"MAXIBOT production {other_sha} by owner"}
+    selected = validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                        FakeGitHub(deploy_runs=[prior]))
+    assert selected["candidate"] == SHA
+
+    diagnostic = {**prior, "head_sha": SHA, "display_title": f"MAXIBOT preflight {SHA} by owner"}
+    selected = validate(values(RELEASE_MODE="production", APPROVE_PRODUCTION="true"),
+                        FakeGitHub(deploy_runs=[diagnostic]))
+    assert selected["candidate"] == SHA
 
 
 def test_github_get_recovers_after_extended_tls_outage_and_continues_read():
@@ -606,7 +653,8 @@ def test_task_scoped_auto_requires_durable_record_but_runs_preflight_inside_depl
     assert selected["mode"] == "task-scoped-auto"
     assert selected["task_authorization_id"] == "maxibot-task-2026-10-06-001"
     assert selected["task_authorization_changed_paths"] == "app/bot/menu.py"
-    assert not any(path.startswith("actions/workflows/maxibot-deploy.yml/") for path in github.paths)
+    assert any(path.startswith("actions/workflows/maxibot-deploy.yml/runs?branch=main&head_sha=")
+               and SHA in path for path in github.paths)
     assert any("/revoked" in path for path in github.paths)
     assert any("/consumed" in path for path in github.paths)
     with pytest.raises(ValidationError, match="durable ID"):
@@ -645,6 +693,35 @@ def test_production_requires_exact_successful_prepare_and_does_not_require_separ
                         FakeGitHub(), lambda *_args: pytest.fail("prior preflight must not be required"))
     assert selected["prepare_run_id"] == "14"
     assert selected["prepare_run_attempt"] == "1"
+
+
+def test_selected_ghcr_transport_requires_authenticated_exact_digest_before_preflight(monkeypatch):
+    with pytest.raises(RuntimeError, match="GHCR read credential is unavailable"):
+        run_release_workflow.validate_transport_credentials("ghcr-oci", {})
+    run_release_workflow.validate_transport_credentials("archive", {})
+    manifest = {"repository": "ghcr.io/akhripunov/maxibot-vps-api",
+                "manifest_digest": "sha256:" + "b" * 64}
+    calls = []
+    monkeypatch.setattr("scripts.maxibot_ghcr.verify_ghcr_digest_access",
+                        lambda repository, digest, username, token, **kw: calls.append(
+                            (repository, digest, username, token, kw.get("opener"))))
+    run_release_workflow.validate_transport_credentials(
+        "ghcr-oci", {"GHCR_READ_TOKEN": "present"}, manifest)
+    assert calls == [(manifest["repository"], manifest["manifest_digest"], "akhripunov", "present", None)]
+    with pytest.raises(RuntimeError, match="manifest evidence"):
+        run_release_workflow.validate_transport_credentials("ghcr-oci", {"GHCR_READ_TOKEN": "present"})
+
+
+def test_safe_result_keeps_selected_transport_and_rollback_image_identity():
+    evidence = run_release_workflow.safe_evidence(
+        "IMAGE_TRANSPORT=archive\nROLLBACK_IMAGE_ID=sha256:" + "c" * 64 +
+        "\nROLLBACK_IMAGE_IDENTITY=LOCAL_CONFIG_DIGEST\nROLLBACK_IMAGE_AVAILABILITY=PASS\n")
+    assert evidence == {
+        "IMAGE_TRANSPORT": "archive",
+        "ROLLBACK_IMAGE_ID": "sha256:" + "c" * 64,
+        "ROLLBACK_IMAGE_IDENTITY": "LOCAL_CONFIG_DIGEST",
+        "ROLLBACK_IMAGE_AVAILABILITY": "PASS",
+    }
 
 
 def test_deploy_workflow_keeps_diagnostic_ready_distinct_from_internal_preflight_pass():
