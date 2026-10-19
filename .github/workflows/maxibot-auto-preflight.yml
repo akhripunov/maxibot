@@ -26,6 +26,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      packages: read
     steps:
       - name: Checkout trusted current main controller code
         uses: actions/checkout@v4
@@ -40,5 +41,6 @@ jobs:
       - name: Dispatch one authorized Deploy or leave exact-SHA approval required
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 scripts/release_orchestrator.py

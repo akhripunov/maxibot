@@ -221,8 +221,8 @@ def test_release_tooling_contains_required_safety_gates():
         "PRE_APPLY_IMAGE_PARITY PASS",
         "PRE_APPLY_API_IMAGE",
         "PRE_APPLY_WORKER_IMAGE",
-        "RELEASE_IMAGE_ARCHIVE_SHA256",
-        "sha256sum $REMOTE_IMAGE_TMP",
+        "RELEASE_IMAGE_DIGEST",
+        "prepared-image.digest",
         "VPS_LOADED_IMAGE_CONFIG_DIGEST",
         "refs/maxibot/release/",
         "git push --force-with-lease=\"$RELEASE_REF:$EXISTING_RELEASE_REF_SHA\" origin \"$TARGET_SHA:$RELEASE_REF\"",
@@ -231,10 +231,13 @@ def test_release_tooling_contains_required_safety_gates():
         assert marker in source
 
 
-def test_loaded_archive_identity_and_native_runtime_rehearsal_are_fail_closed():
+def test_loaded_oci_identity_and_native_runtime_rehearsal_are_fail_closed():
     source = SCRIPT.read_text()
     assert '[[ "$REMOTE_LOADED_IMAGE_ID" == "$RELEASE_IMAGE_ID" ]]' not in source
-    assert 'docker load --input $REMOTE_IMAGE_TMP' in source
+    assert 'docker pull "$image_ref"' in source
+    assert 'mint-pull-token' in source
+    assert 'identitytoken' in source
+    assert 'docker login ghcr.io' not in source
     assert 'verify_loaded_prepared_image.py maxibot-vps-api:$TARGET_SHA $RELEASE_IMAGE_ID $TARGET_SHA' in source
     assert 'LOADED_IMAGE_CONTENT_PROOF PASS' in source
     assert 'PRODUCTION_IMAGE_REHEARSAL' not in source
@@ -289,7 +292,7 @@ def test_shared_retry_budget_is_carried_across_release_stages_and_never_wraps_ap
     assert 'timed_stage MIGRATION' in source
     mutation_section = source[source.index('timed_stage SOURCE_UPLOAD'):]
     assert 'network_retry_read' not in mutation_section
-    assert 'timed_stage IMAGE_LOAD' in mutation_section
+    assert 'timed_stage IMAGE_PULL' in mutation_section
     assert 'timed_stage MIGRATION' in mutation_section
 
 
