@@ -145,7 +145,8 @@ def current_state(event: dict | None = None) -> dict:
         result = read_result_artifact(run)
         mode = result.get("mode")
         is_reconciliation = mode == "publication-recovery"
-        if ((mode == "production" or is_reconciliation) and result.get("status") == "COMPLETE"):
+        if ((mode in {"production", "task-scoped-auto"} or is_reconciliation)
+                and result.get("status") == "COMPLETE"):
             if result.get("github_run_id") != str(run.get("id")):
                 raise SyncError("MAXIBOT production result artifact run identity mismatch")
             if result.get("final_runtime_sha") != result.get("candidate_sha"):
@@ -184,7 +185,9 @@ def current_state(event: dict | None = None) -> dict:
         "main_checked_at": commit.get("commit", {}).get("committer", {}).get("date", "unknown"),
         "production_sha": prod_sha, "production_checked_at": deployment.get("updated_at", deployment.get("created_at", "unknown")),
         "production_status": evidence.get("status"), "in_sync": main_sha == prod_sha,
-        "production_changed": evidence.get("production_changed", evidence.get("mode") == "production"),
+        "production_changed": evidence.get(
+            "production_changed", evidence.get("mode") in {"production", "task-scoped-auto"}
+        ),
         "reconciliation": evidence.get("mode") == "publication-recovery",
         "reconciles_deploy_run_id": evidence.get("reconciles_deploy_run_id"),
         "reconciles_deploy_run_attempt": evidence.get("reconciles_deploy_run_attempt"),

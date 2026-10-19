@@ -535,6 +535,38 @@ def test_prepare_failure_for_current_main_does_not_reuse_old_success(monkeypatch
     assert state["current_prepare"]["id"] == 2
 
 
+def test_task_scoped_auto_complete_is_reconciled_as_production(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "test")
+    task_run = {
+        "id": 7, "head_sha": SHA, "status": "completed", "conclusion": "success",
+        "name": "MAXIBOT task-scoped-auto " + SHA,
+        "html_url": "https://github.com/akhripunov/maxibot/actions/runs/7",
+        "created_at": "2026-10-19T09:00:00Z",
+    }
+    monkeypatch.setattr(publish_release_to_linear, "latest_runs", lambda workflow: (
+        [{"id": 4, "head_sha": SHA, "status": "completed", "conclusion": "success"}]
+        if "prepare" in workflow else [task_run]
+    ))
+    result = {
+        "mode": "task-scoped-auto", "status": "COMPLETE", "github_run_id": "7",
+        "candidate_sha": SHA, "final_runtime_sha": SHA,
+        "target_migration": MIGRATION, "final_migration": MIGRATION,
+        "production_changed": True, "github_deployment_id": None,
+    }
+    monkeypatch.setattr(publish_release_to_linear, "read_result_artifact", lambda run: result)
+    monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: (
+        {"sha": SHA, "commit": {"committer": {"date": "t"}}}
+        if "commits/main" in path else {"workflow_runs": []}
+    ))
+
+    state = publish_release_to_linear.current_state()
+
+    assert state["deploy"] == task_run
+    assert state["production_sha"] == SHA
+    assert state["production_changed"] is True
+    assert state["reconciliation"] is False
+
+
 def test_read_only_publication_reconciliation_becomes_canonical_linear_state(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "test")
     recovery_run = {
