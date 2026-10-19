@@ -19,9 +19,9 @@ DB-миграция допускается только с конкретным 
 
 Процесс оборачивает существующий `scripts/release_prod.sh`; он остаётся единственной production-командой. Workflow не управляет Direct/VK кампаниями, бюджетом, ставками, объявлениями или `ADS_*` master flags.
 
-## Статус миграции хранения — подтверждён 07.10.2026
+## Историческая проверка GitHub Releases — 07.10.2026
 
-**PASS / VERIFIED для проверенной цепочки MAXIBOT:** на SHA
+Историческое подтверждение прежней схемы GitHub Releases на SHA
 `44c19ab59571ccb663ebf5c6d4de49fa5a866239` завершены Prepare
 [#37631234823](https://github.com/akhripunov/maxibot/actions/runs/37631234823),
 automatic controller
@@ -34,26 +34,38 @@ digest. Подробности и ограничения proof — в текущ
 [Правила релиза MAXIBOT](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588).
 Production apply для указанного SHA не выполнялся и не требуется только ради proof.
 Каждый **следующий** candidate независимо проходит immutable/identity/approval
-gates; эта запись не является бессрочным разрешением Deploy.
+gates. Эта запись не описывает актуальный V5 кандидат и не разрешает будущий Deploy.
 
-Публикатор использует штатный workflow `GITHUB_TOKEN` (`contents: write`) для
-создания тега, черновика, загрузки bundle и публикации Release. После публикации
-обязательный API read-back через тот же workflow token проверяет
-`draft=false`, `immutable=true`, tag на точный SHA, загруженный asset и
-совпадение GitHub SHA256 digest с локальными байтами. Если `immutable=true`
-отсутствует или равно false, шаг публикации завершается ошибкой и весь Prepare
-имеет FAILED; Linear не отмечает candidate как READY, а Deploy не может выбрать
-bundle без успешного Prepare и повторного immutable read-back. Внутренний receipt
-отражает только результаты CI/build/rehearsal и сам по себе не разрешает Deploy.
-Это требует включить repository immutable Releases пользователю с
-`Administration: write`; checksum и workflow token эту проверку не заменяют. Без успешных проверок нового конкретного кандидата не считать его production release readiness доказанной.
+## Целевая V5 схема
+
+Локальная реализация переводит MAXIBOT image, Prepare receipt и Deploy evidence
+в отдельные GHCR OCI packages. Каждый payload привязан к SHA/run/attempt, а
+publisher сверяет публикацию повторным read-back по immutable digest. Docker
+archive остаётся только для private containerd rehearsal.
+
+После успешного read-only production preflight Deploy создаёт GitHub Deployment
+для `maxibot-production` с exact SHA, migration, mode, run/attempt и Prepare
+ receipt digest. Только затем запускает canonical Apply. Непосредственно перед
+ pull runner обменивает `GITHUB_TOKEN` на краткоживущий GHCR Bearer token,
+ ограниченный `pull`-доступом к image package, и передаёт его VPS через stdin
+ SSH. VPS тянет `repository@sha256:...`, сверяет config digest, platform и
+ source labels, затем удаляет временный root-only Docker config. Полный workflow
+ token остаётся на runner; registry token не попадает в аргументы, результат
+ workflow или Linear. Deployment status и GHCR evidence независимо проверяются
+ перед обновлением Linear.
+
+Если публикация evidence/status не завершилась после Apply, повторный Apply
+запрещён. `publication-recovery` проверяет точный runtime и БД read-only, затем
+исправляет status существующего Deployment без production mutation. До отдельной
+разрешённой публикации реализации production использует прежнюю схему; эта
+локальная миграция сама по себе не меняет production.
 
 ## Порядок для владельца
 
-1. Dev отправляет commit в `origin/main`. GitHub запускает [MAXIBOT — Prepare](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-prepare.yml): полную pytest suite, frozen-path guard и единственную сборку exact `linux/amd64` image. Prepare использует pinned Docker 29.1.3 с private containerd archive-import rehearsal; проверяет config checksum, platform, source labels и различие native image ID/config digest. Synthetic 256/320/512 MiB allocation больше не является blocking Prepare gate: обязательная memory-защита выполняется read-only на реальном Worker во время preflight/postdeploy и требует Docker и kernel cgroup лимит ровно 512 MiB, `OOMKilled=false`, неизменный restart count и advancing primary heartbeat за 35 секунд. Receipt связывает PASS с SHA, Prepare run ID/attempt и checksum архива. После CI gates Prepare создаёт уникальный tag `maxibot-prepare-<sha>-<run>-<attempt>` и публикует `bundle.zip` с image archive, manifest и receipt. Затем Release metadata read-back обязан подтвердить published state, `immutable=true` и GitHub asset digest. Новые большие Prepare bundles не хранятся в Actions Artifacts. `CI_PASS` появляется в Linear только после завершения публикации.
-2. После успешного exact-main Prepare `workflow_run` controller на уже существующем MAXIBOT Mac runner проверяет SHA, immutable Release/tag/asset/digest и отсутствие активного Deploy. Если единственная валидная durable authorization покрывает весь diff и baseline, controller атомарно claim-ит её и вызывает существующий `MAXIBOT — Deploy` в `task-scoped-auto`. Без неё он оставляет обычный exact-SHA approval path и ничего не применяет. Новые hosted controller jobs и повторные tests/builds не создаются.
-3. Deploy validator проверяет successful exact-SHA Prepare, immutable artifact/provenance, разрешение (если task-auto), baseline и защиту от повторного запуска. После runner readiness и artifact verification он выполняет canonical `scripts/release_prod.sh SHA --dry-run` как read-only preflight непосредственно перед Apply. При PASS критичные условия повторно проверяются под production lock, затем вызывается `scripts/release_prod.sh SHA --apply`. Image не пересобирается на Mac/VPS.
-4. Ручной `preflight` режим остаётся диагностическим и при успехе публикует `READY_FOR_OWNER`; внутренний preflight production/task-auto публикует `PASS`, не READY. Результат и allowlisted preflight/apply evidence публикуются отдельным immutable Release `maxibot-evidence-<sha>-<run>-<attempt>`; Prepare Release остаётся неизменным. Если apply прошёл, а evidence publication упала, не запускайте `production` повторно. `publication-recovery` сверяет точный исходный run/attempt и выполняет только read-only сверку; повторное применение запрещено.
+1. Только в отдельной разрешённой подготовке Dev публикует commit в `origin/main`. GitHub запускает [MAXIBOT — Prepare](https://github.com/akhripunov/maxibot/actions/workflows/maxibot-prepare.yml): обязательную suite, frozen-path guard, exact linux/amd64 build, private Docker rehearsal и GHCR publication/read-back. Успешный V5 Prepare фиксируется OCI digest receipt; `CI_PASS` появляется в Linear только после публикации.
+2. После успешного exact-main Prepare `workflow_run` controller на MAXIBOT Mac runner проверяет SHA, GHCR OCI receipt/image digest, image labels и отсутствие активного Deploy. Если единственная валидная durable authorization покрывает eligible scope и baseline, controller атомарно claim-ит её и вызывает существующий `MAXIBOT — Deploy` в `task-scoped-auto`. Без неё сохраняется exact-SHA approval path.
+3. Deploy validator проверяет successful exact-SHA Prepare, OCI receipt/provenance, разрешение (если task-auto), baseline и защиту от повторного запуска. После runner readiness и image digest verification он выполняет canonical `scripts/release_prod.sh SHA --dry-run` как read-only preflight непосредственно перед Apply. При PASS создаётся GitHub Deployment, затем вызывается `scripts/release_prod.sh SHA --apply`. Image не пересобирается на Mac/VPS.
+4. Ручной `preflight` остаётся диагностическим и при успехе публикует `READY_FOR_OWNER`; внутренний preflight production/task-auto публикует `PASS`, не READY. Результат публикуется как отдельный immutable GHCR OCI evidence digest. Если Apply прошёл, а evidence/status publication упала, не запускайте production повторно. `publication-recovery` сверяет exact исходный run/attempt и исправляет metadata только после read-only runtime reconciliation.
 
 State machine: без предварительной auth — `PREPARING → READY_FOR_OWNER` после отдельного ручного диагностического preflight либо ожидание exact-SHA approval; с валидной task-auto — `PREPARING → DEPLOYING → VERIFYING → COMPLETE`, причём Deploy включает `PREFLIGHTING` до любого Apply. Ошибки переходят в `PREPARE_FAILED`, `PREFLIGHT_FAILED`, `FAILED_PRE_SWITCH`, `RECOVERY_REQUIRED` или `PUBLICATION_RECOVERY_REQUIRED`. Claim refs защищают от повторного Deploy, concurrency lock сериализует runtime apply, а неопределённый dispatch оставляет claim для reconciliation. `FAILED_PRE_SWITCH` означает, что production mutation не началась. `RECOVERY_REQUIRED` требует read-only сверки; apply вслепую не повторяется. При пропавшем Mac runner job останется в очереди.
 
@@ -67,7 +79,7 @@ Runner telemetry публикует hosted/self-hosted job count и измере
 
 Publisher обновляет только именованные MAXIBOT release-блоки в Handoff и добавляет идемпотентные события в журнал; архитектурный контекст владельца сохраняется. Публикуются SHA, run, статус и безопасные migration/readback факты. Секреты, production `.env`, SSH key и пользовательские сообщения в Linear не передаются. Repository secret `LINEAR_API_KEY` доступен только шагам публикации.
 
-Повторные и неуспешные публикации сохраняются по `run_id`/`run_attempt`. Bookkeeping не коммитит и не отправляет `main`; публикационная сверка read-only и не вызывает runtime apply. Исторические Actions result artifacts остаются доступны для reconciliation; новые обязательные bundles/evidence хранятся в immutable Releases.
+Повторные и неуспешные публикации сохраняются по `run_id`/`run_attempt`. Bookkeeping не коммитит и не отправляет `main`; publication recovery read-only и не вызывает runtime apply. Исторические GitHub Releases и Actions result artifacts остаются доступны только для старых попыток; новые images, receipts и evidence хранятся в GHCR по digest.
 
 ## Ограничения runner
 
@@ -87,21 +99,20 @@ An exact-SHA-only preparation run may include a manual diagnostic preflight;
 an authorized task-auto production run must contain one in-Deploy preflight
 before Apply and no separate mandatory preflight run.
 
-Prepare exports the single verified linux/amd64 image as gzip level 1; the
-outer immutable Release bundle ZIP uses stored entries. Mac verification and
-VPS checksum verification use the same image archive bytes. Deploy never
-rebuilds an application image.
+Prepare rehearses the single verified linux/amd64 image through its private
+archive import, then publishes the image to GHCR and verifies the immutable
+manifest digest. Deploy pulls that exact digest and compares config digest,
+platform and source labels. Deploy never rebuilds an application image.
 
-Release tags contain candidate SHA, Prepare run ID and attempt. Before using
-`~/.cache/maxibot-release/artifacts`, Deploy checks fresh GitHub main/run/Release
-metadata and the asset's published SHA-256. Missing/draft/mutable Releases,
-changed attempts and mismatches fail closed. The cache retains at most three ZIPs / 1
-GiB (a selected oversized ZIP is retained alone). Portable Python 3.12.10 uses
-a separate persistent project tool cache. No caches dirty the candidate checkout.
+GHCR tags contain candidate SHA, Prepare run ID and attempt. Before using the
+receipt, Deploy checks fresh GitHub main/run metadata and verifies the selected
+OCI digest read-back. Missing packages, changed attempts and manifest/payload
+mismatches fail closed. Portable Python 3.12.10 uses a separate persistent
+project tool cache. No caches dirty the candidate checkout.
 
-VPS image reuse is allowed only when the saved archive checksum and loaded
+VPS image reuse is allowed only when the saved OCI manifest digest and loaded
 config ID still match and image platform plus all three source labels pass.
-Fresh candidates still use canonical upload/load. The release wrapper streams
+Fresh candidates use canonical GHCR pull-by-digest. The release wrapper streams
 output immediately; upload, load, migration, runtime switch, health and ref
 finalization emit timings, which are also saved in the workflow result.
 

@@ -14,7 +14,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset
+from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
+    PREPARE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
+    resolve_oci_artifact, validate_prepare_receipt)
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
                                    validate_task_authorization)
@@ -149,12 +151,15 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
             raise OrchestrationError("Prepare run metadata changed after completion event")
     if str(run.get("run_attempt", "1")) != attempt:
         raise OrchestrationError("Prepare attempt changed after completion event")
-    tag = release_tag("prepare", sha, run_id, attempt)
+    tag = artifact_tag("prepare", sha, run_id, attempt)
     try:
-        asset = resolve_asset("prepare", sha, run_id, attempt, PREPARE_ASSET_NAME,
-                              lambda route: api.get(route))
-    except (ReleaseAssetError, APIError) as error:
-        raise OrchestrationError("Prepare immutable Release/asset provenance failed") from error
+        receipt_digest, receipt_bytes = resolve_oci_artifact(PREPARE_REPOSITORY, tag,
+            PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
+            _registry_fetch(PREPARE_REPOSITORY, os.environ.get("GITHUB_ACTOR", ""), api.token))
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+        validate_prepare_receipt(receipt, sha, run_id, attempt)
+    except (ArtifactError, UnicodeDecodeError, json.JSONDecodeError, APIError) as error:
+        raise OrchestrationError("Prepare OCI receipt provenance failed") from error
     authorization = _find_task_authorization(repo_root, sha, api)
     if authorization["ambiguous"] == "true":
         return {"state": "TASK_AUTHORIZATION_AMBIGUOUS", "candidate_sha": sha,
@@ -162,8 +167,8 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
     if not authorization["authorization_id"]:
         return {"state": "OWNER_EXACT_SHA_APPROVAL_REQUIRED", "candidate_sha": sha,
                 "prepare_run_id": run_id, "prepare_run_attempt": attempt,
-                "release_tag": tag, "asset_id": str(asset["id"]),
-                "asset_sha256": asset["digest"].removeprefix("sha256:")}
+                "prepare_receipt_tag": tag, "prepare_receipt_digest": receipt_digest,
+                "image_digest": receipt["image"]["digest"]}
     target = migration or (alembic_heads(repo_root)[0] if repo_root else "")
     if not target or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", target):
         raise OrchestrationError("Current Alembic target is not uniquely established")
@@ -187,6 +192,7 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
         "approve_production": "false", "approve_worker_bootstrap": "false",
         "prepare_run_id": run_id, "prepare_run_attempt": attempt,
         "orchestrator_run_id": orchestrator_run_id,
+        "prepare_receipt_digest": receipt_digest,
         "task_authorization_id": authorization["authorization_id"],
     }}
     try:
@@ -196,8 +202,8 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
         raise OrchestrationError("Task-scoped Deploy dispatch failed after durable claim; reconcile before retry") from error
     return {"state": "TASK_SCOPED_AUTO_DISPATCHED", "candidate_sha": sha,
             "prepare_run_id": run_id, "prepare_run_attempt": attempt,
-            "release_tag": tag, "asset_id": str(asset["id"]),
-            "asset_sha256": asset["digest"].removeprefix("sha256:"),
+            "prepare_receipt_tag": tag, "prepare_receipt_digest": receipt_digest,
+            "image_digest": receipt["image"]["digest"],
             "target_migration": target, "authorization_id": authorization["authorization_id"]}
 
 
@@ -281,8 +287,8 @@ def safe_failure_detail(error: Exception) -> str:
             if isinstance(cause, APIError):
                 return f"dispatch_after_claim_{safe_failure_detail(cause)}"
             return "dispatch_after_claim_failed_reconciliation_required"
-        if str(error) == "Prepare immutable Release/asset provenance failed":
-            return "prepare_immutable_release_asset_provenance_failed"
+        if str(error) == "Prepare OCI receipt provenance failed":
+            return "prepare_oci_receipt_provenance_failed"
         if str(error).startswith("Atomic task-scoped Deploy claim failed"):
             status = re.search(r"HTTP (\d{3})", str(error))
             return f"claim_create_http_{status.group(1)}" if status else "claim_create_failed"
@@ -326,8 +332,8 @@ def main() -> int:
             if result["state"] == "OWNER_EXACT_SHA_APPROVAL_REQUIRED":
                 output.write("- Automatic Deploy: `NOT_AUTHORIZED`; exact-SHA OWNER approval starts the existing Deploy workflow.\n")
                 output.write(f"- Prepare run/attempt: `{result['prepare_run_id']}/{result['prepare_run_attempt']}`\n")
-                output.write(f"- Immutable Prepare tag: `{result['release_tag']}`\n")
-                output.write(f"- Asset ID/SHA256: `{result['asset_id']}` / `{result['asset_sha256']}`\n")
+                output.write(f"- Prepare OCI receipt: `{result['prepare_receipt_tag']}` / `{result['prepare_receipt_digest']}`\n")
+                output.write(f"- Image OCI digest: `{result['image_digest']}`\n")
             elif result["state"] == "TASK_AUTHORIZATION_AMBIGUOUS":
                 output.write("- Automatic Deploy: `BLOCKED`; multiple valid authorizations match.\n")
             else:

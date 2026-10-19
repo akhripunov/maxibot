@@ -1,6 +1,8 @@
 import sys
+import json
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +25,7 @@ def event(**overrides):
 
 class FakeAPI:
     def __init__(self):
+        self.token = "test-token"
         self.calls = []
         self.claimed = False
         self.claimed_sha = SHA
@@ -70,6 +73,27 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.api = FakeAPI()
+        env_patch = patch.dict(os.environ, {"GITHUB_ACTOR": "codex-test"})
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        def resolve(_repository, tag, _artifact_type, _layer_type, _fetch):
+            import re
+            match = re.fullmatch(r"prepare-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)", tag)
+            sha, run_id, attempt = match.groups()
+            receipt = {"schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": sha,
+                "github_run_id": run_id, "github_run_attempt": attempt, "status": "READY",
+                "tests": "success", "frozen_path_guard": "success", "linux_amd64_image": "success",
+                "ghcr_image_publish": "success", "private_docker_rehearsal": "PASS",
+                "image": {"repository": "ghcr.io/akhripunov/maxibot-vps-api", "tag": f"prepare-{sha}-{run_id}-{attempt}",
+                    "digest": "sha256:" + "c" * 64, "config_digest": "sha256:" + "d" * 64,
+                    "platform": "linux/amd64", "labels": {
+                        "org.opencontainers.image.revision": sha,
+                        "org.opencontainers.image.source-sha": sha,
+                        "org.maxibot.release.sha": sha}}}
+            return "sha256:" + "e" * 64, json.dumps(receipt).encode()
+        patcher = patch.object(orchestrator, "resolve_oci_artifact", resolve)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def dispatch(self, payload=None):
         return orchestrator.dispatch_prepare(payload or event(), self.api, repo_root=self.root,
@@ -128,12 +152,10 @@ class ReleaseOrchestratorTests(unittest.TestCase):
                 self.dispatch()
         self.assertFalse(any(c[0] == "POST" and c[1].endswith("/dispatches") for c in self.api.calls))
 
-    def test_mutable_and_draft_release_are_rejected(self):
-        for patch in ({"immutable": False}, {"draft": True}):
-            api = FakeAPI()
-            api.release_patch = patch
-            with self.subTest(patch=patch), self.assertRaisesRegex(orchestrator.OrchestrationError, "immutable"):
-                orchestrator.dispatch_prepare(event(), api, repo_root=self.root, migration="0098_test")
+    def test_invalid_oci_prepare_receipt_is_rejected(self):
+        with patch.object(orchestrator, "resolve_oci_artifact", side_effect=orchestrator.ArtifactError("invalid")):
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "OCI receipt provenance"):
+                self.dispatch()
 
     def test_only_single_alembic_head_is_accepted(self):
         versions = self.root / "alembic" / "versions"

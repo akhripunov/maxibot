@@ -6,10 +6,6 @@ from __future__ import annotations
 import json
 import os
 import re
-try:
-    from scripts.prepared_artifact_cache import checksum
-except ModuleNotFoundError:
-    from prepared_artifact_cache import checksum
 import subprocess
 import time
 import sys
@@ -19,9 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from scripts.prepared_image_archive import inspect_prepared_archive
+    from scripts.ghcr_release_artifacts import IMAGE_REPOSITORY, validate_prepare_receipt
 except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
-    from prepared_image_archive import inspect_prepared_archive
+    from ghcr_release_artifacts import IMAGE_REPOSITORY, validate_prepare_receipt
 
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
@@ -31,7 +27,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 EVIDENCE_KEYS = {
     "TARGET_SHA", "TARGET_MIGRATION", "TARGET_DOWN_REVISION", "IMAGE_READY",
-    "IMAGE_PLATFORM", "IMAGE_SOURCE_SHA", "IMAGE_CONFIG_DIGEST", "IMAGE_ARCHIVE_SHA256",
+    "IMAGE_PLATFORM", "IMAGE_SOURCE_SHA", "IMAGE_CONFIG_DIGEST", "IMAGE_DIGEST", "IMAGE_REPOSITORY",
     "API_WORKER_IMAGE_PARITY", "SSH_REMOTE_PREFLIGHT", "PROD_DB_HEAD", "PROD_READY",
     "PROD_API_IMAGE", "PROD_WORKER_IMAGE", "PROD_WORKER_HEALTH", "PROD_WRITE_FLAGS",
     "ROLLBACK_CONFIG", "MIGRATION_REHEARSAL", "ROLLBACK_READY", "PRODUCTION_REHEARSAL",
@@ -74,6 +70,90 @@ def write_result(path: str, result: dict[str, object]) -> None:
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(target)
+
+
+def update_github_deployment(deployment_id: int, state: str, description: str, token: str) -> None:
+    if state not in {"in_progress", "success", "failure", "error"} or not token:
+        raise ValueError("Invalid GitHub Deployment status request")
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/akhripunov/maxibot/deployments/{deployment_id}/statuses",
+        data=json.dumps({"state": state, "description": description[:140],
+                         "environment_url": "https://maxibot.ru"}).encode("utf-8"),
+        method="POST", headers={"Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            if response.status not in {200, 201}:
+                raise ValueError("GitHub Deployment status write was not confirmed")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ValueError("GitHub Deployment status write failed") from exc
+
+
+def create_github_deployment(sha: str, migration: str, mode: str, token: str,
+                             run_id: str, prepare_digest: str) -> int:
+    body = {"ref": sha, "environment": "maxibot-production", "auto_merge": False,
+        "description": f"MAXIBOT {mode} {sha[:12]}",
+        "payload": {"candidate_sha": sha, "target_migration": migration, "mode": mode,
+                    "workflow_run_id": run_id,
+                    "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                    "prepare_receipt_digest": prepare_digest}}
+    request = urllib.request.Request(
+        "https://api.github.com/repos/akhripunov/maxibot/deployments",
+        data=json.dumps(body).encode("utf-8"), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("GitHub Deployment creation failed; production apply was not started") from exc
+    deployment_id = result.get("id") if isinstance(result, dict) else None
+    if not isinstance(deployment_id, int) or deployment_id <= 0:
+        raise ValueError("GitHub Deployment creation returned no valid ID")
+    update_github_deployment(deployment_id, "in_progress", "MAXIBOT production apply started", token)
+    return deployment_id
+
+
+def find_recoverable_deployment(sha: str, run_id: str, attempt: str, token: str) -> int:
+    url = ("https://api.github.com/repos/akhripunov/maxibot/deployments?sha="
+           f"{sha}&environment=maxibot-production&per_page=100")
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            deployments = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("GitHub Deployment read failed during metadata-only recovery") from exc
+    matches = []
+    if isinstance(deployments, list):
+        for deployment in deployments:
+            payload = deployment.get("payload") if isinstance(deployment, dict) else None
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+            if (isinstance(payload, dict) and deployment.get("ref") == sha
+                    and deployment.get("environment") == "maxibot-production"
+                    and str(payload.get("workflow_run_id")) == run_id
+                    and str(payload.get("workflow_run_attempt")) == attempt
+                    and isinstance(deployment.get("id"), int)):
+                matches.append(deployment["id"])
+    if len(matches) != 1:
+        raise ValueError("Metadata-only recovery requires one exact original GitHub Deployment")
+    status_url = f"https://api.github.com/repos/akhripunov/maxibot/deployments/{matches[0]}/statuses?per_page=100"
+    request = urllib.request.Request(status_url, headers={"Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            statuses = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Original GitHub Deployment status read failed") from exc
+    if (not isinstance(statuses, list) or not statuses
+            or statuses[0].get("state") not in {"failure", "error", "in_progress", "success"}):
+        raise ValueError("Original GitHub Deployment is not in a recoverable status")
+    return matches[0]
 
 
 def verify_task_authorization(authorization_id: str, candidate_sha: str,
@@ -175,12 +255,11 @@ def main() -> int:
         "github_actor": os.environ.get("GITHUB_ACTOR", ""),
         "prepare_run_id": os.environ.get("PREPARE_RUN_ID", ""),
         "prepare_run_attempt": os.environ.get("PREPARE_RUN_ATTEMPT", ""),
-        "prepare_release_tag": os.environ.get("PREPARE_RELEASE_TAG", ""),
-        "prepare_release_asset_id": os.environ.get("PREPARE_RELEASE_ASSET_ID", ""),
-        "prepare_release_asset_sha256": os.environ.get("PREPARE_RELEASE_ASSET_SHA256", ""),
+        "prepare_receipt_digest": os.environ.get("PREPARE_RECEIPT_DIGEST", ""),
         "cache_prevented_download": os.environ.get("CACHE_PREVENTED_DOWNLOAD", "NO"),
         "bundle_download_seconds": os.environ.get("BUNDLE_DOWNLOAD_SECONDS", "0"),
     }
+    deployment_id = None
     try:
         if not SHA_RE.fullmatch(sha):
             raise ValueError("A full 40-character candidate SHA is required")
@@ -205,21 +284,21 @@ def main() -> int:
             raise ValueError("Release checkout must be clean and match the exact candidate SHA")
 
         image = f"maxibot-vps-api:{sha}"
-        archive = Path(os.environ.get("IMAGE_ARCHIVE", ""))
         manifest_path = Path(os.environ.get("IMAGE_MANIFEST", ""))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         image_result_path = Path(os.environ.get("IMAGE_RESULT", ""))
         rehearsal = json.loads(image_result_path.read_text(encoding="utf-8")) if image_result_path.is_file() else {}
         prepare_attempt = os.environ.get("PREPARE_RUN_ATTEMPT", "")
-        required = {"schema": "MAXIBOT_PREPARE_RECEIPT_V1", "candidate_sha": sha,
+        required = {"schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": sha,
                     "github_run_id": os.environ.get("PREPARE_RUN_ID", ""),
                     "github_run_attempt": prepare_attempt, "status": "READY", "tests": "success",
                     "frozen_path_guard": "success", "linux_amd64_image": "success",
+                    "ghcr_image_publish": "success",
                     "private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3",
                     "private_store": "containerd", "private_snapshotter": "overlayfs",
                     "private_network_isolated": "YES", "rehearsal_candidate_sha": sha,
                     "rehearsal_prepare_run_id": os.environ.get("PREPARE_RUN_ID", ""),
-                    "rehearsal_archive_sha256": manifest.get("archive_sha256")}
+                    "rehearsal_archive_sha256": rehearsal.get("rehearsal_archive_sha256")}
         if (any(rehearsal.get(key) != value for key, value in required.items())
                 or str(manifest.get("prepare_run_attempt")) != prepare_attempt):
             raise RuntimeError("Prepare private Docker rehearsal receipt is missing or failed")
@@ -238,26 +317,33 @@ def main() -> int:
         elif test_scope != "FULL":
             raise RuntimeError("Unrecognized V3 regression coverage mode")
         result["test_scope"] = test_scope
-        archive_sha256 = checksum(archive)
         if (manifest.get("candidate_sha") != sha
                 or manifest.get("prepare_run_id") != os.environ.get("PREPARE_RUN_ID")
                 or str(manifest.get("prepare_run_attempt")) != prepare_attempt):
             raise RuntimeError("Prepared image provenance does not match selected candidate/Prepare run")
-        if manifest.get("archive_sha256") != archive_sha256 or manifest.get("platform") != "linux/amd64":
-            raise RuntimeError("Prepared image archive digest/platform verification failed")
-        image_id, platform = inspect_prepared_archive(archive, image, sha)
-        if image_id != manifest.get("image_id") or platform != "linux/amd64":
-            raise RuntimeError("Prepared image archive config digest/platform/source SHA verification failed")
+        receipt = validate_prepare_receipt(rehearsal, sha, os.environ.get("PREPARE_RUN_ID", ""), prepare_attempt)
+        image_record = receipt["image"]
+        if (manifest.get("image") != image_record or image_record.get("repository") != IMAGE_REPOSITORY
+                or image_record.get("platform") != "linux/amd64"):
+            raise RuntimeError("Prepare receipt image digest/config/platform proof is inconsistent")
+        image_id = image_record["config_digest"]
+        image_digest = image_record["digest"]
+        if (image_digest != os.environ.get("RELEASE_IMAGE_DIGEST")
+                or image_record.get("repository") != os.environ.get("RELEASE_IMAGE_REPOSITORY")
+                or image_id != os.environ.get("RELEASE_IMAGE_ID")):
+            raise RuntimeError("Selected GHCR image identity differs from exact Prepare receipt")
         env = os.environ.copy()
         env["API_CANDIDATE_IMAGE"] = image
         env["WORKER_CANDIDATE_IMAGE"] = image
-        env["RELEASE_IMAGE_ARCHIVE"] = str(archive)
-        env["RELEASE_IMAGE_ID"] = manifest["image_id"]
-        env["RELEASE_IMAGE_ARCHIVE_SHA256"] = archive_sha256
+        env["RELEASE_IMAGE_REPOSITORY"] = image_record["repository"]
+        env["RELEASE_IMAGE_DIGEST"] = image_digest
+        env["RELEASE_IMAGE_ID"] = image_id
         result["image_platform"] = "linux/amd64"
         result["image_source_sha"] = sha
-        result["image_config_digest"] = manifest["image_id"]
-        result["image_archive_sha256"] = archive_sha256
+        result["image_config_digest"] = image_id
+        result["image_repository"] = image_record["repository"]
+        result["image_digest"] = image_digest
+        result["image_transport"] = "ghcr-oci"
 
         bootstrap = os.environ.get("APPROVE_WORKER_BOOTSTRAP", "false").lower()
         if bootstrap not in {"true", "false"}:
@@ -324,6 +410,14 @@ def main() -> int:
             result["final_runtime_sha"] = sha
             result["final_migration"] = migration
             result["recovery"] = "READ_ONLY_RECONCILIATION_PASS"
+            original_run = os.environ["RECONCILES_DEPLOY_RUN_ID"]
+            original_attempt = os.environ["RECONCILES_DEPLOY_RUN_ATTEMPT"]
+            prior_deployment_id = find_recoverable_deployment(sha, original_run, original_attempt,
+                                                              os.environ.get("GITHUB_TOKEN", ""))
+            update_github_deployment(prior_deployment_id, "success",
+                "MAXIBOT runtime reconciled by read-only recovery", os.environ.get("GITHUB_TOKEN", ""))
+            result["github_deployment_id"] = prior_deployment_id
+            result["github_deployment_state"] = "success"
         else:
             task_authorization = None
             if mode == "task-scoped-auto":
@@ -337,6 +431,11 @@ def main() -> int:
                 result["task_authorization_source"] = task_authorization["source_reference"]
                 result["task_authorization_changed_paths"] = task_authorization["changed_paths"]
             result["release_state"] = "APPROVED"
+            if mode in {"production", "task-scoped-auto"}:
+                deployment_id = create_github_deployment(
+                    sha, migration, mode, os.environ.get("GITHUB_TOKEN", ""),
+                    os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("PREPARE_RECEIPT_DIGEST", ""))
+                result["github_deployment_id"] = deployment_id
             env["OWNER_APPROVED"] = "1"
             result["release_state"] = "DEPLOYING"
             apply_started = time.monotonic()
@@ -378,6 +477,18 @@ def main() -> int:
             result["release_state"] = "FAILED_PRE_SWITCH"
         return_code = 1
     finally:
+        if deployment_id is not None:
+            deployment_state = "success" if result.get("status") == "COMPLETE" else "failure"
+            try:
+                update_github_deployment(deployment_id, deployment_state,
+                    f"MAXIBOT release {result.get('status', 'FAILED')}", os.environ.get("GITHUB_TOKEN", ""))
+                result["github_deployment_state"] = deployment_state
+            except ValueError:
+                result["github_deployment_state"] = "PUBLICATION_FAILED"
+                if result.get("status") == "COMPLETE":
+                    result["status"] = "RECOVERY_REQUIRED"
+                    result["release_state"] = "RECOVERY_REQUIRED"
+                    result["error"] = "Production completed but GitHub Deployment status needs metadata-only reconciliation"
         if result_path:
             write_result(result_path, result)
         output_path = os.environ.get("GITHUB_OUTPUT", "")

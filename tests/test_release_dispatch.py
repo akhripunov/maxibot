@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_release_dispatch import ValidationError, github_get, validate  # noqa: E402
+import validate_release_dispatch as dispatch_module  # noqa: E402
 from publish_release_to_linear import SyncError, append_journal_event, upsert_block, write_document  # noqa: E402
 import publish_release_to_linear  # noqa: E402
 import run_release_workflow  # noqa: E402
@@ -90,6 +91,32 @@ def ready_preflight_run(status="completed", conclusion="success", sha=SHA):
             "head_branch": "main", "event": "workflow_dispatch", "path": ".github/workflows/maxibot-deploy.yml",
             "status": status, "conclusion": conclusion,
             "display_title": f"MAXIBOT preflight {sha} by owner"}
+
+
+@pytest.fixture(autouse=True)
+def verified_oci_receipt(monkeypatch):
+    def resolve(_repository, tag, _artifact_type, _layer_type, _fetch):
+        match = __import__("re").fullmatch(r"prepare-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)", tag)
+        assert match
+        sha, run_id, attempt = match.groups()
+        receipt = {
+            "schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": sha,
+            "github_run_id": run_id, "github_run_attempt": attempt, "status": "READY",
+            "tests": "success", "frozen_path_guard": "success", "linux_amd64_image": "success",
+            "ghcr_image_publish": "success", "private_docker_rehearsal": "PASS",
+            "image": {"repository": "ghcr.io/akhripunov/maxibot-vps-api", "tag": f"prepare-{sha}-{run_id}-{attempt}",
+                      "digest": "sha256:" + "c" * 64, "config_digest": "sha256:" + "d" * 64,
+                      "platform": "linux/amd64", "labels": {
+                          "org.opencontainers.image.revision": sha,
+                          "org.opencontainers.image.source-sha": sha,
+                          "org.maxibot.release.sha": sha}},
+        }
+        return "sha256:" + "e" * 64, json.dumps(receipt).encode()
+    monkeypatch.setattr(dispatch_module, "resolve_oci_artifact", resolve)
+    monkeypatch.setattr(run_release_workflow, "create_github_deployment", lambda *_args, **_kwargs: 987)
+    monkeypatch.setattr(run_release_workflow, "update_github_deployment", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("GITHUB_ACTOR", "codex-test")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
 
 def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
@@ -183,10 +210,12 @@ def test_dispatch_rejects_unfinished_or_failed_latest_prepare(status, conclusion
 
 
 def test_dispatch_rejects_missing_immutable_prepare_release():
-    github = FakeGitHub()
-    github.release_enabled = False
-    with pytest.raises(ValidationError, match="immutable Prepare Release"):
-        validate(values(), github)
+    def missing(*_args):
+        raise dispatch_module.ArtifactError("GHCR receipt is missing")
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(dispatch_module, "resolve_oci_artifact", missing)
+        with pytest.raises(ValidationError, match="immutable Prepare OCI receipt"):
+            validate(values(), FakeGitHub())
 
 
 def test_dispatch_rejects_release_tag_that_points_to_another_commit():
@@ -196,8 +225,12 @@ def test_dispatch_rejects_release_tag_that_points_to_another_commit():
                 return {"object": {"type": "commit", "sha": "b" * 40}}
             return super().__call__(path, token)
 
-    with pytest.raises(ValidationError, match="candidate SHA"):
-        validate(values(), ForeignTag())
+    def foreign(*_args):
+        raise dispatch_module.ArtifactError("receipt candidate SHA differs")
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(dispatch_module, "resolve_oci_artifact", foreign)
+        with pytest.raises(ValidationError, match="candidate SHA"):
+            validate(values(), ForeignTag())
 
 
 def test_publication_recovery_requires_exact_prior_deploy_and_is_not_production_approval():
@@ -217,15 +250,15 @@ def test_publication_recovery_requires_exact_prior_deploy_and_is_not_production_
         validate(values(RELEASE_MODE="production"), FakeGitHub())
 
 
-def test_deploy_workflow_downloads_immutable_prepare_release_and_uses_portable_pinned_python():
+def test_deploy_workflow_resolves_digest_pinned_prepare_receipt_and_uses_portable_pinned_python():
     workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
-    assert "scripts/prepared_artifact_cache.py" in workflow
-    assert "PREPARE_RELEASE_ASSET_ID: ${{ needs.validate.outputs.prepare_release_asset_id }}" in workflow
-    assert "PREPARE_RELEASE_TAG: ${{ needs.validate.outputs.prepare_release_tag }}" in workflow
+    assert "scripts/ghcr_prepare_cache.py" in workflow
+    assert "PREPARE_RECEIPT_DIGEST: ${{ needs.validate.outputs.prepare_receipt_digest }}" in workflow
+    assert "IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}" in workflow
     assert "actions/download-artifact@v4" not in workflow
     assert "python scripts/" not in workflow
     assert '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py' in workflow
-    assert "scripts/verify_prepared_image.py" in workflow
+    assert "scripts/ghcr_release_artifacts.py" in workflow
     assert "astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4" in workflow
     assert "uv python install 3.12.10" in workflow
     assert "uv python find --managed-python 3.12.10" in workflow
@@ -238,7 +271,7 @@ def test_deploy_workflow_downloads_immutable_prepare_release_and_uses_portable_p
     assert "PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}" in workflow
     assert "inputs.mode == 'publication-recovery'" in workflow
     assert "evidence_publication: ${{ steps.evidence.outcome }}" in workflow
-    assert "Publish immutable Deploy evidence Release" in workflow
+    assert "Publish immutable Deploy evidence to GHCR" in workflow
     assert "scripts/rehearse_prepared_image.py" not in workflow
     prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
     assert "scripts/rehearse_private_docker.py" in prepare
@@ -281,8 +314,8 @@ def test_prepare_writes_valid_json_newline_to_image_manifest():
 )
 def test_linear_candidate_status_reflects_final_prepare_and_artifact_result(prepare_result, expected):
     workflow = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
-    assert "Publish immutable Prepare Release bundle" in workflow
-    assert workflow.index("Publish immutable Prepare Release bundle") < workflow.index("Publish final Prepare result to MAXIBOT Linear")
+    assert "Publish immutable Prepare receipt to GHCR" in workflow
+    assert workflow.index("Publish immutable Prepare receipt to GHCR") < workflow.index("Publish final Prepare result to MAXIBOT Linear")
     assert "PREPARE_RESULT: ${{ needs.prepare.result }}" in workflow
     assert publish_release_to_linear.candidate_status(prepare_result) == expected
 
@@ -363,48 +396,43 @@ def test_publisher_reads_legacy_actions_result_only_when_evidence_release_is_abs
             return Response()
 
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("GITHUB_ACTOR", "codex-test")
+    monkeypatch.setattr(publish_release_to_linear, "resolve_oci_artifact",
+        lambda *_args: (_ for _ in ()).throw(publish_release_to_linear.MissingArtifactError("missing")))
     monkeypatch.setattr(publish_release_to_linear, "github_json", api)
     monkeypatch.setattr(publish_release_to_linear.urllib.request, "build_opener", lambda *_args: FakeOpener())
     assert publish_release_to_linear.read_result_artifact(run) == result
     assert any("/actions/runs/321/artifacts" in path for path in calls)
 
 
-def test_publisher_prefers_immutable_release_without_legacy_fallback(monkeypatch, tmp_path):
+def test_publisher_prefers_digest_pinned_ghcr_evidence_without_legacy_fallback(monkeypatch, tmp_path):
     run = {"id": 322, "run_attempt": 2, "head_sha": SHA}
     calls = []
 
-    def api(path):
-        calls.append(path)
-        return {"tag_name": "release"}
-
-    def read(sha, run_id, attempt, destination, github_get, token):
-        assert (sha, run_id, attempt) == (SHA, "322", "2")
-        destination.mkdir(parents=True, exist_ok=True)
-        (destination / "result.json").write_text(json.dumps({"canonical": True}))
-        return {}
+    evidence = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": SHA,
+        "github_run_id": "322", "github_run_attempt": "2", "canonical": True}
 
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
-    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
-    monkeypatch.setattr(publish_release_to_linear, "github_json", api)
-    monkeypatch.setattr(publish_release_to_linear, "read_evidence", read)
+    monkeypatch.setenv("GITHUB_ACTOR", "codex-test")
+    monkeypatch.setattr(publish_release_to_linear, "resolve_oci_artifact",
+        lambda *_args: ("sha256:" + "f" * 64, json.dumps(evidence).encode()))
     result = publish_release_to_linear.read_result_artifact(run)
-    assert result == {"canonical": True}
-    assert calls and all("actions/runs" not in call for call in calls)
+    assert result["canonical"] is True
+    assert result["evidence_digest"] == "sha256:" + "f" * 64
 
 
-def test_publisher_does_not_fallback_when_existing_release_evidence_is_invalid(monkeypatch, tmp_path):
+def test_publisher_does_not_fallback_when_existing_ghcr_evidence_is_invalid(monkeypatch, tmp_path):
     run = {"id": 323, "run_attempt": 1, "head_sha": SHA}
     calls = []
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
-    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
-    monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: calls.append(path) or {"tag_name": "exists"})
+    monkeypatch.setenv("GITHUB_ACTOR", "codex-test")
     monkeypatch.setattr(
-        publish_release_to_linear, "read_evidence",
-        lambda *_args: (_ for _ in ()).throw(publish_release_to_linear.ReleaseAssetError("bad digest")),
+        publish_release_to_linear, "resolve_oci_artifact",
+        lambda *_args: (_ for _ in ()).throw(publish_release_to_linear.ArtifactError("bad digest")),
     )
-    with pytest.raises(SyncError, match="evidence failed validation"):
+    with pytest.raises(SyncError, match="GHCR Deploy evidence failed validation"):
         publish_release_to_linear.read_result_artifact(run)
-    assert calls and all("actions/runs" not in call for call in calls)
+    assert not calls
 
 
 def test_current_state_block_is_identical_idempotent_and_preserves_manual_handoff():
@@ -556,21 +584,20 @@ def test_prepare_write_permission_is_main_only():
 
 def test_release_apply_loads_verified_prepared_image_without_rebuilding():
     release = (ROOT / "scripts/release_prod.sh").read_text()
-    assert 'docker load --input $REMOTE_IMAGE_TMP' in release
-    assert 'sha256sum $REMOTE_IMAGE_TMP' in release
+    assert 'docker pull "$image_ref"' in release
+    assert 'mint-pull-token' in release
+    assert 'identitytoken' in release
     assert 'prepared_image_config_digest' in release
-    assert 'image_archive_sha256' in release
     assert 'VPS_LOADED_IMAGE_CONFIG_DIGEST=$REMOTE_LOADED_IMAGE_ID' in release
-    assert 'test "$(docker image inspect maxibot-vps-api:$TARGET_SHA --format \'{{.Id}}\')" = $RELEASE_IMAGE_ID' not in release
     assert 'docker build --platform linux/amd64' not in release
     assert 'RELEASE_IMAGE_ID' in release
-    assert 'A verified Prepare image archive is required' in release
+    assert 'prepared-image.digest' in release
 
 
 def test_release_workflow_wrapper_never_builds_and_requires_prepare_image():
     wrapper = (ROOT / "scripts/run_release_workflow.py").read_text()
     assert '"docker", "build"' not in wrapper
-    assert 'IMAGE_ARCHIVE' in wrapper and 'IMAGE_MANIFEST' in wrapper
+    assert 'IMAGE_MANIFEST' in wrapper and 'RELEASE_IMAGE_DIGEST' in wrapper
     assert 'PREPARE_RUN_ID' in wrapper
 
 
@@ -701,7 +728,7 @@ def test_publication_recovery_rejects_prior_preflight_run():
 def test_immutable_evidence_publication_failure_cannot_trigger_automatic_apply_retry():
     workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
     apply_step = workflow.index("Run production preflight and requested release mode")
-    evidence_step = workflow.index("Publish immutable Deploy evidence Release")
+    evidence_step = workflow.index("Publish immutable Deploy evidence to GHCR")
     assert evidence_step > apply_step
     assert "continue-on-error: true" not in workflow[evidence_step:evidence_step + 240]
     assert "publication-recovery" in workflow
@@ -728,18 +755,27 @@ def test_apply_wrapper_never_runs_without_owner_confirmation(monkeypatch, tmp_pa
 
 
 def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeypatch, tmp_path):
-    archive = tmp_path / "image.tar.gz"
     manifest = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
     rehearsal_path = tmp_path / "prepare-result.json"
-    archive.write_bytes(b"prepared")
-    manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "prepare_run_attempt": "1", "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
-    rehearsal_path.write_text(json.dumps({"schema": "MAXIBOT_PREPARE_RECEIPT_V1", "candidate_sha": SHA, "github_run_id": "123", "github_run_attempt": "1", "status": "READY", "tests": "success", "frozen_path_guard": "success", "linux_amd64_image": "success", "private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES", "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123", "rehearsal_archive_sha256": "a" * 64}))
+    image = {"repository": "ghcr.io/akhripunov/maxibot-vps-api", "tag": f"prepare-{SHA}-123-1", "digest": "sha256:" + "2" * 64,
+             "config_digest": "sha256:" + "1" * 64, "platform": "linux/amd64", "labels": {
+                 "org.opencontainers.image.revision": SHA, "org.opencontainers.image.source-sha": SHA,
+                 "org.maxibot.release.sha": SHA}}
+    manifest.write_text(json.dumps({"schema": "MAXIBOT_PREPARED_IMAGE_V2", "candidate_sha": SHA,
+        "prepare_run_id": "123", "prepare_run_attempt": "1", "image": image}))
+    rehearsal_path.write_text(json.dumps({"schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": SHA,
+        "github_run_id": "123", "github_run_attempt": "1", "status": "READY", "tests": "success",
+        "frozen_path_guard": "success", "linux_amd64_image": "success", "ghcr_image_publish": "success",
+        "image": image, "private_docker_rehearsal": "PASS", "private_docker_version": "29.1.3",
+        "private_store": "containerd", "private_snapshotter": "overlayfs", "private_network_isolated": "YES",
+        "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123", "rehearsal_archive_sha256": "a" * 64}))
     for key, value in {
         "CANDIDATE_SHA": SHA, "TARGET_MIGRATION": MIGRATION, "RELEASE_MODE": "production",
         "APPROVE_PRODUCTION": "true", "RELEASE_RESULT": str(result_path), "GITHUB_RUN_ID": "123",
         "GITHUB_RUN_ATTEMPT": "1", "PREPARE_RUN_ID": "123", "PREPARE_RUN_ATTEMPT": "1",
-        "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
+        "IMAGE_MANIFEST": str(manifest), "RELEASE_IMAGE_DIGEST": image["digest"],
+        "RELEASE_IMAGE_REPOSITORY": image["repository"], "RELEASE_IMAGE_ID": image["config_digest"],
         "IMAGE_RESULT": str(rehearsal_path),
     }.items():
         monkeypatch.setenv(key, value)
@@ -748,8 +784,6 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
         git_commands.append(command)
         return SHA if command[:2] == ["git", "rev-parse"] else ""
     monkeypatch.setattr(run_release_workflow.subprocess, "check_output", read_git)
-    monkeypatch.setattr(run_release_workflow, "checksum", lambda _: "a" * 64)
-    monkeypatch.setattr(run_release_workflow, "inspect_prepared_archive", lambda *_: ("sha256:" + "1" * 64, "linux/amd64"))
     commands = []
     def execute(command, env):
         commands.append((command, env.copy()))
@@ -764,26 +798,28 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
         result = json.loads(result_path.read_text())
         assert result["status"] == "FAILED_PRE_SWITCH"
         assert result["production_changed"] is False
-        assert result["image_archive_sha256"] == "a"*64
+        assert result["image_digest"] == image["digest"]
     assert len(commands) == 4
     assert [c[-1] for c, _ in commands] == ["--dry-run", "--apply"]*2
     assert all(SHA in c for c, _ in commands)
     assert all(env["RELEASE_IMAGE_ID"] == "sha256:"+"1"*64 for _, env in commands)
     assert all(command[1] in ("rev-parse", "status") for command in git_commands)
-    assert archive.read_bytes() == b"prepared"
 
 
 def _setup_task_scoped_wrapper(monkeypatch, tmp_path, migration_head):
-    archive = tmp_path / "image.tar.gz"
     manifest = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
     rehearsal_path = tmp_path / "prepare-result.json"
-    archive.write_bytes(b"prepared")
-    manifest.write_text(json.dumps({"candidate_sha": SHA, "prepare_run_id": "123", "prepare_run_attempt": "1",
-        "archive_sha256": "a" * 64, "platform": "linux/amd64", "image_id": "sha256:" + "1" * 64}))
-    rehearsal_path.write_text(json.dumps({"schema": "MAXIBOT_PREPARE_RECEIPT_V1", "candidate_sha": SHA,
+    image = {"repository": "ghcr.io/akhripunov/maxibot-vps-api", "tag": f"prepare-{SHA}-123-1", "digest": "sha256:" + "2" * 64,
+        "config_digest": "sha256:" + "1" * 64, "platform": "linux/amd64", "labels": {
+            "org.opencontainers.image.revision": SHA, "org.opencontainers.image.source-sha": SHA,
+            "org.maxibot.release.sha": SHA}}
+    manifest.write_text(json.dumps({"schema": "MAXIBOT_PREPARED_IMAGE_V2", "candidate_sha": SHA,
+        "prepare_run_id": "123", "prepare_run_attempt": "1", "image": image}))
+    rehearsal_path.write_text(json.dumps({"schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": SHA,
         "github_run_id": "123", "github_run_attempt": "1", "status": "READY", "tests": "success",
-        "frozen_path_guard": "success", "linux_amd64_image": "success", "private_docker_rehearsal": "PASS",
+        "frozen_path_guard": "success", "linux_amd64_image": "success", "ghcr_image_publish": "success", "image": image,
+        "private_docker_rehearsal": "PASS",
         "private_docker_version": "29.1.3", "private_store": "containerd", "private_snapshotter": "overlayfs",
         "private_network_isolated": "YES", "rehearsal_candidate_sha": SHA, "rehearsal_prepare_run_id": "123",
         "rehearsal_archive_sha256": "a" * 64}))
@@ -791,14 +827,13 @@ def _setup_task_scoped_wrapper(monkeypatch, tmp_path, migration_head):
         "RELEASE_MODE": "task-scoped-auto", "APPROVE_PRODUCTION": "false",
         "TASK_AUTHORIZATION_ID": "maxibot-task-2026-10-06-001", "RELEASE_RESULT": str(result_path),
         "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "PREPARE_RUN_ID": "123",
-        "PREPARE_RUN_ATTEMPT": "1", "IMAGE_ARCHIVE": str(archive), "IMAGE_MANIFEST": str(manifest),
+        "PREPARE_RUN_ATTEMPT": "1", "IMAGE_MANIFEST": str(manifest),
+        "RELEASE_IMAGE_DIGEST": image["digest"], "RELEASE_IMAGE_REPOSITORY": image["repository"],
+        "RELEASE_IMAGE_ID": image["config_digest"],
         "IMAGE_RESULT": str(rehearsal_path), "GITHUB_TOKEN": "test-token"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(run_release_workflow.subprocess, "check_output",
         lambda command, **kwargs: SHA if command[:2] == ["git", "rev-parse"] else "")
-    monkeypatch.setattr(run_release_workflow, "checksum", lambda _: "a" * 64)
-    monkeypatch.setattr(run_release_workflow, "inspect_prepared_archive",
-        lambda *_: ("sha256:" + "1" * 64, "linux/amd64"))
     return result_path, migration_head
 
 

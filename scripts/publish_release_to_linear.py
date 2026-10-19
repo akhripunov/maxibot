@@ -19,6 +19,9 @@ from pathlib import Path
 
 from sync_agents_to_linear import SyncError, _content_matches, graphql_request
 from release_assets import ReleaseAssetError, read_evidence, release_tag
+from ghcr_release_artifacts import (EVIDENCE_ARTIFACT_TYPE, EVIDENCE_LAYER_MEDIA_TYPE,
+    EVIDENCE_REPOSITORY, ArtifactError, MissingArtifactError, _registry_fetch,
+    artifact_tag, resolve_oci_artifact)
 
 HANDOFF_ID = "6f799a5c-75b2-4fc1-a522-86bab4c1950b"
 HANDOFF_TITLE = "Архитектор — Handoff"
@@ -61,25 +64,26 @@ def read_result_artifact(run: dict) -> dict:
     run_id = str(run.get("id", ""))
     attempt = str(run.get("run_attempt", "1"))
     if SHA_RE.fullmatch(sha) and run_id.isdigit() and attempt.isdigit():
-        tag = release_tag("evidence", sha, run_id, attempt)
+        tag = artifact_tag("evidence", sha, run_id, attempt)
         try:
-            github_json(f"repos/{REPOSITORY}/releases/tags/{tag}")
-        except SyncError as exc:
-            # Historical Deploy runs predate immutable evidence Releases. Only a
-            # confirmed 404 may fall back to their original Actions result ZIP.
-            if str(exc) != "GitHub resource not found":
-                raise
-        else:
             token = os.environ.get("GITHUB_TOKEN", "")
-            destination = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "maxibot-evidence-read" / f"{run_id}-{attempt}"
-            try:
-                read_evidence(
-                    sha, run_id, attempt, destination,
-                    lambda route: github_json(f"repos/{REPOSITORY}/{route}"), token,
-                )
-                return json.loads((destination / "result.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError, ReleaseAssetError) as exc:
-                raise SyncError("Immutable MAXIBOT Deploy evidence failed validation") from exc
+            digest, payload = resolve_oci_artifact(EVIDENCE_REPOSITORY, tag,
+                EVIDENCE_ARTIFACT_TYPE, EVIDENCE_LAYER_MEDIA_TYPE,
+                _registry_fetch(EVIDENCE_REPOSITORY, os.environ.get("GITHUB_ACTOR", ""), token))
+            evidence = json.loads(payload.decode("utf-8"))
+            if (evidence.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+                    or evidence.get("candidate_sha") != sha
+                    or str(evidence.get("github_run_id")) != run_id
+                    or str(evidence.get("github_run_attempt")) != attempt):
+                raise SyncError("GHCR Deploy evidence identity does not match the exact workflow attempt")
+            evidence["evidence_digest"] = digest
+            return evidence
+        except MissingArtifactError:
+            # Historical Deploy runs predate OCI evidence; only a confirmed missing GHCR tag
+            # may use the original Actions result ZIP fallback below.
+            pass
+        except (ArtifactError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SyncError("Immutable MAXIBOT GHCR Deploy evidence failed validation") from exc
     artifacts = github_json(f"repos/{REPOSITORY}/actions/runs/{run['id']}/artifacts").get("artifacts", [])
     artifacts = [a for a in artifacts if a.get("name", "").startswith(f"maxibot-release-result-{run['id']}-") and not a.get("expired")]
     if len(artifacts) != 1:
@@ -134,7 +138,7 @@ def current_state(event: dict | None = None) -> dict:
     deploy_runs = latest_runs("maxibot-deploy.yml")
     production_runs = sorted((r for r in deploy_runs if r.get("conclusion") == "success" and
                               any(marker in (r.get("name") or r.get("display_title") or "").lower()
-                                  for marker in ("production ", "publication-recovery "))),
+                                  for marker in ("production ", "task-scoped-auto ", "publication-recovery "))),
                              key=lambda r: r.get("created_at", ""), reverse=True)
     deployment = evidence = None
     for run in production_runs:
@@ -148,6 +152,20 @@ def current_state(event: dict | None = None) -> dict:
                 raise SyncError("MAXIBOT production result artifact SHA mismatch")
             if result.get("candidate_sha") != run.get("head_sha"):
                 raise SyncError("MAXIBOT production result artifact does not match its workflow head SHA")
+            deployment_id = result.get("github_deployment_id")
+            if deployment_id is None:  # Historical runs predate V5 deployment tracking.
+                result["deployment_status"] = "LEGACY_NOT_TRACKED"
+            else:
+                if not isinstance(deployment_id, int) or deployment_id <= 0:
+                    raise SyncError("MAXIBOT production result has an invalid GitHub Deployment identity")
+                deployment_record = github_json(f"repos/{REPOSITORY}/deployments/{deployment_id}")
+                statuses = github_json(f"repos/{REPOSITORY}/deployments/{deployment_id}/statuses?per_page=100")
+                if (deployment_record.get("sha") != result.get("candidate_sha")
+                        or deployment_record.get("environment") != "maxibot-production"
+                        or not isinstance(statuses, list) or not statuses
+                        or statuses[0].get("state") != "success"):
+                    raise SyncError("MAXIBOT GitHub Deployment readback is not a successful exact-SHA release")
+                result["deployment_status"] = statuses[0].get("state")
             if is_reconciliation and (
                     result.get("production_changed") is not False
                     or result.get("recovery") != "READ_ONLY_RECONCILIATION_PASS"
@@ -195,10 +213,11 @@ def render_current_state(state: dict) -> str:
             f"Последний подтверждённый production state: `{state['production_sha']}` / "
             f"read-only reconciliation run `#{deploy['id']}` / **COMPLETE**."
         )
-        evidence_description = "read-only reconciliation evidence Release"
+        evidence_description = "read-only reconciliation OCI evidence"
     else:
         production_line = (
-            f"Production: `{state['production_sha']}`; source: MAXIBOT immutable Deploy evidence "
+            f"Production: `{state['production_sha']}`; source: verified MAXIBOT OCI evidence and "
+            f"GitHub Deployment `#{evidence.get('github_deployment_id')}`; workflow run "
             f"[#{deploy['id']}]({deploy['html_url']}); проверка завершена `{timestamp}`; "
             f"canonical status **{state['production_status']}**."
         )
@@ -206,7 +225,7 @@ def render_current_state(state: dict) -> str:
             f"Последний production Deploy: `{state['production_sha']}` / run `#{deploy['id']}` / "
             f"**{state['production_status']}**."
         )
-        evidence_description = "canonical production evidence Release"
+        evidence_description = "canonical production OCI evidence"
     lines = [
         f"Синхронизировано: `{state['synced_at']}` UTC.",
         f"GitHub main: `{state['main_sha']}` (commit time `{state['main_checked_at']}`).",

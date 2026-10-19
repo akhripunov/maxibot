@@ -16,7 +16,9 @@ import urllib.request
 from typing import Any
 
 from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
-from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset
+from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
+    PREPARE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
+    resolve_oci_artifact, validate_prepare_receipt)
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
                                    validate_task_authorization)
@@ -63,9 +65,9 @@ def github_get(path: str, token: str, opener=urllib.request.urlopen, *,
     except NetworkUnavailable:
         raise ValidationError("NETWORK_UNAVAILABLE stage=release_provenance") from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValidationError("GitHub release provenance could not be verified") from exc
+        raise ValidationError("GHCR Prepare provenance could not be verified") from exc
     except urllib.error.HTTPError as exc:
-        raise ValidationError(f"GitHub release provenance request failed (HTTP {exc.code})") from None
+        raise ValidationError(f"GitHub provenance request failed (HTTP {exc.code})") from None
 
 
 def validate(values: dict[str, str], api_get=github_get,
@@ -77,6 +79,7 @@ def validate(values: dict[str, str], api_get=github_get,
     token = values.get("GITHUB_TOKEN", "")
     expected_prepare_run_id = values.get("PREPARE_RUN_ID", "").strip()
     expected_prepare_run_attempt = values.get("PREPARE_RUN_ATTEMPT", "").strip()
+    expected_prepare_receipt_digest = values.get("PREPARE_RECEIPT_DIGEST", "").strip()
     orchestrator_run_id = values.get("ORCHESTRATOR_RUN_ID", "").strip()
     if orchestrator_run_id and not orchestrator_run_id.isdigit():
         raise ValidationError("Automatic orchestrator run ID must be an integer")
@@ -176,14 +179,18 @@ def validate(values: dict[str, str], api_get=github_get,
             "Latest successful Prepare run/attempt changed after artifact selection; restart Deploy"
         )
     attempt = latest.get("run_attempt", 1)
-    tag = release_tag("prepare", sha, latest_run_id, attempt)
+    tag = artifact_tag("prepare", sha, latest_run_id, attempt)
     try:
-        asset = resolve_asset(
-            "prepare", sha, latest_run_id, attempt, PREPARE_ASSET_NAME,
-            lambda route: api_get(route, token),
-        )
-    except (ReleaseAssetError, ValidationError) as exc:
-        raise ValidationError(f"Exact immutable Prepare Release is not valid: {exc}") from exc
+        username = os.environ.get("GITHUB_ACTOR", "")
+        receipt_digest, receipt_bytes = resolve_oci_artifact(PREPARE_REPOSITORY, tag,
+            PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
+            _registry_fetch(PREPARE_REPOSITORY, username, token))
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+        validate_prepare_receipt(receipt, sha, latest_run_id, attempt)
+        if expected_prepare_receipt_digest and receipt_digest != expected_prepare_receipt_digest:
+            raise ArtifactError("Selected Prepare receipt digest changed after controller selection")
+    except (ArtifactError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"Exact immutable Prepare OCI receipt is not valid: {exc}") from exc
 
     # Production modes execute the full read-only preflight inside Deploy,
     # immediately before apply. A prior diagnostic preflight is optional.
@@ -204,9 +211,11 @@ def validate(values: dict[str, str], api_get=github_get,
         "candidate": sha,
         "target_migration": migration,
         "mode": mode,
-        "prepare_release_tag": tag,
-        "prepare_release_asset_id": str(asset["id"]),
-        "prepare_release_asset_sha256": asset["digest"][7:],
+        "prepare_receipt_tag": tag,
+        "prepare_receipt_digest": receipt_digest,
+        "image_repository": receipt["image"]["repository"],
+        "image_digest": receipt["image"]["digest"],
+        "image_config_digest": receipt["image"]["config_digest"],
         "prepare_run_id": latest_run_id,
         "prepare_run_attempt": latest_run_attempt,
         "prepare_url": str(latest.get("html_url", "")),
@@ -231,7 +240,7 @@ def main() -> int:
                     raise ValidationError("GitHub output contains invalid line breaks")
                 output.write(f"{key}={value}\n")
             output.write(f"network_retry_budget_used_seconds={math.ceil(NETWORK_BUDGET.spent)}\n")
-        print(f"RELEASE_PROVENANCE=PASS SHA={result['candidate']} PREPARE_RUN={result['prepare_run_id']} IMMUTABLE_RELEASE={result['prepare_release_tag']}")
+        print(f"RELEASE_PROVENANCE=PASS SHA={result['candidate']} PREPARE_RUN={result['prepare_run_id']} PREPARE_RECEIPT_DIGEST={result['prepare_receipt_digest']} IMAGE_DIGEST={result['image_digest']}")
         return 0
     except (ValidationError, OSError) as exc:
         print(f"RELEASE_PROVENANCE=BLOCKED REASON={exc}", file=sys.stderr)

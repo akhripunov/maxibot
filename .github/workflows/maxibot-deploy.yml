@@ -38,6 +38,10 @@ on:
         description: 'Exact Prepare attempt paired with prepare_run_id'
         required: false
         type: string
+      prepare_receipt_digest:
+        description: 'Exact GHCR Prepare OCI receipt digest selected by the trusted controller'
+        required: false
+        type: string
       orchestrator_run_id:
         description: 'Automatic release controller run; telemetry only'
         required: false
@@ -72,9 +76,11 @@ jobs:
     outputs:
       candidate: ${{ steps.select.outputs.candidate }}
       target_migration: ${{ steps.select.outputs.target_migration }}
-      prepare_release_tag: ${{ steps.select.outputs.prepare_release_tag }}
-      prepare_release_asset_id: ${{ steps.select.outputs.prepare_release_asset_id }}
-      prepare_release_asset_sha256: ${{ steps.select.outputs.prepare_release_asset_sha256 }}
+      prepare_receipt_tag: ${{ steps.select.outputs.prepare_receipt_tag }}
+      prepare_receipt_digest: ${{ steps.select.outputs.prepare_receipt_digest }}
+      image_repository: ${{ steps.select.outputs.image_repository }}
+      image_digest: ${{ steps.select.outputs.image_digest }}
+      image_config_digest: ${{ steps.select.outputs.image_config_digest }}
       prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
       prepare_run_attempt: ${{ steps.select.outputs.prepare_run_attempt }}
       prepare_url: ${{ steps.select.outputs.prepare_url }}
@@ -83,6 +89,11 @@ jobs:
       reconciles_deploy_run_attempt: ${{ steps.select.outputs.reconciles_deploy_run_attempt }}
       network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
       task_authorization_id: ${{ steps.select.outputs.task_authorization_id }}
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      deployments: read
     steps:
       - name: Initialize shared retry budget
         shell: bash
@@ -105,6 +116,8 @@ jobs:
           APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
           PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
           PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
+          PREPARE_RECEIPT_DIGEST: ${{ inputs.prepare_receipt_digest }}
+          GITHUB_ACTOR: ${{ github.actor }}
           ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
           TASK_AUTHORIZATION_ID: ${{ inputs.task_authorization_id }}
           RECONCILES_DEPLOY_RUN_ID: ${{ inputs.reconciles_deploy_run_id }}
@@ -118,19 +131,22 @@ jobs:
     permissions:
       contents: write
       actions: read
+      packages: write
+      deployments: write
     outputs:
       preflight: ${{ steps.execute.outputs.preflight }}
       status: ${{ steps.execute.outputs.status }}
       execute_outcome: ${{ steps.execute.outcome }}
       evidence_publication: ${{ steps.evidence.outcome }}
-      cache_prevented_download: ${{ steps.bundle.outputs.cache_prevented_download }}
-      bundle_download_seconds: ${{ steps.bundle.outputs.bundle_download_seconds }}
+      evidence_digest: ${{ steps.evidence.outputs.digest }}
     env:
       CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
       TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
-      PREPARE_RELEASE_TAG: ${{ needs.validate.outputs.prepare_release_tag }}
-      PREPARE_RELEASE_ASSET_ID: ${{ needs.validate.outputs.prepare_release_asset_id }}
-      PREPARE_RELEASE_ASSET_SHA256: ${{ needs.validate.outputs.prepare_release_asset_sha256 }}
+      PREPARE_RECEIPT_TAG: ${{ needs.validate.outputs.prepare_receipt_tag }}
+      PREPARE_RECEIPT_DIGEST: ${{ needs.validate.outputs.prepare_receipt_digest }}
+      IMAGE_REPOSITORY: ${{ needs.validate.outputs.image_repository }}
+      IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}
+      IMAGE_CONFIG_DIGEST: ${{ needs.validate.outputs.image_config_digest }}
       PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
       PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
       RELEASE_MODE: ${{ inputs.mode }}
@@ -188,18 +204,17 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py'
 
-      - name: Restore or download the verified immutable Release bundle
-        id: bundle
+      - name: Resolve and verify exact Prepare receipt from GHCR
+        id: receipt
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+          PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
+          PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
+          PREPARE_RECEIPT_DIGEST: ${{ needs.validate.outputs.prepare_receipt_digest }}
           ARTIFACT_DESTINATION: ${{ runner.temp }}/maxibot-prepared-image
-        run: '"$MAXIBOT_PYTHON" scripts/prepared_artifact_cache.py'
-
-      - name: Verify and load the prepared image
-        env:
-          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
-          IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
-        run: '"$MAXIBOT_PYTHON" scripts/verify_prepared_image.py'
+        run: '"$MAXIBOT_PYTHON" scripts/ghcr_prepare_cache.py'
 
       - name: Verify exact candidate checkout is still clean
         shell: bash
@@ -210,28 +225,44 @@ jobs:
       - name: Run production preflight and requested release mode
         id: execute
         env:
-          IMAGE_ARCHIVE: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-${{ needs.validate.outputs.candidate }}.tar.gz
           IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
           IMAGE_RESULT: ${{ runner.temp }}/maxibot-prepared-image/maxibot-prepare-result.json
-          CACHE_PREVENTED_DOWNLOAD: ${{ steps.bundle.outputs.cache_prevented_download }}
-          BUNDLE_DOWNLOAD_SECONDS: ${{ steps.bundle.outputs.bundle_download_seconds }}
+          RELEASE_IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}
+          RELEASE_IMAGE_REPOSITORY: ${{ needs.validate.outputs.image_repository }}
+          RELEASE_IMAGE_ID: ${{ needs.validate.outputs.image_config_digest }}
+          CACHE_PREVENTED_DOWNLOAD: NO
+          BUNDLE_DOWNLOAD_SECONDS: '0'
           GITHUB_TOKEN: ${{ github.token }}
           TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
         run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
 
-      - name: Publish immutable Deploy evidence Release
+      - name: Set up ORAS for immutable Deploy evidence
+        if: always()
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.0.0
+        with:
+          version: 1.3.0
+
+      - name: Publish immutable Deploy evidence to GHCR and verify digest readback
         id: evidence
         if: always()
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PREPARED_BUNDLE_DIRECTORY: ${{ runner.temp }}/maxibot-prepared-image
-        run: '"$MAXIBOT_PYTHON" scripts/release_assets.py publish-evidence'
+          GITHUB_ACTOR: ${{ github.actor }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RELEASE_RESULT: ${{ runner.temp }}/maxibot-release-result-${{ github.run_id }}.json
+        run: '"$MAXIBOT_PYTHON" scripts/ghcr_release_artifacts.py publish-evidence'
 
   publish:
     needs: [validate, deploy]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      packages: read
     concurrency:
       group: maxibot-linear-release
       cancel-in-progress: false
@@ -269,17 +300,20 @@ jobs:
             echo 'DUPLICATE_HOSTED_WORK_REMOVED=UNKNOWN'
             echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
           } >> "$GITHUB_ENV"
-      - name: Read immutable Release evidence
+      - name: Read immutable GHCR evidence by exact digest
         if: needs.deploy.outputs.status != ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          DEPLOY_EVIDENCE_DIGEST: ${{ needs.deploy.outputs.evidence_digest }}
           EVIDENCE_DESTINATION: ${{ runner.temp }}/release-evidence
-        run: python3 scripts/release_assets.py read-evidence
+        run: python3 scripts/ghcr_release_artifacts.py read-evidence
       - name: Publish preflight result to MAXIBOT Linear
         if: always()
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
           RELEASE_PHASE: preflight
           RELEASE_STATUS: ${{ inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PASS' && 'READY_FOR_OWNER' || (needs.deploy.outputs.preflight == 'PASS' && 'PASS' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED')) }}
         run: python3 scripts/publish_release_to_linear.py
@@ -288,6 +322,7 @@ jobs:
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
           RELEASE_PHASE: production
           RELEASE_STATUS: ${{ needs.deploy.outputs.evidence_publication != 'success' && needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || (needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || (needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || needs.deploy.outputs.status || 'FAILED')) }}
         run: python3 scripts/publish_release_to_linear.py
