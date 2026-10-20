@@ -252,6 +252,7 @@ def test_publication_recovery_requires_exact_prior_deploy_and_is_not_production_
 
 def test_deploy_workflow_resolves_digest_pinned_prepare_receipt_and_uses_portable_pinned_python():
     workflow = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+    assert "if: always() && steps.execute.outcome != 'skipped'" in workflow
     assert "scripts/ghcr_prepare_cache.py" in workflow
     assert "PREPARE_RECEIPT_DIGEST: ${{ needs.validate.outputs.prepare_receipt_digest }}" in workflow
     assert "IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}" in workflow
