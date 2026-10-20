@@ -145,7 +145,7 @@ jobs:
         id: tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --run-tests "$RUNNER_TEMP/maxibot-v3-impact.json"
+        run: env -u NETWORK_RETRY_BUDGET_STATE python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --run-tests "$RUNNER_TEMP/maxibot-v3-impact.json"
 
       - name: Enable BuildKit cross-run cache (no image identity reuse)
         if: steps.coalesce.outputs.result == 'WINNER'

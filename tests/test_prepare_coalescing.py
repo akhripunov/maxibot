@@ -159,6 +159,11 @@ class PrepareCoalescingTests(unittest.TestCase):
         self.assertLess(checkout, coalescing)
         self.assertIn("NETWORK_RETRY_BUDGET_STATE", workflow[initialize:checkout])
 
+    def test_prepare_tests_do_not_charge_synthetic_time_to_workflow_budget(self):
+        workflow = (ROOT / ".github" / "workflows" / "maxibot-prepare.yml").read_text()
+        test_step = workflow[workflow.index("Run V3 exact-candidate required test suite"):]
+        self.assertIn("env -u NETWORK_RETRY_BUDGET_STATE python3 -B scripts/maxibot_impact_v3.py", test_step)
+
     def test_invalid_sha_from_github_ref_fails_closed(self):
         class Response:
             def __enter__(self):
