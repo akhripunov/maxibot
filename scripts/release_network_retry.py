@@ -6,13 +6,51 @@ import random
 import math
 import os
 from pathlib import Path
+import errno
+import socket
+import ssl
 import time
+import urllib.error
 from collections.abc import Callable
 from typing import TypeVar
 
 T = TypeVar("T")
 NETWORK_RETRY_BUDGET_SECONDS = 30 * 60
 NETWORK_BACKOFF_CAP_SECONDS = 60
+RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+RETRYABLE_ERRNOS = {
+    errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT,
+    errno.EHOSTUNREACH, errno.ENETUNREACH,
+}
+
+
+def is_retryable_network_error(error: BaseException) -> bool:
+    """Classify transient failures for idempotent network reads only."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in RETRYABLE_HTTP_STATUS
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        message = str(reason).lower()
+        if any(marker in message for marker in (
+            "certificate_verify_failed", "certificate verify failed",
+            "wrong_version_number", "protocol_version", "unsupported protocol",
+        )):
+            return False
+        if isinstance(reason, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
+            return True
+        syscall_error = getattr(ssl, "SSLSyscallError", ())
+        return bool(syscall_error and isinstance(reason, syscall_error)) or any(
+            marker in message for marker in (
+                "ssl_error_syscall", "unexpected_eof", "eof occurred", "timed out", "timeout",
+                "connection reset", "tlsv1_alert_internal_error",
+            ))
+    if isinstance(reason, socket.gaierror):
+        return reason.errno == getattr(socket, "EAI_AGAIN", None)
+    if isinstance(reason, (TimeoutError, socket.timeout, ConnectionError)):
+        return True
+    return isinstance(reason, OSError) and reason.errno in RETRYABLE_ERRNOS
 
 
 class NetworkUnavailable(RuntimeError):
@@ -59,6 +97,7 @@ def retry_network_read(operation: Callable[[], T], stage: str,
     budget = budget or RetryBudget(clock=clock)
     call_started = clock()
     retries = 0
+    attempts = 0
 
     def unavailable() -> NetworkUnavailable:
         elapsed = budget.spent + clock() - call_started
@@ -72,6 +111,7 @@ def retry_network_read(operation: Callable[[], T], stage: str,
         if clock() >= deadline:
             raise unavailable()
         try:
+            attempts += 1
             result = operation()
             elapsed = budget.spent + clock() - call_started
             if clock() >= deadline:
@@ -92,5 +132,5 @@ def retry_network_read(operation: Callable[[], T], stage: str,
             retries += 1
             sleep(delay)
     finally:
-        if retries:
+        if attempts:
             budget.persist(clock() - call_started)

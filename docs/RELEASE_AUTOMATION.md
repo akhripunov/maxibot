@@ -74,6 +74,27 @@ State machine: без предварительной auth — `PREPARING → REA
 
 Runner telemetry публикует hosted/self-hosted job count и измеренные wall-clock seconds (не billable minutes), `DUPLICATE_HOSTED_WORK_REMOVED` и `CACHE_PREVENTED_DOWNLOAD`. Pipeline controller использует существующий self-hosted runner; Prepare и image build выполняются один раз, Deploy использует persistent project cache и проверяет release metadata/hash при каждом чтении.
 
+## Bounded network retry
+
+All retries are for idempotent reads only and share the existing 30-minute
+workflow budget through `NETWORK_RETRY_BUDGET_STATE`. Backoff is exponential,
+jittered, and capped at 60 seconds. A fresh response is rechecked against the
+current main SHA, exact Prepare run/attempt, immutable GHCR digest, and existing
+authorization/conflict gates after each successful retry.
+
+| Operation | Endpoint / action | Retry behavior |
+|---|---|---|
+| Release provenance and runner readiness | GitHub API GETs for `main`, workflow runs, and exact Prepare metadata | Retry temporary TLS EOF, transient DNS/socket/timeouts, and HTTP 408/425/429/5xx within the shared budget. Never retry 401/403, TLS verification failures, malformed data, SHA/provenance mismatch, or active Deploy conflict. |
+| Prepare receipt and image verification | GHCR pull-token GET, OCI manifest/blob reads by exact tag and digest | Retry only the GETs. Never relax SHA256, OCI digest, descriptor, run/attempt, or linux/amd64 checks. Token and registry response bodies are not logged. |
+| Cached GitHub release artifact reads | GitHub artifact/release API GET and signed object-storage download | Retry within one shared budget; obtain a fresh signed URL on a new API attempt and never forward the GitHub bearer token to storage. |
+| Runner-to-VPS readiness and production baseline reads | Fixed-host SSH readiness probe and `release_prod.sh` read-only commands | Retry only classified transient SSH/network errors through the shared budget. Authentication and host-key failures fail closed. |
+| Runner bootstrap before project scripts | GitHub action metadata/source downloads, `actions/checkout`, codeload, and pinned ORAS setup | Project retry code is not running yet. Rely only on the runner/action's own bounded download handling; keep actions pinned, TLS verification enabled, and fail closed if bootstrap cannot complete. |
+| Writes and production mutation | GHCR ORAS publication, GitHub Deployment create/status, Apply, Alembic migration | No blind network retry. Reconcile/read back exact state before any authorized recovery; Apply and migrations are never retried automatically. |
+
+`NETWORK_UNAVAILABLE` means the bounded window expired. HTTP authorization
+failures and verification failures keep their safe, specific categories and do
+not consume repeated attempts.
+
 ## Где смотреть
 
 - GitHub run и первый упавший шаг: ссылки **MAXIBOT — Prepare** / **MAXIBOT — Deploy** выше.

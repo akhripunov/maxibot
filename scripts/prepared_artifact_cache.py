@@ -18,7 +18,8 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+from release_network_retry import (NetworkUnavailable, RetryBudget,
+    is_retryable_network_error, retry_network_read)
 from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset, validate_prepare_directory
 
 
@@ -34,15 +35,7 @@ class NetworkStageError(RuntimeError):
 
 
 def _retryable(error: BaseException) -> bool:
-    if isinstance(error, urllib.error.HTTPError):
-        return error.code in {408, 425, 429, 500, 502, 503, 504}
-    reason = error.reason if isinstance(error, urllib.error.URLError) else error
-    if isinstance(reason, ssl.SSLCertVerificationError):
-        return False
-    if isinstance(reason, ssl.SSLError):
-        return not any(marker in str(reason).lower() for marker in (
-            "certificate_verify_failed", "wrong_version_number", "protocol_version"))
-    return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
+    return is_retryable_network_error(error)
 
 
 def network_request(operation, stage: str, allow_redirect: bool = False, budget=None):

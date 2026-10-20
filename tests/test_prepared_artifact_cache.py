@@ -82,6 +82,19 @@ class ArtifactCacheTests(unittest.TestCase):
                 jitter=lambda _low, _high: 60, emit=lambda _message: None)
         self.assertEqual(state.read_text().strip(), '1800')
 
+    def test_successful_read_time_is_persisted_to_shared_budget(self):
+        state = self.root / 'retry-budget.state'
+        now = [0.0]
+        budget = RetryBudget(1800, clock=lambda: now[0], state_path=str(state))
+        result = retry_network_read(
+            lambda: (now.__setitem__(0, now[0] + 7) or 'ok'), 'successful_read',
+            lambda _error: False, budget=budget, clock=lambda: now[0], emit=lambda _event: None)
+
+        self.assertEqual(result, 'ok')
+        self.assertEqual(state.read_text().strip(), '7')
+        next_stage = RetryBudget(1800, clock=lambda: now[0], state_path=str(state))
+        self.assertEqual(next_stage.seconds - next_stage.spent, 1793)
+
     def fetch(self, target):
         self.downloads += 1
         shutil.copyfile(self.archive, target)
