@@ -646,9 +646,10 @@ def test_release_apply_loads_verified_prepared_image_without_rebuilding():
     release = (ROOT / "scripts/release_prod.sh").read_text()
     assert 'docker pull "$image_ref"' in release
     assert 'mint-pull-token' in release
-    assert 'identitytoken' in release
+    assert 'registrytoken' in release
     assert 'prepared_image_config_digest' in release
-    assert 'VPS_LOADED_IMAGE_CONFIG_DIGEST=$REMOTE_LOADED_IMAGE_ID' in release
+    assert 'VPS_LOADED_IMAGE_CONFIG_DIGEST=$RELEASE_IMAGE_ID' in release
+    assert 'VPS_LOADED_IMAGE_NATIVE_ID=$REMOTE_LOADED_IMAGE_ID' in release
     assert 'docker build --platform linux/amd64' not in release
     assert 'RELEASE_IMAGE_ID' in release
     assert 'prepared-image.digest' in release

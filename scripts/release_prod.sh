@@ -414,9 +414,12 @@ remote_read() {
   network_retry_read "$stage" remote "$@"
 }
 pull_ghcr_image() {
-  local image_ref=$1 image_tag=$2 expected_config=$3 sha=$4 remote_script scoped_token
-  scoped_token=$(python3 "$ROOT_DIR/scripts/ghcr_release_artifacts.py" mint-pull-token)
-  [[ -n "$scoped_token" ]] || die "Could not mint a scoped GHCR pull token"
+  local image_ref=$1 image_tag=$2 expected_config=$3 sha=$4 remote_script scoped_token pull_status
+  if ! scoped_token=$(python3 "$ROOT_DIR/scripts/ghcr_release_artifacts.py" mint-pull-token) || [[ -z "$scoped_token" ]]; then
+    unset scoped_token
+    printf '%s\n' 'Could not mint a scoped GHCR pull token' >&2
+    return 1
+  fi
   remote_script='set -Eeuo pipefail
 image_ref=$1 image_tag=$2 expected_config=$3 sha=$4
 IFS= read -r token
@@ -425,19 +428,24 @@ chmod 700 "$docker_config"
 cleanup() { rm -rf -- "$docker_config"; unset token; }
 trap cleanup EXIT
 export DOCKER_CONFIG="$docker_config"
-printf "%s" "$token" | python3 -c "import json,os,sys; p=sys.argv[1]; token=sys.stdin.read(); fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,json.dumps({\"auths\":{\"ghcr.io\":{\"identitytoken\":token}}}).encode()); os.close(fd)" "$docker_config/config.json"
+printf "%s" "$token" | python3 -c "import json,os,sys; p=sys.argv[1]; token=sys.stdin.read(); fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,json.dumps({\"auths\":{\"ghcr.io\":{\"registrytoken\":token}}}).encode()); os.close(fd)" "$docker_config/config.json"
 unset token
 docker pull "$image_ref"
 rm -rf -- "$docker_config"
 docker image inspect "$image_ref" --format "{{range .RepoDigests}}{{println .}}{{end}}" | grep -Fx "$image_ref" >/dev/null
-test "$(docker image inspect "$image_ref" --format "{{.Id}}")" = "$expected_config"
+test "$(docker image inspect "$image_ref" --format "{{.Id}}")" = "${image_ref##*@}"
 test "$(docker image inspect "$image_ref" --format "{{.Os}}/{{.Architecture}}")" = linux/amd64
 test "$(docker image inspect "$image_ref" --format "{{index .Config.Labels \"org.opencontainers.image.revision\"}}")" = "$sha"
 test "$(docker image inspect "$image_ref" --format "{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}")" = "$sha"
 test "$(docker image inspect "$image_ref" --format "{{index .Config.Labels \"org.maxibot.release.sha\"}}")" = "$sha"
 docker tag "$image_ref" "$image_tag"'
-  printf '%s\n' "$scoped_token" | "${SSH[@]}" "bash -c '$remote_script' -- '$image_ref' '$image_tag' '$expected_config' '$sha'"
+  # timed_stage calls this function in a conditional, which disables implicit
+  # errexit inside it. Preserve an SSH/pull/proof error instead of masking it
+  # with the successful unset below.
+  pull_status=0
+  printf '%s\n' "$scoped_token" | "${SSH[@]}" "bash -c '$remote_script' -- '$image_ref' '$image_tag' '$expected_config' '$sha'" || pull_status=$?
   unset scoped_token
+  return "$pull_status"
 }
 say RELEASE_SSH_USER "$PRODUCTION_SSH_USER"
 say CANONICAL_TARGET "$PRODUCTION_TARGET"
@@ -575,7 +583,7 @@ timed_stage SOURCE_UPLOAD "${SCP[@]}" "$ARCHIVE" "$PRODUCTION_TARGET:$REMOTE_TMP
 
 remote "set -eu; test -r $PRODUCTION_ROOT/.env; mkdir -p $PRODUCTION_ROOT/releases/$TARGET_SHA; tar -xf $REMOTE_TMP -C $PRODUCTION_ROOT/releases/$TARGET_SHA; find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -exec rm -rf {} +; if find $PRODUCTION_ROOT/releases/$TARGET_SHA \( -name '._*' -o -name '.DS_Store' -o -name '__MACOSX' \) -print -quit | grep -q .; then echo 'AppleDouble or macOS metadata remains in remote release context' >&2; exit 1; fi"
 remote "rm -f $REMOTE_TMP"
-IMAGE_REUSE=$(remote "if test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.digest && test \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.digest)\" = $RELEASE_IMAGE_DIGEST && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}' 2>/dev/null)\" = \"$RELEASE_IMAGE_ID\" && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; then echo YES; else echo NO; fi")
+IMAGE_REUSE=$(remote "if test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.digest && test \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.digest)\" = $RELEASE_IMAGE_DIGEST && test -r $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config && test \"\$(cat $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config)\" = $RELEASE_IMAGE_ID && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64 && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.opencontainers.image.source-sha\"}}')\" = $TARGET_SHA && test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{index .Config.Labels \"org.maxibot.release.sha\"}}')\" = $TARGET_SHA; then echo YES; else echo NO; fi")
 if [[ "$IMAGE_REUSE" == YES ]]; then
   IMAGE_REPO_DIGESTS=$(remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null || true")
   printf '%s\n' "$IMAGE_REPO_DIGESTS" | grep -Fxq "$RELEASE_IMAGE_REPOSITORY@$RELEASE_IMAGE_DIGEST" || IMAGE_REUSE=NO
@@ -586,11 +594,12 @@ timed_stage IMAGE_PULL pull_ghcr_image "${RELEASE_IMAGE_REPOSITORY}@${RELEASE_IM
 remote "printf '%s\\n' $RELEASE_IMAGE_DIGEST > $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.digest; printf '%s\\n' $RELEASE_IMAGE_ID > $PRODUCTION_ROOT/releases/$TARGET_SHA/prepared-image.config"
 fi
 REMOTE_LOADED_IMAGE_ID=$(remote "docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Id}}'")
-[[ "$REMOTE_LOADED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "loaded VPS image config digest is unavailable"
+[[ "$REMOTE_LOADED_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "loaded VPS native image ID is unavailable"
 remote "python3 $PRODUCTION_ROOT/releases/$TARGET_SHA/scripts/verify_loaded_prepared_image.py maxibot-vps-api:$TARGET_SHA $RELEASE_IMAGE_ID $TARGET_SHA"
 say LOADED_IMAGE_CONTENT_PROOF PASS
 say PREPARED_IMAGE_CONFIG_DIGEST "$RELEASE_IMAGE_ID"
-say VPS_LOADED_IMAGE_CONFIG_DIGEST "$REMOTE_LOADED_IMAGE_ID"
+say VPS_LOADED_IMAGE_CONFIG_DIGEST "$RELEASE_IMAGE_ID"
+say VPS_LOADED_IMAGE_NATIVE_ID "$REMOTE_LOADED_IMAGE_ID"
 say IMAGE_REPOSITORY "$RELEASE_IMAGE_REPOSITORY"
 say IMAGE_DIGEST "$RELEASE_IMAGE_DIGEST"
 PREVIOUS_CONFIG=$(remote "docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}'")
@@ -698,7 +707,8 @@ TARGET_SHA=$TARGET_SHA
 PREVIOUS_SHA=$PREVIOUS_SHA
 TARGET_IMAGE=maxibot-vps-api:$TARGET_SHA
 PREPARED_IMAGE_CONFIG_DIGEST=$RELEASE_IMAGE_ID
-VPS_LOADED_IMAGE_CONFIG_DIGEST=$REMOTE_LOADED_IMAGE_ID
+VPS_LOADED_IMAGE_CONFIG_DIGEST=$RELEASE_IMAGE_ID
+VPS_LOADED_IMAGE_NATIVE_ID=$REMOTE_LOADED_IMAGE_ID
 IMAGE_REPOSITORY=$RELEASE_IMAGE_REPOSITORY
 IMAGE_DIGEST=$RELEASE_IMAGE_DIGEST
 PREVIOUS_IMAGE=$PREVIOUS_IMAGE

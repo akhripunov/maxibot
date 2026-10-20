@@ -236,7 +236,7 @@ def test_loaded_oci_identity_and_native_runtime_rehearsal_are_fail_closed():
     assert '[[ "$REMOTE_LOADED_IMAGE_ID" == "$RELEASE_IMAGE_ID" ]]' not in source
     assert 'docker pull "$image_ref"' in source
     assert 'mint-pull-token' in source
-    assert 'identitytoken' in source
+    assert 'registrytoken' in source
     assert 'docker login ghcr.io' not in source
     assert 'verify_loaded_prepared_image.py maxibot-vps-api:$TARGET_SHA $RELEASE_IMAGE_ID $TARGET_SHA' in source
     assert 'LOADED_IMAGE_CONTENT_PROOF PASS' in source
