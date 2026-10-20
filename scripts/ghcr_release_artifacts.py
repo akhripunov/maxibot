@@ -257,18 +257,24 @@ def registry_pull_token(repository: str, username: str, password: str, *,
             UnicodeDecodeError) as exc:
         raise ArtifactError(
             f"Could not mint a scoped MAXIBOT GHCR pull token ({_network_failure_category(exc)})") from None
-    token = body.get("token") or body.get("access_token") if isinstance(body, dict) else None
-    expires = body.get("expires_in", 0) if isinstance(body, dict) else 0
-    if not isinstance(token, str) or not token or len(token) > 8192 or not isinstance(expires, int) or not 0 < expires <= 3600:
-        raise ArtifactError("GHCR did not return a short-lived pull-only identity token")
+    token = (body.get("token") or body.get("access_token")) if isinstance(body, dict) else None
+    # Registry V2 defines a 60-second lifetime when expires_in is omitted.
+    # GHCR returns this token-only response; explicit invalid lifetimes still fail closed.
+    # https://docs.docker.com/reference/api/registry/auth/#expires_in
+    expires = body.get("expires_in", 60) if isinstance(body, dict) else 0
+    if not isinstance(token, str) or not token or len(token) > 8192 or type(expires) is not int or not 0 < expires <= 3600:
+        raise ArtifactError("GHCR did not return a short-lived pull-only bearer token")
     return token
 
 
 def main_pull_token() -> int:
     """Print only the short-lived pull-only token for local shell pipe capture."""
+    from contextlib import redirect_stdout
     try:
-        token = registry_pull_token(IMAGE_REPOSITORY, os.environ.get("GITHUB_ACTOR", ""),
-                                    os.environ.get("GITHUB_TOKEN", ""))
+        # Retry telemetry must never become part of the secret stdin payload.
+        with redirect_stdout(sys.stderr):
+            token = registry_pull_token(IMAGE_REPOSITORY, os.environ.get("GITHUB_ACTOR", ""),
+                                        os.environ.get("GITHUB_TOKEN", ""))
         sys.stdout.write(token)
         return 0
     except ArtifactError as exc:
