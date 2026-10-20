@@ -37,6 +37,23 @@ def test_release_receipts_reuse_the_existing_repository_linked_image_package():
     assert artifacts.EVIDENCE_REPOSITORY == artifacts.IMAGE_REPOSITORY
 
 
+def test_oras_subprocess_failure_logs_safe_operation_and_http_status(monkeypatch):
+    import subprocess
+
+    def fail(args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            1, args, output="registry token should stay private",
+            stderr="unexpected status: 403 Forbidden secret-token-value")
+
+    monkeypatch.setattr(artifacts.subprocess, "run", fail)
+    with pytest.raises(artifacts.ArtifactError) as error:
+        artifacts._run_oras(["oras", "push", "ghcr.io/owner/package:tag"])
+
+    assert str(error.value) == "ORAS push failed (exit 1; HTTP 403)"
+    assert "secret-token-value" not in str(error.value)
+    assert "registry token should stay private" not in str(error.value)
+
+
 @pytest.mark.parametrize("args", [
     ("gpoint", SHA, RUN_ID, ATTEMPT), ("prepare", "bad", RUN_ID, ATTEMPT),
     ("prepare", SHA, "0", ATTEMPT), ("prepare", SHA, RUN_ID, "0"),
