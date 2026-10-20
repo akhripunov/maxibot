@@ -10,6 +10,7 @@ import errno
 import socket
 import ssl
 import time
+import threading
 import urllib.error
 from collections.abc import Callable
 from typing import TypeVar
@@ -64,6 +65,8 @@ class RetryBudget:
         self.clock = clock or time.monotonic
         self.started = self.clock()
         self.seconds = seconds
+        self._lock = threading.Lock()
+        self._charged_intervals: list[tuple[float, float]] = []
         configured_path = state_path or os.environ.get("NETWORK_RETRY_BUDGET_STATE")
         self.state_path = Path(configured_path) if configured_path else None
         self.spent = 0.0
@@ -75,17 +78,51 @@ class RetryBudget:
         self.deadline = self.started + max(0.0, seconds - self.spent)
 
     def persist(self, elapsed: float) -> None:
-        if self.state_path:
+        with self._lock:
             self.spent += max(0.0, elapsed)
+            if not self.state_path:
+                return
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
             temporary.write_text(f"{math.ceil(self.spent)}\n", encoding="utf-8")
             temporary.replace(self.state_path)
 
+    def persist_interval(self, started: float, ended: float) -> None:
+        """Charge only the newly observed portion of a possibly overlapping retry interval."""
+        start, end = started, ended
+        if end <= start:
+            return
+        with self._lock:
+            overlap = 0.0
+            for old_start, old_end in self._charged_intervals:
+                overlap += max(0.0, min(end, old_end) - max(start, old_start))
+            charged = max(0.0, end - start - overlap)
+            merged = []
+            for old_start, old_end in sorted([*self._charged_intervals, (start, end)]):
+                if merged and old_start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], old_end))
+                else:
+                    merged.append((old_start, old_end))
+            self._charged_intervals = merged
+            if charged == 0:
+                return
+            self.spent += charged
+            if not self.state_path:
+                return
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+            temporary.write_text(f"{math.ceil(self.spent)}\n", encoding="utf-8")
+            temporary.replace(self.state_path)
+
+    def remaining_seconds(self) -> float:
+        with self._lock:
+            return max(0.0, self.seconds - self.spent)
+
 
 def retry_network_read(operation: Callable[[], T], stage: str,
                        is_retryable: Callable[[BaseException], bool], *,
                        budget: RetryBudget | None = None,
+                       deadline: float | None = None,
                        clock: Callable[[], float] | None = None,
                        sleep: Callable[[float], None] | None = None,
                        jitter: Callable[[float, float], float] | None = None,
@@ -97,7 +134,6 @@ def retry_network_read(operation: Callable[[], T], stage: str,
     budget = budget or RetryBudget(clock=clock)
     call_started = clock()
     retries = 0
-    attempts = 0
 
     def unavailable() -> NetworkUnavailable:
         elapsed = budget.spent + clock() - call_started
@@ -105,13 +141,13 @@ def retry_network_read(operation: Callable[[], T], stage: str,
         return NetworkUnavailable(stage)
 
     retries = 0
-    deadline = clock() + max(0.0, budget.seconds - budget.spent)
+    budget_deadline = clock() + budget.remaining_seconds()
+    deadline = min(budget_deadline, deadline) if deadline is not None else budget_deadline
     try:
       while True:
         if clock() >= deadline:
             raise unavailable()
         try:
-            attempts += 1
             result = operation()
             elapsed = budget.spent + clock() - call_started
             if clock() >= deadline:
@@ -132,5 +168,5 @@ def retry_network_read(operation: Callable[[], T], stage: str,
             retries += 1
             sleep(delay)
     finally:
-        if attempts:
-            budget.persist(clock() - call_started)
+        if retries:
+            budget.persist_interval(call_started, clock())

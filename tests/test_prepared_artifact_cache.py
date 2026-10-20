@@ -82,19 +82,6 @@ class ArtifactCacheTests(unittest.TestCase):
                 jitter=lambda _low, _high: 60, emit=lambda _message: None)
         self.assertEqual(state.read_text().strip(), '1800')
 
-    def test_successful_read_time_is_persisted_to_shared_budget(self):
-        state = self.root / 'retry-budget.state'
-        now = [0.0]
-        budget = RetryBudget(1800, clock=lambda: now[0], state_path=str(state))
-        result = retry_network_read(
-            lambda: (now.__setitem__(0, now[0] + 7) or 'ok'), 'successful_read',
-            lambda _error: False, budget=budget, clock=lambda: now[0], emit=lambda _event: None)
-
-        self.assertEqual(result, 'ok')
-        self.assertEqual(state.read_text().strip(), '7')
-        next_stage = RetryBudget(1800, clock=lambda: now[0], state_path=str(state))
-        self.assertEqual(next_stage.seconds - next_stage.spent, 1793)
-
     def fetch(self, target):
         self.downloads += 1
         shutil.copyfile(self.archive, target)
@@ -252,6 +239,24 @@ class ArtifactCacheTests(unittest.TestCase):
         self.assertFalse(CACHE._retryable(invalid_cert))
         self.assertFalse(CACHE._retryable(unauthorized))
 
+    def test_retry_cannot_cross_parent_download_deadline(self):
+        now = [0.0]
+        calls = []
+
+        def request():
+            calls.append(now[0])
+            now[0] = 11.0
+            raise TimeoutError('transient range read timeout')
+
+        with self.assertRaises(NetworkUnavailable):
+            retry_network_read(request, 'release_asset_download', CACHE._retryable,
+                budget=RetryBudget(seconds=1800, clock=lambda: now[0]), deadline=10.0,
+                clock=lambda: now[0], sleep=lambda _seconds: None,
+                jitter=lambda _low, _high: 0, emit=lambda _event: None)
+
+        self.assertEqual(calls, [0.0])
+        self.assertEqual(now[0], 11.0)
+
     def test_download_refreshes_signed_url_after_transient_storage_failure(self):
         import io
         redirects=[]
@@ -342,6 +347,55 @@ class ArtifactCacheTests(unittest.TestCase):
         self.assertEqual(requests[0].get_header("Range"), f"bytes=0-{len(payload) - 1}")
         self.assertEqual(len(storage_requests), 1)
         self.assertEqual(target.read_bytes(), payload)
+
+    def test_parallel_release_ranges_share_one_existing_retry_budget(self):
+        import io
+        budget = RetryBudget(seconds=10)
+        seen_budgets = []
+        seen_deadlines = []
+
+        class RangeResponse(io.BytesIO):
+            def __init__(self, payload, content_range):
+                super().__init__(payload)
+                self.headers = {"Content-Range": content_range, "Content-Length": str(len(payload))}
+            def getcode(self): return 206
+
+        def api_open(request, timeout):
+            start, end = map(int, request.get_header("Range")[6:].split("-"))
+            return RangeResponse(b"x", f"bytes {start}-{end}/2")
+
+        def fake_download_ranges(size, target, fetch_range, workers=4, chunk_size=16 * 1024 * 1024):
+            fetch_range(0, 0, self.root / "part-0")
+            fetch_range(1, 1, self.root / "part-1")
+
+        def fake_network_request(operation, _stage, budget=None, **_kwargs):
+            seen_budgets.append(budget)
+            seen_deadlines.append(_kwargs.get('deadline'))
+            return operation()
+
+        with patch.object(CACHE.urllib.request, "build_opener") as opener, \
+             patch.object(CACHE.urllib.request, "urlopen") as storage_open, \
+             patch.object(CACHE, "download_ranges", side_effect=fake_download_ranges), \
+             patch.object(CACHE, "network_request", side_effect=fake_network_request):
+            opener.return_value.open.side_effect = api_open
+            CACHE.download_release("owner/repo", 72, "token", self.root / "release.zip",
+                expected_size=2, budget=budget)
+
+        self.assertEqual(len(seen_budgets), 2)
+        self.assertIs(seen_budgets[0], budget)
+        self.assertIs(seen_budgets[1], budget)
+        self.assertEqual(seen_deadlines[0], seen_deadlines[1])
+        self.assertIsNotNone(seen_deadlines[0])
+        storage_open.assert_not_called()
+
+    def test_parallel_retry_budget_charges_union_of_overlapping_retry_time(self):
+        budget = RetryBudget(seconds=100)
+        budget.persist_interval(10, 20)
+        budget.persist_interval(15, 25)
+        budget.persist_interval(5, 30)
+
+        self.assertEqual(budget.spent, 25)
+        self.assertEqual(budget.remaining_seconds(), 75)
 
     def test_parallel_range_transfer_reassembles_exact_verified_bytes(self):
         content = bytes(index % 251 for index in range(1024 * 1024 + 319))
