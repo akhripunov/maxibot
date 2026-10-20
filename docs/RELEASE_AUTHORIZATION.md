@@ -83,11 +83,12 @@ GitHub's native queued state is an allowed wait for a self-hosted runner. It is
 not a production mutation or a failure and does not require an additional
 runner-status credential, polling service, or owner decision. When the job
 starts, its first readiness gate fails closed unless it verifies the expected
-project runner identity/labels, OS/architecture, Docker/runtime dependency,
-disk space, cache and runtime paths, required tools/network access, and absence
-of a conflicting production mutation. This gate runs before expensive artifact
-transfer or any mutating stage. Do not add blind reruns or scheduled hosted
-polling to address runner availability.
+project runner identity/labels, OS/architecture, disk space, cache and runtime
+paths, required tools/network access, and absence of a conflicting production
+mutation. Docker operations run on the VPS through SSH after the authorized
+read-only preflight; the Mac runner does not require a Docker CLI or daemon.
+This gate runs before expensive artifact transfer or any mutating stage. Do
+not add blind reruns or scheduled hosted polling to address runner availability.
 
 Examples:
 - “Исправь ссылку в меню и выкатывай” → task-scoped, if the durable record and

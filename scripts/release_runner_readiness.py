@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import time
 import urllib.error
 import urllib.request
 
@@ -36,60 +35,11 @@ def ensure_free_disk(runner_temp: Path, reclaim_cache, measure=shutil.disk_usage
     return free_bytes
 
 
-def inspect_docker_runtime(run_command=subprocess.run, timeout: float = 15) -> tuple[str, str]:
-    """Classify Docker without starting services or touching the release cache."""
-    info_command = ["docker", "info", "--format", "{{.OSType}}"]
-    try:
-        result = run_command(info_command, check=False, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return "", "unavailable"
-    output = result.stdout.strip()
-    if result.returncode == 0:
-        return output, "ready" if output == "linux" else "wrong_platform"
-    error = result.stderr.strip().lower()
-    if "is the docker daemon running" in error or "cannot connect to the docker daemon" in error:
-        return "", "stopped"
-    return "", "unavailable"
-
-
-def resolve_docker_os(run_command=subprocess.run, sleep=time.sleep, monotonic=time.monotonic,
-                      startup_timeout_seconds: int = 90,
-                      initial_probe: tuple[str, str] | None = None) -> str:
-    """Use a running Linux Docker engine, or start installed Desktop once and verify it boundedly."""
-    probe = initial_probe or inspect_docker_runtime(run_command=run_command)
-    docker_os, state = probe
-    if state == "ready":
-        return docker_os
-    if state != "stopped":
-        return ""
-
-    try:
-        started = run_command(["docker", "desktop", "start"], check=False,
-                              capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    if started.returncode != 0:
-        return ""
-
-    deadline = monotonic() + max(0, startup_timeout_seconds)
-    while monotonic() < deadline:
-        remaining = max(0, deadline - monotonic())
-        docker_os, state = inspect_docker_runtime(run_command=run_command, timeout=min(5, remaining))
-        if state == "ready":
-            return docker_os
-        if state != "stopped":
-            return ""
-        remaining = max(0, deadline - monotonic())
-        if remaining <= 0:
-            break
-        sleep(min(2, remaining))
-    return ""
-
-
-def validate_pre_docker_start(*, runner_name: str, runner_os: str, runner_arch: str,
-                              main_sha: str, candidate_sha: str, active_conflict: bool,
-                              paths_ready: bool, tools_ready: bool, network_ready: bool) -> dict[str, str]:
-    """Reject an ineligible run before starting or otherwise touching Docker Desktop."""
+def validate_runner_identity_and_scope(*, runner_name: str, runner_os: str, runner_arch: str,
+                                        main_sha: str, candidate_sha: str, active_conflict: bool,
+                                        paths_ready: bool, tools_ready: bool,
+                                        network_ready: bool) -> dict[str, str]:
+    """Reject an ineligible release runner before cache or production checks."""
     if runner_name != EXPECTED_RUNNER or runner_os != "macOS" or runner_arch != "ARM64":
         raise RunnerReadinessError("Assigned runner identity/OS/architecture does not match MAXIBOT lane")
     if not paths_ready:
@@ -106,20 +56,18 @@ def validate_pre_docker_start(*, runner_name: str, runner_os: str, runner_arch: 
             "candidate_sha": candidate_sha, "conflicting_production_mutation": "NO"}
 
 
-def validate_runtime(*, runner_name: str, runner_os: str, runner_arch: str,
-                     free_bytes: int, docker_available: bool, docker_os: str,
-                     main_sha: str, candidate_sha: str, active_conflict: bool,
-                     paths_ready: bool, tools_ready: bool, network_ready: bool) -> dict[str, str]:
-    preflight = validate_pre_docker_start(
+def validate_release_host(*, runner_name: str, runner_os: str, runner_arch: str,
+                          free_bytes: int, main_sha: str, candidate_sha: str,
+                          active_conflict: bool, paths_ready: bool,
+                          tools_ready: bool, network_ready: bool) -> dict[str, str]:
+    preflight = validate_runner_identity_and_scope(
         runner_name=runner_name, runner_os=runner_os, runner_arch=runner_arch,
         main_sha=main_sha, candidate_sha=candidate_sha, active_conflict=active_conflict,
         paths_ready=paths_ready, tools_ready=tools_ready, network_ready=network_ready)
     if free_bytes < MIN_FREE_BYTES:
         raise RunnerReadinessError("Insufficient free disk for release bundle/runtime work")
-    if not docker_available or docker_os != "linux":
-        raise RunnerReadinessError("Required Docker runtime is unavailable")
     return {"runner": preflight["runner"], "runner_os": runner_os, "runner_arch": runner_arch,
-            "free_bytes": str(free_bytes), "docker": "READY", "network": "READY",
+            "free_bytes": str(free_bytes), "deployment_runtime": "VPS_VIA_SSH", "network": "READY",
             "project_paths": "READY", "conflicting_production_mutation": "NO"}
 
 
@@ -199,31 +147,16 @@ def run() -> dict[str, str]:
                    {"queued", "in_progress", "waiting", "pending"}
                    for run in active.get("workflow_runs", []))
     candidate = os.environ.get("CANDIDATE_SHA", "")
-    pre_docker_args = dict(
+    runner_scope_args = dict(
         runner_name=os.environ.get("RUNNER_NAME", ""), runner_os=os.environ.get("RUNNER_OS", ""),
         runner_arch=os.environ.get("RUNNER_ARCH", ""), main_sha=main, candidate_sha=candidate,
         active_conflict=conflict, paths_ready=paths_ready, tools_ready=tools_ready,
         network_ready=network_ready)
-    validate_pre_docker_start(**pre_docker_args)
-    docker_probe = inspect_docker_runtime()
-    if docker_probe[1] not in {"ready", "stopped"}:
-        raise RunnerReadinessError("Required Docker runtime is unavailable")
-    # Reclaim only our known release artifacts after identity/scope/conflict gates pass,
-    # and verify Docker is usable or its installed Desktop is stopped before reclaiming.
-    ensure_free_disk(runner_temp, lambda: prune_reclaimable_release_archives(artifact_cache))
-    docker = resolve_docker_os(initial_probe=docker_probe)
-    readiness_args = dict(
-        runner_name=pre_docker_args["runner_name"], runner_os=pre_docker_args["runner_os"],
-        runner_arch=pre_docker_args["runner_arch"],
-        docker_available=bool(docker), docker_os=docker, main_sha=main,
-        candidate_sha=candidate, active_conflict=conflict,
-        paths_ready=paths_ready, tools_ready=tools_ready, network_ready=network_ready)
-    # Validate runner identity, dependencies, exact candidate and conflicts
-    # before touching even the bounded, reproducible release cache.
-    validate_runtime(free_bytes=MIN_FREE_BYTES, **readiness_args)
+    validate_runner_identity_and_scope(**runner_scope_args)
+    # Reclaim only our known release artifacts after identity/scope/conflict gates pass.
     free_bytes = ensure_free_disk(
         runner_temp, lambda: prune_reclaimable_release_archives(artifact_cache))
-    facts = validate_runtime(free_bytes=free_bytes, **readiness_args)
+    facts = validate_release_host(free_bytes=free_bytes, **runner_scope_args)
     print("RELEASE_RUNNER_READINESS=PASS " + " ".join(f"{key.upper()}={value}" for key, value in facts.items()))
     return facts
 
