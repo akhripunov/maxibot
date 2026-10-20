@@ -99,6 +99,10 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         return orchestrator.dispatch_prepare(payload or event(), self.api, repo_root=self.root,
                                              migration="0098_test", orchestrator_run_id="987")
 
+    def test_controller_checkout_fetches_full_history_for_authorization_ancestry(self):
+        workflow = (ROOT / ".github/workflows/maxibot-auto-preflight.yml").read_text(encoding="utf-8")
+        self.assertRegex(workflow, r"(?m)^\s+fetch-depth:\s+0\s*$")
+
     def test_prepare_without_full_cycle_authorization_does_not_dispatch_preflight_or_production(self):
         receipt = self.dispatch()
         self.assertEqual(receipt["state"], "OWNER_EXACT_SHA_APPROVAL_REQUIRED")
