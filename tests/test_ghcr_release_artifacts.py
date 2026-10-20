@@ -272,6 +272,11 @@ def test_deploy_runner_uses_stdin_credential_and_removes_temporary_docker_config
     monkeypatch.setattr("scripts.ghcr_prepare_cache.tempfile.mkdtemp", lambda **_kwargs: str(docker_config))
     def run(args, **kwargs):
         calls.append((args, kwargs))
+        if args[1:3] == ["login", "ghcr.io"]:
+            config_path = Path(kwargs["env"]["DOCKER_CONFIG"]) / "config.json"
+            assert json.loads(config_path.read_text()) == {"auths": {"ghcr.io": {}}}
+            assert config_path.stat().st_mode & 0o777 == 0o600
+            assert config_path.parent.stat().st_mode & 0o777 == 0o700
         return subprocess.CompletedProcess(args, 0)
     def check_output(args, **kwargs):
         fmt = args[-1]
