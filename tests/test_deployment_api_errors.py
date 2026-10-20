@@ -16,6 +16,7 @@ import run_release_workflow  # noqa: E402
 
 def test_github_deployment_creation_requires_exact_prepare_context(monkeypatch):
     observed = {}
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
 
     class Response:
         status = 201
@@ -43,7 +44,22 @@ def test_github_deployment_creation_requires_exact_prepare_context(monkeypatch):
     )
 
     assert deployment_id == 1234
-    assert observed["required_contexts"] == ["prepare"]
+    assert observed == {
+        "ref": "a" * 40,
+        "task": "maxibot-production-deploy",
+        "environment": "maxibot-production",
+        "auto_merge": False,
+        "required_contexts": ["prepare"],
+        "description": "MAXIBOT production aaaaaaaaaaaa",
+        "payload": {
+            "candidate_sha": "a" * 40,
+            "target_migration": "0098_durable_autopilot_execution_claim_v1",
+            "mode": "production",
+            "workflow_run_id": "777",
+            "workflow_run_attempt": "2",
+            "prepare_receipt_digest": "sha256:" + "b" * 64,
+        },
+    }
 
 
 def test_github_deployment_creation_reports_only_http_status(monkeypatch):
