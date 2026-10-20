@@ -6,7 +6,7 @@ import json
 import pytest
 
 from scripts import ghcr_release_artifacts as artifacts
-from scripts.ghcr_prepare_cache import resolve_prepare, pull_verified_image
+from scripts.ghcr_prepare_cache import resolve_prepare, pull_verified_image, verify_image_config_digest
 
 
 SHA = "a" * 40
@@ -265,6 +265,16 @@ def test_resolve_prepare_requires_validator_selected_digest_and_writes_only_rece
 def test_deploy_runner_uses_stdin_credential_and_removes_temporary_docker_config(tmp_path, monkeypatch):
     import subprocess
     from pathlib import Path
+    config_digest = "sha256:" + "c" * 64
+    image_manifest = json.dumps({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": config_digest, "size": 1},
+        "layers": [],
+    }, separators=(",", ":")).encode()
+    image_digest = "sha256:" + hashlib.sha256(image_manifest).hexdigest()
+    image_reference = f"{artifacts.IMAGE_REPOSITORY}@{image_digest}"
     calls = []
     docker_config = tmp_path / "docker-auth"
     docker_config.mkdir()
@@ -280,16 +290,24 @@ def test_deploy_runner_uses_stdin_credential_and_removes_temporary_docker_config
         return subprocess.CompletedProcess(args, 0)
     def check_output(args, **kwargs):
         fmt = args[-1]
-        if fmt == "{{.Id}}": return "sha256:" + "c" * 64
+        if fmt == "{{.Id}}": return image_digest
+        if fmt == "{{range .RepoDigests}}{{println .}}{{end}}": return image_reference + "\n"
         if fmt == "{{.Os}}/{{.Architecture}}": return "linux/amd64"
         return json.dumps({"org.opencontainers.image.revision": SHA,
             "org.opencontainers.image.source-sha": SHA, "org.maxibot.release.sha": SHA})
+    def registry_fetch(_repository, _username, _token):
+        def fetch(url, _accept):
+            assert url.endswith(f"/manifests/{image_digest}")
+            return image_manifest, {"Docker-Content-Digest": image_digest}
+        return fetch
     monkeypatch.setattr("scripts.ghcr_prepare_cache.subprocess.run", run)
     monkeypatch.setattr("scripts.ghcr_prepare_cache.subprocess.check_output", check_output)
+    monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", registry_fetch)
     image = {"repository": artifacts.IMAGE_REPOSITORY, "digest": "sha256:" + "b" * 64,
-        "config_digest": "sha256:" + "c" * 64, "platform": "linux/amd64", "labels": {
+        "config_digest": config_digest, "platform": "linux/amd64", "labels": {
             "org.opencontainers.image.revision": SHA, "org.opencontainers.image.source-sha": SHA,
             "org.maxibot.release.sha": SHA}}
+    image["digest"] = image_digest
     pull_verified_image(image, SHA, "owner", "secret-token")
     login = calls[0]
     assert login[0][1] == "login" and login[1]["input"] == "secret-token\n"
@@ -297,6 +315,24 @@ def test_deploy_runner_uses_stdin_credential_and_removes_temporary_docker_config
     assert calls[-1][0][1] == "logout"
     assert all(call[1]["env"]["DOCKER_CONFIG"] == str(docker_config) for call in calls)
     assert not Path(docker_config).exists()
+
+
+def test_ghcr_image_manifest_must_bind_receipt_config_digest(monkeypatch):
+    config_digest = "sha256:" + "c" * 64
+    manifest_bytes = json.dumps({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": config_digest, "size": 1},
+        "layers": [],
+    }, separators=(",", ":")).encode()
+    image_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+    monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", lambda *_args: (
+        lambda *_request: (manifest_bytes, {"Docker-Content-Digest": image_digest})))
+    image = {"repository": artifacts.IMAGE_REPOSITORY, "digest": image_digest,
+        "config_digest": "sha256:" + "d" * 64}
+    with pytest.raises(artifacts.ArtifactError, match="config descriptor"):
+        verify_image_config_digest(image, "owner", "token")
 
 
 def test_pull_token_is_short_lived_and_scoped_to_image_package(monkeypatch):
