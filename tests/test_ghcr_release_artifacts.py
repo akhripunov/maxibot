@@ -223,6 +223,7 @@ def test_publish_oci_artifact_links_new_package_to_workflow_repository(tmp_path,
 
     push_args = calls[1][0]
     assert "--debug" in push_args
+    assert "--disable-path-validation" in push_args
     annotation_index = push_args.index("--annotation")
     assert push_args[annotation_index + 1] == (
         "org.opencontainers.image.source=https://github.com/akhripunov/maxibot")
