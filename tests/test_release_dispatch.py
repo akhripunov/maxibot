@@ -761,6 +761,38 @@ def test_failed_in_deploy_preflight_never_reaches_production_apply(monkeypatch, 
     assert result["production_changed"] is False
 
 
+def test_github_deployment_creation_error_never_reaches_production_apply(monkeypatch, tmp_path):
+    result_path, migration_head = _setup_task_scoped_wrapper(monkeypatch, tmp_path, MIGRATION)
+    commands = []
+
+    def execute(command, _env):
+        commands.append(command)
+        if command[-1] == "--dry-run":
+            return 0, f"SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration_head}\n"
+        pytest.fail("Deployment creation failure must stop before production apply")
+
+    def reject_deployment(*_args, **_kwargs):
+        raise ValueError("GitHub Deployment creation failed (HTTP 403); production apply was not started")
+
+    monkeypatch.setattr(run_release_workflow, "run", execute)
+    monkeypatch.setattr(run_release_workflow, "create_github_deployment", reject_deployment)
+    monkeypatch.setattr(run_release_workflow, "verify_task_authorization",
+                        lambda *_args, **_kwargs: {"record_sha256": "b" * 64,
+                            "source_reference": "linear:task#owner", "changed_paths": "app/bot/menu.py",
+                            "_record": {}, "_changed_paths_list": []})
+    monkeypatch.setattr(run_release_workflow, "assert_task_scoped_no_migration", lambda *_args, **_kwargs: None)
+
+    assert run_release_workflow.main() == 1
+
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "FAILED_PRE_SWITCH"
+    assert result["preflight"] == "PASS"
+    assert result["production_changed"] is False
+    assert result["authorization_consumed"] is False
+    assert "HTTP 403" in result["error"]
+    assert commands == [["bash", "scripts/release_prod.sh", SHA, "--dry-run"]]
+
+
 def test_publication_recovery_is_read_only_and_cannot_repeat_apply():
     wrapper = (ROOT / "scripts/run_release_workflow.py").read_text()
     assert "mode == \"publication-recovery\"" in wrapper

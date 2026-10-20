@@ -92,7 +92,12 @@ def update_github_deployment(deployment_id: int, state: str, description: str, t
 
 def create_github_deployment(sha: str, migration: str, mode: str, token: str,
                              run_id: str, prepare_digest: str) -> int:
-    body = {"ref": sha, "environment": "maxibot-production", "auto_merge": False,
+    # The exact Prepare workflow run was verified before this call. Requiring
+    # only its successful check avoids making this Deploy wait on its own
+    # still-running `deploy` check, while retaining GitHub's Prepare gate.
+    body = {"ref": sha, "task": "maxibot-production-deploy",
+        "environment": "maxibot-production", "auto_merge": False,
+        "required_contexts": ["prepare"],
         "description": f"MAXIBOT {mode} {sha[:12]}",
         "payload": {"candidate_sha": sha, "target_migration": migration, "mode": mode,
                     "workflow_run_id": run_id,
@@ -106,6 +111,12 @@ def create_github_deployment(sha: str, migration: str, mode: str, token: str,
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # Keep public Actions logs useful without copying a possibly private
+        # GitHub API response body or headers into release evidence.
+        raise ValueError(
+            f"GitHub Deployment creation failed (HTTP {exc.code}); production apply was not started"
+        ) from None
     except Exception as exc:
         raise ValueError("GitHub Deployment creation failed; production apply was not started") from exc
     deployment_id = result.get("id") if isinstance(result, dict) else None
