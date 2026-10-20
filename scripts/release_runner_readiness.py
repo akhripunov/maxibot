@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import ssl
@@ -18,6 +19,7 @@ from release_network_retry import NetworkUnavailable, RetryBudget, is_retryable_
 REPOSITORY = "akhripunov/maxibot"
 DEPLOY_WORKFLOW = "maxibot-deploy.yml"
 EXPECTED_RUNNER = "maxibot-owner-mac"
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIN_FREE_BYTES = 5 * 1024**3
 NETWORK_BUDGET = RetryBudget()
 
@@ -52,7 +54,10 @@ def validate_runner_identity_and_scope(*, runner_name: str, runner_os: str, runn
         raise RunnerReadinessError("Required release command-line tools are unavailable")
     if not network_ready:
         raise RunnerReadinessError("Canonical deployment SSH network is unavailable")
-    if not candidate_sha or main_sha != candidate_sha:
+    if (not isinstance(candidate_sha, str) or not SHA_RE.fullmatch(candidate_sha)
+            or not isinstance(main_sha, str) or not SHA_RE.fullmatch(main_sha)):
+        raise RunnerReadinessError("GitHub main reference or candidate SHA is invalid")
+    if main_sha != candidate_sha:
         raise RunnerReadinessError("Candidate is no longer exact current main")
     if active_conflict:
         raise RunnerReadinessError("Conflicting MAXIBOT production mutation is active or queued")
@@ -155,6 +160,15 @@ def _request(path: str, token: str, *, opener=urllib.request.urlopen,
         raise RunnerReadinessError("GitHub API returned invalid JSON") from None
 
 
+def current_main_sha(reference: dict) -> str:
+    """Validate GitHub's ref response before comparing the exact candidate SHA."""
+    obj = reference.get("object") if isinstance(reference, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+        raise RunnerReadinessError("GitHub API returned invalid main reference")
+    return sha
+
+
 def has_conflicting_production_run(workflow_runs, current_run_id: str) -> bool:
     if not isinstance(workflow_runs, list) or any(not isinstance(run, dict) for run in workflow_runs):
         raise RunnerReadinessError("GitHub API returned invalid production workflow data")
@@ -210,7 +224,7 @@ def run() -> dict[str, str]:
     ssh_key = os.environ.get("PRODUCTION_SSH_KEY", os.environ.get(
         "MAXIBOT_PRODUCTION_SSH_KEY", "/Users/akhripuniov/.ssh/maxibot_selectel_ed25519"))
     network_ready = probe_deployment_ssh(host=production_host, key=ssh_key)
-    main = _request("git/ref/heads/main", token).get("object", {}).get("sha", "")
+    main = current_main_sha(_request("git/ref/heads/main", token))
     active = _request(f"actions/workflows/{DEPLOY_WORKFLOW}/runs?branch=main&per_page=100", token)
     this_run = os.environ.get("GITHUB_RUN_ID", "")
     conflict = has_conflicting_production_run(active.get("workflow_runs"), this_run)

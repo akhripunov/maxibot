@@ -254,6 +254,22 @@ def test_main_sha_returned_after_retry_is_still_checked_exactly():
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("reference", [
+    [], {}, {"object": []}, {"object": {"sha": "not-a-commit"}},
+])
+def test_malformed_current_main_reference_fails_with_safe_category(reference):
+    with pytest.raises(RunnerReadinessError, match="invalid main reference"):
+        readiness.current_main_sha(reference)
+
+
+def test_candidate_sha_with_invalid_shape_fails_closed():
+    with pytest.raises(RunnerReadinessError, match="main reference or candidate SHA is invalid"):
+        readiness.validate_runner_identity_and_scope(
+            runner_name="maxibot-owner-mac", runner_os="macOS", runner_arch="ARM64",
+            main_sha=SHA, candidate_sha="not-a-commit", active_conflict=False,
+            paths_ready=True, tools_ready=True, network_ready=True)
+
+
 def test_conflicting_deploy_found_after_retry_still_blocks_readiness():
     import json
     import urllib.error
