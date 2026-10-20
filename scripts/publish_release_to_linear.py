@@ -304,7 +304,8 @@ def read_document(document_id: str, expected_title: str, api_key: str) -> str:
     return content
 
 
-def write_document(document_id: str, expected_title: str, content: str, api_key: str) -> None:
+def write_document(document_id: str, expected_title: str, content: str, api_key: str,
+                   *, allow_trailing_newline_variation: bool = False) -> None:
     mutation = """
       mutation UpdateDocument($id: String!, $input: DocumentUpdateInput!) {
         documentUpdate(id: $id, input: $input) { success document { id title } }
@@ -321,7 +322,12 @@ def write_document(document_id: str, expected_title: str, content: str, api_key:
     # seconds after the mutation response. Retry only the read; never repeat
     # the document update, and remain fail-closed after this bounded window.
     for attempt in range(4):
-        if _content_matches(content, read_document(document_id, expected_title, api_key)):
+        returned = read_document(document_id, expected_title, api_key)
+        matches = _content_matches(content, returned)
+        if (not matches and allow_trailing_newline_variation
+                and _content_matches(content.rstrip("\n"), returned.rstrip("\n"))):
+            matches = True
+        if matches:
             return
         if attempt < 3:
             time.sleep(0.5)
@@ -444,7 +450,8 @@ def publish(env: dict[str, str], state: dict | None = None) -> None:
     updated_journal = append_journal_event(current_journal, event_marker, block)
     updated_journal = upsert_current_state(updated_journal, state_block)
     if updated_journal != current_journal:
-        write_document(JOURNAL_ID, JOURNAL_TITLE, updated_journal, api_key)
+        write_document(JOURNAL_ID, JOURNAL_TITLE, updated_journal, api_key,
+                       allow_trailing_newline_variation=True)
     print(f"MAXIBOT_LINEAR_PUBLICATION=PASS PHASE={phase} STATUS={status} SHA={sha}")
 
 
@@ -457,7 +464,8 @@ def sync_current_state(api_key: str) -> None:
     journal = read_document(JOURNAL_ID, JOURNAL_TITLE, api_key)
     updated = upsert_current_state(journal, block)
     if updated != journal:
-        write_document(JOURNAL_ID, JOURNAL_TITLE, updated, api_key)
+        write_document(JOURNAL_ID, JOURNAL_TITLE, updated, api_key,
+                       allow_trailing_newline_variation=True)
 
 
 def main() -> int:
