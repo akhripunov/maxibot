@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 import os
+import re
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
@@ -54,6 +55,8 @@ class FakeAPI:
         self.evidence_result = None
         self.refs = {}
         self.workflow_runs = []
+        self.jobs_by_attempt = {}
+        self.logs_by_job = {}
 
     def get(self, path):
         self.calls.append(("GET", path))
@@ -61,6 +64,10 @@ class FakeAPI:
             return {"object": {"sha": SHA}}
         if path == "actions/runs/123":
             return event()["workflow_run"]
+        job_match = re.fullmatch(r"actions/runs/([0-9]+)/attempts/([0-9]+)/jobs\?per_page=100", path)
+        if job_match:
+            jobs = self.jobs_by_attempt.get("/".join(job_match.groups()), [])
+            return {"total_count": len(jobs), "jobs": jobs}
         if path.startswith("releases/tags/"):
             tag = path.rsplit("/", 1)[1]
             return {"tag_name": tag, "draft": False, "immutable": True, "assets": [{
@@ -84,6 +91,18 @@ class FakeAPI:
         if "actions/workflows/maxibot-deploy.yml/runs" in path:
             return {"total_count": len(self.workflow_runs), "workflow_runs": self.workflow_runs}
         raise orchestrator.APIError(404)
+
+    def get_job_log_archive(self, job_id):
+        return self.logs_by_job[job_id]
+
+    def add_publisher(self, run_id, attempt, job_id, step_name, digest, conclusion="success"):
+        self.jobs_by_attempt[f"{run_id}/{attempt}"] = [{"id": int(job_id), "run_id": int(run_id),
+            "steps": [{"name": step_name, "conclusion": conclusion}]}]
+        prefix = ("MAXIBOT_GHCR_PREPARE_RECEIPT=PASS DIGEST=" if "Prepare" in step_name
+                  else "MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST=")
+        self.logs_by_job[str(job_id)] = (
+            "2026-10-20T17:19:54.2975796Z Run python3 scripts/publish.py\n"
+            f"2026-10-20T17:19:54.2975796Z {prefix}{digest}\n")
 
     def post(self, path, body):
         self.calls.append(("POST", path, body))
@@ -111,6 +130,8 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         env_patch = patch.dict(os.environ, {"GITHUB_ACTOR": "codex-test"})
         env_patch.start()
         self.addCleanup(env_patch.stop)
+        self.api.add_publisher("123", "2", "124", orchestrator.PREPARE_PUBLISH_STEP,
+                               "sha256:" + "e" * 64)
         def resolve(_repository, tag, _artifact_type, _layer_type, _fetch):
             import re
             match = re.fullmatch(r"prepare-([0-9a-f]{40})-([1-9][0-9]*)-([1-9][0-9]*)", tag)
@@ -176,13 +197,42 @@ class ReleaseOrchestratorTests(unittest.TestCase):
             self.dispatch()
         self.assertFalse(any(c[0] == "POST" for c in self.api.calls))
 
-    def test_duplicate_event_is_a_noop_and_does_not_dispatch_twice(self):
+    def test_duplicate_event_with_unreconciled_marker_blocks_without_redispatch(self):
         authorization_id = "maxibot-task-2026-10-16-001"
         with patch.object(orchestrator, "_find_task_authorization", return_value={
                 "authorization_id": authorization_id, "ambiguous": "false"}):
             self.dispatch()
-            duplicate = self.dispatch()
-        self.assertEqual(duplicate["state"], "TASK_SCOPED_AUTO_EVENT_ALREADY_CLAIMED")
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "reconciliation required"):
+                self.dispatch()
+        self.assertEqual(sum(c[0] == "POST" and c[1].endswith("/dispatches") for c in self.api.calls), 1)
+
+    def test_duplicate_event_is_noop_only_after_exact_immutable_evidence_reconciliation(self):
+        authorization_id = "maxibot-task-2026-10-16-001"
+        with patch.object(orchestrator, "_find_task_authorization", return_value={
+                "authorization_id": authorization_id, "ambiguous": "false"}):
+            first = self.dispatch()
+            self.assertEqual(first["state"], "TASK_SCOPED_AUTO_DISPATCHED")
+            self.api.workflow_runs = [{"id": 789, "run_attempt": 1, "head_sha": SHA,
+                "path": ".github/workflows/maxibot-deploy.yml", "event": "workflow_dispatch",
+                "status": "completed", "conclusion": "failure"}]
+            self.api.add_publisher("789", "1", "790", orchestrator.EVIDENCE_PUBLISH_STEP,
+                                   "sha256:" + "e" * 64)
+            exact = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": SHA,
+                "github_run_id": "789", "github_run_attempt": "1", "prepare_run_id": "123",
+                "prepare_run_attempt": "2", "task_authorization_id": authorization_id,
+                "mode": "task-scoped-auto", "status": "FAILED_PRE_SWITCH",
+                "release_state": "FAILED_PRE_SWITCH", "production_changed": False,
+                "authorization_consumed": False, "production_baseline_sha": "d" * 40}
+            original = orchestrator.resolve_oci_artifact
+
+            def resolve(repository, tag, artifact_type, layer_type, fetch):
+                if tag.startswith("evidence-"):
+                    return "sha256:" + "e" * 64, json.dumps(exact).encode()
+                return original(repository, tag, artifact_type, layer_type, fetch)
+
+            with patch.object(orchestrator, "resolve_oci_artifact", side_effect=resolve):
+                duplicate = self.dispatch()
+        self.assertEqual(duplicate["state"], "TASK_SCOPED_AUTO_EVENT_ALREADY_DISPATCHED")
         self.assertEqual(sum(c[0] == "POST" and c[1].endswith("/dispatches") for c in self.api.calls), 1)
 
     def test_github_get_retries_transient_transport_failure_with_bounded_read_retry(self):
@@ -240,9 +290,15 @@ class ReleaseOrchestratorTests(unittest.TestCase):
                     "production_baseline_sha": "d" * 40}
         with patch.object(orchestrator, "resolve_oci_artifact",
                           return_value=("sha256:" + "e" * 64, json.dumps(evidence).encode())):
+            self.api.add_publisher("991", "1", "992", orchestrator.EVIDENCE_PUBLISH_STEP,
+                                   "sha256:" + "e" * 64)
             orchestrator._prove_safe_prior_dispatch(self.api, marker, runs, "auth-id", "d" * 40)
             with self.assertRaisesRegex(orchestrator.OrchestrationError, "not proven safe"):
                 orchestrator._prove_safe_prior_dispatch(self.api, marker, runs, "auth-id", "f" * 40)
+            self.api.add_publisher("991", "1", "992", orchestrator.EVIDENCE_PUBLISH_STEP,
+                                   "sha256:" + "f" * 64)
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "unknown"):
+                orchestrator._prove_safe_prior_dispatch(self.api, marker, runs, "auth-id", "d" * 40)
         with self.assertRaisesRegex(orchestrator.OrchestrationError, "unknown"):
             orchestrator._prove_safe_prior_dispatch(self.api, marker, [], "auth-id", "d" * 40)
 
@@ -256,6 +312,8 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         self.api.workflow_runs = [{"id": 789, "run_attempt": 1, "head_sha": prior_sha,
             "path": ".github/workflows/maxibot-deploy.yml", "event": "workflow_dispatch",
             "status": "completed", "conclusion": "failure"}]
+        self.api.add_publisher("789", "1", "790", orchestrator.EVIDENCE_PUBLISH_STEP,
+                               "sha256:" + "e" * 64)
         failure_result = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": prior_sha,
             "github_run_id": "789", "github_run_attempt": "1", "prepare_run_id": "456",
             "prepare_run_attempt": "1", "task_authorization_id": authorization_id,
@@ -291,6 +349,47 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         with patch.object(orchestrator, "resolve_oci_artifact", side_effect=orchestrator.ArtifactError("invalid")):
             with self.assertRaisesRegex(orchestrator.OrchestrationError, "OCI receipt provenance"):
                 self.dispatch()
+
+    def test_prepare_receipt_tag_must_match_successful_publisher_log_digest(self):
+        with patch.object(orchestrator, "_find_task_authorization", return_value={
+                "authorization_id": "", "ambiguous": "false"}), \
+                patch.object(orchestrator, "resolve_oci_artifact", return_value=(
+                    "sha256:" + "f" * 64, json.dumps({}).encode())):
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "digest does not match"):
+                self.dispatch()
+
+    def test_prepare_receipt_requires_successful_exact_publisher_step(self):
+        self.api.add_publisher("123", "2", "124", orchestrator.PREPARE_PUBLISH_STEP,
+                               "sha256:" + "e" * 64, conclusion="failure")
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "Publisher step"):
+            self.dispatch()
+
+    def test_publisher_digest_parser_handles_real_timestamped_log_and_rejects_ambiguous_markers(self):
+        self.api.add_publisher("991", "1", "992", orchestrator.EVIDENCE_PUBLISH_STEP,
+                               "sha256:" + "e" * 64)
+        # A command echo is not an output marker; the timestamped stdout line is.
+        self.api.logs_by_job["992"] = (
+            "Run echo MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST=sha256:" + "f" * 64 + "\n"
+            "2026-10-20T17:19:54.2975796Z MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST=sha256:" + "e" * 64 + "\n")
+        self.assertEqual(orchestrator.publisher_logged_digest(
+            self.api, "991", "1", orchestrator.EVIDENCE_PUBLISH_STEP,
+            "MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST="), "sha256:" + "e" * 64)
+        self.api.logs_by_job["992"] += "MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST=sha256:" + "e" * 64 + "\n"
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "missing or ambiguous"):
+            orchestrator.publisher_logged_digest(self.api, "991", "1",
+                orchestrator.EVIDENCE_PUBLISH_STEP, "MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST=")
+
+    def test_log_redirect_strips_github_token_and_rejects_untrusted_host(self):
+        handler = orchestrator._NoAuthGitHubLogRedirect()
+        request = __import__("urllib.request").request.Request(
+            "https://api.github.com/repos/akhripunov/maxibot/actions/jobs/1/logs",
+            headers={"Authorization": "Bearer secret-token"})
+        redirected = handler.redirect_request(request, None, 302, "Found", {},
+            "https://release-logs.blob.core.windows.net/signed/logs")
+        self.assertIsNotNone(redirected)
+        self.assertIsNone(redirected.get_header("Authorization"))
+        self.assertIsNone(handler.redirect_request(request, None, 302, "Found", {},
+            "https://attacker.example/logs"))
 
     def test_only_single_alembic_head_is_accepted(self):
         versions = self.root / "alembic" / "versions"

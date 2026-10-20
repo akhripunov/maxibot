@@ -61,6 +61,22 @@ def github_get(path: str, token: str, opener=urllib.request.urlopen, *,
         raise ValidationError(f"GitHub provenance request failed (HTTP {exc.code})") from None
 
 
+def read_prepare_publisher_digest(run_id: str, attempt: str, token: str, api_get) -> str:
+    """Bind registry identity to the successful publisher of this exact attempt."""
+    from release_orchestrator import GitHubAPI, OrchestrationError, APIError, publisher_logged_digest
+    class PublisherAPI:
+        def get(self, path):
+            return api_get(path, token)
+        def get_job_log_archive(self, job_id):
+            return GitHubAPI(token).get_job_log_archive(job_id)
+    try:
+        return publisher_logged_digest(PublisherAPI(), run_id, attempt,
+            "Publish immutable Prepare receipt to GHCR and verify digest readback",
+            "MAXIBOT_GHCR_PREPARE_RECEIPT=PASS DIGEST=")
+    except (OrchestrationError, APIError, OSError, ValueError) as error:
+        raise ArtifactError("Exact Prepare publisher digest proof is unavailable") from error
+
+
 def validate(values: dict[str, str], api_get=github_get,
              evidence_reader=None) -> dict[str, str]:
     sha = values.get("CANDIDATE_SHA", "")
@@ -178,6 +194,8 @@ def validate(values: dict[str, str], api_get=github_get,
             _registry_fetch(PREPARE_REPOSITORY, username, token, budget=NETWORK_BUDGET))
         receipt = json.loads(receipt_bytes.decode("utf-8"))
         validate_prepare_receipt(receipt, sha, latest_run_id, attempt)
+        if receipt_digest != read_prepare_publisher_digest(latest_run_id, str(attempt), token, api_get):
+            raise ArtifactError("Prepare OCI receipt differs from the exact successful publisher digest")
         if expected_prepare_receipt_digest and receipt_digest != expected_prepare_receipt_digest:
             raise ArtifactError("Selected Prepare receipt digest changed after controller selection")
     except (ArtifactError, UnicodeDecodeError, json.JSONDecodeError) as exc:

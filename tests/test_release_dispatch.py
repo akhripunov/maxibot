@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from validate_release_dispatch import ValidationError, github_get, validate  # noqa: E402
 import validate_release_dispatch as dispatch_module  # noqa: E402
+READ_PREPARE_PUBLISHER_DIGEST = dispatch_module.read_prepare_publisher_digest
 from publish_release_to_linear import SyncError, append_journal_event, upsert_block, write_document  # noqa: E402
 import publish_release_to_linear  # noqa: E402
 import run_release_workflow  # noqa: E402
@@ -113,6 +114,7 @@ def verified_oci_receipt(monkeypatch):
         }
         return "sha256:" + "e" * 64, json.dumps(receipt).encode()
     monkeypatch.setattr(dispatch_module, "resolve_oci_artifact", resolve)
+    monkeypatch.setattr(dispatch_module, "read_prepare_publisher_digest", lambda *_: "sha256:" + "e" * 64)
     monkeypatch.setattr(run_release_workflow, "create_github_deployment", lambda *_args, **_kwargs: 987)
     monkeypatch.setattr(run_release_workflow, "update_github_deployment", lambda *_args, **_kwargs: None)
     monkeypatch.setenv("GITHUB_ACTOR", "codex-test")
@@ -1089,3 +1091,31 @@ def test_bootstrap_dispatch_still_requires_exact_main_prepare_and_production_app
         validate(values(APPROVE_WORKER_BOOTSTRAP='true'),FakeGitHub(main_sha='b'*40))
     with pytest.raises(ValidationError,match='owner approval'):
         validate(values(APPROVE_WORKER_BOOTSTRAP='true',RELEASE_MODE='production'),FakeGitHub())
+
+
+def test_prepare_receipt_must_match_exact_publisher_logged_digest(monkeypatch):
+    monkeypatch.setattr(dispatch_module, 'read_prepare_publisher_digest', lambda *_: 'sha256:' + 'f' * 64)
+    with pytest.raises(ValidationError, match='publisher'):
+        validate(values(RELEASE_MODE='production', APPROVE_PRODUCTION='true'), FakeGitHub())
+
+
+def test_missing_prepare_publisher_proof_blocks_production(monkeypatch):
+    def unavailable(*_):
+        raise dispatch_module.ArtifactError('Prepare publisher proof unavailable')
+    monkeypatch.setattr(dispatch_module, 'read_prepare_publisher_digest', unavailable)
+    with pytest.raises(ValidationError, match='publisher'):
+        validate(values(RELEASE_MODE='production', APPROVE_PRODUCTION='true'), FakeGitHub())
+
+
+def test_prepare_publisher_adapter_checks_exact_attempt_and_timestamped_real_log_format(monkeypatch):
+    from release_orchestrator import GitHubAPI
+    expected = "sha256:" + "e" * 64
+    paths = []
+    def lookup(path, token):
+        paths.append(path)
+        assert token == "isolated-test-token"
+        return {"total_count": 1, "jobs": [{"id": 456, "run_id": 123,
+            "steps": [{"name": "Publish immutable Prepare receipt to GHCR and verify digest readback", "conclusion": "success"}]}]}
+    monkeypatch.setattr(GitHubAPI, "get_job_log_archive", lambda self, job: "2026-10-20T17:19:54.2975796Z MAXIBOT_GHCR_PREPARE_RECEIPT=PASS DIGEST=" + expected + "\n")
+    assert READ_PREPARE_PUBLISHER_DIGEST("123", "2", "isolated-test-token", lookup) == expected
+    assert paths == ["actions/runs/123/attempts/2/jobs?per_page=100"]
