@@ -119,6 +119,16 @@ def verified_oci_receipt(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
 
+def _direct_owner_record(value):
+    from release_authorization import owner_task_commitment_sha256
+    value.update(environment="production", source_instruction_identifier="OWNER_TASK_MAXIBOT_TEST_RELEASE_20261020",
+        owner_task_reference="Direct OWNER full-cycle release instruction for this bounded test task.",
+        candidate_selection_rule="EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+        allowed_operations=["integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"])
+    value["owner_task_commitment_sha256"] = owner_task_commitment_sha256(value)
+    return value
+
+
 def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
     github = FakeGitHub()
     selected = validate(values(), github)
@@ -674,7 +684,7 @@ def test_dispatch_requires_exact_operator_confirmation_for_production():
 
 def test_task_scoped_auto_requires_durable_record_but_runs_preflight_inside_deploy(monkeypatch, tmp_path):
     record_path = tmp_path / "task-auth.json"
-    record_path.write_text(json.dumps({
+    record_path.write_text(json.dumps(_direct_owner_record({
         "schema_version": 3, "project": "maxibot", "authorization_mode": "TASK_SCOPED_AUTO",
         "authorization_id": "maxibot-task-2026-10-06-001",
         "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
@@ -683,7 +693,7 @@ def test_task_scoped_auto_requires_durable_record_but_runs_preflight_inside_depl
         "allowed_paths": ["app/bot/menu.py"], "acceptance_criteria": ["menu opens the configured website"],
         "exclusions": ["database", "migrations", "security", "secrets", "payments", "ads", "paid_traffic", "release_infrastructure"],
         "state": "ACTIVE", "revoked": False, "consumed": False,
-    }))
+    })))
     monkeypatch.setattr("validate_release_dispatch.record_path", lambda _authorization_id: str(record_path))
     monkeypatch.setattr("validate_release_dispatch.candidate_scope_diff", lambda *_args: ["app/bot/menu.py"])
     github = FakeGitHub()
@@ -706,7 +716,7 @@ def test_task_scoped_auto_requires_durable_record_but_runs_preflight_inside_depl
 
 def test_manual_diagnostic_preflight_with_linked_authorization_does_not_require_a_claim(monkeypatch, tmp_path):
     record_path = tmp_path / "task-auth.json"
-    record_path.write_text(json.dumps({
+    record_path.write_text(json.dumps(_direct_owner_record({
         "schema_version": 3, "project": "maxibot", "authorization_mode": "TASK_SCOPED_AUTO",
         "authorization_id": "maxibot-task-2026-10-06-001",
         "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
@@ -716,7 +726,7 @@ def test_manual_diagnostic_preflight_with_linked_authorization_does_not_require_
         "exclusions": ["database", "migrations", "security", "secrets", "payments",
                        "ads", "paid_traffic", "release_infrastructure"],
         "state": "ACTIVE", "revoked": False, "consumed": False,
-    }))
+    })))
     monkeypatch.setattr("validate_release_dispatch.record_path", lambda _authorization_id: str(record_path))
     monkeypatch.setattr("validate_release_dispatch.candidate_scope_diff", lambda *_args: ["app/bot/menu.py"])
     github = FakeGitHub()

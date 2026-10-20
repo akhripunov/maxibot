@@ -11,7 +11,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: maxibot-auto-release-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  group: maxibot-auto-release
   cancel-in-progress: false
 
 jobs:
@@ -22,12 +22,17 @@ jobs:
       github.event.workflow_run.head_sha == github.sha &&
       github.event.workflow_run.path == '.github/workflows/maxibot-prepare.yml'
     runs-on: [self-hosted, macOS, maxibot-production]
-    timeout-minutes: 3
+    timeout-minutes: 5
     permissions:
       contents: write
       actions: write
       packages: read
     steps:
+      - name: Initialize shared bounded controller network-read budget
+        shell: bash
+        run: |
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-auto-release-network-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '0\n' > "$RUNNER_TEMP/maxibot-auto-release-network-budget-$GITHUB_RUN_ID"
       - name: Checkout trusted current main controller code
         uses: actions/checkout@v4
         with:

@@ -20,7 +20,7 @@ from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_T
     resolve_oci_artifact, validate_prepare_receipt)
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
-                                   validate_task_authorization)
+                                   validate_task_authorization, validate_claim_candidate)
 
 REPO = "akhripunov/maxibot"
 WORKFLOW = "maxibot-prepare.yml"
@@ -146,8 +146,8 @@ def validate(values: dict[str, str], api_get=github_get,
             if mode == "preflight":
                 if claim is not None:
                     raise ValidationError("Task authorization already has a production claim")
-            elif claim is None or claim.get("object", {}).get("sha") != sha:
-                raise ValidationError("Task authorization has no exact-candidate atomic Deploy claim")
+            else:
+                validate_claim_candidate(Path.cwd(), task_authorization_id, record, claim, sha)
         except (OSError, ValueError, AuthorizationError) as error:
             raise ValidationError(f"TASK_SCOPED_AUTO authorization is invalid: {error}") from None
 

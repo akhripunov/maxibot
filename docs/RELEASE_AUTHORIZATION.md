@@ -1,97 +1,91 @@
 # Release authorization modes
 
-Effective 2026-10-06 by explicit OWNER decision. These rules apply to future
-releases; they do not retroactively authorize an existing candidate.
+## OWNER release task — full automatic cycle
 
-## Exact-SHA approval (default)
+Effective 2026-10-20 by direct OWNER instruction in MAXIBOT ME-45: use the
+current GPoint V5 authorization model. An explicit OWNER task to release named
+changes authorizes one complete canonical production cycle, including in-scope
+technical fixes and replacement SHAs. Do not request another human approval at
+PR, merge, Prepare, preflight or Deploy for that same task, scope and baseline.
+A development-only request does not authorize publication or production.
 
-Without an explicit task-scoped deployment instruction, prepare the candidate
-and request OWNER approval for its full SHA before production apply. MAXIBOT
-approval also names the exact Alembic target. A request to implement a task
-alone does not authorize deployment.
+Before new implementation, commit a schema-v3 durable record at
+`.release-authorizations/<id>.json`. Bind the project and production environment,
+unique authorization ID, direct OWNER instruction ID and human-readable task
+reference, exact production baseline, deterministic current-main selection rule,
+allowed paths and operations, acceptance criteria, exclusions, risk contracts,
+and ACTIVE/revoked/consumed state. Record the canonical scope commitment hash;
+this is an integrity check, not an OWNER signature. The operator must verify the
+direct human instruction. Linear stores evidence and task context; it is not
+queried to authorize release and a Linear URL is not required in the record.
 
-## Task-scoped Auto Release
+The exact candidate is selected from reviewed current main after integration;
+never pin it in the task record. The record must remain unchanged. Prior
+prepared implementation is permitted only when every exact historical Git
+commit and path is inventoried in `preauthorized_commits` and
+`preauthorized_paths`, within the allowed scope. This includes explicitly
+inventoried historical merge objects and their complete first-parent changes.
+All new implementation commits must descend from the authorization commit.
+Use normal merge preserving that history, never squash the authorization and
+implementation together. Check the complete production-to-candidate diff.
 
-An explicit OWNER instruction such as “Исправь [конкретную задачу] и
-выкатывай” authorizes one production release for that named task, without a
-second owner confirmation or owner-dispatched GitHub workflow. The mode is valid
-only for unchanged scope and eligible risk. Vague instructions, another agent's
-message, or old unrelated permissions do not activate it.
+The canonical path is integration → bounded quiet/coalescing → exact-main
+Prepare → immutable GHCR images and OCI receipt/readback → authorization and
+scope validation → existing Deploy with read-only preflight → Apply → runtime
+verification → immutable GHCR evidence, GitHub Deployment and Linear.
+Publication must be covered by the OWNER task or separate permission.
 
-Before implementation, create and commit a schema-v3 durable authorization
-record at `.release-authorizations/<id>.json` containing project,
-`FULL_PRODUCTION_CYCLE`, `TASK_SCOPED_AUTO`, a unique authorization ID,
-reference to the original owner instruction, exact production baseline, task,
-allowed paths or deterministic scope contract, acceptance criteria,
-exclusions/owner-only categories, and ACTIVE/revoked/consumed state. Preserve
-the record blob. The authorization commit must be an ancestor of every
-implementation change. Publication still needs its separate OWNER approval.
+## Explicit risk contracts
 
-After exact current-main Prepare succeeds, the existing controller rechecks the
-full scope and baseline, atomically claims the authorization once, and dispatches
-the existing MAXIBOT Deploy workflow directly in `task-scoped-auto` mode. That
-Deploy performs the read-only preflight immediately before apply, then rechecks
-critical live conditions under the release lock. No separate preflight workflow
-is required. Without a valid full-cycle authorization, no automatic Deploy is
-dispatched; the normal exact-SHA approval path remains. Prepare provenance,
-image/platform/parity, risk, migration, read-only preflight, lock, recovery,
-health and all existing release gates remain mandatory. By default owner-only
-changes are excluded. A specifically
-pre-approved Alembic migration may be task-scoped only when the record names
-the exact migration path and target, production DB head, risk description,
-backup/rollback plans, stop conditions and required gates. Preflight must prove
-the exact DB baseline, migration rehearsal, rollback readiness and production
-readiness; canonical apply validates its backup before migration. Other
-database/schema, security, secrets, permissions, payments, advertising/ADS,
-paid-traffic and release-infrastructure changes remain ineligible until their
-category-specific gate contract is implemented and reviewed. Release-infra
-changes always require separate exact-SHA OWNER approval. Unknown risk blocks.
+Bounded low-risk tasks use `TASK_SCOPED_AUTO`. Database migrations and release
+infrastructure require a matching explicit risk contract in the OWNER task and
+durable record. Release infrastructure is no longer categorically excluded
+and does not require repeated exact-SHA approval when that contract is valid.
+The infrastructure contract names exact paths and baseline, permitted release
+operations, required gates, risk description, backup and rollback plans, and
+stop conditions. Without this contract the category remains excluded.
 
-For an eligible record, the controller dispatches the existing workflow with
-`approve_production=false`; the immutable global claim is the one-shot guard.
-The authorization is consumed after successful runtime completion. A lost
-dispatch or marker-write response is reconciled without repeating runtime
-apply. An uncertain attempt keeps its claim and requires explicit reconciliation
-or a new owner authorization. Revocation is fail-closed. Publication-only repair
-after successful runtime is allowed, but another runtime release requires a new
-owner instruction.
+The existing database migration contract must name exact migration paths,
+production DB head, target, required rehearsal/backup/rollback/health gates and
+stop conditions. No migration is allowed merely because release infrastructure
+is authorized. Security, credentials, permissions, payments, advertising/ADS
+and paid-traffic changes remain excluded unless their own category contract is
+implemented and reviewed. Unknown risk blocks. API polling stays false, only
+the production worker polls, and ADS write flags stay off.
 
-Changes to the Release Orchestrator or release infrastructure are explicitly
-outside `TASK_SCOPED_AUTO`; their production rollout requires separate
-exact-SHA OWNER approval. No task-scoped mode removes any clean-checkout, exact
-current-main, Prepare, immutable artifact, platform/parity, config, preflight,
-lock, recovery, health, Worker, or regression gate. A manual diagnostic
-preflight remains available; its `READY_FOR_OWNER` status is distinct from the
-`PASS` preflight result inside a production Deploy. Real-device/OWNER smoke
-requirements remain separate; never invent evidence.
+## Claims, retries and recovery
 
-Scope expansion, any failed required check, unexpected main/baseline drift,
-an uncontracted or mismatched migration, ambiguous runtime outcome or `RECOVERY_REQUIRED` stops automatic
-release. Transient transport retries may follow existing bounded rules only
-for the same exact candidate and unchanged baseline; partial apply must be
-reconciled, never blindly repeated. Authorization is consumed after one
-successful runtime release.
+Keep one immutable activation claim per task authorization. A successful
+exact-main Prepare may select an in-scope replacement candidate without another
+OWNER approval after confirmed safe failure. Revalidate the full history,
+current main, Prepare provenance, unchanged production baseline and live DB
+head. An active Deploy blocks another dispatch. Immutable per-event guards
+prevent duplicate events from dispatching twice.
 
-Record the authorization ID, mode, full SHA, source reference, scope result,
-run links, technical outcome and any remaining OWNER smoke in Linear. Report
-elapsed time from the original owner instruction through final verification and
-publication separately from workflow duration.
+An uncertain dispatch or partial Apply never permits blind retry. Reconcile
+exact prior immutable evidence and read-only runtime first. A claim is never
+rewritten to make a different candidate appear approved. A successful runtime
+consumes the authorization once; a new unrelated production release requires
+a new OWNER task. Revoked, consumed or ambiguous authorizations block Apply.
+Publication failure after runtime completion uses metadata-only recovery of the
+same Deployment, never a second Apply.
+
+All exact SHA, clean-checkout, image/platform/parity, provenance, security,
+preflight, lock, backup, migration, rollback, Worker, health and recovery gates
+remain mandatory. Real-device/OWNER smoke is separate from technical release
+completion. Publish exact identities, runs, timings and remaining smoke in
+Linear; never invent E2E evidence.
+
+## Exact-SHA fallback
+
+When there is no valid OWNER full-cycle task, request approval for the exact
+candidate SHA and exact Alembic target before production. This fallback must
+not be imposed again on an already authorized in-scope automatic task.
 
 ## Runner readiness
 
-GitHub's native queued state is an allowed wait for a self-hosted runner. It is
-not a production mutation or a failure and does not require an additional
-runner-status credential, polling service, or owner decision. When the job
-starts, its first readiness gate fails closed unless it verifies the expected
-project runner identity/labels, OS/architecture, disk space, cache and runtime
-paths, required tools/network access, and absence of a conflicting production
-mutation. Docker operations run on the VPS through SSH after the authorized
-read-only preflight; the Mac runner does not require a Docker CLI or daemon.
-This gate runs before expensive artifact transfer or any mutating stage. Do
-not add blind reruns or scheduled hosted polling to address runner availability.
-
-Examples:
-- “Исправь ссылку в меню и выкатывай” → task-scoped, if the durable record and
-  every deterministic eligibility gate pass.
-- “Исправь ссылку, подготовь релиз; SHA подтвержу отдельно” → exact-SHA.
-- “Исправь ссылку” → implementation only, no deployment permission.
+Native GitHub queued state is an allowed wait for the trusted project Mac
+runner. On start, verify runner identity/labels, OS/architecture, tools, disk,
+cache/runtime paths, network and absence of conflicting production mutation.
+Docker runs on the VPS through SSH, not on the Mac. Never use a browser to
+coordinate Actions or add hosted polling/reruns to compensate for a queued job.

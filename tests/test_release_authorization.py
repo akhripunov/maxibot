@@ -35,7 +35,13 @@ def record(**overrides):
         "revoked": False,
         "consumed": False,
     }
+    value.update(environment="production", source_instruction_identifier="OWNER_TASK_MAXIBOT_TEST_RELEASE_20261020",
+        owner_task_reference="Direct OWNER full-cycle release instruction for this bounded test task.",
+        candidate_selection_rule="EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+        allowed_operations=["integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"])
     value.update(overrides)
+    from release_authorization import owner_task_commitment_sha256
+    value["owner_task_commitment_sha256"] = owner_task_commitment_sha256(value)
     return value
 
 
@@ -86,7 +92,7 @@ def test_task_authorization_rejects_candidate_or_production_baseline_drift():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("source_reference", ""), ("acceptance_criteria", []), ("allowed_paths", []),
+    ("owner_task_reference", ""), ("acceptance_criteria", []), ("allowed_paths", []),
     ("exclusions", ["database"]), ("state", "REVOKED"), ("revoked", True),
     ("consumed", True),
 ])

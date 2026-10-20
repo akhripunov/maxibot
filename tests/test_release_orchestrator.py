@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 import os
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,8 +12,28 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import release_orchestrator as orchestrator
 import run_release_workflow
 from validate_release_dispatch import ValidationError
+from release_authorization import owner_task_commitment_sha256
 
 SHA = "a" * 40
+
+def task_record(authorization_id):
+    record = {
+        "schema_version": 3, "project": "maxibot", "environment": "production",
+        "authorization_mode": "TASK_SCOPED_AUTO", "authorization_id": authorization_id,
+        "source_instruction_identifier": "OWNER_TASK_MAXIBOT_ME45_CONTROLLER",
+        "owner_task_reference": "Direct OWNER authorization for this bounded MAXIBOT release task.",
+        "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+        "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+        "production_baseline_sha": "d" * 40, "task": "Bounded release controller task",
+        "allowed_paths": ["scripts/release_orchestrator.py"],
+        "allowed_operations": ["integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"],
+        "preauthorized_commits": [], "preauthorized_paths": [],
+        "acceptance_criteria": ["All release gates pass."],
+        "exclusions": ["database", "migrations", "security", "secrets", "payments", "ads", "paid_traffic"],
+        "risk_contracts": {}, "state": "ACTIVE", "revoked": False, "consumed": False,
+    }
+    record["owner_task_commitment_sha256"] = owner_task_commitment_sha256(record)
+    return record
 
 
 def event(**overrides):
@@ -31,6 +52,8 @@ class FakeAPI:
         self.claimed_sha = SHA
         self.release_patch = {}
         self.evidence_result = None
+        self.refs = {}
+        self.workflow_runs = []
 
     def get(self, path):
         self.calls.append(("GET", path))
@@ -46,21 +69,33 @@ class FakeAPI:
             }], **self.release_patch}
         if path.endswith("/claimed") and "task-auth/" in path and self.claimed:
             return {"object": {"type": "commit", "sha": self.claimed_sha}}
+        if path.startswith("git/matching-refs/tags/"):
+            prefix = "refs/tags/" + path.removeprefix("git/matching-refs/tags/")
+            return [{"ref": ref, "object": {"type": "commit", "sha": sha}}
+                    for ref, sha in self.refs.items() if ref.startswith(prefix)]
+        if path.startswith("git/ref/tags/"):
+            ref = "refs/tags/" + path.removeprefix("git/ref/tags/")
+            if ref in self.refs:
+                return {"object": {"type": "commit", "sha": self.refs[ref]}}
         if path.startswith("git/ref/tags/"):
             return {"object": {"type": "commit", "sha": SHA}}
         if path.startswith("git/ref/tags/maxibot-orchestrator/") and self.claimed:
             return {"object": {"type": "commit", "sha": SHA}}
         if "actions/workflows/maxibot-deploy.yml/runs" in path:
-            return {"workflow_runs": []}
+            return {"total_count": len(self.workflow_runs), "workflow_runs": self.workflow_runs}
         raise orchestrator.APIError(404)
 
     def post(self, path, body):
         self.calls.append(("POST", path, body))
         if path == "git/refs":
-            if self.claimed:
+            if body["ref"].endswith("/claimed") and self.claimed:
                 raise orchestrator.APIError(422)
-            self.claimed = True
-            self.claimed_sha = body["sha"]
+            if body["ref"] in self.refs:
+                raise orchestrator.APIError(422)
+            self.refs[body["ref"]] = body["sha"]
+            if body["ref"].endswith("/claimed"):
+                self.claimed = True
+                self.claimed_sha = body["sha"]
             return {"ref": body["ref"]}
         if path.endswith("/dispatches"):
             return {}
@@ -96,6 +131,10 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def dispatch(self, payload=None):
+        authorization_id = "maxibot-task-2026-10-16-001"
+        record_dir = self.root / ".release-authorizations"
+        record_dir.mkdir(exist_ok=True)
+        (record_dir / f"{authorization_id}.json").write_text(json.dumps(task_record(authorization_id)))
         return orchestrator.dispatch_prepare(payload or event(), self.api, repo_root=self.root,
                                              migration="0098_test", orchestrator_run_id="987")
 
@@ -143,7 +182,99 @@ class ReleaseOrchestratorTests(unittest.TestCase):
                 "authorization_id": authorization_id, "ambiguous": "false"}):
             self.dispatch()
             duplicate = self.dispatch()
-        self.assertEqual(duplicate["state"], "TASK_SCOPED_AUTO_ALREADY_CLAIMED")
+        self.assertEqual(duplicate["state"], "TASK_SCOPED_AUTO_EVENT_ALREADY_CLAIMED")
+        self.assertEqual(sum(c[0] == "POST" and c[1].endswith("/dispatches") for c in self.api.calls), 1)
+
+    def test_github_get_retries_transient_transport_failure_with_bounded_read_retry(self):
+        calls = []
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return b'{"object":{"sha":"' + SHA.encode() + b'"}}'
+
+        def opener(request, timeout):
+            calls.append((request.method, timeout))
+            if len(calls) == 1:
+                raise urllib.error.URLError(TimeoutError("temporary"))
+            return Response()
+
+        api = orchestrator.GitHubAPI("test-token", opener=opener)
+        with patch.object(orchestrator, "NETWORK_BUDGET",
+                          orchestrator.RetryBudget(seconds=10)), \
+                patch.object(orchestrator.time, "sleep", lambda _seconds: None), \
+                patch.object(orchestrator, "retry_jitter", lambda _low, _high: 0):
+            result = api.get("git/ref/heads/main")
+        self.assertEqual(result["object"]["sha"], SHA)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(method == "GET" for method, _ in calls))
+
+    def test_github_post_is_never_retried_after_transport_error(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request.method)
+            raise urllib.error.URLError(TimeoutError("temporary"))
+
+        api = orchestrator.GitHubAPI("test-token", opener=opener)
+        with self.assertRaises(orchestrator.OrchestrationError):
+            api.post("actions/workflows/maxibot-deploy.yml/dispatches", {"ref": "main"})
+        self.assertEqual(calls, ["POST"])
+
+    def test_controller_reports_invalid_event_without_name_error_in_exception_handler(self):
+        with patch.dict(os.environ, {"GITHUB_EVENT_PATH": "/no/such/event.json"}), \
+                patch("sys.stderr"):
+            self.assertEqual(orchestrator.main(), 1)
+
+    def test_prior_dispatch_requires_exact_failed_pre_switch_evidence_and_baseline(self):
+        marker = {"ref": "maxibot-task-auth/auth-id/dispatches/prepare-123-2", "sha": SHA}
+        runs = [{"id": 991, "run_attempt": 1, "head_sha": SHA,
+                 "path": ".github/workflows/maxibot-deploy.yml", "event": "workflow_dispatch",
+                 "status": "completed", "conclusion": "failure"}]
+        evidence = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": SHA,
+                    "github_run_id": "991", "github_run_attempt": "1",
+                    "prepare_run_id": "123", "prepare_run_attempt": "2",
+                    "task_authorization_id": "auth-id", "mode": "task-scoped-auto",
+                    "status": "FAILED_PRE_SWITCH", "release_state": "FAILED_PRE_SWITCH",
+                    "production_changed": False, "authorization_consumed": False,
+                    "production_baseline_sha": "d" * 40}
+        with patch.object(orchestrator, "resolve_oci_artifact",
+                          return_value=("sha256:" + "e" * 64, json.dumps(evidence).encode())):
+            orchestrator._prove_safe_prior_dispatch(self.api, marker, runs, "auth-id", "d" * 40)
+            with self.assertRaisesRegex(orchestrator.OrchestrationError, "not proven safe"):
+                orchestrator._prove_safe_prior_dispatch(self.api, marker, runs, "auth-id", "f" * 40)
+        with self.assertRaisesRegex(orchestrator.OrchestrationError, "unknown"):
+            orchestrator._prove_safe_prior_dispatch(self.api, marker, [], "auth-id", "d" * 40)
+
+    def test_replacement_candidate_dispatches_only_after_proven_safe_prior_failure(self):
+        authorization_id = "maxibot-task-2026-10-16-001"
+        prior_sha = "c" * 40
+        prior_marker = orchestrator._task_dispatch_ref(authorization_id, "456", "1")
+        self.api.claimed = True
+        self.api.claimed_sha = prior_sha
+        self.api.refs[prior_marker] = prior_sha
+        self.api.workflow_runs = [{"id": 789, "run_attempt": 1, "head_sha": prior_sha,
+            "path": ".github/workflows/maxibot-deploy.yml", "event": "workflow_dispatch",
+            "status": "completed", "conclusion": "failure"}]
+        failure_result = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": prior_sha,
+            "github_run_id": "789", "github_run_attempt": "1", "prepare_run_id": "456",
+            "prepare_run_attempt": "1", "task_authorization_id": authorization_id,
+            "mode": "task-scoped-auto", "status": "FAILED_PRE_SWITCH",
+            "release_state": "FAILED_PRE_SWITCH", "production_changed": False,
+            "authorization_consumed": False, "production_baseline_sha": "d" * 40}
+        original_resolve = orchestrator.resolve_oci_artifact
+
+        def resolve(repository, tag, artifact_type, layer_type, fetch):
+            if tag.startswith("evidence-"):
+                return "sha256:" + "e" * 64, json.dumps(failure_result).encode()
+            return original_resolve(repository, tag, artifact_type, layer_type, fetch)
+
+        with patch.object(orchestrator, "_find_task_authorization", return_value={
+                "authorization_id": authorization_id, "ambiguous": "false"}), \
+                patch.object(orchestrator, "validate_claim_candidate"), \
+                patch.object(orchestrator, "resolve_oci_artifact", side_effect=resolve):
+            result = self.dispatch()
+        self.assertEqual(result["state"], "TASK_SCOPED_AUTO_DISPATCHED")
         self.assertEqual(sum(c[0] == "POST" and c[1].endswith("/dispatches") for c in self.api.calls), 1)
 
     def test_existing_authorization_claim_for_different_sha_blocks(self):
@@ -198,16 +329,22 @@ class ReleaseOrchestratorTests(unittest.TestCase):
     def test_preflight_authorization_requires_no_claim_but_task_deploy_requires_exact_claim(self):
         authorization_id = "maxibot-task-2026-10-16-001"
         record = {
-            "schema_version": 3, "project": "maxibot",
+            "schema_version": 3, "project": "maxibot", "environment": "production",
             "authorization_mode": "TASK_SCOPED_AUTO", "authorization_id": authorization_id,
             "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
-            "source_reference": "linear:ME-31/owner-instruction",
+            "source_instruction_identifier": "OWNER_TASK_MAXIBOT_ME45_CONTROLLER",
+            "owner_task_reference": "Direct OWNER authorization for this bounded MAXIBOT release task.",
+            "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
             "production_baseline_sha": "d" * 40, "task": "Bounded product task",
-            "allowed_paths": ["app/bot/menu.py"], "acceptance_criteria": ["menu works"],
-            "exclusions": ["database", "migrations", "security", "secrets", "payments",
-                           "ads", "paid_traffic", "release_infrastructure"],
+            "allowed_paths": ["app/bot/menu.py"],
+            "allowed_operations": ["integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"],
+            "preauthorized_commits": [], "preauthorized_paths": [],
+            "acceptance_criteria": ["menu works"],
+            "exclusions": ["database", "migrations", "security", "secrets", "payments", "ads", "paid_traffic", "release_infrastructure"],
+            "risk_contracts": {},
             "state": "ACTIVE", "revoked": False, "consumed": False,
         }
+        record["owner_task_commitment_sha256"] = owner_task_commitment_sha256(record)
         claim_ref = "git/ref/tags/maxibot-task-auth/" + authorization_id + "/claimed"
         absent = ValidationError("GitHub release provenance request failed (HTTP 404)")
 

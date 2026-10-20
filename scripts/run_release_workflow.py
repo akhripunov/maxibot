@@ -21,7 +21,7 @@ except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/
 
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
-                                   validate_task_authorization, assert_task_scoped_no_migration)
+                                   validate_task_authorization, assert_task_scoped_no_migration, validate_claim_candidate)
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
@@ -29,7 +29,7 @@ EVIDENCE_KEYS = {
     "TARGET_SHA", "TARGET_MIGRATION", "TARGET_DOWN_REVISION", "IMAGE_READY",
     "IMAGE_PLATFORM", "IMAGE_SOURCE_SHA", "IMAGE_CONFIG_DIGEST", "IMAGE_DIGEST", "IMAGE_REPOSITORY",
     "API_WORKER_IMAGE_PARITY", "SSH_REMOTE_PREFLIGHT", "PROD_DB_HEAD", "PROD_READY",
-    "PROD_API_IMAGE", "PROD_WORKER_IMAGE", "PROD_WORKER_HEALTH", "PROD_WRITE_FLAGS",
+    "PROD_API_IMAGE", "PROD_WORKER_IMAGE", "PROD_RELEASE_SHA", "PROD_WORKER_HEALTH", "PROD_WRITE_FLAGS",
     "ROLLBACK_CONFIG", "MIGRATION_REHEARSAL", "ROLLBACK_READY", "PRODUCTION_REHEARSAL",
     "SAFE_TO_RELEASE", "RELEASE_READY", "DRY_RUN_RESULT", "BACKUP", "BACKUP_VALIDATION",
     "BACKUP_DISK_PREFLIGHT", "BACKUP_PATH", "CURRENT_PRODUCTION_SHA",
@@ -198,11 +198,11 @@ def verify_task_authorization(authorization_id: str, candidate_sha: str,
         if "HTTP 404" not in str(error):
             raise
         claim = None
-    if require_claim and (claim is None or claim.get("object", {}).get("sha") != candidate_sha):
-        raise ValueError("Task authorization has no exact-candidate atomic Deploy claim")
+    if require_claim:
+        validate_claim_candidate(Path(__file__).resolve().parents[1], authorization_id, record, claim, candidate_sha)
     if not require_claim and claim is not None:
         raise ValueError("Task authorization already has a production claim")
-    proof["source_reference"] = record["source_reference"]
+    proof["source_reference"] = record.get("owner_task_reference", record.get("source_reference", ""))
     proof["_record"] = record
     proof["_changed_paths_list"] = changed_paths
     return proof
@@ -447,6 +447,8 @@ def main() -> int:
                     sha, migration, mode, os.environ.get("GITHUB_TOKEN", ""),
                     os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("PREPARE_RECEIPT_DIGEST", ""))
                 result["github_deployment_id"] = deployment_id
+            env["EXPECTED_PRODUCTION_SHA"] = result["production_baseline_sha"]
+            env["EXPECTED_PRODUCTION_DB_HEAD"] = result["db_migration_baseline"]
             env["OWNER_APPROVED"] = "1"
             result["release_state"] = "DEPLOYING"
             apply_started = time.monotonic()

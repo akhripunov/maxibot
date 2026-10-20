@@ -289,6 +289,7 @@ check_value() {
 
 check_value PROD_DB_HEAD docker exec maxibot-vps-db-1 psql -U maxibot -d maxibot -At -c 'select version_num from alembic_version'
 check_value PROD_READY docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready"))["status"])'
+check_value PROD_RELEASE_SHA docker exec maxibot-vps-api-1 python -c 'import urllib.request,json; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready"))["commit_sha"])'
 check_value PROD_API_IMAGE docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}'
 check_value PROD_WORKER_IMAGE docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}'
 check_value ROLLBACK_CONFIG docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
@@ -313,6 +314,7 @@ REMOTE_PREFLIGHT
         case "$key" in
           PROD_DB_HEAD) PROD_DB_HEAD=$value ;;
           PROD_READY) PROD_READY=$value ;;
+          PROD_RELEASE_SHA) PROD_RELEASE_SHA=$value ;;
           PROD_API_IMAGE) PROD_API_IMAGE=$value ;;
           PROD_WORKER_IMAGE) PROD_WORKER_IMAGE=$value ;;
           PROD_WORKER_HEALTH) PROD_WORKER_HEALTH=$value ;;
@@ -345,7 +347,7 @@ REMOTE_PREFLIGHT
       else
         say MIGRATION_REHEARSAL "BLOCKED (production DB head unavailable or rehearsal failed)"
       fi
-      if [[ "$PROD_WORKER_HEALTH" == ERROR || "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" == ERROR || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || "$PROD_WORKER_IMAGE" == ERROR || -z "$ROLLBACK_CONFIG" || "$ROLLBACK_CONFIG" == ERROR || "$PROD_WRITE_FLAGS" == ERROR || "$PROD_WRITE_FLAGS" != *"ADS_AUTOPILOT_ENABLED=false"* || "$PROD_WRITE_FLAGS" != *"ADS_WRITE_ACTIONS_ENABLED=false"* ]]; then
+      if [[ ! "${PROD_RELEASE_SHA:-}" =~ ^[0-9a-f]{40}$ || "$PROD_WORKER_HEALTH" == ERROR || "$DB_REHEARSAL_OK" != 1 || "$PROD_READY" != ready || -z "$PROD_API_IMAGE" || "$PROD_API_IMAGE" == ERROR || "$PROD_API_IMAGE" != "$PROD_WORKER_IMAGE" || "$PROD_WORKER_IMAGE" == ERROR || -z "$ROLLBACK_CONFIG" || "$ROLLBACK_CONFIG" == ERROR || "$PROD_WRITE_FLAGS" == ERROR || "$PROD_WRITE_FLAGS" != *"ADS_AUTOPILOT_ENABLED=false"* || "$PROD_WRITE_FLAGS" != *"ADS_WRITE_ACTIONS_ENABLED=false"* ]]; then
         PREFLIGHT_OK=0
       fi
     else
@@ -377,6 +379,24 @@ REMOTE_PREFLIGHT
 fi
 
 [[ "${OWNER_APPROVED:-0}" == 1 ]] || die "--apply requires OWNER_APPROVED=1"
+acquire_release_lock() {
+  RELEASE_LOCK_DIR=${MAXIBOT_RELEASE_LOCK_DIR:-$HOME/.config/maxibot/release-production.lock}
+  RELEASE_LOCK_TOKEN="$$:$RANDOM:$RANDOM"
+  mkdir -p "$(dirname "$RELEASE_LOCK_DIR")"
+  mkdir "$RELEASE_LOCK_DIR" 2>/dev/null || die "release lock exists; reconcile its owner, never remove a stale lock automatically"
+  chmod 700 "$RELEASE_LOCK_DIR"
+  printf '%s\n' "$RELEASE_LOCK_TOKEN" > "$RELEASE_LOCK_DIR/owner"
+}
+release_owned_lock() {
+  if [[ -n "${RELEASE_LOCK_TOKEN:-}" && -r "$RELEASE_LOCK_DIR/owner" && "$(cat "$RELEASE_LOCK_DIR/owner")" == "$RELEASE_LOCK_TOKEN" ]]; then
+    rm -f -- "$RELEASE_LOCK_DIR/owner"
+    rmdir "$RELEASE_LOCK_DIR" || true
+  fi
+  return 0
+}
+# End release lock helpers
+acquire_release_lock
+trap release_owned_lock EXIT
 CANONICAL_PRODUCTION_HOST=135.106.166.46
 PRODUCTION_HOST=${PRODUCTION_HOST:-${MAXIBOT_PRODUCTION_HOST:-$CANONICAL_PRODUCTION_HOST}}
 PRODUCTION_SSH_KEY=${PRODUCTION_SSH_KEY:-${MAXIBOT_PRODUCTION_SSH_KEY:-/Users/akhripuniov/.ssh/maxibot_selectel_ed25519}}
@@ -405,6 +425,7 @@ cleanup_release() {
   [[ -z "$WORK" ]] || rm -rf -- "$WORK"
   ssh -i "$PRODUCTION_SSH_KEY" -o BatchMode=yes -o ControlPath="$SSH_CONTROL_PATH" -O exit "$PRODUCTION_TARGET" >/dev/null 2>&1 || true
   rm -rf -- "$SSH_CONTROL_DIR"
+  release_owned_lock
 }
 trap cleanup_release EXIT
 remote() { "${SSH[@]}" "$@"; }
@@ -468,6 +489,13 @@ CURRENT_PRODUCTION_DB_HEAD=$(remote_read production_db_head "docker exec maxibot
 [[ -n "$CURRENT_PRODUCTION_DB_HEAD" ]] || die "current production DB head is unavailable"
 say CURRENT_PRODUCTION_SHA "$CURRENT_PRODUCTION_SHA"
 say CURRENT_PRODUCTION_DB_HEAD "$CURRENT_PRODUCTION_DB_HEAD"
+# Recheck the preflight/task baseline while holding the shared Mac Apply lock.
+if [[ -n "${EXPECTED_PRODUCTION_SHA:-}" || -n "${EXPECTED_PRODUCTION_DB_HEAD:-}" ]]; then
+  [[ "${EXPECTED_PRODUCTION_SHA:-}" =~ ^[0-9a-f]{40}$ && -n "${EXPECTED_PRODUCTION_DB_HEAD:-}" ]] || die "expected authorization baseline is incomplete"
+  [[ "$CURRENT_PRODUCTION_SHA" == "$EXPECTED_PRODUCTION_SHA" ]] || die "authorization production baseline drifted"
+  [[ "$CURRENT_PRODUCTION_DB_HEAD" == "$EXPECTED_PRODUCTION_DB_HEAD" ]] || die "authorization production database head drifted"
+fi
+
 if [[ -n "$WORKER_BOOTSTRAP_FROM" ]]; then
   [[ "$CURRENT_PRODUCTION_SHA" == "$WORKER_BOOTSTRAP_FROM" && "$CURRENT_PRODUCTION_DB_HEAD" == "$TARGET_MIGRATION" ]] || die "worker bootstrap forbids changed legacy SHA or pending migrations"
 fi

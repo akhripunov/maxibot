@@ -1,3 +1,19 @@
+## CURRENT OWNER TASK AUTHORIZATION — 2026-10-20
+
+MAXIBOT follows the current GPoint V5 full-cycle OWNER-task model in
+`docs/RELEASE_AUTHORIZATION.md`. A direct task to release the named scope covers
+PR/merge, Prepare, controller, Deploy and verification, including reviewed
+replacement SHAs within the unchanged scope and production baseline. No repeated
+human exact-SHA approval is required for that task. Release infrastructure is
+eligible with its complete explicit risk contract. Linear publishes evidence;
+the committed direct OWNER task record supplies authorization. Older statements
+below about mandatory separate infrastructure approval are historical.
+
+Keep one immutable task activation claim and per-Prepare dispatch guards.
+Only confirmed safe failure permits continuation; uncertain dispatch or runtime
+requires read-only reconciliation. All security, DB, Worker, provenance,
+backup, rollback, lock and health gates remain mandatory.
+
 # Автоматический выпуск MAXIBOT
 
 ## Два режима разрешения выпуска
@@ -10,10 +26,11 @@
 existing controller перепроверяет baseline/scope, атомарно claim-ит разрешение
 и вызывает существующий Deploy workflow. Этот Deploy выполняет read-only
 preflight непосредственно перед Apply; отдельный обязательный preflight-run не
-создаётся. Без разрешения сохраняется exact-SHA approval path. Release infrastructure и
-неподдержанные owner-only категории остаются за отдельным exact-SHA approval;
-DB-миграция допускается только с конкретным риск-контрактом и всеми штатными
-миграционными gates. Runner может штатно ждать в `Queued`; readiness check
+создаётся. Без валидной OWNER release task сохраняется exact-SHA approval fallback.
+Release infrastructure допускается по полному явно разрешённому риск-контракту
+в durable OWNER task без повторного подтверждения SHA. Неподдержанные owner-only
+категории блокируются; DB-миграция допускается только с конкретным риск-контрактом
+и всеми штатными миграционными gates. Runner может штатно ждать в `Queued`; readiness check
 остаётся fail-closed.
 Подробности: [Release authorization modes](RELEASE_AUTHORIZATION.md).
 
