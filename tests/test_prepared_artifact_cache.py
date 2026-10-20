@@ -1,4 +1,5 @@
 import importlib.util
+import http.client
 import ssl
 from pathlib import Path
 import shutil
@@ -220,6 +221,28 @@ class ArtifactCacheTests(unittest.TestCase):
         self.assertTrue(any(event.startswith('NETWORK_RETRYING') for event in events))
         self.assertTrue(any(event.startswith('NETWORK_RESTORED') for event in events))
         self.assertEqual(events[-1], 'RELEASE_CONTINUING stage=artifact_metadata')
+
+    def test_incomplete_http_response_body_is_retryable_for_idempotent_reads(self):
+        calls = []
+        events = []
+
+        def request():
+            calls.append(1)
+            if len(calls) == 1:
+                raise http.client.IncompleteRead(b'partial response', 128)
+            return 'complete response'
+
+        result = release_network_retry.retry_network_read(
+            request, 'runner_readiness_github_api',
+            release_network_retry.is_retryable_network_error,
+            budget=release_network_retry.RetryBudget(30, clock=lambda: 0.0),
+            clock=lambda: float(len(calls)), sleep=lambda _seconds: None,
+            jitter=lambda _low, _high: 0, emit=events.append)
+
+        self.assertEqual(result, 'complete response')
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(any(event.startswith('NETWORK_RETRYING') for event in events))
+        self.assertTrue(any(event.startswith('NETWORK_RESTORED') for event in events))
 
     def test_tls_outage_stops_at_30_minutes_and_permanent_errors_do_not_retry(self):
         now = [0.0]

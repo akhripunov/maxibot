@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import errno
+import http.client
 import socket
 import ssl
 import time
@@ -30,6 +31,8 @@ def is_retryable_network_error(error: BaseException) -> bool:
     if isinstance(error, urllib.error.HTTPError):
         return error.code in RETRYABLE_HTTP_STATUS
     reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, http.client.IncompleteRead):
+        return True
     if isinstance(reason, ssl.SSLCertVerificationError):
         return False
     if isinstance(reason, ssl.SSLError):
