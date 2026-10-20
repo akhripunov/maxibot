@@ -244,7 +244,7 @@ jobs:
 
       - name: Publish immutable Deploy evidence to GHCR and verify digest readback
         id: evidence
-        if: always()
+        if: always() && steps.execute.outcome != 'skipped'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_ACTOR: ${{ github.actor }}
