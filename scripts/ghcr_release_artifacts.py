@@ -41,6 +41,12 @@ class MissingArtifactError(ArtifactError):
     """The exact immutable GHCR tag does not exist."""
 
 
+def _header_value(headers: dict[str, str], name: str) -> str:
+    """Read an HTTP header without relying on the spelling/case used by urllib."""
+    expected = name.casefold()
+    return next((value for key, value in headers.items() if key.casefold() == expected), "")
+
+
 def artifact_tag(kind: str, sha: str, run_id: str | int, attempt: str | int) -> str:
     if kind not in {"prepare", "evidence"} or not SHA40.fullmatch(sha):
         raise ArtifactError("Invalid MAXIBOT artifact identity")
@@ -121,11 +127,11 @@ def resolve_oci_artifact(repository: str, tag: str, artifact_type: str,
         raise ArtifactError("Invalid MAXIBOT artifact tag")
     base = f"https://ghcr.io/v2/{repository.split('/', 1)[1]}"
     tag_manifest, tag_headers = fetch(f"{base}/manifests/{tag}", OCI_ACCEPT)
-    digest = tag_headers.get("Docker-Content-Digest", "")
+    digest = _header_value(tag_headers, "Docker-Content-Digest")
     if not DIGEST.fullmatch(digest) or hashlib.sha256(tag_manifest).hexdigest() != digest[7:]:
         raise ArtifactError("GHCR tag did not resolve to a verified manifest digest")
     manifest, headers = fetch(f"{base}/manifests/{digest}", OCI_ACCEPT)
-    if headers.get("Docker-Content-Digest") != digest or manifest != tag_manifest:
+    if _header_value(headers, "Docker-Content-Digest") != digest or manifest != tag_manifest:
         raise ArtifactError("GHCR artifact changed between tag and digest read")
     try:
         parsed = json.loads(manifest)

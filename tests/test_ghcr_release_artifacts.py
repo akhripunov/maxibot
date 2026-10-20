@@ -143,7 +143,8 @@ def test_validate_prepare_receipt_requires_exact_sha_attempt_and_image_digest():
             artifacts.validate_prepare_receipt(altered, SHA, RUN_ID, ATTEMPT)
 
 
-def test_resolve_oci_artifact_reads_tag_then_digest_and_verifies_exact_blob():
+@pytest.mark.parametrize("header_name", ["Docker-Content-Digest", "docker-content-digest"])
+def test_resolve_oci_artifact_reads_tag_then_digest_and_verifies_exact_blob(header_name):
     payload = b'{"candidate_sha":"' + SHA.encode() + b'"}'
     manifest, digest = oci_manifest(artifacts.PREPARE_ARTIFACT_TYPE,
                                     artifacts.PREPARE_LAYER_MEDIA_TYPE, payload)
@@ -155,9 +156,9 @@ def test_resolve_oci_artifact_reads_tag_then_digest_and_verifies_exact_blob():
     def fetch(url, accept):
         calls.append(url)
         if url == f"{base}/manifests/{tag}":
-            return manifest, {"Docker-Content-Digest": digest}
+            return manifest, {header_name: digest}
         if url == f"{base}/manifests/{digest}":
-            return manifest, {"Docker-Content-Digest": digest}
+            return manifest, {header_name: digest}
         if url == f"{base}/blobs/sha256:{hashlib.sha256(payload).hexdigest()}":
             return payload, {}
         raise AssertionError(url)
