@@ -196,6 +196,7 @@ def test_publish_oci_artifact_links_new_package_to_workflow_repository(tmp_path,
         run=run, fetch_factory=lambda *_args: fetch)
 
     push_args = calls[1][0]
+    assert "--debug" in push_args
     annotation_index = push_args.index("--annotation")
     assert push_args[annotation_index + 1] == (
         "org.opencontainers.image.source=https://github.com/akhripunov/maxibot")
