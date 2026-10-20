@@ -39,8 +39,11 @@ gates. Эта запись не описывает актуальный V5 ка�
 ## Целевая V5 схема
 
 Локальная реализация переводит MAXIBOT image, Prepare receipt и Deploy evidence
-в отдельные GHCR OCI packages. Каждый payload привязан к SHA/run/attempt, а
-publisher сверяет публикацию повторным read-back по immutable digest. Docker
+в уже связанный с MAXIBOT repository GHCR package. OCI image, receipt и evidence
+различаются по типам манифеста и уникальным SHA/run/attempt tags; workflow token
+имеет write-доступ через существующую связь package с repository. Каждый payload
+привязан к SHA/run/attempt, а publisher сверяет публикацию повторным read-back
+по immutable digest. Docker
 archive остаётся только для private containerd rehearsal.
 
 После успешного read-only production preflight Deploy создаёт GitHub Deployment
