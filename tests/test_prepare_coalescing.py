@@ -1,10 +1,13 @@
 import importlib.util
+import json
 from pathlib import Path
+import sys
 import urllib.error
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "prepare_coalescing", ROOT / "scripts" / "prepare_coalescing.py"
 )
@@ -103,13 +106,58 @@ class PrepareCoalescingTests(unittest.TestCase):
             COALESCING.read_current_main_sha("redacted-test-token", opener=lambda *_a, **_k: Response())
 
     def test_github_http_error_fails_closed_without_echoing_credentials(self):
+        calls = []
+
         def reject(*_args, **_kwargs):
+            calls.append(1)
             raise urllib.error.HTTPError("https://api.github.com", 403, "Forbidden", {}, None)
 
         with self.assertRaises(COALESCING.CoalescingError) as raised:
             COALESCING.read_current_main_sha("redacted-test-token", opener=reject)
         self.assertIn("HTTP 403", str(raised.exception))
         self.assertNotIn("redacted-test-token", str(raised.exception))
+        self.assertEqual(len(calls), 1)
+
+    def test_main_sha_read_retries_transient_tls_with_shared_budget(self):
+        import ssl
+        sha = "a" * 40
+        calls = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"object": {"sha": sha}}).encode()
+
+        def intermittent(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise urllib.error.URLError(ssl.SSLEOFError("unexpected EOF"))
+            return Response()
+
+        budget = COALESCING.RetryBudget(seconds=10)
+        result = COALESCING.read_current_main_sha(
+            "redacted-test-token", opener=intermittent, budget=budget,
+            retry_options={"sleep": lambda _delay: None,
+                           "jitter": lambda _low, _high: 0,
+                           "emit": lambda _event: None},
+        )
+
+        self.assertEqual(result, sha)
+        self.assertEqual(len(calls), 2)
+
+    def test_prepare_initializes_one_retry_budget_before_coalescing(self):
+        workflow = (ROOT / ".github" / "workflows" / "maxibot-prepare.yml").read_text()
+        initialize = workflow.index("Initialize shared retry budget")
+        checkout = workflow.index("Checkout exact candidate")
+        coalescing = workflow.index("Wait for a quiet main and verify the exact candidate")
+        self.assertLess(initialize, checkout)
+        self.assertLess(checkout, coalescing)
+        self.assertIn("NETWORK_RETRY_BUDGET_STATE", workflow[initialize:checkout])
 
     def test_invalid_sha_from_github_ref_fails_closed(self):
         class Response:
