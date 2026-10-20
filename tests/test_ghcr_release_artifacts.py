@@ -141,6 +141,50 @@ def test_resolve_oci_artifact_rejects_tag_digest_drift_and_unapproved_repository
             artifacts.PREPARE_ARTIFACT_TYPE, artifacts.PREPARE_LAYER_MEDIA_TYPE, drift)
 
 
+def test_publish_oci_artifact_links_new_package_to_workflow_repository(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_ACTOR", "owner")
+    monkeypatch.setenv("GITHUB_TOKEN", "workflow-token")
+    payload = b'{"candidate_sha":"' + SHA.encode() + b'"}'
+    payload_path = tmp_path / "receipt.json"
+    payload_path.write_bytes(payload)
+    manifest, digest = oci_manifest(artifacts.PREPARE_ARTIFACT_TYPE,
+                                    artifacts.PREPARE_LAYER_MEDIA_TYPE, payload)
+    tag = artifacts.artifact_tag("prepare", SHA, RUN_ID, ATTEMPT)
+    base = f"https://ghcr.io/v2/{artifacts.PREPARE_REPOSITORY.split('/', 1)[1]}"
+    calls = []
+
+    def run(args, input=None):
+        calls.append((args, input))
+        if args[1] == "push":
+            return json.dumps({"digest": digest})
+        return ""
+
+    fetched_urls = []
+    def fetch(url, _accept):
+        fetched_urls.append(url)
+        if url.endswith(f"/manifests/{tag}") or url.endswith(f"/manifests/{digest}"):
+            return manifest, {"Docker-Content-Digest": digest}
+        if "/blobs/" in url:
+            return payload, {}
+        raise AssertionError(url)
+
+    result_digest, result_payload = artifacts.publish_oci_artifact(
+        artifacts.PREPARE_REPOSITORY, "prepare", SHA, RUN_ID, ATTEMPT,
+        payload_path, artifacts.PREPARE_ARTIFACT_TYPE, artifacts.PREPARE_LAYER_MEDIA_TYPE,
+        run=run, fetch_factory=lambda *_args: fetch)
+
+    push_args = calls[1][0]
+    annotation_index = push_args.index("--annotation")
+    assert push_args[annotation_index + 1] == (
+        "org.opencontainers.image.source=https://github.com/akhripunov/maxibot")
+    assert fetched_urls == [
+        f"{base}/manifests/{tag}",
+        f"{base}/manifests/{digest}",
+        f"{base}/blobs/sha256:{hashlib.sha256(payload).hexdigest()}",
+    ]
+    assert (result_digest, result_payload) == (digest, payload)
+
+
 def test_resolve_prepare_requires_validator_selected_digest_and_writes_only_receipt(tmp_path, monkeypatch):
     receipt = {
         "schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": SHA,
