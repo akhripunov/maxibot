@@ -335,6 +335,34 @@ def test_ghcr_image_manifest_must_bind_receipt_config_digest(monkeypatch):
         verify_image_config_digest(image, "owner", "token")
 
 
+def test_read_deploy_evidence_writes_verified_payload_to_destination(tmp_path, monkeypatch):
+    evidence = {
+        "schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1",
+        "candidate_sha": SHA,
+        "github_run_id": RUN_ID,
+        "github_run_attempt": ATTEMPT,
+    }
+    payload = json.dumps(evidence).encode()
+    digest = "sha256:" + "e" * 64
+    monkeypatch.setattr(artifacts.sys, "argv", ["ghcr_release_artifacts.py", "read-evidence"])
+    for key, value in {
+        "CANDIDATE_SHA": SHA,
+        "GITHUB_RUN_ID": RUN_ID,
+        "GITHUB_RUN_ATTEMPT": ATTEMPT,
+        "GITHUB_OUTPUT": str(tmp_path / "output"),
+        "GITHUB_ACTOR": "owner",
+        "GITHUB_TOKEN": "workflow-token",
+        "DEPLOY_EVIDENCE_DIGEST": digest,
+        "EVIDENCE_DESTINATION": str(tmp_path / "evidence"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(artifacts, "_registry_fetch", lambda *_args: object())
+    monkeypatch.setattr(artifacts, "resolve_oci_artifact", lambda *_args: (digest, payload))
+
+    assert artifacts.main() == 0
+    assert (tmp_path / "evidence" / "result.json").read_bytes() == payload
+
+
 def test_pull_token_is_short_lived_and_scoped_to_image_package(monkeypatch):
     from scripts.ghcr_release_artifacts import registry_pull_token
     class Response:
