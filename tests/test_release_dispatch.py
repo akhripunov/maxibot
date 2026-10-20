@@ -405,6 +405,33 @@ def test_publisher_reads_legacy_actions_result_only_when_evidence_release_is_abs
     assert any("/actions/runs/321/artifacts" in path for path in calls)
 
 
+def test_publisher_reads_legacy_immutable_release_evidence_before_expired_actions_artifact(monkeypatch):
+    run = {"id": 321, "run_attempt": 1, "head_sha": SHA}
+    result = {"candidate_sha": SHA, "github_run_id": "321", "github_run_attempt": "1",
+              "final_runtime_sha": SHA, "status": "COMPLETE"}
+    calls = []
+
+    def api(path):
+        calls.append(path)
+        if "/releases/tags/" in path:
+            return {"tag_name": "maxibot-evidence-" + SHA + "-321-1"}
+        raise AssertionError(path)
+
+    def read_legacy(_sha, _run_id, _attempt, target_dir, _github_get, _token):
+        Path(target_dir, "result.json").write_text(json.dumps(result), encoding="utf-8")
+        return {}
+
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("GITHUB_ACTOR", "codex-test")
+    monkeypatch.setattr(publish_release_to_linear, "resolve_oci_artifact",
+        lambda *_args: (_ for _ in ()).throw(publish_release_to_linear.MissingArtifactError("missing")))
+    monkeypatch.setattr(publish_release_to_linear, "github_json", api)
+    monkeypatch.setattr(publish_release_to_linear, "read_evidence", read_legacy)
+
+    assert publish_release_to_linear.read_result_artifact(run) == result
+    assert calls == ["repos/akhripunov/maxibot/releases/tags/maxibot-evidence-" + SHA + "-321-1"]
+
+
 def test_publisher_prefers_digest_pinned_ghcr_evidence_without_legacy_fallback(monkeypatch, tmp_path):
     run = {"id": 322, "run_attempt": 2, "head_sha": SHA}
     calls = []

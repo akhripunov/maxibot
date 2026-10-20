@@ -9,6 +9,7 @@ import io
 import json
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -84,6 +85,26 @@ def read_result_artifact(run: dict) -> dict:
             pass
         except (ArtifactError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SyncError("Immutable MAXIBOT GHCR Deploy evidence failed validation") from exc
+    # V3 production runs persisted their canonical result inside an immutable
+    # GitHub Release evidence.zip. Keep that verified path available while old
+    # Actions result ZIPs age out; never downgrade from a present but invalid
+    # GHCR or Release evidence object.
+    if SHA_RE.fullmatch(sha) and run_id.isdigit() and attempt.isdigit():
+        tag = release_tag("evidence", sha, run_id, attempt)
+        try:
+            github_json(f"repos/{REPOSITORY}/releases/tags/{tag}")
+        except SyncError as exc:
+            if str(exc) != "GitHub resource not found":
+                raise
+        else:
+            token = os.environ.get("GITHUB_TOKEN", "")
+            with tempfile.TemporaryDirectory(prefix="maxibot-legacy-evidence-") as directory:
+                try:
+                    read_evidence(sha, run_id, attempt, Path(directory),
+                        lambda path: github_json(f"repos/{REPOSITORY}/{path}"), token)
+                    return json.loads((Path(directory) / "result.json").read_text(encoding="utf-8"))
+                except (ReleaseAssetError, OSError, json.JSONDecodeError) as exc:
+                    raise SyncError("Immutable historical MAXIBOT Release evidence failed validation") from exc
     artifacts = github_json(f"repos/{REPOSITORY}/actions/runs/{run['id']}/artifacts").get("artifacts", [])
     artifacts = [a for a in artifacts if a.get("name", "").startswith(f"maxibot-release-result-{run['id']}-") and not a.get("expired")]
     if len(artifacts) != 1:
