@@ -7,25 +7,36 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import random
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
-    PREPARE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
+    PREPARE_REPOSITORY, EVIDENCE_ARTIFACT_TYPE, EVIDENCE_LAYER_MEDIA_TYPE,
+    EVIDENCE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
     resolve_oci_artifact, validate_prepare_receipt)
+from release_network_retry import (NETWORK_RETRY_BUDGET_SECONDS, NetworkUnavailable,
+    RetryBudget, RETRYABLE_HTTP_STATUS, is_retryable_network_error, retry_network_read)
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
+                                   validate_claim_candidate,
                                    validate_task_authorization)
 
 REPOSITORY = "akhripunov/maxibot"
 PREPARE_PATH = ".github/workflows/maxibot-prepare.yml"
 DEPLOY_WORKFLOW = "maxibot-deploy.yml"
+EVIDENCE_PUBLISH_STEP = "Publish immutable Deploy evidence to GHCR and verify digest readback"
+PREPARE_PUBLISH_STEP = "Publish immutable Prepare receipt to GHCR and verify digest readback"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 AUTH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
+CONTROLLER_RETRY_BUDGET_SECONDS = min(90, NETWORK_RETRY_BUDGET_SECONDS)
+NETWORK_BUDGET = RetryBudget(seconds=CONTROLLER_RETRY_BUDGET_SECONDS)
+retry_jitter = random.uniform
 
 
 class OrchestrationError(RuntimeError):
@@ -38,6 +49,25 @@ class APIError(RuntimeError):
         self.status = status
         self.response = response
         self.path = path
+
+
+class _NoAuthGitHubLogRedirect(urllib.request.HTTPRedirectHandler):
+    """Allow GitHub's signed log redirect without forwarding API credentials."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlsplit(newurl)
+        host = (parsed.hostname or "").lower()
+        allowed = (host in {"github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+                   or host.endswith(".blob.core.windows.net"))
+        if (parsed.scheme != "https" or not allowed or parsed.username or parsed.password
+                or parsed.port not in {None, 443}):
+            return None
+        return urllib.request.Request(newurl, headers={"User-Agent": "maxibot-release-controller"})
+
+
+def _retryable_github_read(error: BaseException) -> bool:
+    if isinstance(error, APIError):
+        return error.status in RETRYABLE_HTTP_STATUS
+    return is_retryable_network_error(error)
 
 
 class GitHubAPI:
@@ -56,16 +86,52 @@ class GitHubAPI:
                      "X-GitHub-Api-Version": "2022-11-28",
                      "Content-Type": "application/json"})
         try:
-            with self.opener(request, timeout=20) as response:
+            with self.opener(request, timeout=10) as response:
                 raw = response.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as error:
             raise APIError(error.code, error.read().decode("utf-8", "replace"), path) from None
         except (urllib.error.URLError, TimeoutError, OSError) as error:
+            if method == "GET":
+                raise
             raise OrchestrationError(f"GitHub API unavailable ({type(error).__name__})") from None
 
     def get(self, path):
-        return self.request("GET", path)
+        try:
+            return retry_network_read(
+                lambda: self.request("GET", path), "auto_release_controller_read",
+                _retryable_github_read, budget=NETWORK_BUDGET, sleep=time.sleep,
+                jitter=retry_jitter, emit=lambda message: print(message, file=sys.stderr))
+        except NetworkUnavailable:
+            raise OrchestrationError("GitHub API read unavailable within the controller retry budget") from None
+
+    def get_job_log_archive(self, job_id: str) -> str:
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", job_id):
+            raise OrchestrationError("Deploy evidence job identity is invalid")
+        path = f"actions/jobs/{job_id}/logs"
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{REPOSITORY}/{path}",
+            headers={"Authorization": f"Bearer {self.token}",
+                     "Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28"})
+        opener = urllib.request.build_opener(_NoAuthGitHubLogRedirect())
+
+        def download():
+            try:
+                with opener.open(request, timeout=10) as response:
+                    body = response.read(20 * 1024 * 1024 + 1)
+                    if len(body) > 20 * 1024 * 1024:
+                        raise OrchestrationError("Deploy evidence job logs exceed the size limit")
+                    return body.decode("utf-8", "replace")
+            except urllib.error.HTTPError as error:
+                raise APIError(error.code, "", path) from None
+
+        try:
+            return retry_network_read(download, "auto_release_deploy_log_read",
+                _retryable_github_read, budget=NETWORK_BUDGET, sleep=time.sleep,
+                jitter=retry_jitter, emit=lambda message: print(message, file=sys.stderr))
+        except NetworkUnavailable:
+            raise OrchestrationError("Deploy evidence job logs unavailable within the controller retry budget") from None
 
     def post(self, path, body):
         return self.request("POST", path, body)
@@ -91,15 +157,165 @@ def _event_run(payload: dict) -> tuple[str, dict]:
 def _task_auto_claim_ref(authorization_id: str) -> str:
     if not AUTH_ID_RE.fullmatch(authorization_id):
         raise OrchestrationError("Invalid task-scoped Deploy claim identity")
-    # One durable claim per authorization prevents duplicate Prepare events and
-    # different runner attempts from dispatching more than one Deploy.
+    # One durable claim binds the OWNER authorization across safe candidate retries.
     return authorization_state_ref("maxibot", authorization_id, "claimed")
 
 
-def _active_deploy(api) -> bool:
-    data = api.get(f"actions/workflows/{DEPLOY_WORKFLOW}/runs?branch=main&per_page=100")
+def _task_dispatch_ref(authorization_id: str, prepare_run_id: str, prepare_attempt: str) -> str:
+    if (not AUTH_ID_RE.fullmatch(authorization_id)
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", prepare_run_id)
+            or not re.fullmatch(r"[1-9][0-9]{0,5}", prepare_attempt)):
+        raise OrchestrationError("Invalid task-scoped dispatch identity")
+    return (f"refs/tags/maxibot-task-auth/{authorization_id}/dispatches/"
+            f"prepare-{prepare_run_id}-{prepare_attempt}")
+
+
+def _deploy_runs(api) -> list[dict]:
+    runs, total = [], None
+    for page in range(1, 11):
+        data = api.get(f"actions/workflows/{DEPLOY_WORKFLOW}/runs?branch=main&per_page=100&page={page}")
+        page_runs, page_total = data.get("workflow_runs"), data.get("total_count")
+        if (not isinstance(page_runs, list) or not isinstance(page_total, int)
+                or page_total < 0 or (total is not None and page_total != total)):
+            raise OrchestrationError("Deploy run inventory is incomplete")
+        total = page_total
+        runs.extend(page_runs)
+        if len(runs) >= total:
+            return runs[:total]
+        if len(page_runs) < 100:
+            break
+    raise OrchestrationError("Deploy run inventory exceeds the bounded controller limit")
+
+
+def _active_deploy(runs: list[dict]) -> bool:
     return any(run.get("status") in {"queued", "in_progress", "waiting", "pending"}
-               for run in data.get("workflow_runs", []))
+               for run in runs)
+
+
+def _task_dispatch_refs(api, authorization_id: str) -> list[dict]:
+    prefix = f"maxibot-task-auth/{authorization_id}/dispatches/"
+    refs = api.get("git/matching-refs/tags/" + prefix)
+    if not isinstance(refs, list):
+        raise OrchestrationError("Task-scoped dispatch inventory is invalid")
+    result = []
+    for item in refs:
+        name = item.get("ref", "") if isinstance(item, dict) else ""
+        obj = item.get("object", {}) if isinstance(item, dict) else {}
+        if (not name.startswith("refs/tags/" + prefix)
+                or not SHA_RE.fullmatch(obj.get("sha", ""))
+                or obj.get("type", "commit") != "commit"):
+            raise OrchestrationError("Task-scoped dispatch marker is invalid")
+        result.append({"ref": name.removeprefix("refs/tags/"), "sha": obj["sha"]})
+    return result
+
+
+def _verified_deploy_evidence(api, run: dict) -> tuple[str, dict] | None:
+    run_id, attempt = str(run.get("id", "")), str(run.get("run_attempt", ""))
+    if (not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
+            or not re.fullmatch(r"[1-9][0-9]{0,5}", attempt)):
+        return None
+    digest = publisher_logged_digest(api, run_id, attempt, EVIDENCE_PUBLISH_STEP,
+                                     "MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST=")
+    candidate = run.get("head_sha", "")
+    tag = artifact_tag("evidence", candidate, run_id, attempt)
+    try:
+        resolved_digest, payload = resolve_oci_artifact(
+            EVIDENCE_REPOSITORY, tag, EVIDENCE_ARTIFACT_TYPE, EVIDENCE_LAYER_MEDIA_TYPE,
+            _registry_fetch(EVIDENCE_REPOSITORY, os.environ.get("GITHUB_ACTOR", ""),
+                            api.token, budget=NETWORK_BUDGET))
+        result = json.loads(payload.decode("utf-8"))
+    except (ArtifactError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if resolved_digest != digest:
+        return None
+    if (result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+            or result.get("candidate_sha") != candidate
+            or str(result.get("github_run_id", "")) != run_id
+            or str(result.get("github_run_attempt", "")) != attempt):
+        return None
+    return digest, result
+
+
+def publisher_logged_digest(api, run_id: str, attempt: str, publisher_step: str,
+                            marker_prefix: str) -> str:
+    """Bind a publisher's durable artifact digest to one successful run attempt log."""
+    if (not re.fullmatch(r"[1-9][0-9]{0,19}", str(run_id))
+            or not re.fullmatch(r"[1-9][0-9]{0,5}", str(attempt))
+            or not publisher_step or not marker_prefix):
+        raise OrchestrationError("Publisher attempt identity is invalid")
+    jobs = api.get(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+    job_list = jobs.get("jobs")
+    total = jobs.get("total_count")
+    if not isinstance(job_list, list) or not isinstance(total, int) or total != len(job_list):
+        raise OrchestrationError("Deploy evidence job inventory is incomplete")
+    publisher_jobs = []
+    for job in job_list:
+        if not isinstance(job, dict) or str(job.get("run_id", run_id)) != run_id:
+            continue
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        publishers = [step for step in steps if isinstance(step, dict)
+                      and step.get("name") == publisher_step]
+        if len(publishers) > 1:
+            raise OrchestrationError("Deploy evidence publisher step is ambiguous")
+        if publishers:
+            publisher_jobs.append((str(job.get("id", "")), publishers[0].get("conclusion")))
+    if len(publisher_jobs) != 1 or publisher_jobs[0][1] != "success":
+        raise OrchestrationError("Publisher step is missing, unsuccessful, or ambiguous")
+    text = api.get_job_log_archive(publisher_jobs[0][0])
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    prefix = re.escape(marker_prefix)
+    timestamp = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+-]+Z )?"
+    digests = re.findall(rf"(?m)^{timestamp}{prefix}(sha256:[0-9a-f]{{64}})\r?$", text)
+    if len(digests) != 1:
+        raise OrchestrationError("Publisher digest log is missing or ambiguous")
+    return digests[0]
+
+
+def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
+                               authorization_id: str, production_baseline_sha: str) -> None:
+    marker = dispatch_ref["ref"].rsplit("/", 1)[-1]
+    match = re.fullmatch(r"prepare-([1-9][0-9]{0,19})-([1-9][0-9]{0,5})", marker)
+    if not match:
+        raise OrchestrationError("Task-scoped dispatch marker has an invalid Prepare identity")
+    prepare_run_id, prepare_attempt = match.groups()
+    candidate = dispatch_ref["sha"]
+    candidates = [run for run in runs if run.get("head_sha") == candidate
+                  and run.get("path") == ".github/workflows/maxibot-deploy.yml"
+                  and run.get("event") == "workflow_dispatch"]
+    matching = []
+    for run in candidates:
+        run_id, attempt = str(run.get("id", "")), str(run.get("run_attempt", ""))
+        if (not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
+                or not re.fullmatch(r"[1-9][0-9]{0,5}", attempt)):
+            continue
+        try:
+            verified = _verified_deploy_evidence(api, run)
+        except OrchestrationError:
+            continue
+        if verified is None:
+            continue
+        _digest, result = verified
+        if (result.get("candidate_sha") == candidate
+                and str(result.get("github_run_id", "")) == run_id
+                and str(result.get("github_run_attempt", "")) == attempt
+                and str(result.get("prepare_run_id", "")) == prepare_run_id
+                and str(result.get("prepare_run_attempt", "")) == prepare_attempt
+                and result.get("task_authorization_id") == authorization_id
+                and result.get("mode") == "task-scoped-auto"):
+            matching.append((run, result))
+    if len(matching) != 1:
+        raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
+    run, result = matching[0]
+    if (run.get("status") != "completed" or run.get("conclusion") != "failure"
+            or result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+            or result.get("status") != "FAILED_PRE_SWITCH"
+            or result.get("release_state") != "FAILED_PRE_SWITCH"
+            or result.get("production_changed") is not False
+            or result.get("authorization_consumed") is not False
+            or result.get("production_baseline_sha") != production_baseline_sha):
+        raise OrchestrationError("Prior task-scoped Deploy was not proven safe to retry")
 
 
 def _find_task_authorization(repo_root: Path, candidate_sha: str, api) -> dict[str, str]:
@@ -153,9 +369,15 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
         raise OrchestrationError("Prepare attempt changed after completion event")
     tag = artifact_tag("prepare", sha, run_id, attempt)
     try:
+        publisher_digest = publisher_logged_digest(
+            api, run_id, attempt, PREPARE_PUBLISH_STEP,
+            "MAXIBOT_GHCR_PREPARE_RECEIPT=PASS DIGEST=")
         receipt_digest, receipt_bytes = resolve_oci_artifact(PREPARE_REPOSITORY, tag,
             PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
-            _registry_fetch(PREPARE_REPOSITORY, os.environ.get("GITHUB_ACTOR", ""), api.token))
+            _registry_fetch(PREPARE_REPOSITORY, os.environ.get("GITHUB_ACTOR", ""), api.token,
+                            budget=NETWORK_BUDGET))
+        if receipt_digest != publisher_digest:
+            raise OrchestrationError("Prepare receipt digest does not match successful publisher log")
         receipt = json.loads(receipt_bytes.decode("utf-8"))
         validate_prepare_receipt(receipt, sha, run_id, attempt)
     except (ArtifactError, UnicodeDecodeError, json.JSONDecodeError, APIError) as error:
@@ -169,31 +391,92 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
                 "prepare_run_id": run_id, "prepare_run_attempt": attempt,
                 "prepare_receipt_tag": tag, "prepare_receipt_digest": receipt_digest,
                 "image_digest": receipt["image"]["digest"]}
+    authorization_id = authorization["authorization_id"]
+    authorization_file = repo_root / record_path(authorization_id)
+    try:
+        record = json.loads(authorization_file.read_text(encoding="utf-8"))
+        baseline = record["production_baseline_sha"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise OrchestrationError("Task-scoped authorization record is unavailable") from None
+    if not SHA_RE.fullmatch(str(baseline)):
+        raise OrchestrationError("Task-scoped authorization baseline is invalid")
     target = migration or (alembic_heads(repo_root)[0] if repo_root else "")
     if not target or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", target):
         raise OrchestrationError("Current Alembic target is not uniquely established")
-    if _active_deploy(api):
+    runs = _deploy_runs(api)
+    if _active_deploy(runs):
         raise OrchestrationError("A Deploy workflow is already active")
-    claim = _task_auto_claim_ref(authorization["authorization_id"])
+    claim = _task_auto_claim_ref(authorization_id)
+    claim_exists = False
     try:
         api.post("git/refs", {"ref": claim, "sha": sha})
     except APIError as error:
         if error.status != 422:
             raise OrchestrationError("Atomic task-scoped Deploy claim failed") from None
         existing = api.get("git/ref/tags/" + claim.removeprefix("refs/tags/"))
+        claim_sha = existing.get("object", {}).get("sha")
         if (existing.get("object", {}).get("type") != "commit"
-                or existing.get("object", {}).get("sha") != sha):
+                or not SHA_RE.fullmatch(str(claim_sha or ""))):
             raise OrchestrationError("Existing task-scoped authorization claim is invalid") from None
-        return {"state": "TASK_SCOPED_AUTO_ALREADY_CLAIMED",
-                "candidate_sha": existing["object"]["sha"],
-                "authorization_id": authorization["authorization_id"]}
+        try:
+            validate_claim_candidate(repo_root, authorization_id, record, existing, sha)
+        except AuthorizationError:
+            raise OrchestrationError("Existing task-scoped authorization claim is invalid") from None
+        claim_exists = True
+    dispatches = _task_dispatch_refs(api, authorization_id)
+    event_ref = _task_dispatch_ref(authorization_id, run_id, attempt)
+    existing_event = next((item for item in dispatches if "refs/tags/" + item["ref"] == event_ref), None)
+    if existing_event:
+        if existing_event["sha"] != sha:
+            raise OrchestrationError("Prepare event dispatch marker conflicts with candidate")
+        marker_name = existing_event["ref"].rsplit("/", 1)[-1]
+        identity = re.fullmatch(r"prepare-([1-9][0-9]{0,19})-([1-9][0-9]{0,5})", marker_name)
+        if not identity:
+            raise OrchestrationError("Existing Prepare dispatch marker identity is invalid")
+        prepare_id, prepare_attempt = identity.groups()
+        reconciled = []
+        for run in runs:
+            if (run.get("head_sha") != sha
+                    or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+                    or run.get("event") != "workflow_dispatch"
+                    or run.get("status") != "completed"):
+                continue
+            try:
+                verified = _verified_deploy_evidence(api, run)
+            except OrchestrationError:
+                continue
+            if verified is None:
+                continue
+            _digest, result = verified
+            if (str(result.get("prepare_run_id", "")) == prepare_id
+                    and str(result.get("prepare_run_attempt", "")) == prepare_attempt
+                    and result.get("task_authorization_id") == authorization_id
+                    and result.get("mode") == "task-scoped-auto"):
+                reconciled.append(run)
+        if len(reconciled) != 1:
+            raise OrchestrationError("Existing Prepare dispatch marker lacks exact Deploy evidence; reconciliation required")
+        return {"state": "TASK_SCOPED_AUTO_EVENT_ALREADY_DISPATCHED", "candidate_sha": sha,
+                "authorization_id": authorization_id}
+    if claim_exists and not dispatches:
+        raise OrchestrationError("Task-scoped claim has no dispatch marker; reconciliation required")
+    for previous in dispatches:
+        _prove_safe_prior_dispatch(api, previous, runs, authorization_id, baseline)
+    try:
+        api.post("git/refs", {"ref": event_ref, "sha": sha})
+    except APIError as error:
+        if error.status != 422:
+            raise OrchestrationError("Task-scoped dispatch marker creation failed") from None
+        marker = api.get("git/ref/tags/" + event_ref.removeprefix("refs/tags/"))
+        if marker.get("object", {}).get("sha") != sha:
+            raise OrchestrationError("Task-scoped dispatch marker conflict is unverified") from None
+        raise OrchestrationError("Task-scoped dispatch marker already exists; reconciliation required") from None
     body = {"ref": "main", "inputs": {
         "candidate": sha, "target_migration": target, "mode": "task-scoped-auto",
         "approve_production": "false", "approve_worker_bootstrap": "false",
         "prepare_run_id": run_id, "prepare_run_attempt": attempt,
         "orchestrator_run_id": orchestrator_run_id,
         "prepare_receipt_digest": receipt_digest,
-        "task_authorization_id": authorization["authorization_id"],
+        "task_authorization_id": authorization_id,
     }}
     try:
         api.post(f"actions/workflows/{DEPLOY_WORKFLOW}/dispatches", body)
@@ -306,6 +589,7 @@ def safe_failure_detail(error: Exception) -> str:
             "Prepare attempt changed after completion event": "prepare_attempt_changed",
             "A Deploy workflow is already active": "deploy_already_active",
             "Current Alembic target is not uniquely established": "alembic_target_not_unique",
+            "GitHub API read unavailable within the controller retry budget": "github_api_read_network_unavailable",
         }
         return known.get(str(error), "orchestration_guard_failed")
     if isinstance(error, KeyError):
@@ -343,7 +627,7 @@ def main() -> int:
             output.write("- `DUPLICATE_HOSTED_WORK_REMOVED=YES`; `CACHE_PREVENTED_DOWNLOAD=UNKNOWN` until Deploy verifies the artifact cache\n")
         print(json.dumps(result, sort_keys=True))
         return 0
-    except (KeyError, ValueError, OrchestrationError, APIError, OSError, ReleaseAssetError) as error:
+    except (KeyError, ValueError, OrchestrationError, APIError, OSError) as error:
         detail = safe_failure_detail(error)
         print(f"MAXIBOT_AUTO_RELEASE=BLOCKED TYPE={type(error).__name__} REASON={detail}", file=sys.stderr)
         return 1
