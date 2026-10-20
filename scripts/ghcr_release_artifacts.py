@@ -250,7 +250,7 @@ def publish_oci_artifact(repository: str, kind: str, sha: str, run_id: str | int
         login = ["oras", "login", "--registry-config", str(auth_file), "ghcr.io",
                  "--username", username, "--password-stdin"]
         runner(login, input=password)
-        command = ["oras", "push", "--registry-config", str(auth_file), "--format", "json",
+        command = ["oras", "push", "--debug", "--registry-config", str(auth_file), "--format", "json",
                    "--artifact-type", artifact_type,
                    "--annotation", "org.opencontainers.image.source=https://github.com/akhripunov/maxibot",
                    f"{repository}:{tag}",
