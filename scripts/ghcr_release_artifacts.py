@@ -15,8 +15,10 @@ from typing import Callable
 
 REPOSITORY = "akhripunov/maxibot"
 IMAGE_REPOSITORY = "ghcr.io/akhripunov/maxibot-vps-api"
-PREPARE_REPOSITORY = "ghcr.io/akhripunov/maxibot-prepare-receipts"
-EVIDENCE_REPOSITORY = "ghcr.io/akhripunov/maxibot-deploy-evidence"
+# Reuse the already-linked image package so GITHUB_TOKEN's packages:write grant
+# covers all V5 artifacts without requiring per-package Actions access setup.
+PREPARE_REPOSITORY = IMAGE_REPOSITORY
+EVIDENCE_REPOSITORY = IMAGE_REPOSITORY
 PREPARE_ARTIFACT_TYPE = "application/vnd.maxibot.prepare.receipt.v1"
 PREPARE_LAYER_MEDIA_TYPE = PREPARE_ARTIFACT_TYPE + "+json"
 EVIDENCE_ARTIFACT_TYPE = "application/vnd.maxibot.deploy.evidence.v1"
@@ -113,7 +115,7 @@ def resolve_oci_artifact(repository: str, tag: str, artifact_type: str,
                          layer_media_type: str,
                          fetch: Callable[[str, str], tuple[bytes, dict[str, str]]]) -> tuple[str, bytes]:
     """Resolve a unique registry tag, then use only a digest-verified readback."""
-    if repository not in {PREPARE_REPOSITORY, EVIDENCE_REPOSITORY}:
+    if repository != IMAGE_REPOSITORY:
         raise ArtifactError("Unapproved MAXIBOT artifact repository")
     if not re.fullmatch(r"(?:prepare|evidence)-[0-9a-f]{40}-[1-9][0-9]{0,19}-[1-9][0-9]{0,5}", tag):
         raise ArtifactError("Invalid MAXIBOT artifact tag")
@@ -145,7 +147,7 @@ def _registry_fetch(repository: str, username: str, password: str):
     import urllib.parse
     import urllib.request
 
-    if repository not in {PREPARE_REPOSITORY, EVIDENCE_REPOSITORY} or not username or not password:
+    if repository != IMAGE_REPOSITORY or not username or not password:
         raise ArtifactError("Scoped MAXIBOT GHCR credentials are unavailable")
     repository_path = repository.split("/", 1)[1]
     realm = f"https://ghcr.io/token?{urllib.parse.urlencode({'service': 'ghcr.io', 'scope': 'repository:' + repository_path + ':pull'})}"

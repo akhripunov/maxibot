@@ -32,6 +32,11 @@ def test_artifact_tag_binds_project_sha_run_and_attempt():
     assert artifacts.artifact_tag("prepare", SHA, RUN_ID, ATTEMPT) == f"prepare-{SHA}-{RUN_ID}-{ATTEMPT}"
 
 
+def test_release_receipts_reuse_the_existing_repository_linked_image_package():
+    assert artifacts.PREPARE_REPOSITORY == artifacts.IMAGE_REPOSITORY
+    assert artifacts.EVIDENCE_REPOSITORY == artifacts.IMAGE_REPOSITORY
+
+
 @pytest.mark.parametrize("args", [
     ("gpoint", SHA, RUN_ID, ATTEMPT), ("prepare", "bad", RUN_ID, ATTEMPT),
     ("prepare", SHA, "0", ATTEMPT), ("prepare", SHA, RUN_ID, "0"),
@@ -258,4 +263,4 @@ def test_pull_token_is_short_lived_and_scoped_to_image_package(monkeypatch):
     assert request.get_header("Authorization").startswith("Basic ")
     assert timeout == 20
     with pytest.raises(artifacts.ArtifactError):
-        registry_pull_token(artifacts.PREPARE_REPOSITORY, "owner", "workflow-secret")
+        registry_pull_token("ghcr.io/akhripunov/unapproved", "owner", "workflow-secret")
