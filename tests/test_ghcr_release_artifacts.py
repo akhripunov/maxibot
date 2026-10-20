@@ -49,9 +49,35 @@ def test_oras_subprocess_failure_logs_safe_operation_and_http_status(monkeypatch
     with pytest.raises(artifacts.ArtifactError) as error:
         artifacts._run_oras(["oras", "push", "ghcr.io/owner/package:tag"])
 
-    assert str(error.value) == "ORAS push failed (exit 1; HTTP 403)"
+    assert "ORAS push failed (exit 1; HTTP 403" in str(error.value)
+    assert "403 Forbidden" in str(error.value)
     assert "secret-token-value" not in str(error.value)
     assert "registry token should stay private" not in str(error.value)
+
+
+def test_oras_failure_diagnostic_redacts_credentials_and_is_bounded(monkeypatch):
+    import subprocess
+
+    secret = "super-secret-registry-password"
+    monkeypatch.setenv("GHCR_READ_TOKEN", "ghp_abcdefghijklmnop123456")
+
+    def fail(args, **_kwargs):
+        raise subprocess.CalledProcessError(
+            1, args, output=("upload failed " + "x" * 300),
+            stderr=(f"403 Forbidden password={secret} Bearer abcdefghijklmnop1234567890 "
+                    "https://registry.example/v2?token=querysecret response={private}"))
+
+    monkeypatch.setattr(artifacts.subprocess, "run", fail)
+    with pytest.raises(artifacts.ArtifactError) as error:
+        artifacts._run_oras(["oras", "push", "ghcr.io/owner/package:tag"], input=secret)
+
+    message = str(error.value)
+    diagnostic = message.split("; detail: ", 1)[1].rstrip(")")
+    assert len(diagnostic) <= 240
+    for forbidden in (secret, "ghp_abcdefghijklmnop123456", "querysecret", "private",
+                      "abcdefghijklmnop1234567890"):
+        assert forbidden not in message
+    assert "403 Forbidden" in message
 
 
 @pytest.mark.parametrize("args", [
