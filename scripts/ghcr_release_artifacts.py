@@ -277,9 +277,8 @@ def _run_oras(args, input=None):
         result = subprocess.run(args, input=input, text=True, capture_output=True,
                                 check=True, timeout=300, env=os.environ.copy())
     except subprocess.CalledProcessError as exc:
-        # Keep registry output private while exposing enough bounded diagnostics
-        # to distinguish auth, permission, unsupported media type, and transport
-        # failures in GitHub Actions logs.
+        # Only emit a small, aggressively redacted suffix. These diagnostics may
+        # appear in public Actions logs, so never include commands or exceptions.
         detail = "\n".join(str(value) for value in (exc.stderr, exc.stdout) if value).lower()
         status = re.search(r"\b(401|403|404|405|406|409|413|415|422|429|500|502|503)\b", detail)
         if status:
@@ -293,10 +292,40 @@ def _run_oras(args, input=None):
         else:
             category = "registry request rejected"
         operation = args[1] if len(args) > 1 and args[1] in {"login", "push"} else "operation"
-        raise ArtifactError(f"ORAS {operation} failed (exit {exc.returncode}; {category})") from None
+        diagnostic = _redacted_oras_diagnostic(
+            "\n".join(str(value) for value in (exc.stderr, exc.stdout) if value),
+            secrets=[input, os.environ.get("GITHUB_TOKEN"), os.environ.get("GHCR_READ_TOKEN")],
+        )
+        suffix = f"; detail: {diagnostic}" if diagnostic else ""
+        raise ArtifactError(f"ORAS {operation} failed (exit {exc.returncode}; {category}{suffix})") from None
     except (OSError, subprocess.SubprocessError) as exc:
         raise ArtifactError("ORAS OCI publication failed") from exc
     return result.stdout
+
+
+def _redacted_oras_diagnostic(value: str, secrets=()) -> str:
+    """Return at most 240 chars of low-risk registry text for public CI logs."""
+    text = str(value or "")
+    for secret in secrets:
+        if isinstance(secret, str) and len(secret) >= 4:
+            text = text.replace(secret, "[REDACTED]")
+    patterns = (
+        (r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]"),
+        (r"(?i)\bBasic\s+[^\s,;]+", "Basic [REDACTED]"),
+        (r"(?i)\b(?:token|password|secret|authorization)(\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]"),
+        (r"(?i)\b(?:registry\s+)?(?:token|password|secret|authorization)\s+[^\s,;]+(?:\s+[^\s,;]+)?", "[REDACTED]"),
+        (r"(?i)\b(?:secret|token|password)[-_][A-Za-z0-9_-]{4,}\b", "[REDACTED]"),
+        (r"https?://[^\s/@]+:[^\s/@]+@", "https://[REDACTED]@"),
+        (r"https?://[^\s?#]+\?[^\s#]*", "[URL WITH QUERY REDACTED]"),
+        (r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b", "[REDACTED]"),
+        (r"\b[A-Za-z0-9_/-]{32,}\b", "[REDACTED]"),
+        (r"\{[^{}]*\}", "[RESPONSE BODY REDACTED]"),
+    )
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # Keep the tail where ORAS commonly places the registry's actionable reason.
+    return text[-240:]
 
 
 def publish_prepare_receipt(sha: str, run_id: str, attempt: str,
