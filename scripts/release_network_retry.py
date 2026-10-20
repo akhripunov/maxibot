@@ -6,13 +6,52 @@ import random
 import math
 import os
 from pathlib import Path
+import errno
+import socket
+import ssl
 import time
+import threading
+import urllib.error
 from collections.abc import Callable
 from typing import TypeVar
 
 T = TypeVar("T")
 NETWORK_RETRY_BUDGET_SECONDS = 30 * 60
 NETWORK_BACKOFF_CAP_SECONDS = 60
+RETRYABLE_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+RETRYABLE_ERRNOS = {
+    errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE, errno.ETIMEDOUT,
+    errno.EHOSTUNREACH, errno.ENETUNREACH,
+}
+
+
+def is_retryable_network_error(error: BaseException) -> bool:
+    """Classify transient failures for idempotent network reads only."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in RETRYABLE_HTTP_STATUS
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(reason, ssl.SSLError):
+        message = str(reason).lower()
+        if any(marker in message for marker in (
+            "certificate_verify_failed", "certificate verify failed",
+            "wrong_version_number", "protocol_version", "unsupported protocol",
+        )):
+            return False
+        if isinstance(reason, (ssl.SSLEOFError, ssl.SSLZeroReturnError)):
+            return True
+        syscall_error = getattr(ssl, "SSLSyscallError", ())
+        return bool(syscall_error and isinstance(reason, syscall_error)) or any(
+            marker in message for marker in (
+                "ssl_error_syscall", "unexpected_eof", "eof occurred", "timed out", "timeout",
+                "connection reset", "tlsv1_alert_internal_error",
+            ))
+    if isinstance(reason, socket.gaierror):
+        return reason.errno == getattr(socket, "EAI_AGAIN", None)
+    if isinstance(reason, (TimeoutError, socket.timeout, ConnectionError)):
+        return True
+    return isinstance(reason, OSError) and reason.errno in RETRYABLE_ERRNOS
 
 
 class NetworkUnavailable(RuntimeError):
@@ -26,6 +65,8 @@ class RetryBudget:
         self.clock = clock or time.monotonic
         self.started = self.clock()
         self.seconds = seconds
+        self._lock = threading.Lock()
+        self._charged_intervals: list[tuple[float, float]] = []
         configured_path = state_path or os.environ.get("NETWORK_RETRY_BUDGET_STATE")
         self.state_path = Path(configured_path) if configured_path else None
         self.spent = 0.0
@@ -37,17 +78,51 @@ class RetryBudget:
         self.deadline = self.started + max(0.0, seconds - self.spent)
 
     def persist(self, elapsed: float) -> None:
-        if self.state_path:
+        with self._lock:
             self.spent += max(0.0, elapsed)
+            if not self.state_path:
+                return
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
             temporary.write_text(f"{math.ceil(self.spent)}\n", encoding="utf-8")
             temporary.replace(self.state_path)
 
+    def persist_interval(self, started: float, ended: float) -> None:
+        """Charge only the newly observed portion of a possibly overlapping retry interval."""
+        start, end = started, ended
+        if end <= start:
+            return
+        with self._lock:
+            overlap = 0.0
+            for old_start, old_end in self._charged_intervals:
+                overlap += max(0.0, min(end, old_end) - max(start, old_start))
+            charged = max(0.0, end - start - overlap)
+            merged = []
+            for old_start, old_end in sorted([*self._charged_intervals, (start, end)]):
+                if merged and old_start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], old_end))
+                else:
+                    merged.append((old_start, old_end))
+            self._charged_intervals = merged
+            if charged == 0:
+                return
+            self.spent += charged
+            if not self.state_path:
+                return
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+            temporary.write_text(f"{math.ceil(self.spent)}\n", encoding="utf-8")
+            temporary.replace(self.state_path)
+
+    def remaining_seconds(self) -> float:
+        with self._lock:
+            return max(0.0, self.seconds - self.spent)
+
 
 def retry_network_read(operation: Callable[[], T], stage: str,
                        is_retryable: Callable[[BaseException], bool], *,
                        budget: RetryBudget | None = None,
+                       deadline: float | None = None,
                        clock: Callable[[], float] | None = None,
                        sleep: Callable[[float], None] | None = None,
                        jitter: Callable[[float, float], float] | None = None,
@@ -66,7 +141,8 @@ def retry_network_read(operation: Callable[[], T], stage: str,
         return NetworkUnavailable(stage)
 
     retries = 0
-    deadline = clock() + max(0.0, budget.seconds - budget.spent)
+    budget_deadline = clock() + budget.remaining_seconds()
+    deadline = min(budget_deadline, deadline) if deadline is not None else budget_deadline
     try:
       while True:
         if clock() >= deadline:
@@ -93,4 +169,4 @@ def retry_network_read(operation: Callable[[], T], stage: str,
             sleep(delay)
     finally:
         if retries:
-            budget.persist(clock() - call_started)
+            budget.persist_interval(call_started, clock())

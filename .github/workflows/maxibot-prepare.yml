@@ -49,6 +49,12 @@ jobs:
       ADS_AUTOPILOT_ENABLED: 'false'
       ADS_WRITE_ACTIONS_ENABLED: 'false'
     steps:
+      - name: Initialize shared retry budget
+        shell: bash
+        run: |
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '0\n' > "$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID"
+
       - name: Checkout exact candidate
         uses: actions/checkout@v4
         with:

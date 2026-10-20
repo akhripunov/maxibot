@@ -98,6 +98,75 @@ def test_verify_oci_artifact_binds_manifest_digest_layer_and_payload():
     assert verified == payload
 
 
+def test_ghcr_token_and_exact_digest_reads_retry_transient_tls_eof(monkeypatch):
+    import ssl
+    import urllib.error
+    from scripts.release_network_retry import RetryBudget
+
+    payload = b'exact receipt bytes'
+    manifest, digest = oci_manifest(artifacts.PREPARE_ARTIFACT_TYPE,
+        artifacts.PREPARE_LAYER_MEDIA_TYPE, payload)
+    calls = {"token": 0, "tag": 0, "digest": 0, "blob": 0}
+
+    class Response:
+        def __init__(self, body, headers=None):
+            self.body, self.headers = body, headers or {}
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def read(self, _limit=-1): return self.body
+
+    def opener(request, timeout):
+        url = request.full_url
+        if "/token?" in url:
+            calls["token"] += 1
+            if calls["token"] == 1:
+                raise urllib.error.URLError(ssl.SSLEOFError("transient EOF"))
+            return Response(b'{"token":"short-lived-test-token"}')
+        if url.endswith(f"/manifests/{artifacts.artifact_tag('prepare', SHA, RUN_ID, ATTEMPT)}"):
+            calls["tag"] += 1
+            if calls["tag"] == 1:
+                raise urllib.error.URLError(ssl.SSLEOFError("transient EOF"))
+            return Response(manifest, {"Docker-Content-Digest": digest})
+        if url.endswith(f"/manifests/{digest}"):
+            calls["digest"] += 1
+            return Response(manifest, {"Docker-Content-Digest": digest})
+        if url.endswith("/blobs/" + json.loads(manifest)["layers"][0]["digest"]):
+            calls["blob"] += 1
+            return Response(payload)
+        raise AssertionError("unexpected GHCR URL")
+
+    retry = artifacts.retry_network_read
+    monkeypatch.setattr(artifacts, "retry_network_read", lambda *args, **kwargs: retry(
+        *args, **kwargs, sleep=lambda _seconds: None, jitter=lambda _low, _high: 0,
+        emit=lambda _event: None))
+    fetch = artifacts._registry_fetch(artifacts.PREPARE_REPOSITORY, "test-user", "secret-test",
+        budget=RetryBudget(seconds=10), opener=opener)
+
+    assert artifacts.resolve_oci_artifact(artifacts.PREPARE_REPOSITORY,
+        artifacts.artifact_tag("prepare", SHA, RUN_ID, ATTEMPT),
+        artifacts.PREPARE_ARTIFACT_TYPE, artifacts.PREPARE_LAYER_MEDIA_TYPE, fetch) == (digest, payload)
+    assert calls == {"token": 2, "tag": 2, "digest": 1, "blob": 1}
+
+
+def test_ghcr_authorization_failure_is_not_retried_or_disclosed(monkeypatch):
+    import urllib.error
+    from scripts.release_network_retry import RetryBudget
+
+    calls = []
+    def opener(request, timeout):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 403, "private body", {}, None)
+
+    fetch = artifacts._registry_fetch(artifacts.PREPARE_REPOSITORY, "test-user", "secret-test",
+        budget=RetryBudget(seconds=10), opener=opener)
+    with pytest.raises(artifacts.ArtifactError, match="HTTP 403") as error:
+        fetch(f"https://ghcr.io/v2/akhripunov/maxibot-vps-api/manifests/prepare-{SHA}-{RUN_ID}-{ATTEMPT}",
+            artifacts.OCI_ACCEPT)
+    assert len(calls) == 1
+    assert "private body" not in str(error.value)
+    assert "secret-test" not in str(error.value)
+
+
 @pytest.mark.parametrize("mutation", ["manifest", "artifact_type", "layer_type", "layer_hash", "size"])
 def test_verify_oci_artifact_rejects_mismatched_identity(mutation):
     payload = b'{"status":"READY"}'

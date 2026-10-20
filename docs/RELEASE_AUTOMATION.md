@@ -74,6 +74,33 @@ State machine: без предварительной auth — `PREPARING → REA
 
 Runner telemetry публикует hosted/self-hosted job count и измеренные wall-clock seconds (не billable minutes), `DUPLICATE_HOSTED_WORK_REMOVED` и `CACHE_PREVENTED_DOWNLOAD`. Pipeline controller использует существующий self-hosted runner; Prepare и image build выполняются один раз, Deploy использует persistent project cache и проверяет release metadata/hash при каждом чтении.
 
+## Bounded network retry
+
+All retries are for idempotent reads only and share the existing 30-minute
+workflow budget through `NETWORK_RETRY_BUDGET_STATE`. Backoff is exponential,
+jittered, and capped at 60 seconds. A fresh response is rechecked against the
+current main SHA, exact Prepare run/attempt, immutable GHCR digest, and existing
+authorization/conflict gates after each successful retry.
+
+| Phase / operation | Endpoint and method | Idempotent | Retry / budget | Failure handling |
+|---|---|---:|---|---|
+| Runner bootstrap (before project scripts) | GitHub Actions service, action archives, `codeload.github.com`, pinned ORAS/action downloads; runner/platform GETs | Read-only | No project retry code is loaded yet; only the runner/action's own bounded behavior applies. Not charged to `NETWORK_RETRY_BUDGET_STATE`. | Bootstrap failure ends the job. Keep actions pinned and TLS verification enabled; do not claim Python retries can repair it. |
+| Prepare coalescing | `GET api.github.com/repos/.../git/ref/heads/main` before and after quiet window | Yes | Retry classified transient network/TLS failures through the same shared 30-minute workflow budget. | Do not proceed with stale/unknown `main`; auth, non-transient HTTP and malformed responses fail closed. |
+| Candidate / authorization / Prepare provenance | GitHub API `GET` for main ref, authorization refs, workflow runs, exact run metadata | Yes | Retry classified transient network/TLS EOF and HTTP 408/425/429/5xx through the shared 30-minute workflow budget. | 401/403, TLS verification failure, malformed response, changed SHA/run/attempt, invalid provenance or authorization mismatch fail closed. |
+| Runner readiness | GitHub API `GET` plus fixed production host SSH readiness `printf` probe | Yes | Retry selected temporary network errors through the same budget; SSH attempts remain bounded and use one connection attempt each. | Auth, host-key and non-transient SSH failures fail closed. No production command is sent by the readiness probe. |
+| GHCR artifact and image verification | Registry token, OCI manifest/blob GETs, and Docker pull by exact image digest | Yes | Retry classified transient reads and digest-pinned Docker pull through the shared budget and absolute deadline. Docker stderr is captured and never emitted. | Never relax repository scope, SHA/run/attempt identity, descriptor/layer/image digest or `linux/amd64` checks; auth and verification failures fail closed. |
+| Cached GitHub artifact ZIP | GitHub Actions artifact API GET, signed HTTPS object-storage GET, parallel byte-range GETs | Yes | Retry reads through one shared budget and the download's absolute deadline. Parallel ranges charge the union of overlapping retry intervals, not the sum of worker durations. Obtain a fresh signed redirect on a new API attempt; never send the GitHub bearer token to storage. | Enforce byte/range bounds and exact artifact identity; expired or malformed redirects fail closed. |
+| Legacy GitHub Release metadata / evidence reads | `gh api` / `gh release` readback and GitHub Release asset GET | Yes | No common retry wrapper in these legacy paths. | Fail closed on unavailable or inconsistent metadata; no retry claim is made for these paths. |
+| GHCR / GitHub publication | ORAS login/push; Git tag and Release create/upload/edit; GitHub ref create/claim/consume; Deployment create/status | No (writes) | No blind retry and no shared read budget. | On uncertain outcome, read back exact tag/ref/run/deployment identity and reconcile. Never repeat a publication or claim based only on a timeout. |
+| Production mutation | Canonical `release_prod.sh` over fixed-host SSH, Apply and Alembic migration | No (mutation) | No automatic network retry. | Preserve backup, lock, rollback and health gates. An uncertain result requires read-only reconciliation; never automatically repeat Apply or migration. |
+| Linear / release bookkeeping | Release status and history publication | Write | No retry wrapper in the release client. | Report publication failure and reconcile the existing run/evidence; do not rerun Deploy. |
+
+`NETWORK_UNAVAILABLE` means the bounded window expired. Budget accounting is
+shared across concurrent reads: overlapping retry intervals consume only their
+union of wall-clock time. HTTP authorization
+failures and verification failures keep their safe, specific categories and do
+not consume repeated attempts.
+
 ## Где смотреть
 
 - GitHub run и первый упавший шаг: ссылки **MAXIBOT — Prepare** / **MAXIBOT — Deploy** выше.

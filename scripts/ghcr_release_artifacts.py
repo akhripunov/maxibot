@@ -13,6 +13,13 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+try:
+    from scripts.release_network_retry import (NetworkUnavailable, RetryBudget,
+        is_retryable_network_error, retry_network_read)
+except ModuleNotFoundError:  # Direct script execution puts scripts/ on sys.path.
+    from release_network_retry import (NetworkUnavailable, RetryBudget,
+        is_retryable_network_error, retry_network_read)
+
 
 REPOSITORY = "akhripunov/maxibot"
 IMAGE_REPOSITORY = "ghcr.io/akhripunov/maxibot-vps-api"
@@ -32,6 +39,7 @@ OCI_ACCEPT = ", ".join((OCI_MANIFEST_MEDIA_TYPE,
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+NETWORK_BUDGET = RetryBudget()
 
 
 class ArtifactError(ValueError):
@@ -147,12 +155,32 @@ def resolve_oci_artifact(repository: str, tag: str, artifact_type: str,
     return digest, verified
 
 
-def _registry_fetch(repository: str, username: str, password: str):
+def _network_failure_category(error: BaseException) -> str:
+    import urllib.error
+    if isinstance(error, NetworkUnavailable):
+        return "NETWORK_UNAVAILABLE"
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code}"
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    return type(reason).__name__
+
+
+def _retry_registry_read(operation: Callable, stage: str, budget: RetryBudget | None = None):
+    try:
+        return retry_network_read(operation, stage, is_retryable_network_error,
+                                  budget=budget or NETWORK_BUDGET)
+    except NetworkUnavailable:
+        raise ArtifactError(f"GHCR {stage} failed (NETWORK_UNAVAILABLE)") from None
+
+
+def _registry_fetch(repository: str, username: str, password: str, *,
+                    budget: RetryBudget | None = None, opener=None):
     """Build a scoped GHCR reader. Basic credentials go only to ghcr.io/token."""
     import base64
-    import urllib.error
     import urllib.parse
     import urllib.request
+    request_opener = opener or urllib.request.urlopen
+    retry_budget = budget or NETWORK_BUDGET
 
     if repository != IMAGE_REPOSITORY or not username or not password:
         raise ArtifactError("Scoped MAXIBOT GHCR credentials are unavailable")
@@ -169,34 +197,46 @@ def _registry_fetch(repository: str, username: str, password: str):
             request = urllib.request.Request(realm, headers={"Authorization": f"Basic {auth}",
                 "Accept": "application/json"})
             try:
-                with urllib.request.urlopen(request, timeout=30) as response:
-                    token_body = json.loads(response.read(65536).decode("utf-8"))
-            except Exception as exc:
-                raise ArtifactError("GHCR pull token request failed") from exc
+                def fetch_token():
+                    with request_opener(request, timeout=30) as response:
+                        return json.loads(response.read(65536).decode("utf-8"))
+                token_body = _retry_registry_read(fetch_token, "pull_token", retry_budget)
+            except urllib.error.HTTPError as exc:
+                raise ArtifactError(f"GHCR pull token request failed ({_network_failure_category(exc)})") from None
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError,
+                    UnicodeDecodeError) as exc:
+                raise ArtifactError(
+                    f"GHCR pull token request failed ({_network_failure_category(exc)})") from None
             bearer = token_body.get("token") or token_body.get("access_token") if isinstance(token_body, dict) else None
             if not isinstance(bearer, str) or not bearer or len(bearer) > 8192:
                 raise ArtifactError("GHCR returned an invalid pull token")
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {bearer}",
             "Accept": accept, "User-Agent": "maxibot-release-orchestrator"})
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = response.read(MAX_ARTIFACT_BYTES + 2)
-                if len(body) > MAX_ARTIFACT_BYTES:
-                    raise ArtifactError("GHCR artifact response exceeds its size limit")
-                return body, {key: value for key, value in response.headers.items()}
+            def fetch_artifact():
+                with request_opener(request, timeout=30) as response:
+                    body = response.read(MAX_ARTIFACT_BYTES + 2)
+                    if len(body) > MAX_ARTIFACT_BYTES:
+                        raise ArtifactError("GHCR artifact response exceeds its size limit")
+                    return body, {key: value for key, value in response.headers.items()}
+            return _retry_registry_read(fetch_artifact, "digest_readback", retry_budget)
         except urllib.error.HTTPError as exc:
             if exc.code == 404 and "/manifests/" in url and not DIGEST.fullmatch(url.rsplit("/", 1)[-1]):
                 raise MissingArtifactError("GHCR artifact tag is not published") from None
-            raise ArtifactError("GHCR digest readback failed") from None
-        except Exception as exc:
-            raise ArtifactError("GHCR digest readback failed") from exc
+            raise ArtifactError(f"GHCR digest readback failed ({_network_failure_category(exc)})") from None
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError,
+                UnicodeDecodeError) as exc:
+            raise ArtifactError(
+                f"GHCR digest readback failed ({_network_failure_category(exc)})") from None
     return fetch
 
 
-def registry_pull_token(repository: str, username: str, password: str) -> str:
+def registry_pull_token(repository: str, username: str, password: str, *,
+                        budget: RetryBudget | None = None, opener=None) -> str:
     """Exchange a workflow token for a short-lived, repository-pull-only GHCR token."""
     import urllib.parse
     import urllib.request
+    request_opener = opener or urllib.request.urlopen
 
     if repository != IMAGE_REPOSITORY or not username or not password:
         raise ArtifactError("Only the approved MAXIBOT image repository may receive a pull token")
@@ -206,10 +246,17 @@ def registry_pull_token(repository: str, username: str, password: str) -> str:
         "Authorization": "Basic " + __import__("base64").b64encode(
             f"{username}:{password}".encode()).decode(), "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = json.loads(response.read(16384).decode("utf-8"))
-    except Exception as exc:
-        raise ArtifactError("Could not mint a scoped MAXIBOT GHCR pull token") from exc
+        def fetch_token():
+            with request_opener(request, timeout=20) as response:
+                return json.loads(response.read(16384).decode("utf-8"))
+        body = _retry_registry_read(fetch_token, "pull_token", budget)
+    except urllib.error.HTTPError as exc:
+        raise ArtifactError(
+            f"Could not mint a scoped MAXIBOT GHCR pull token ({_network_failure_category(exc)})") from None
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError,
+            UnicodeDecodeError) as exc:
+        raise ArtifactError(
+            f"Could not mint a scoped MAXIBOT GHCR pull token ({_network_failure_category(exc)})") from None
     token = body.get("token") or body.get("access_token") if isinstance(body, dict) else None
     expires = body.get("expires_in", 0) if isinstance(body, dict) else 0
     if not isinstance(token, str) or not token or len(token) > 8192 or not isinstance(expires, int) or not 0 < expires <= 3600:

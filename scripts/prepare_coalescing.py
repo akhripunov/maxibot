@@ -10,9 +10,17 @@ import time
 import urllib.error
 import urllib.request
 
+try:
+    from scripts.release_network_retry import (NetworkUnavailable, RetryBudget,
+        is_retryable_network_error, retry_network_read)
+except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
+    from release_network_retry import (NetworkUnavailable, RetryBudget,
+        is_retryable_network_error, retry_network_read)
+
 REPOSITORY = "akhripunov/maxibot"
 QUIET_WINDOW_SECONDS = 60
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+NETWORK_BUDGET = RetryBudget()
 
 
 class CoalescingError(RuntimeError):
@@ -23,7 +31,8 @@ def _valid_sha(value):
     return isinstance(value, str) and SHA_RE.fullmatch(value) is not None
 
 
-def read_current_main_sha(token, opener=urllib.request.urlopen):
+def read_current_main_sha(token, opener=urllib.request.urlopen, *, budget=None,
+                          retry_options=None):
     if not token:
         raise CoalescingError("GitHub token is unavailable")
     request = urllib.request.Request(
@@ -34,9 +43,18 @@ def read_current_main_sha(token, opener=urllib.request.urlopen):
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    try:
+    def fetch():
         with opener(request, timeout=15) as response:
             payload = json.loads(response.read())
+        return payload
+
+    try:
+        payload = retry_network_read(fetch, "prepare_coalescing_main_sha",
+            is_retryable_network_error, budget=budget or NETWORK_BUDGET,
+            **(retry_options or {}))
+    except NetworkUnavailable:
+        raise CoalescingError(
+            "NETWORK_UNAVAILABLE stage=prepare_coalescing_main_sha") from None
     except urllib.error.HTTPError as error:
         raise CoalescingError(f"GitHub main SHA lookup failed (HTTP {error.code})") from None
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):

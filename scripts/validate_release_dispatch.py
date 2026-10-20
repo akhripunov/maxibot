@@ -7,15 +7,14 @@ import json
 import math
 import os
 import re
-import socket
-import ssl
 import sys
 from pathlib import Path
 import urllib.error
 import urllib.request
 from typing import Any
 
-from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+from release_network_retry import (NetworkUnavailable, RetryBudget,
+    is_retryable_network_error, retry_network_read)
 from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
     PREPARE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
     resolve_oci_artifact, validate_prepare_receipt)
@@ -31,15 +30,7 @@ NETWORK_BUDGET = RetryBudget()
 
 
 def _retryable_github_error(error: BaseException) -> bool:
-    if isinstance(error, urllib.error.HTTPError):
-        return error.code in {408, 425, 429, 500, 502, 503, 504}
-    reason = error.reason if isinstance(error, urllib.error.URLError) else error
-    if isinstance(reason, ssl.SSLCertVerificationError):
-        return False
-    if isinstance(reason, ssl.SSLError):
-        return not any(marker in str(reason).lower() for marker in (
-            "certificate_verify_failed", "wrong_version_number", "protocol_version"))
-    return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
+    return is_retryable_network_error(error)
 
 
 class ValidationError(RuntimeError):
@@ -184,7 +175,7 @@ def validate(values: dict[str, str], api_get=github_get,
         username = os.environ.get("GITHUB_ACTOR", "")
         receipt_digest, receipt_bytes = resolve_oci_artifact(PREPARE_REPOSITORY, tag,
             PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
-            _registry_fetch(PREPARE_REPOSITORY, username, token))
+            _registry_fetch(PREPARE_REPOSITORY, username, token, budget=NETWORK_BUDGET))
         receipt = json.loads(receipt_bytes.decode("utf-8"))
         validate_prepare_receipt(receipt, sha, latest_run_id, attempt)
         if expected_prepare_receipt_digest and receipt_digest != expected_prepare_receipt_digest:

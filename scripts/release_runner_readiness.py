@@ -4,18 +4,24 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import urllib.error
 import urllib.request
 
 from prepared_artifact_cache import prune_reclaimable_release_archives
+from release_network_retry import NetworkUnavailable, RetryBudget, is_retryable_network_error, retry_network_read
 
 REPOSITORY = "akhripunov/maxibot"
 DEPLOY_WORKFLOW = "maxibot-deploy.yml"
 EXPECTED_RUNNER = "maxibot-owner-mac"
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MIN_FREE_BYTES = 5 * 1024**3
+NETWORK_BUDGET = RetryBudget()
 
 
 class RunnerReadinessError(RuntimeError):
@@ -48,7 +54,10 @@ def validate_runner_identity_and_scope(*, runner_name: str, runner_os: str, runn
         raise RunnerReadinessError("Required release command-line tools are unavailable")
     if not network_ready:
         raise RunnerReadinessError("Canonical deployment SSH network is unavailable")
-    if not candidate_sha or main_sha != candidate_sha:
+    if (not isinstance(candidate_sha, str) or not SHA_RE.fullmatch(candidate_sha)
+            or not isinstance(main_sha, str) or not SHA_RE.fullmatch(main_sha)):
+        raise RunnerReadinessError("GitHub main reference or candidate SHA is invalid")
+    if main_sha != candidate_sha:
         raise RunnerReadinessError("Candidate is no longer exact current main")
     if active_conflict:
         raise RunnerReadinessError("Conflicting MAXIBOT production mutation is active or queued")
@@ -71,29 +80,104 @@ def validate_release_host(*, runner_name: str, runner_os: str, runner_arch: str,
             "project_paths": "READY", "conflicting_production_mutation": "NO"}
 
 
-def probe_deployment_ssh(*, host: str, key: str, run_command=subprocess.run) -> bool:
+def probe_deployment_ssh(*, host: str, key: str, run_command=subprocess.run,
+                         budget: RetryBudget | None = None,
+                         retry_options: dict | None = None) -> bool:
+    return _probe_deployment_ssh(host=host, key=key, run_command=run_command,
+                                  budget=budget, retry_options=retry_options)
+
+
+class _TransientSSHNetworkError(RuntimeError):
+    pass
+
+
+def _probe_deployment_ssh(*, host: str, key: str, run_command,
+                          budget: RetryBudget | None = None,
+                          retry_options: dict | None = None) -> bool:
     if host != "135.106.166.46" or not key or not os.path.isfile(key) or not os.access(key, os.R_OK):
         return False
-    try:
-        result = run_command(
-            ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-             "-o", "ConnectionAttempts=1", f"root@{host}", "printf MAXIBOT_DEPLOYMENT_NETWORK_READY"],
-            check=False, capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
+
+    transient_markers = (
+        "could not resolve", "temporary failure in name resolution", "eai_again",
+        "connection timed out", "operation timed out", "connection reset",
+        "connection closed", "connection refused", "network is unreachable",
+        "no route to host", "banner exchange", "end of file",
+    )
+
+    def probe() -> bool:
+        try:
+            result = run_command(
+                ["ssh", "-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                 "-o", "ConnectionAttempts=1", f"root@{host}", "printf MAXIBOT_DEPLOYMENT_NETWORK_READY"],
+                check=False, capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            raise _TransientSSHNetworkError() from None
+        except OSError as error:
+            if is_retryable_network_error(error):
+                raise _TransientSSHNetworkError() from None
+            return False
+        if result.returncode == 0:
+            return result.stdout.strip() == "MAXIBOT_DEPLOYMENT_NETWORK_READY"
+        if result.returncode == 255 and any(marker in (result.stderr or "").lower()
+                                            for marker in transient_markers):
+            raise _TransientSSHNetworkError() from None
         return False
-    return result.returncode == 0 and result.stdout.strip() == "MAXIBOT_DEPLOYMENT_NETWORK_READY"
+
+    try:
+        return retry_network_read(probe, "runner_readiness_deployment_ssh",
+            lambda error: isinstance(error, _TransientSSHNetworkError),
+            budget=budget or NETWORK_BUDGET, **(retry_options or {}))
+    except NetworkUnavailable:
+        raise RunnerReadinessError("NETWORK_UNAVAILABLE stage=runner_readiness_deployment_ssh") from None
 
 
-def _request(path: str, token: str) -> dict:
+def _request(path: str, token: str, *, opener=urllib.request.urlopen,
+             budget: RetryBudget | None = None, retry_options: dict | None = None) -> dict:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{REPOSITORY}/{path}",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28"})
+    def fetch() -> dict:
+        with opener(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise RunnerReadinessError("GitHub API returned invalid JSON")
+        return payload
+
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise RunnerReadinessError(f"GitHub network/API readiness failed ({type(error).__name__})") from None
+        return retry_network_read(fetch, "runner_readiness_github_api",
+            is_retryable_network_error, budget=budget or NETWORK_BUDGET,
+            **(retry_options or {}))
+    except NetworkUnavailable:
+        raise RunnerReadinessError("NETWORK_UNAVAILABLE stage=runner_readiness_github_api") from None
+    except urllib.error.HTTPError as error:
+        raise RunnerReadinessError(f"GitHub API request failed (HTTP {error.code})") from None
+    except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, ssl.SSLError) as error:
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        raise RunnerReadinessError(
+            f"GitHub API request failed ({type(reason).__name__})") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RunnerReadinessError("GitHub API returned invalid JSON") from None
+
+
+def current_main_sha(reference: dict) -> str:
+    """Validate GitHub's ref response before comparing the exact candidate SHA."""
+    obj = reference.get("object") if isinstance(reference, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+        raise RunnerReadinessError("GitHub API returned invalid main reference")
+    return sha
+
+
+def has_conflicting_production_run(workflow_runs, current_run_id: str) -> bool:
+    if not isinstance(workflow_runs, list) or any(not isinstance(run, dict) for run in workflow_runs):
+        raise RunnerReadinessError("GitHub API returned invalid production workflow data")
+    valid_statuses = {"queued", "in_progress", "completed", "waiting", "pending", "requested", "action_required"}
+    if any(not str(run.get("id", "")).isdigit() or run.get("status") not in valid_statuses
+           for run in workflow_runs):
+        raise RunnerReadinessError("GitHub API returned invalid production workflow data")
+    return any(str(run.get("id")) != current_run_id and run.get("status") in
+               {"queued", "in_progress", "waiting", "pending", "requested"} for run in workflow_runs)
 
 
 def _safe_writable_path(path: Path, home: Path) -> bool:
@@ -140,12 +224,10 @@ def run() -> dict[str, str]:
     ssh_key = os.environ.get("PRODUCTION_SSH_KEY", os.environ.get(
         "MAXIBOT_PRODUCTION_SSH_KEY", "/Users/akhripuniov/.ssh/maxibot_selectel_ed25519"))
     network_ready = probe_deployment_ssh(host=production_host, key=ssh_key)
-    main = _request("git/ref/heads/main", token).get("object", {}).get("sha", "")
+    main = current_main_sha(_request("git/ref/heads/main", token))
     active = _request(f"actions/workflows/{DEPLOY_WORKFLOW}/runs?branch=main&per_page=100", token)
     this_run = os.environ.get("GITHUB_RUN_ID", "")
-    conflict = any(str(run.get("id")) != this_run and run.get("status") in
-                   {"queued", "in_progress", "waiting", "pending"}
-                   for run in active.get("workflow_runs", []))
+    conflict = has_conflicting_production_run(active.get("workflow_runs"), this_run)
     candidate = os.environ.get("CANDIDATE_SHA", "")
     runner_scope_args = dict(
         runner_name=os.environ.get("RUNNER_NAME", ""), runner_os=os.environ.get("RUNNER_OS", ""),

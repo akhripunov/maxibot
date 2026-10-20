@@ -10,18 +10,69 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 try:
     from scripts.ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
-        PREPARE_REPOSITORY, IMAGE_REPOSITORY, OCI_ACCEPT, DIGEST, ArtifactError,
+        PREPARE_REPOSITORY, IMAGE_REPOSITORY, OCI_ACCEPT, DIGEST, ArtifactError, NETWORK_BUDGET,
         _header_value, _registry_fetch, artifact_tag,
         resolve_oci_artifact, validate_prepare_receipt)
+    from scripts.release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
 except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
     from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
-        PREPARE_REPOSITORY, IMAGE_REPOSITORY, OCI_ACCEPT, DIGEST, ArtifactError,
+        PREPARE_REPOSITORY, IMAGE_REPOSITORY, OCI_ACCEPT, DIGEST, ArtifactError, NETWORK_BUDGET,
         _header_value, _registry_fetch, artifact_tag,
         resolve_oci_artifact, validate_prepare_receipt)
+    from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+
+
+class _TransientDockerPullError(RuntimeError):
+    pass
+
+
+def _pull_image_by_digest(docker: str, reference: str, env: dict, *,
+                          budget: RetryBudget | None = None,
+                          run_command=None,
+                          clock=None,
+                          retry_options: dict | None = None) -> None:
+    """Retry only transient failures while reading an immutable GHCR image digest."""
+    retry_budget = budget or NETWORK_BUDGET
+    run_command = run_command or subprocess.run
+    clock = clock or time.monotonic
+    deadline = clock() + retry_budget.remaining_seconds()
+    transient_markers = (
+        "tls handshake timeout", "ssl connection timeout", "unexpected eof",
+        "connection reset", "connection refused", "connection timed out",
+        "temporary failure in name resolution", "no such host", "network is unreachable",
+        "no route to host", "context deadline exceeded", "i/o timeout",
+    )
+
+    def pull_once() -> None:
+        remaining = min(retry_budget.remaining_seconds(), deadline - clock())
+        if remaining <= 0:
+            raise _TransientDockerPullError()
+        try:
+            run_command([docker, "pull", reference], env=env, check=True,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                        timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise _TransientDockerPullError() from None
+        except subprocess.CalledProcessError as error:
+            diagnostic = error.stderr or ""
+            if any(marker in diagnostic.lower() for marker in transient_markers):
+                raise _TransientDockerPullError() from None
+            raise ArtifactError("GHCR image pull failed") from None
+
+    retry_kwargs = dict(retry_options or {})
+    retry_kwargs.setdefault("clock", clock)
+    retry_kwargs.setdefault("deadline", deadline)
+    try:
+        retry_network_read(pull_once, "ghcr_image_pull",
+            lambda error: isinstance(error, _TransientDockerPullError),
+            budget=retry_budget, **retry_kwargs)
+    except NetworkUnavailable:
+        raise ArtifactError("NETWORK_UNAVAILABLE stage=ghcr_image_pull") from None
 
 
 def resolve_prepare(sha: str, run_id: str, attempt: str, expected_digest: str,
@@ -93,7 +144,7 @@ def pull_verified_image(image: dict, sha: str, username: str, token: str) -> Non
         subprocess.run([docker, "login", "ghcr.io", "--username", username,
                         "--password-stdin"], input=token + "\n", text=True,
                        env=env, check=True, stdout=subprocess.DEVNULL)
-        subprocess.run([docker, "pull", reference], env=env, check=True)
+        _pull_image_by_digest(docker, reference, env)
         verify_image_config_digest(image, username, token)
         repo_digests = subprocess.check_output([docker, "image", "inspect", reference,
             "--format", "{{range .RepoDigests}}{{println .}}{{end}}"], env=env, text=True).splitlines()

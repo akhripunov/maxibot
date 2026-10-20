@@ -18,7 +18,8 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release_network_retry import NetworkUnavailable, RetryBudget, retry_network_read
+from release_network_retry import (NetworkUnavailable, RetryBudget,
+    is_retryable_network_error, retry_network_read)
 from release_assets import PREPARE_ASSET_NAME, ReleaseAssetError, release_tag, resolve_asset, validate_prepare_directory
 
 
@@ -34,18 +35,10 @@ class NetworkStageError(RuntimeError):
 
 
 def _retryable(error: BaseException) -> bool:
-    if isinstance(error, urllib.error.HTTPError):
-        return error.code in {408, 425, 429, 500, 502, 503, 504}
-    reason = error.reason if isinstance(error, urllib.error.URLError) else error
-    if isinstance(reason, ssl.SSLCertVerificationError):
-        return False
-    if isinstance(reason, ssl.SSLError):
-        return not any(marker in str(reason).lower() for marker in (
-            "certificate_verify_failed", "wrong_version_number", "protocol_version"))
-    return isinstance(reason, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
+    return is_retryable_network_error(error)
 
 
-def network_request(operation, stage: str, allow_redirect: bool = False, budget=None):
+def network_request(operation, stage: str, allow_redirect: bool = False, budget=None, deadline=None):
     def request_once():
         try:
             return operation()
@@ -55,7 +48,8 @@ def network_request(operation, stage: str, allow_redirect: bool = False, budget=
                 return error
             raise
     try:
-        return retry_network_read(request_once, stage, _retryable, budget=budget or NETWORK_BUDGET)
+        return retry_network_read(request_once, stage, _retryable,
+                                  budget=budget or NETWORK_BUDGET, deadline=deadline)
     except NetworkUnavailable:
         raise NetworkStageError(stage, "NETWORK_UNAVAILABLE") from None
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
@@ -146,11 +140,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def download_release(repo, asset_id, token, target, expected_size=None):
+def download_release(repo, asset_id, token, target, expected_size=None, budget=None):
     """Download an exact GitHub Release ZIP via parallel authenticated byte-range redirects."""
     if not isinstance(expected_size, int) or isinstance(expected_size, bool) or not 0 < expected_size <= MAX_BYTES:
         raise ReleaseAssetError('Release asset size is unavailable or out of bounds')
-    deadline = time.monotonic() + RetryBudget().seconds
+    retry_budget = budget or NETWORK_BUDGET or RetryBudget()
+    deadline = time.monotonic() + retry_budget.remaining_seconds()
 
     def fetch_range(start, end, path):
         expected_range = f'bytes {start}-{end}/{expected_size}'
@@ -205,11 +200,10 @@ def download_release(repo, asset_id, token, target, expected_size=None):
                 if total != end - start + 1:
                     raise ConnectionError('Release asset range was incomplete')
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if deadline - time.monotonic() <= 0:
             raise NetworkStageError('release_asset_download', 'NETWORK_UNAVAILABLE')
-        budget = RetryBudget(seconds=remaining)
-        network_request(operation, 'release_asset_download', budget=budget)
+        network_request(operation, 'release_asset_download', budget=retry_budget,
+                        deadline=deadline)
 
     before = time.monotonic()
     download_ranges(expected_size, target, fetch_range, workers=4)
