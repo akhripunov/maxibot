@@ -995,6 +995,21 @@ def test_linear_write_retries_only_readback_after_eventual_visibility(monkeypatc
     assert calls == ["mutation", "read", "read"]
 
 
+def test_linear_journal_write_accepts_only_trailing_newline_roundtrip_variation(monkeypatch):
+    calls = []
+
+    def fake_graphql(query, variables, api_key):
+        calls.append("mutation" if "mutation UpdateDocument" in query else "read")
+        if "mutation UpdateDocument" in query:
+            return {"documentUpdate": {"success": True, "document": {"id": "doc", "title": "title"}}}
+        return {"document": {"id": "doc", "title": "title", "content": "published\n\n"}}
+
+    monkeypatch.setattr(publish_release_to_linear, "graphql_request", fake_graphql)
+    monkeypatch.setattr(publish_release_to_linear.time, "sleep", lambda _: None)
+    write_document("doc", "title", "published\n", "key", allow_trailing_newline_variation=True)
+    assert calls == ["mutation", "read"]
+
+
 def test_linear_write_does_not_repeat_mutation_when_readback_never_matches(monkeypatch):
     calls = []
 
