@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -13,11 +14,13 @@ from pathlib import Path
 
 try:
     from scripts.ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
-        PREPARE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
+        PREPARE_REPOSITORY, IMAGE_REPOSITORY, OCI_ACCEPT, DIGEST, ArtifactError,
+        _header_value, _registry_fetch, artifact_tag,
         resolve_oci_artifact, validate_prepare_receipt)
 except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
     from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_TYPE,
-        PREPARE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
+        PREPARE_REPOSITORY, IMAGE_REPOSITORY, OCI_ACCEPT, DIGEST, ArtifactError,
+        _header_value, _registry_fetch, artifact_tag,
         resolve_oci_artifact, validate_prepare_receipt)
 
 
@@ -45,6 +48,30 @@ def resolve_prepare(sha: str, run_id: str, attempt: str, expected_digest: str,
     return {"tag": tag, "digest": digest, "image": receipt["image"]}
 
 
+def verify_image_config_digest(image: dict, username: str, token: str) -> None:
+    """Verify the OCI config descriptor; Docker image IDs vary by image store."""
+    repository = image.get("repository")
+    digest = image.get("digest")
+    expected_config = image.get("config_digest")
+    if (repository != IMAGE_REPOSITORY or not DIGEST.fullmatch(str(digest or ""))
+            or not DIGEST.fullmatch(str(expected_config or ""))):
+        raise ArtifactError("Prepare receipt has an invalid immutable image identity")
+    repository_path = repository.split("/", 1)[1]
+    manifest_url = f"https://ghcr.io/v2/{repository_path}/manifests/{digest}"
+    manifest_bytes, headers = _registry_fetch(repository, username, token)(manifest_url, OCI_ACCEPT)
+    if (hashlib.sha256(manifest_bytes).hexdigest() != digest[7:]
+            or _header_value(headers, "Docker-Content-Digest") != digest):
+        raise ArtifactError("GHCR image manifest digest differs from Prepare receipt")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactError("GHCR image manifest is invalid JSON") from exc
+    if (not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2
+            or manifest.get("mediaType") not in OCI_ACCEPT.split(", ")
+            or (manifest.get("config") or {}).get("digest") != expected_config):
+        raise ArtifactError("GHCR image manifest config descriptor differs from Prepare receipt")
+
+
 def pull_verified_image(image: dict, sha: str, username: str, token: str) -> None:
     """Pull the immutable image on the trusted Deploy runner with temporary auth."""
     docker = shutil.which("docker")
@@ -67,8 +94,9 @@ def pull_verified_image(image: dict, sha: str, username: str, token: str) -> Non
                         "--password-stdin"], input=token + "\n", text=True,
                        env=env, check=True, stdout=subprocess.DEVNULL)
         subprocess.run([docker, "pull", reference], env=env, check=True)
-        config = subprocess.check_output([docker, "image", "inspect", reference,
-            "--format", "{{.Id}}"], env=env, text=True).strip()
+        verify_image_config_digest(image, username, token)
+        repo_digests = subprocess.check_output([docker, "image", "inspect", reference,
+            "--format", "{{range .RepoDigests}}{{println .}}{{end}}"], env=env, text=True).splitlines()
         platform = subprocess.check_output([docker, "image", "inspect", reference,
             "--format", "{{.Os}}/{{.Architecture}}"], env=env, text=True).strip()
         labels = json.loads(subprocess.check_output([docker, "image", "inspect", reference,
@@ -76,7 +104,7 @@ def pull_verified_image(image: dict, sha: str, username: str, token: str) -> Non
         expected_labels = {key: image.get("labels", {}).get(key)
             for key in ("org.opencontainers.image.revision", "org.opencontainers.image.source-sha",
                         "org.maxibot.release.sha")}
-        if (config != image["config_digest"] or platform != "linux/amd64"
+        if (reference not in repo_digests or platform != "linux/amd64"
                 or expected_labels != {key: sha for key in expected_labels}
                 or any(labels.get(key) != sha for key in expected_labels)):
             raise ArtifactError("Pulled MAXIBOT image config, platform, or source labels differ from Prepare receipt")
