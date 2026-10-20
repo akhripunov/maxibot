@@ -276,6 +276,24 @@ def _run_oras(args, input=None):
     try:
         result = subprocess.run(args, input=input, text=True, capture_output=True,
                                 check=True, timeout=300, env=os.environ.copy())
+    except subprocess.CalledProcessError as exc:
+        # Keep registry output private while exposing enough bounded diagnostics
+        # to distinguish auth, permission, unsupported media type, and transport
+        # failures in GitHub Actions logs.
+        detail = "\n".join(str(value) for value in (exc.stderr, exc.stdout) if value).lower()
+        status = re.search(r"\b(401|403|404|405|406|409|413|415|422|429|500|502|503)\b", detail)
+        if status:
+            category = "HTTP " + status.group(1)
+        elif "unauthorized" in detail or "authentication required" in detail:
+            category = "unauthorized"
+        elif "denied" in detail or "forbidden" in detail:
+            category = "permission denied"
+        elif "unsupported" in detail:
+            category = "unsupported request"
+        else:
+            category = "registry request rejected"
+        operation = args[1] if len(args) > 1 and args[1] in {"login", "push"} else "operation"
+        raise ArtifactError(f"ORAS {operation} failed (exit {exc.returncode}; {category})") from None
     except (OSError, subprocess.SubprocessError) as exc:
         raise ArtifactError("ORAS OCI publication failed") from exc
     return result.stdout
