@@ -249,7 +249,9 @@ def publish_oci_artifact(repository: str, kind: str, sha: str, run_id: str | int
                  "--username", username, "--password-stdin"]
         runner(login, input=password)
         command = ["oras", "push", "--registry-config", str(auth_file), "--format", "json",
-                   "--artifact-type", artifact_type, f"{repository}:{tag}",
+                   "--artifact-type", artifact_type,
+                   "--annotation", "org.opencontainers.image.source=https://github.com/akhripunov/maxibot",
+                   f"{repository}:{tag}",
                    f"{path}:{layer_media_type}"]
         try:
             response = json.loads(runner(command))
