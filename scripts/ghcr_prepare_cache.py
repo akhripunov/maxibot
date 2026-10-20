@@ -52,10 +52,17 @@ def pull_verified_image(image: dict, sha: str, username: str, token: str) -> Non
         raise ArtifactError("Docker and scoped GHCR read credentials are required")
     docker_config = Path(tempfile.mkdtemp(prefix="maxibot-ghcr-auth-"))
     os.chmod(docker_config, 0o700)
+    # An empty Docker config makes the macOS CLI select its default Keychain
+    # helper. Headless Actions runners cannot unlock that helper; seed an auth
+    # entry so Docker writes credentials only inside this private temp config.
+    config_path = docker_config / "config.json"
     env = os.environ.copy()
     env["DOCKER_CONFIG"] = str(docker_config)
     reference = f"{image['repository']}@{image['digest']}"
     try:
+        config_fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(config_fd, "w", encoding="utf-8") as config_file:
+            json.dump({"auths": {"ghcr.io": {}}}, config_file)
         subprocess.run([docker, "login", "ghcr.io", "--username", username,
                         "--password-stdin"], input=token + "\n", text=True,
                        env=env, check=True, stdout=subprocess.DEVNULL)
