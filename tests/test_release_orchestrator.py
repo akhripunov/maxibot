@@ -16,6 +16,7 @@ from validate_release_dispatch import ValidationError
 from release_authorization import owner_task_commitment_sha256
 
 SHA = "a" * 40
+HISTORICAL_GUARD_SHA = "b5f972d8fae7ecdaaef8cd0d1512512207e4c4d7"
 
 def task_record(authorization_id):
     record = {
@@ -58,6 +59,8 @@ class FakeAPI:
         self.jobs_by_attempt = {}
         self.logs_by_job = {}
         self.job_total_override = None
+        self.deployments = []
+        self.deployment_statuses = {}
 
     def get(self, path):
         self.calls.append(("GET", path))
@@ -70,6 +73,11 @@ class FakeAPI:
             jobs = self.jobs_by_attempt.get("/".join(job_match.groups()), [])
             return {"total_count": self.job_total_override if self.job_total_override is not None else len(jobs),
                     "jobs": jobs}
+        if path.startswith("deployments?"):
+            return self.deployments
+        deployment_status_match = re.fullmatch(r"deployments/([1-9][0-9]*)/statuses\?per_page=100&page=1", path)
+        if deployment_status_match:
+            return self.deployment_statuses.get(deployment_status_match.group(1), [])
         if path.startswith("releases/tags/"):
             tag = path.rsplit("/", 1)[1]
             return {"tag_name": tag, "draft": False, "immutable": True, "assets": [{
@@ -341,6 +349,177 @@ class ReleaseOrchestratorTests(unittest.TestCase):
         return {"id": int(run_id), "run_attempt": int(attempt), "head_sha": candidate,
                 "head_branch": "main", "path": ".github/workflows/maxibot-deploy.yml",
                 "event": "workflow_dispatch", "status": "completed", "conclusion": "failure"}
+
+    def _set_historical_guard_failure(self, *, run_actor="github-actions[bot]", mode="task-scoped-auto",
+                                      duplicate_guard=False, conflicting_apply=False,
+                                      deployment_state="failure", source_candidate=HISTORICAL_GUARD_SHA,
+                                      prepare_id="39544452691", prepare_attempt="1",
+                                      authorization_id="maxibot-task-guardproof-20261021",
+                                      token_value="***", job_total=3, wrong_job_run_id=False):
+        run_id, attempt, candidate = "39545600520", "1", HISTORICAL_GUARD_SHA
+        validate_steps = [
+            ("Set up job", "success"), ("Initialize shared retry budget", "success"),
+            ("Checkout trusted main workflow source", "success"),
+            ("Verify approval, current main and latest successful Prepare", "success"),
+            ("Post Checkout trusted main workflow source", "success"), ("Complete job", "success"),
+        ]
+        deploy_steps = [
+            ("Set up job", "success"), ("Set result evidence path", "success"),
+            ("Configure writable persistent tool cache", "success"), ("Checkout the approved candidate", "success"),
+            ("Verify assigned runner before tools, bundle, or production checks", "success"),
+            ("Install uv", "success"), ("Install portable Python 3.12.10", "success"),
+            ("Verify Python runtime", "success"), ("Recheck current main and Prepare provenance on the Mac", "success"),
+            ("Resolve and verify exact Prepare receipt from GHCR", "success"),
+            ("Verify exact candidate checkout is still clean", "success"),
+            ("Run production preflight and requested release mode", "failure"),
+            ("Set up ORAS for immutable Deploy evidence", "success"),
+            ("Publish immutable Deploy evidence to GHCR and verify digest readback", "failure"),
+            ("Post Install uv", "skipped"), ("Post Checkout the approved candidate", "success"),
+            ("Complete job", "success"),
+        ]
+        publish_steps = [
+            ("Set up job", "success"), ("Set publication evidence path", "success"),
+            ("Run actions/checkout@v4", "success"), ("Measure release runner usage", "success"),
+            ("Mark release telemetry unknown", "skipped"),
+            ("Read immutable GHCR evidence by exact digest", "failure"),
+            ("Publish preflight result to MAXIBOT Linear", "success"),
+            ("Publish production result to MAXIBOT Linear", "success"),
+            ("Post Run actions/checkout@v4", "success"), ("Complete job", "success"),
+        ]
+        def job(job_id, name, conclusion, steps):
+            return {"id": job_id, "run_id": int(run_id) + (1 if wrong_job_run_id and name == "deploy" else 0),
+                    "run_attempt": int(attempt),
+                    "head_sha": source_candidate, "name": name, "status": "completed",
+                    "conclusion": conclusion,
+                    "steps": [{"name": n, "status": "completed", "conclusion": c} for n, c in steps]}
+        self.api.jobs_by_attempt[f"{run_id}/{attempt}"] = [
+            job(119042955279, "validate", "success", validate_steps),
+            job(119043003895, "deploy", "failure", deploy_steps),
+            job(119049527308, "publish", "failure", publish_steps),
+        ]
+        self.api.job_total_override = job_total
+        values = {"CANDIDATE_SHA": candidate, "RELEASE_MODE": mode,
+                  "PREPARE_RUN_ID": prepare_id, "PREPARE_RUN_ATTEMPT": prepare_attempt,
+                  "TASK_AUTHORIZATION_ID": authorization_id,
+                  "APPROVE_PRODUCTION": "false", "APPROVE_WORKER_BOOTSTRAP": "false",
+                  "GITHUB_TOKEN": token_value}
+        env = "\n".join(f"2026-10-21T05:04:35.7400000Z   {key}: {value}" for key, value in values.items())
+        log = ("2026-10-21T05:04:35.7400000Z ##[group]Run \"$MAXIBOT_PYTHON\" scripts/run_release_workflow.py\n"
+               "2026-10-21T05:04:35.7401000Z   \"$MAXIBOT_PYTHON\" scripts/run_release_workflow.py\n"
+               "2026-10-21T05:04:35.7402000Z env:\n" + env + "\n"
+               "2026-10-21T05:04:35.7403000Z ##[endgroup]\n"
+               "2026-10-21T05:04:35.9589550Z RELEASE_STAGE=PREFLIGHT_START\n"
+               "2026-10-21T05:04:36.9024090Z RELEASE_ENTRYPOINT=scripts/release_prod.sh\n"
+               f"2026-10-21T05:04:36.9024420Z TARGET_SHA={candidate}\n"
+               "2026-10-21T05:04:37.0733850Z MIGRATION_ALLOWED=NO\n"
+               "2026-10-21T05:04:37.0000000Z SAFE_TO_RELEASE=YES\n"
+               "2026-10-21T05:04:37.1000000Z DRY_RUN_RESULT=PASS\n"
+               "2026-10-21T05:06:03.9021130Z RELEASE_STAGE=APPLY_START\n"
+               "2026-10-21T05:06:05.2299810Z RELEASE_ENTRYPOINT=scripts/release_prod.sh\n"
+               f"2026-10-21T05:06:05.2300210Z TARGET_SHA={candidate}\n"
+               "2026-10-21T05:06:05.2640050Z RELEASE_BLOCKED=A workflow token is required to mint a scoped GHCR pull token\n")
+        if duplicate_guard:
+            log += "2026-10-21T05:06:05.3000000Z RELEASE_BLOCKED=A workflow token is required to mint a scoped GHCR pull token\n"
+        if conflicting_apply:
+            log += "2026-10-21T05:06:05.3100000Z MIGRATION_ALLOWED=YES\n"
+        log += (f"2026-10-21T05:06:06.0000000Z MAXIBOT_RELEASE_RESULT=FAILED_PRE_SWITCH SHA={candidate} "
+                f"MODE={mode} PRODUCTION_CHANGED=False\n")
+        self.api.logs_by_job[str(119043003895)] = log
+        payload = {"candidate_sha": candidate, "target_migration": "0098", "mode": mode,
+                   "workflow_run_id": run_id, "workflow_run_attempt": attempt,
+                   "prepare_receipt_digest": "sha256:" + "1" * 64}
+        self.api.deployments = [{"id": 7001, "task": "maxibot-production-deploy",
+                                 "environment": "maxibot-production", "ref": candidate,
+                                 "sha": candidate, "payload": payload}]
+        self.api.deployment_statuses["7001"] = [{"id": 7002,
+            "deployment_url": "https://api.github.com/repos/akhripunov/maxibot/deployments/7001",
+            "created_at": "2026-10-21T08:00:19Z", "state": deployment_state,
+            "creator": {"login": "akhripunov"}},
+            {"id": 6999, "deployment_url": "https://api.github.com/repos/akhripunov/maxibot/deployments/7001",
+             "created_at": "2026-10-21T05:06:00Z", "state": "in_progress",
+             "creator": {"login": "github-actions[bot]"}}]
+        return {"id": int(run_id), "run_attempt": int(attempt), "head_sha": candidate,
+                "head_branch": "main", "path": ".github/workflows/maxibot-deploy.yml",
+                "event": "workflow_dispatch", "actor": {"login": run_actor},
+                "status": "completed", "conclusion": "failure"}
+
+    def test_historical_guard_failure_is_safe_only_with_exact_pinned_pre_remote_proof(self):
+        candidate = HISTORICAL_GUARD_SHA
+        authorization_id = "maxibot-task-guardproof-20261021"
+        marker = {"ref": "maxibot-task-auth/" + authorization_id + "/dispatches/prepare-39544452691-1",
+                  "sha": candidate}
+        run = self._set_historical_guard_failure()
+        orchestrator._prove_safe_prior_dispatch(
+            self.api, marker, [run], authorization_id, "d" * 40, repo_root=ROOT)
+
+    def test_historical_guard_proof_fails_closed_on_identity_artifact_or_source_drift(self):
+        candidate = HISTORICAL_GUARD_SHA
+        authorization_id = "maxibot-task-guardproof-20261021"
+        marker = {"ref": "maxibot-task-auth/" + authorization_id + "/dispatches/prepare-39544452691-1",
+                  "sha": candidate}
+        cases = [
+            {"run_actor": "untrusted-user"},
+            {"mode": "production"},
+            {"duplicate_guard": True},
+            {"conflicting_apply": True},
+            {"deployment_state": "in_progress"},
+            {"deployment_state": "success"},
+            {"prepare_id": "123"},
+            {"prepare_attempt": "2"},
+            {"token_value": ""},
+            {"job_total": 2},
+            {"wrong_job_run_id": True},
+        ]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                self.api = FakeAPI()
+                run = self._set_historical_guard_failure(**overrides)
+                with self.assertRaises(orchestrator.OrchestrationError):
+                    orchestrator._prove_safe_prior_dispatch(
+                        self.api, marker, [run], authorization_id, "d" * 40, repo_root=ROOT)
+
+        self.api = FakeAPI()
+        run = self._set_historical_guard_failure()
+        with patch.object(orchestrator.subprocess, "check_output", return_value=b"tampered source"):
+            with self.assertRaises(orchestrator.OrchestrationError):
+                orchestrator._prove_safe_prior_dispatch(
+                    self.api, marker, [run], authorization_id, "d" * 40, repo_root=ROOT)
+
+    def test_historical_guard_proof_requires_runner_timestamps_on_stage_and_identity_markers(self):
+        for marker in ("RELEASE_STAGE=APPLY_START", f"TARGET_SHA={HISTORICAL_GUARD_SHA}", "MIGRATION_ALLOWED=NO"):
+            with self.subTest(marker=marker):
+                self.api = FakeAPI()
+                self._set_historical_guard_failure()
+                log = self.api.logs_by_job["119043003895"]
+                self.api.logs_by_job["119043003895"] = "\n".join(
+                    marker if line.endswith(" " + marker) else line for line in log.splitlines())
+                self.assertFalse(orchestrator._historical_guard_log_is_exact(
+                    self.api, {"id": 119043003895}, HISTORICAL_GUARD_SHA, "39544452691", "1",
+                    "maxibot-task-guardproof-20261021"))
+
+    def test_historical_guard_proof_rejects_malformed_timeline_and_unaccounted_sibling(self):
+        authorization_id = "maxibot-task-guardproof-20261021"
+        marker = {"ref": "maxibot-task-auth/" + authorization_id + "/dispatches/prepare-39544452691-1",
+                  "sha": HISTORICAL_GUARD_SHA}
+        for old, new in [
+            ("RELEASE_STAGE=APPLY_START", "RELEASE_STAGE=PREFLIGHT_START"),
+            ("MAXIBOT_RELEASE_RESULT=FAILED_PRE_SWITCH SHA=", "MAXIBOT_RELEASE_RESULT=COMPLETE SHA="),
+        ]:
+            with self.subTest(replacement=new):
+                self.api = FakeAPI()
+                run = self._set_historical_guard_failure()
+                log = self.api.logs_by_job["119043003895"]
+                self.api.logs_by_job["119043003895"] = log.replace(old, new, 1)
+                with self.assertRaises(orchestrator.OrchestrationError):
+                    orchestrator._prove_safe_prior_dispatch(
+                        self.api, marker, [run], authorization_id, "d" * 40, repo_root=ROOT)
+
+        self.api = FakeAPI()
+        run = self._set_historical_guard_failure()
+        sibling = dict(run, id=39545600521, run_attempt=1)
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator._prove_safe_prior_dispatch(
+                self.api, marker, [run, sibling], authorization_id, "d" * 40, repo_root=ROOT)
 
     def test_validate_failure_with_skipped_empty_deploy_is_safe_to_retry(self):
         authorization_id = "auth-id"

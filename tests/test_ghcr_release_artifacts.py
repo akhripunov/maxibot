@@ -55,6 +55,154 @@ def test_oras_subprocess_failure_logs_safe_operation_and_http_status(monkeypatch
     assert "registry token should stay private" not in str(error.value)
 
 
+def test_oras_login_retries_transient_tls_eof_then_pushes_once(tmp_path, monkeypatch, capsys):
+    import subprocess
+    from scripts.release_network_retry import RetryBudget
+
+    monkeypatch.setenv("GITHUB_ACTOR", "github-actions[bot]")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-secret-token")
+    monkeypatch.setattr(artifacts, "NETWORK_BUDGET", RetryBudget(seconds=5))
+    retry = artifacts.retry_network_read
+    monkeypatch.setattr(artifacts, "retry_network_read", lambda *args, **kwargs: retry(
+        *args, **kwargs, sleep=lambda _seconds: None, jitter=lambda _low, _high: 0,
+        emit=lambda _event: None))
+
+    payload = b'{"candidate_sha":"' + SHA.encode() + b'"}'
+    path = tmp_path / "receipt.json"
+    path.write_bytes(payload)
+    manifest, digest = oci_manifest(artifacts.PREPARE_ARTIFACT_TYPE,
+                                    artifacts.PREPARE_LAYER_MEDIA_TYPE, payload)
+    calls = []
+
+    def run(args, input=None, **kwargs):
+        calls.append((args, kwargs))
+        if args[1] == "login" and sum(1 for item, _ in calls if item[1] == "login") == 1:
+            raise subprocess.CalledProcessError(
+                1, args, stderr='Error: failed to validate the credentials for ghcr.io: Get "https://ghcr.io/v2/": EOF')
+        if args[1] == "push":
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"digest": digest}), stderr="")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    def fetch(url, _accept):
+        if url.endswith("/manifests/" + artifacts.artifact_tag("prepare", SHA, RUN_ID, ATTEMPT)) or url.endswith("/manifests/" + digest):
+            return manifest, {"Docker-Content-Digest": digest}
+        if "/blobs/" in url:
+            return payload, {}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(artifacts.subprocess, "run", run)
+    result = artifacts.publish_oci_artifact(
+        artifacts.PREPARE_REPOSITORY, "prepare", SHA, RUN_ID, ATTEMPT, path,
+        artifacts.PREPARE_ARTIFACT_TYPE, artifacts.PREPARE_LAYER_MEDIA_TYPE,
+        fetch_factory=lambda *_args: fetch)
+
+    assert result == (digest, payload)
+    assert [args[1] for args, _ in calls] == ["login", "login", "push"]
+    login_config = calls[0][0][calls[0][0].index("--registry-config") + 1]
+    assert not __import__("pathlib").Path(login_config).exists()
+    assert "fixture-secret-token" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("detail", [
+    "unexpected status: 403 Forbidden",
+    "x509: certificate signed by unknown authority",
+    'permission denied: Head "https://ghcr.io/v2/": EOF',
+    'TLS protocol version unsupported: Head "https://ghcr.io/v2/": EOF',
+])
+def test_oras_login_does_not_retry_auth_certificate_or_tls_protocol_failures(tmp_path, monkeypatch, detail, capsys):
+    import subprocess
+    from scripts.release_network_retry import RetryBudget
+
+    monkeypatch.setenv("GITHUB_ACTOR", "github-actions[bot]")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-secret-token")
+    monkeypatch.setattr(artifacts, "NETWORK_BUDGET", RetryBudget(seconds=5))
+    retry = artifacts.retry_network_read
+    monkeypatch.setattr(artifacts, "retry_network_read", lambda *args, **kwargs: retry(
+        *args, **kwargs, sleep=lambda _seconds: None, jitter=lambda _low, _high: 0,
+        emit=lambda _event: None))
+    path = tmp_path / "receipt.json"
+    path.write_bytes(b"payload")
+    calls = []
+
+    def run(args, input=None, **kwargs):
+        calls.append(args[1])
+        raise subprocess.CalledProcessError(1, args, stderr=detail)
+
+    monkeypatch.setattr(artifacts.subprocess, "run", run)
+    with pytest.raises(artifacts.ArtifactError):
+        artifacts.publish_oci_artifact(
+            artifacts.PREPARE_REPOSITORY, "prepare", SHA, RUN_ID, ATTEMPT, path,
+            artifacts.PREPARE_ARTIFACT_TYPE, artifacts.PREPARE_LAYER_MEDIA_TYPE,
+            fetch_factory=lambda *_args: pytest.fail("login failure must prevent registry readback"))
+
+    assert calls == ["login"]
+    assert "fixture-secret-token" not in capsys.readouterr().out
+
+
+def test_oras_push_tls_eof_is_never_retried(tmp_path, monkeypatch):
+    import subprocess
+    from scripts.release_network_retry import RetryBudget
+
+    monkeypatch.setenv("GITHUB_ACTOR", "github-actions[bot]")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-secret-token")
+    monkeypatch.setattr(artifacts, "NETWORK_BUDGET", RetryBudget(seconds=5))
+    retry = artifacts.retry_network_read
+    monkeypatch.setattr(artifacts, "retry_network_read", lambda *args, **kwargs: retry(
+        *args, **kwargs, sleep=lambda _seconds: None, jitter=lambda _low, _high: 0,
+        emit=lambda _event: None))
+    path = tmp_path / "receipt.json"
+    path.write_bytes(b"payload")
+    calls = []
+
+    def run(args, input=None, **kwargs):
+        calls.append(args[1])
+        if args[1] == "login":
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        raise subprocess.CalledProcessError(
+            1, args, stderr='failed to do request: Head "https://ghcr.io/v2/": EOF')
+
+    monkeypatch.setattr(artifacts.subprocess, "run", run)
+    with pytest.raises(artifacts.ArtifactError):
+        artifacts.publish_oci_artifact(
+            artifacts.PREPARE_REPOSITORY, "prepare", SHA, RUN_ID, ATTEMPT, path,
+            artifacts.PREPARE_ARTIFACT_TYPE, artifacts.PREPARE_LAYER_MEDIA_TYPE,
+            fetch_factory=lambda *_args: pytest.fail("push failure must not read back"))
+
+    assert calls == ["login", "push"]
+
+
+def test_oras_login_timeout_uses_and_exhausts_one_shared_retry_budget(monkeypatch):
+    import subprocess
+    from scripts.release_network_retry import RetryBudget
+
+    now = [0.0]
+    budget = RetryBudget(seconds=2, clock=lambda: now[0])
+    monkeypatch.setattr(artifacts, "NETWORK_BUDGET", budget)
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(kwargs["timeout"])
+        now[0] += kwargs["timeout"]
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(artifacts.subprocess, "run", run)
+    original_retry_network_read = artifacts.retry_network_read
+    monkeypatch.setattr(artifacts, "retry_network_read", lambda *args, **kwargs: original_retry_network_read(
+        *args, **kwargs, clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        jitter=lambda _low, _high: 0, emit=lambda _event: None))
+
+    with pytest.raises(artifacts.ArtifactError, match="NETWORK_UNAVAILABLE"):
+        artifacts._run_oras(["oras", "login", "ghcr.io"], input="fixture-secret-token")
+    with pytest.raises(artifacts.ArtifactError, match="NETWORK_UNAVAILABLE"):
+        artifacts._run_oras(["oras", "login", "ghcr.io"], input="fixture-secret-token")
+
+    assert len(calls) > 1
+    assert calls[0] < 2
+    assert sum(calls) == pytest.approx(2)
+    assert budget.spent == 2
+    assert "fixture-secret-token" not in str(calls)
+
+
 def test_oras_failure_diagnostic_redacts_credentials_and_is_bounded(monkeypatch):
     import subprocess
 

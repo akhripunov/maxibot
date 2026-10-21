@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
 import random
 import re
 import sys
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -40,6 +42,51 @@ DEPLOY_VALIDATE_JOB_STEPS = (
     (DEPLOY_VALIDATE_STEP, "failure"),
 )
 DEPLOY_VALIDATE_POST_STEPS = (
+    ("Post Checkout trusted main workflow source", "success"),
+    ("Complete job", "success"),
+)
+HISTORICAL_GUARD_SHA = "b5f972d8fae7ecdaaef8cd0d1512512207e4c4d7"
+HISTORICAL_GUARD_SOURCE_SHA256 = {
+    ".github/workflows/maxibot-deploy.yml": "e3b6b4cf210c34102add9b0c8b267f5b509151da52949a919fa142f7461b764b",
+    "scripts/run_release_workflow.py": "b0cef2ee9e1ba8cc0d20c1518422d3fa9d1ddd051c2b449c06cf1283c7668f20",
+    "scripts/release_prod.sh": "52eb4ab5bd97dabe632f07daa21ed1ce64ef9a0e868124d48f627f85ca8c175c",
+}
+HISTORICAL_GUARD_DEPLOY_STEPS = (
+    ("Set up job", "success"),
+    ("Set result evidence path", "success"),
+    ("Configure writable persistent tool cache", "success"),
+    ("Checkout the approved candidate", "success"),
+    ("Verify assigned runner before tools, bundle, or production checks", "success"),
+    ("Install uv", "success"),
+    ("Install portable Python 3.12.10", "success"),
+    ("Verify Python runtime", "success"),
+    ("Recheck current main and Prepare provenance on the Mac", "success"),
+    ("Resolve and verify exact Prepare receipt from GHCR", "success"),
+    ("Verify exact candidate checkout is still clean", "success"),
+    ("Run production preflight and requested release mode", "failure"),
+    ("Set up ORAS for immutable Deploy evidence", "success"),
+    ("Publish immutable Deploy evidence to GHCR and verify digest readback", "failure"),
+    ("Post Install uv", "skipped"),
+    ("Post Checkout the approved candidate", "success"),
+    ("Complete job", "success"),
+)
+HISTORICAL_GUARD_PUBLISH_STEPS = (
+    ("Set up job", "success"),
+    ("Set publication evidence path", "success"),
+    ("Run actions/checkout@v4", "success"),
+    ("Measure release runner usage", "success"),
+    ("Mark release telemetry unknown", "skipped"),
+    ("Read immutable GHCR evidence by exact digest", "failure"),
+    ("Publish preflight result to MAXIBOT Linear", "success"),
+    ("Publish production result to MAXIBOT Linear", "success"),
+    ("Post Run actions/checkout@v4", "success"),
+    ("Complete job", "success"),
+)
+HISTORICAL_GUARD_VALIDATOR_STEPS = (
+    ("Set up job", "success"),
+    ("Initialize shared retry budget", "success"),
+    ("Checkout trusted main workflow source", "success"),
+    (DEPLOY_VALIDATE_STEP, "success"),
     ("Post Checkout trusted main workflow source", "success"),
     ("Complete job", "success"),
 )
@@ -371,6 +418,229 @@ def _prove_safe_predeploy_failure(api, run: dict, candidate: str, prepare_run_id
     return all(env.get(key) == value for key, value in expected.items())
 
 
+def _historical_guard_source_is_pinned(repo_root: Path, candidate: str) -> bool:
+    if candidate != HISTORICAL_GUARD_SHA:
+        return False
+    try:
+        for path, expected in HISTORICAL_GUARD_SOURCE_SHA256.items():
+            blob = subprocess.check_output(
+                ["git", "show", f"{candidate}:{path}"], cwd=repo_root,
+                stderr=subprocess.DEVNULL, timeout=10)
+            if hashlib.sha256(blob).hexdigest() != expected:
+                return False
+        release_script = subprocess.check_output(
+            ["git", "show", f"{candidate}:scripts/release_prod.sh"], cwd=repo_root,
+            stderr=subprocess.DEVNULL, timeout=10).decode("utf-8")
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return False
+    guard = '[[ -n "${GITHUB_TOKEN:-}" && "${GITHUB_ACTOR:-}" =~ ^[A-Za-z0-9-]{1,39}$ ]] || die "A workflow token is required to mint a scoped GHCR pull token"'
+    return (release_script.count(guard) == 1
+            and release_script.index(guard) < release_script.find("ssh_preflight"))
+
+
+def _historical_guard_log_is_exact(api, job: dict, candidate: str, prepare_run_id: str,
+                                   prepare_attempt: str, authorization_id: str) -> bool:
+    try:
+        log = api.get_job_log_archive(str(job["id"]))
+    except Exception:
+        return False
+    if not isinstance(log, str):
+        return False
+    lines = log.splitlines()
+    command = '##[group]Run "$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
+    starts = [i for i, line in enumerate(lines) if _log_content(line) == command]
+    if len(starts) != 1 or not _has_runner_timestamp(lines[starts[0]]):
+        return False
+    start = starts[0]
+    ends = [i for i in range(start + 1, len(lines))
+            if _log_content(lines[i]) == "##[endgroup]"]
+    if (not ends or any(_log_content(line).startswith("##[group]")
+                        for line in lines[start + 1:ends[0]])
+            or not all(_has_runner_timestamp(line) for line in lines[start:ends[0] + 1])):
+        return False
+    body = lines[start + 1:ends[0]]
+    env_positions = [i for i, line in enumerate(body) if _log_content(line) == "env:"]
+    if len(env_positions) != 1:
+        return False
+    env: dict[str, str] = {}
+    for line in body[env_positions[0] + 1:]:
+        content = _log_content(line)
+        if not content.strip():
+            continue
+        match = re.fullmatch(r"\s{2,}([A-Z][A-Z0-9_]*):\s?(.*)", content)
+        if not match or match.group(1) in env:
+            return False
+        env[match.group(1)] = match.group(2)
+    required = {
+        "CANDIDATE_SHA": candidate, "RELEASE_MODE": "task-scoped-auto",
+        "PREPARE_RUN_ID": prepare_run_id, "PREPARE_RUN_ATTEMPT": prepare_attempt,
+        "TASK_AUTHORIZATION_ID": authorization_id, "APPROVE_PRODUCTION": "false",
+        "APPROVE_WORKER_BOOTSTRAP": "false", "GITHUB_TOKEN": "***",
+    }
+    if any(env.get(key) != value for key, value in required.items()):
+        return False
+    # The guard is proven only after a successful read-only preflight and the
+    # second invocation of the pinned release entrypoint, before any apply marker.
+    content = [_log_content(line) for line in lines[ends[0] + 1:]]
+    entrypoint = "RELEASE_ENTRYPOINT=scripts/release_prod.sh"
+    guard = "RELEASE_BLOCKED=A workflow token is required to mint a scoped GHCR pull token"
+    apply_start = "RELEASE_STAGE=APPLY_START"
+    preflight_start = "RELEASE_STAGE=PREFLIGHT_START"
+    target = f"TARGET_SHA={candidate}"
+    result = (f"MAXIBOT_RELEASE_RESULT=FAILED_PRE_SWITCH SHA={candidate} "
+              "MODE=task-scoped-auto PRODUCTION_CHANGED=False")
+    if (content.count(entrypoint) != 2 or content.count(guard) != 1
+            or content.count("SAFE_TO_RELEASE=YES") != 1
+            or content.count("DRY_RUN_RESULT=PASS") != 1
+            or content.count(preflight_start) != 1 or content.count(apply_start) != 1
+            or content.count(target) != 2 or content.count("MIGRATION_ALLOWED=NO") != 1
+            or content.count(result) != 1):
+        return False
+    preflight = content.index(preflight_start)
+    first_entry = content.index(entrypoint)
+    safe = content.index("SAFE_TO_RELEASE=YES")
+    dry_run = content.index("DRY_RUN_RESULT=PASS")
+    migration = content.index("MIGRATION_ALLOWED=NO")
+    apply = content.index(apply_start)
+    second_entry = content.index(entrypoint, first_entry + 1)
+    guard_pos = content.index(guard)
+    result_pos = content.index(result)
+    target_positions = [i for i, line in enumerate(content) if line == target]
+    if not (preflight < first_entry < target_positions[0] < migration < safe < dry_run
+            < apply < second_entry < target_positions[1] < guard_pos < result_pos):
+        return False
+    result_lines = [line for line in content if line.startswith("MAXIBOT_RELEASE_RESULT=")]
+    if (len(result_lines) != 1 or any(any(marker in line for marker in (
+            "MIGRATION_ALLOWED=YES", "PRODUCTION_CHANGED=True", "PRODUCTION_CHANGED=POSSIBLE",
+            "RECOVERY_REQUIRED", "RELEASE_STATUS=PASS", "MAXIBOT_RELEASE_RESULT=COMPLETE",
+            "MAXIBOT_RELEASE_RESULT=FAILED_AFTER_SWITCH"))
+           for line in content)):
+        return False
+    return all(_has_runner_timestamp(line) for line in lines[ends[0] + 1:]
+               if _log_content(line).startswith((entrypoint, guard, "SAFE_TO_RELEASE=",
+                                                 "DRY_RUN_RESULT=", "MAXIBOT_RELEASE_RESULT=",
+                                                 "RELEASE_STAGE=", "TARGET_SHA=", "MIGRATION_ALLOWED=")))
+
+
+def _historical_guard_deployment_is_terminal_failure(api, run_id: str, attempt: str,
+                                                     candidate: str) -> bool:
+    try:
+        deployments = api.get(
+            f"deployments?sha={candidate}&environment=maxibot-production&per_page=100&page=1")
+    except Exception:
+        return False
+    if not isinstance(deployments, list) or len(deployments) != 1:
+        return False
+    matches = []
+    for deployment in deployments:
+        if not isinstance(deployment, dict):
+            return False
+        payload = deployment.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return False
+        if not isinstance(payload, dict):
+            continue
+        if (payload.get("candidate_sha") == candidate
+                and str(payload.get("workflow_run_id", "")) == run_id
+                and str(payload.get("workflow_run_attempt", "")) == attempt
+                and payload.get("mode") == "task-scoped-auto"):
+            matches.append(deployment)
+    if len(matches) != 1:
+        return False
+    deployment = matches[0]
+    if (deployment.get("task") != "maxibot-production-deploy"
+            or deployment.get("environment") != "maxibot-production"
+            or deployment.get("ref") != candidate or deployment.get("sha") != candidate):
+        return False
+    deployment_id = str(deployment.get("id", ""))
+    if not re.fullmatch(r"[1-9][0-9]{0,19}", deployment_id):
+        return False
+    try:
+        statuses = api.get(f"deployments/{deployment_id}/statuses?per_page=100&page=1")
+    except Exception:
+        return False
+    if not isinstance(statuses, list) or not statuses or len(statuses) >= 100:
+        return False
+    status_ids = [str(item.get("id", "")) for item in statuses if isinstance(item, dict)]
+    if len(status_ids) != len(statuses) or len(set(status_ids)) != len(status_ids):
+        return False
+    latest = statuses[0]
+    expected_url = f"https://api.github.com/repos/{REPOSITORY}/deployments/{deployment_id}"
+    if (latest.get("deployment_url") != expected_url or latest.get("state") != "failure"
+            or not isinstance(latest.get("created_at"), str)):
+        return False
+    try:
+        latest_time = dt.datetime.fromisoformat(latest["created_at"].replace("Z", "+00:00"))
+        for older in statuses[1:]:
+            if (not isinstance(older, dict) or older.get("deployment_url") != expected_url
+                    or not isinstance(older.get("created_at"), str)
+                    or latest_time <= dt.datetime.fromisoformat(older["created_at"].replace("Z", "+00:00"))):
+                return False
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _prove_historical_guard_failure(api, run: dict, candidate: str, prepare_run_id: str,
+                                    prepare_attempt: str, authorization_id: str,
+                                    repo_root: Path | None) -> bool:
+    if (repo_root is None or candidate != HISTORICAL_GUARD_SHA
+            or not _historical_guard_source_is_pinned(repo_root, candidate)
+            or run.get("actor", {}).get("login") != "github-actions[bot]"
+            or run.get("status") != "completed" or run.get("conclusion") != "failure"
+            or run.get("head_sha") != candidate or run.get("head_branch") != "main"
+            or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+            or run.get("event") != "workflow_dispatch"):
+        return False
+    run_id, attempt = str(run.get("id", "")), str(run.get("run_attempt", ""))
+    if (run_id != "39545600520" or attempt != "1"
+            or not _historical_guard_deployment_is_terminal_failure(api, run_id, attempt, candidate)):
+        return False
+    try:
+        response = api.get(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+    except Exception:
+        return False
+    jobs, total = response.get("jobs"), response.get("total_count")
+    if not isinstance(jobs, list) or total != 3 or len(jobs) != 3:
+        return False
+    by_name: dict[str, list[dict]] = {}
+    ids = []
+    for job in jobs:
+        if (not isinstance(job, dict) or str(job.get("run_id")) != run_id
+                or str(job.get("run_attempt")) != attempt or job.get("head_sha") != candidate
+                or not re.fullmatch(r"[1-9][0-9]{0,19}", str(job.get("id", "")))):
+            return False
+        ids.append(str(job["id"]))
+        by_name.setdefault(job.get("name", ""), []).append(job)
+    if len(set(ids)) != len(ids) or set(by_name) != {"validate", "deploy", "publish"}:
+        return False
+    if any(len(items) != 1 for items in by_name.values()):
+        return False
+    validate_job, deploy_job, publish_job = (by_name[name][0] for name in ("validate", "deploy", "publish"))
+    expected = {
+        "validate": ("success", HISTORICAL_GUARD_VALIDATOR_STEPS),
+        "deploy": ("failure", HISTORICAL_GUARD_DEPLOY_STEPS),
+        "publish": ("failure", HISTORICAL_GUARD_PUBLISH_STEPS),
+    }
+    for name, job in (("validate", validate_job), ("deploy", deploy_job), ("publish", publish_job)):
+        conclusion, expected_steps = expected[name]
+        steps = job.get("steps")
+        actual = ([(step.get("name"), step.get("status"), step.get("conclusion"))
+                  for step in steps if isinstance(step, dict)] if isinstance(steps, list) else [])
+        if (job.get("status") != "completed" or job.get("conclusion") != conclusion
+                or not isinstance(steps, list) or len(actual) != len(steps)
+                or actual != [(step, "completed", state) for step, state in expected_steps]):
+            return False
+    return (_historical_guard_log_is_exact(api, deploy_job, candidate, prepare_run_id,
+                                           prepare_attempt, authorization_id)
+            and str(validate_job.get("id")) == "119042955279"
+            and str(deploy_job.get("id")) == "119043003895"
+            and str(publish_job.get("id")) == "119049527308")
+
+
 def publisher_logged_digest(api, run_id: str, attempt: str, publisher_step: str,
                             marker_prefix: str) -> str:
     """Bind a publisher's durable artifact digest to one successful run attempt log."""
@@ -409,7 +679,8 @@ def publisher_logged_digest(api, run_id: str, attempt: str, publisher_step: str,
 
 
 def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
-                               authorization_id: str, production_baseline_sha: str) -> None:
+                               authorization_id: str, production_baseline_sha: str,
+                               repo_root: Path | None = None) -> None:
     marker = dispatch_ref["ref"].rsplit("/", 1)[-1]
     match = re.fullmatch(r"prepare-([1-9][0-9]{0,19})-([1-9][0-9]{0,5})", marker)
     if not match:
@@ -423,6 +694,10 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
         raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
     safe_prior_runs = 0
     for run in candidates:
+        if _prove_historical_guard_failure(api, run, candidate, prepare_run_id,
+                                           prepare_attempt, authorization_id, repo_root):
+            safe_prior_runs += 1
+            continue
         if _prove_safe_predeploy_failure(api, run, candidate, prepare_run_id,
                                          prepare_attempt, authorization_id):
             safe_prior_runs += 1
@@ -602,7 +877,8 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
     if claim_exists and not dispatches:
         raise OrchestrationError("Task-scoped claim has no dispatch marker; reconciliation required")
     for previous in dispatches:
-        _prove_safe_prior_dispatch(api, previous, runs, authorization_id, baseline)
+        _prove_safe_prior_dispatch(api, previous, runs, authorization_id, baseline,
+                                   repo_root=repo_root)
     try:
         api.post("git/refs", {"ref": event_ref, "sha": sha})
     except APIError as error:
