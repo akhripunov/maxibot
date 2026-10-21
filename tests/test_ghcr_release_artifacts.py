@@ -6,7 +6,8 @@ import json
 import pytest
 
 from scripts import ghcr_release_artifacts as artifacts
-from scripts.ghcr_prepare_cache import resolve_prepare, pull_verified_image, verify_image_config_digest
+from scripts.ghcr_prepare_cache import (resolve_prepare, pull_verified_image,
+    verify_image_config_digest, image_preflight)
 
 
 SHA = "a" * 40
@@ -469,6 +470,8 @@ def test_resolve_prepare_requires_validator_selected_digest_and_writes_only_rece
     digest = "sha256:" + "d" * 64
     monkeypatch.setattr("scripts.ghcr_prepare_cache.resolve_oci_artifact",
                         lambda *_args: (digest, payload))
+    monkeypatch.setattr("scripts.ghcr_prepare_cache.verify_image_config_digest",
+                        lambda *_args: "linux/amd64")
     result = resolve_prepare(SHA, RUN_ID, ATTEMPT, digest, "owner", "token", tmp_path)
     assert result["digest"] == digest
     assert json.loads((tmp_path / "maxibot-prepare-result.json").read_text()) == receipt
@@ -482,15 +485,10 @@ def test_resolve_prepare_requires_validator_selected_digest_and_writes_only_rece
 def test_deploy_runner_uses_stdin_credential_and_removes_temporary_docker_config(tmp_path, monkeypatch):
     import subprocess
     from pathlib import Path
-    config_digest = "sha256:" + "c" * 64
-    image_manifest = json.dumps({
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
-                    "digest": config_digest, "size": 1},
-        "layers": [],
-    }, separators=(",", ":")).encode()
-    image_digest = "sha256:" + hashlib.sha256(image_manifest).hexdigest()
+    image, _config, blobs = _prepared_oci_image()
+    config_digest = image["config_digest"]
+    image_digest = image["digest"]
+    image_manifest = blobs[image_digest][0]
     image_reference = f"{artifacts.IMAGE_REPOSITORY}@{image_digest}"
     calls = []
     docker_config = tmp_path / "docker-auth"
@@ -514,17 +512,13 @@ def test_deploy_runner_uses_stdin_credential_and_removes_temporary_docker_config
             "org.opencontainers.image.source-sha": SHA, "org.maxibot.release.sha": SHA})
     def registry_fetch(_repository, _username, _token):
         def fetch(url, _accept):
-            assert url.endswith(f"/manifests/{image_digest}")
-            return image_manifest, {"Docker-Content-Digest": image_digest}
+            digest = url.rsplit("/", 1)[-1]
+            assert digest in blobs
+            return blobs[digest]
         return fetch
     monkeypatch.setattr("scripts.ghcr_prepare_cache.subprocess.run", run)
     monkeypatch.setattr("scripts.ghcr_prepare_cache.subprocess.check_output", check_output)
     monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", registry_fetch)
-    image = {"repository": artifacts.IMAGE_REPOSITORY, "digest": "sha256:" + "b" * 64,
-        "config_digest": config_digest, "platform": "linux/amd64", "labels": {
-            "org.opencontainers.image.revision": SHA, "org.opencontainers.image.source-sha": SHA,
-            "org.maxibot.release.sha": SHA}}
-    image["digest"] = image_digest
     pull_verified_image(image, SHA, "owner", "secret-token")
     login = calls[0]
     assert login[0][1] == "login" and login[1]["input"] == "secret-token\n"
@@ -547,9 +541,171 @@ def test_ghcr_image_manifest_must_bind_receipt_config_digest(monkeypatch):
     monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", lambda *_args: (
         lambda *_request: (manifest_bytes, {"Docker-Content-Digest": image_digest})))
     image = {"repository": artifacts.IMAGE_REPOSITORY, "digest": image_digest,
-        "config_digest": "sha256:" + "d" * 64}
+        "config_digest": "sha256:" + "d" * 64, "platform": "linux/amd64",
+        "labels": {"org.opencontainers.image.revision": SHA,
+            "org.opencontainers.image.source-sha": SHA, "org.maxibot.release.sha": SHA}}
     with pytest.raises(artifacts.ArtifactError, match="config descriptor"):
         verify_image_config_digest(image, "owner", "token")
+
+
+def _prepared_oci_image(sha=SHA):
+    config = {"architecture": "amd64", "os": "linux", "config": {"Labels": {
+        "org.opencontainers.image.revision": sha,
+        "org.opencontainers.image.source-sha": sha,
+        "org.maxibot.release.sha": sha}}, "rootfs": {"type": "layers", "diff_ids": []}}
+    config_bytes = json.dumps(config, separators=(",", ":")).encode()
+    config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+    manifest = {"schemaVersion": 2, "mediaType": artifacts.OCI_MANIFEST_MEDIA_TYPE,
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                   "digest": config_digest, "size": len(config_bytes)}, "layers": []}
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+    manifest_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+    image = {"repository": artifacts.IMAGE_REPOSITORY,
+        "tag": f"prepare-{sha}-{RUN_ID}-{ATTEMPT}", "digest": manifest_digest,
+        "config_digest": config_digest, "platform": "linux/amd64", "labels": {
+            "org.opencontainers.image.revision": sha,
+            "org.opencontainers.image.source-sha": sha,
+            "org.maxibot.release.sha": sha}}
+    blobs = {manifest_digest: (manifest_bytes, {"Docker-Content-Digest": manifest_digest}),
+             config_digest: (config_bytes, {})}
+    return image, config, blobs
+
+
+def test_verify_image_config_digest_reads_and_hashes_only_manifest_and_config(monkeypatch):
+    image, _config, blobs = _prepared_oci_image()
+    urls = []
+    def fetch(url, _accept):
+        urls.append(url)
+        digest = url.rsplit("/", 1)[-1]
+        return blobs[digest]
+    monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", lambda *_args: fetch)
+
+    assert verify_image_config_digest(image, "owner", "token", SHA) == "linux/amd64"
+    assert len(urls) == 2
+    assert all("/manifests/" in url or "/blobs/" in url for url in urls)
+
+
+@pytest.mark.parametrize("mutation", ["config_digest", "config_size", "config_hash", "platform", "label", "rootfs"])
+def test_verify_image_config_digest_rejects_untrusted_config_metadata(monkeypatch, mutation):
+    image, config, blobs = _prepared_oci_image()
+    manifest_url = f"https://ghcr.io/v2/akhripunov/maxibot-vps-api/manifests/{image['digest']}"
+    if mutation == "config_digest":
+        manifest = json.loads(blobs[image["digest"]][0])
+        manifest["config"]["digest"] = "sha256:" + "0" * 64
+        manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+        blobs[image["digest"]] = (manifest_bytes, {"Docker-Content-Digest": image["digest"]})
+    elif mutation == "config_size":
+        manifest = json.loads(blobs[image["digest"]][0])
+        manifest["config"]["size"] += 1
+        manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+        image["digest"] = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        blobs[image["digest"]] = (manifest_bytes, {"Docker-Content-Digest": image["digest"]})
+    elif mutation == "config_hash":
+        config["unexpected"] = True
+        config_bytes = json.dumps(config, separators=(",", ":")).encode()
+        blobs[image["config_digest"]] = (config_bytes, {})
+    elif mutation == "platform":
+        config["architecture"] = "arm64"
+        config_bytes = json.dumps(config, separators=(",", ":")).encode()
+        config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+        manifest = json.loads(blobs[image["digest"]][0])
+        manifest["config"]["digest"] = config_digest
+        manifest["config"]["size"] = len(config_bytes)
+        manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+        image["digest"] = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        image["config_digest"] = config_digest
+        blobs[image["digest"]] = (manifest_bytes, {"Docker-Content-Digest": image["digest"]})
+        blobs[config_digest] = (config_bytes, {})
+    elif mutation == "label":
+        config["config"]["Labels"]["org.maxibot.release.sha"] = "f" * 40
+        config_bytes = json.dumps(config, separators=(",", ":")).encode()
+        config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+        manifest = json.loads(blobs[image["digest"]][0])
+        manifest["config"]["digest"] = config_digest
+        manifest["config"]["size"] = len(config_bytes)
+        manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+        image["digest"] = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        image["config_digest"] = config_digest
+        blobs[image["digest"]] = (manifest_bytes, {"Docker-Content-Digest": image["digest"]})
+        blobs[config_digest] = (config_bytes, {})
+    else:
+        config["rootfs"]["diff_ids"] = ["sha256:" + "1" * 64]
+        config_bytes = json.dumps(config, separators=(",", ":")).encode()
+        config_digest = "sha256:" + hashlib.sha256(config_bytes).hexdigest()
+        manifest = json.loads(blobs[image["digest"]][0])
+        manifest["config"]["digest"] = config_digest
+        manifest["config"]["size"] = len(config_bytes)
+        manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+        image["digest"] = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        image["config_digest"] = config_digest
+        blobs[image["digest"]] = (manifest_bytes, {"Docker-Content-Digest": image["digest"]})
+        blobs[config_digest] = (config_bytes, {})
+    def fetch(url, _accept):
+        digest = url.rsplit("/", 1)[-1]
+        return blobs[digest]
+    monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", lambda *_args: fetch)
+    with pytest.raises(artifacts.ArtifactError):
+        verify_image_config_digest(image, "owner", "token", SHA)
+
+
+def test_image_preflight_cli_verifies_receipt_and_oci_without_docker(tmp_path, monkeypatch, capsys):
+    image, _config, blobs = _prepared_oci_image()
+    receipt = {"schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": SHA,
+        "github_run_id": RUN_ID, "github_run_attempt": ATTEMPT, "status": "READY",
+        "tests": "success", "frozen_path_guard": "success", "linux_amd64_image": "success",
+        "ghcr_image_publish": "success", "private_docker_rehearsal": "PASS", "image": image}
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    monkeypatch.setenv("MAXIBOT_IMAGE_TRANSPORT", "GHCR_VPS_DIRECT")
+    monkeypatch.setenv("RELEASE_PREPARE_RECEIPT", str(receipt_path))
+    monkeypatch.setenv("PREPARE_RUN_ID", RUN_ID)
+    monkeypatch.setenv("PREPARE_RUN_ATTEMPT", ATTEMPT)
+    monkeypatch.setenv("RELEASE_IMAGE_REPOSITORY", artifacts.IMAGE_REPOSITORY)
+    monkeypatch.setenv("RELEASE_IMAGE_DIGEST", image["digest"])
+    monkeypatch.setenv("RELEASE_IMAGE_ID", image["config_digest"])
+    monkeypatch.setenv("GITHUB_ACTOR", "github-actions[bot]")
+    monkeypatch.setenv("GITHUB_TOKEN", "fixture-token")
+    def fetch(url, _accept):
+        return blobs[url.rsplit("/", 1)[-1]]
+    monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", lambda *_args: fetch)
+    monkeypatch.setattr("scripts.ghcr_prepare_cache.shutil.which", lambda *_args: pytest.fail("Docker lookup forbidden"))
+    monkeypatch.setattr("scripts.ghcr_prepare_cache.subprocess.run", lambda *_args, **_kwargs: pytest.fail("Docker subprocess forbidden"))
+    monkeypatch.setattr("scripts.ghcr_prepare_cache.subprocess.check_output", lambda *_args, **_kwargs: pytest.fail("Docker subprocess forbidden"))
+
+    assert image_preflight(SHA, f"maxibot-vps-api:{SHA}", f"maxibot-vps-api:{SHA}") == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "IMAGE_READY=YES", f"API_IMAGE_SHA={SHA}", f"WORKER_IMAGE_SHA={SHA}",
+        f"IMAGE_ID={image['config_digest']}", "IMAGE_PLATFORM=linux/amd64"]
+
+
+@pytest.mark.parametrize("mutation", ["sha", "api_tag", "worker_tag", "repository", "digest", "config_id", "run_attempt", "transport"])
+def test_image_preflight_fails_closed_on_any_identity_mismatch(tmp_path, monkeypatch, mutation, capsys):
+    image, _config, blobs = _prepared_oci_image()
+    receipt = {"schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": SHA,
+        "github_run_id": RUN_ID, "github_run_attempt": ATTEMPT, "status": "READY",
+        "tests": "success", "frozen_path_guard": "success", "linux_amd64_image": "success",
+        "ghcr_image_publish": "success", "private_docker_rehearsal": "PASS", "image": image}
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    env = {"MAXIBOT_IMAGE_TRANSPORT": "GHCR_VPS_DIRECT", "RELEASE_PREPARE_RECEIPT": str(receipt_path),
+        "PREPARE_RUN_ID": RUN_ID, "PREPARE_RUN_ATTEMPT": ATTEMPT,
+        "RELEASE_IMAGE_REPOSITORY": artifacts.IMAGE_REPOSITORY,
+        "RELEASE_IMAGE_DIGEST": image["digest"], "RELEASE_IMAGE_ID": image["config_digest"],
+        "GITHUB_ACTOR": "github-actions[bot]", "GITHUB_TOKEN": "fixture-token"}
+    for key, value in env.items(): monkeypatch.setenv(key, value)
+    sha, api_image, worker_image = SHA, f"maxibot-vps-api:{SHA}", f"maxibot-vps-api:{SHA}"
+    if mutation == "sha": sha = "b" * 40
+    elif mutation == "api_tag": api_image = f"maxibot-vps-api:{'b' * 40}"
+    elif mutation == "worker_tag": worker_image = f"maxibot-vps-worker:{SHA}"
+    elif mutation == "repository": monkeypatch.setenv("RELEASE_IMAGE_REPOSITORY", "ghcr.io/other/image")
+    elif mutation == "digest": monkeypatch.setenv("RELEASE_IMAGE_DIGEST", "sha256:" + "0" * 64)
+    elif mutation == "config_id": monkeypatch.setenv("RELEASE_IMAGE_ID", "sha256:" + "0" * 64)
+    elif mutation == "run_attempt": monkeypatch.setenv("PREPARE_RUN_ATTEMPT", "3")
+    else: monkeypatch.setenv("MAXIBOT_IMAGE_TRANSPORT", "DOCKER_LOCAL")
+    monkeypatch.setattr("scripts.ghcr_prepare_cache._registry_fetch", lambda *_args: (
+        lambda url, _accept: blobs[url.rsplit("/", 1)[-1]]))
+    assert image_preflight(sha, api_image, worker_image) != 0
+    assert "IMAGE_READY=YES" not in capsys.readouterr().out
 
 
 def test_read_deploy_evidence_writes_verified_payload_to_destination(tmp_path, monkeypatch):

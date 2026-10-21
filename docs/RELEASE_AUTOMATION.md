@@ -63,6 +63,16 @@ gates. Эта запись не описывает актуальный V5 ка�
 по immutable digest. Docker
 archive остаётся только для private containerd rehearsal.
 
+На Mac canonical Deploy загружает только receipt, OCI manifest и небольшой
+config blob. `ghcr_prepare_cache.py` проверяет их digest/размер, linux/amd64,
+три source SHA label и rootfs metadata; Docker login/pull и скачивание image
+layers на Mac не выполняются. После проверки exact receipt wrapper передаёт
+`MAXIBOT_IMAGE_TRANSPORT=GHCR_VPS_DIRECT` и путь к нему в canonical preflight.
+Тот повторяет metadata-проверку через `image-preflight` и требует одинаковую
+exact-SHA identity API/Worker. Неизвестный transport или неверный receipt
+блокируют release. Legacy local Docker helper остаётся только для standalone
+локальной проверки без workflow transport marker.
+
 После успешного read-only production preflight Deploy создаёт GitHub Deployment
 для `maxibot-production` с exact SHA, migration, mode, run/attempt и Prepare
  receipt digest. Только затем запускает canonical Apply. Непосредственно перед
@@ -105,7 +115,7 @@ authorization/conflict gates after each successful retry.
 | Prepare coalescing | `GET api.github.com/repos/.../git/ref/heads/main` before and after quiet window | Yes | Retry classified transient network/TLS failures through the same shared 30-minute workflow budget. | Do not proceed with stale/unknown `main`; auth, non-transient HTTP and malformed responses fail closed. |
 | Candidate / authorization / Prepare provenance | GitHub API `GET` for main ref, authorization refs, workflow runs, exact run metadata | Yes | Retry classified transient network/TLS EOF and HTTP 408/425/429/5xx through the shared 30-minute workflow budget. | 401/403, TLS verification failure, malformed response, changed SHA/run/attempt, invalid provenance or authorization mismatch fail closed. |
 | Runner readiness | GitHub API `GET` plus fixed production host SSH readiness `printf` probe | Yes | Retry selected temporary network errors through the same budget; SSH attempts remain bounded and use one connection attempt each. | Auth, host-key and non-transient SSH failures fail closed. No production command is sent by the readiness probe. |
-| GHCR artifact and image verification | Registry token, OCI manifest/blob GETs, and Docker pull by exact image digest | Yes | Retry classified transient reads and digest-pinned Docker pull through the shared budget and absolute deadline. Docker stderr is captured and never emitted. | Never relax repository scope, SHA/run/attempt identity, descriptor/layer/image digest or `linux/amd64` checks; auth and verification failures fail closed. |
+| GHCR artifact and image verification | Registry token and OCI manifest/config/receipt GETs on Mac; exact-digest image pull on VPS | Yes (reads) | Retry classified transient reads through the shared budget and absolute deadline. Canonical Mac control plane never runs Docker login/pull or downloads image layers. | Never relax repository scope, SHA/run/attempt identity, descriptor/layer/image digest or `linux/amd64` checks; auth and verification failures fail closed. |
 | Cached GitHub artifact ZIP | GitHub Actions artifact API GET, signed HTTPS object-storage GET, parallel byte-range GETs | Yes | Retry reads through one shared budget and the download's absolute deadline. Parallel ranges charge the union of overlapping retry intervals, not the sum of worker durations. Obtain a fresh signed redirect on a new API attempt; never send the GitHub bearer token to storage. | Enforce byte/range bounds and exact artifact identity; expired or malformed redirects fail closed. |
 | Legacy GitHub Release metadata / evidence reads | `gh api` / `gh release` readback and GitHub Release asset GET | Yes | No common retry wrapper in these legacy paths. | Fail closed on unavailable or inconsistent metadata; no retry claim is made for these paths. |
 | GHCR / GitHub publication | ORAS login/push; Git tag and Release create/upload/edit; GitHub ref create/claim/consume; Deployment create/status | No (writes) | No blind retry and no shared read budget. | On uncertain outcome, read back exact tag/ref/run/deployment identity and reconcile. Never repeat a publication or claim based only on a timeout. |

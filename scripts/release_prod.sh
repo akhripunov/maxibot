@@ -124,6 +124,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || die "full 40-hex SHA required"
+IMAGE_TRANSPORT=${MAXIBOT_IMAGE_TRANSPORT:-}
+if [[ -n "$IMAGE_TRANSPORT" && "$IMAGE_TRANSPORT" != GHCR_VPS_DIRECT ]]; then
+  die "unsupported image transport: $IMAGE_TRANSPORT"
+fi
+if [[ "$IMAGE_TRANSPORT" == GHCR_VPS_DIRECT ]]; then
+  [[ -n "${RELEASE_PREPARE_RECEIPT:-}" && -f "$RELEASE_PREPARE_RECEIPT" ]] || die "verified Prepare receipt is required for GHCR_VPS_DIRECT image preflight"
+fi
 git cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null || die "unknown commit"
 # Prospective policy activation: immutable candidates must contain this policy
 # module in their own tree. Historical pre-policy SHAs remain governed by the
@@ -224,8 +231,14 @@ if [[ "$MODE" == DRY_RUN ]]; then
   say TARGET_SHA_PROVEN YES
   API_CANDIDATE_IMAGE=${API_CANDIDATE_IMAGE:-maxibot-vps-api:$TARGET_SHA}
   WORKER_CANDIDATE_IMAGE=${WORKER_CANDIDATE_IMAGE:-maxibot-vps-api:$TARGET_SHA}
-  if ! IMAGE_PREFLIGHT=$(python3 "$ROOT_DIR/scripts/release_image_preflight.py" \
-    "$TARGET_SHA" "$API_CANDIDATE_IMAGE" "$WORKER_CANDIDATE_IMAGE" 2>&1); then
+  if [[ "$IMAGE_TRANSPORT" == GHCR_VPS_DIRECT ]]; then
+    IMAGE_PREFLIGHT_COMMAND=(python3 "$ROOT_DIR/scripts/ghcr_prepare_cache.py" image-preflight \
+      "$TARGET_SHA" "$API_CANDIDATE_IMAGE" "$WORKER_CANDIDATE_IMAGE")
+  else
+    IMAGE_PREFLIGHT_COMMAND=(python3 "$ROOT_DIR/scripts/release_image_preflight.py" \
+      "$TARGET_SHA" "$API_CANDIDATE_IMAGE" "$WORKER_CANDIDATE_IMAGE")
+  fi
+  if ! IMAGE_PREFLIGHT=$("${IMAGE_PREFLIGHT_COMMAND[@]}" 2>&1); then
     say IMAGE_READY NO
     say API_WORKER_IMAGE_PARITY BLOCKED
     say IMAGE_PREFLIGHT_REASON "$(printf '%s' "$IMAGE_PREFLIGHT" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"

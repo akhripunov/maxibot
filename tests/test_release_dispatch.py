@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -803,6 +804,40 @@ def test_failed_in_deploy_preflight_never_reaches_production_apply(monkeypatch, 
     result = json.loads(result_path.read_text())
     assert len(commands) == 1 and commands[0][-1] == "--dry-run"
     assert result["preflight"] == "FAILED"
+    assert result["production_changed"] is False
+
+
+def test_wrapper_passes_direct_transport_only_after_exact_prepare_receipt_validation(monkeypatch, tmp_path):
+    result_path, _migration_head = _setup_task_scoped_wrapper(monkeypatch, tmp_path, MIGRATION)
+    monkeypatch.delenv("MAXIBOT_IMAGE_TRANSPORT", raising=False)
+    observed = []
+
+    def stop_at_dry_run(command, env):
+        observed.append((command, env.copy()))
+        return 1, "IMAGE_READY=NO\nSAFE_TO_RELEASE=NO\n"
+
+    monkeypatch.setattr(run_release_workflow, "run", stop_at_dry_run)
+    assert run_release_workflow.main() == 1
+    assert len(observed) == 1 and observed[0][0][-1] == "--dry-run"
+    child_env = observed[0][1]
+    assert child_env["MAXIBOT_IMAGE_TRANSPORT"] == "GHCR_VPS_DIRECT"
+    assert child_env["RELEASE_PREPARE_RECEIPT"] == os.environ["IMAGE_RESULT"]
+    assert json.loads(result_path.read_text())["preflight"] == "FAILED"
+
+
+def test_wrapper_rejects_bad_prepare_receipt_before_enabling_direct_transport(monkeypatch, tmp_path):
+    result_path, _migration_head = _setup_task_scoped_wrapper(monkeypatch, tmp_path, MIGRATION)
+    receipt_path = os.environ["IMAGE_RESULT"]
+    receipt = json.loads(Path(receipt_path).read_text())
+    receipt["image"]["config_digest"] = "sha256:" + "f" * 64
+    Path(receipt_path).write_text(json.dumps(receipt))
+    observed = []
+    monkeypatch.setattr(run_release_workflow, "run",
+                        lambda command, env: observed.append((command, env)) or pytest.fail("invalid receipt must stop before release_prod"))
+    assert run_release_workflow.main() == 1
+    assert observed == []
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "FAILED"
     assert result["production_changed"] is False
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,7 @@ def resolve_prepare(sha: str, run_id: str, attempt: str, expected_digest: str,
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ArtifactError("GHCR Prepare receipt is invalid JSON") from exc
     validate_prepare_receipt(receipt, sha, run_id, attempt)
+    verify_image_config_digest(receipt["image"], username, token, sha)
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "maxibot-prepare-result.json").write_text(
         json.dumps(receipt, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -99,17 +101,29 @@ def resolve_prepare(sha: str, run_id: str, attempt: str, expected_digest: str,
     return {"tag": tag, "digest": digest, "image": receipt["image"]}
 
 
-def verify_image_config_digest(image: dict, username: str, token: str) -> None:
-    """Verify the OCI config descriptor; Docker image IDs vary by image store."""
+def verify_image_config_digest(image: dict, username: str, token: str,
+                               expected_sha: str | None = None) -> str:
+    """Verify image manifest/config metadata without downloading image layers."""
     repository = image.get("repository")
     digest = image.get("digest")
     expected_config = image.get("config_digest")
     if (repository != IMAGE_REPOSITORY or not DIGEST.fullmatch(str(digest or ""))
-            or not DIGEST.fullmatch(str(expected_config or ""))):
+            or not DIGEST.fullmatch(str(expected_config or ""))
+            or image.get("platform") != "linux/amd64"):
         raise ArtifactError("Prepare receipt has an invalid immutable image identity")
+    sha = expected_sha or image.get("labels", {}).get("org.opencontainers.image.revision", "")
+    expected_labels = {
+        "org.opencontainers.image.revision": sha,
+        "org.opencontainers.image.source-sha": sha,
+        "org.maxibot.release.sha": sha,
+    }
+    if (not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+            or image.get("labels") != expected_labels):
+        raise ArtifactError("Prepare receipt image labels do not bind the exact candidate SHA")
     repository_path = repository.split("/", 1)[1]
     manifest_url = f"https://ghcr.io/v2/{repository_path}/manifests/{digest}"
-    manifest_bytes, headers = _registry_fetch(repository, username, token)(manifest_url, OCI_ACCEPT)
+    fetch = _registry_fetch(repository, username, token)
+    manifest_bytes, headers = fetch(manifest_url, OCI_ACCEPT)
     if (hashlib.sha256(manifest_bytes).hexdigest() != digest[7:]
             or _header_value(headers, "Docker-Content-Digest") != digest):
         raise ArtifactError("GHCR image manifest digest differs from Prepare receipt")
@@ -117,10 +131,47 @@ def verify_image_config_digest(image: dict, username: str, token: str) -> None:
         manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ArtifactError("GHCR image manifest is invalid JSON") from exc
+    config_descriptor = manifest.get("config") if isinstance(manifest, dict) else None
+    layers = manifest.get("layers") if isinstance(manifest, dict) else None
     if (not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2
             or manifest.get("mediaType") not in OCI_ACCEPT.split(", ")
-            or (manifest.get("config") or {}).get("digest") != expected_config):
+            or not isinstance(config_descriptor, dict)
+            or config_descriptor.get("mediaType") not in {
+                "application/vnd.oci.image.config.v1+json",
+                "application/vnd.docker.container.image.v1+json"}
+            or config_descriptor.get("digest") != expected_config
+            or type(config_descriptor.get("size")) is not int
+            or not 0 < config_descriptor["size"] <= 2 * 1024 * 1024
+            or not isinstance(layers, list)):
         raise ArtifactError("GHCR image manifest config descriptor differs from Prepare receipt")
+    for layer in layers:
+        if (not isinstance(layer, dict) or not DIGEST.fullmatch(str(layer.get("digest", "")))
+                or type(layer.get("size")) is not int or layer.get("size", 0) <= 0
+                or not isinstance(layer.get("mediaType"), str) or not layer["mediaType"]):
+            raise ArtifactError("GHCR image manifest contains an invalid layer descriptor")
+    config_url = f"https://ghcr.io/v2/{repository_path}/blobs/{expected_config}"
+    config_bytes, _ = fetch(config_url, "application/octet-stream")
+    if (len(config_bytes) != config_descriptor["size"]
+            or hashlib.sha256(config_bytes).hexdigest() != expected_config[7:]):
+        raise ArtifactError("GHCR image config blob digest or size differs from manifest")
+    try:
+        image_config = json.loads(config_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactError("GHCR image config blob is invalid JSON") from exc
+    if (not isinstance(image_config, dict) or image_config.get("os") != "linux"
+            or image_config.get("architecture") != "amd64"):
+        raise ArtifactError("GHCR image config platform differs from linux/amd64")
+    runtime_config = image_config.get("config")
+    labels = runtime_config.get("Labels") if isinstance(runtime_config, dict) else None
+    if labels != expected_labels:
+        raise ArtifactError("GHCR image config source labels differ from Prepare receipt")
+    rootfs = image_config.get("rootfs")
+    diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+    if (not isinstance(rootfs, dict) or rootfs.get("type") != "layers"
+            or not isinstance(diff_ids, list) or len(diff_ids) != len(layers)
+            or any(not isinstance(value, str) or not DIGEST.fullmatch(value) for value in diff_ids)):
+        raise ArtifactError("GHCR image config rootfs metadata differs from image manifest")
+    return "linux/amd64"
 
 
 def pull_verified_image(image: dict, sha: str, username: str, token: str) -> None:
@@ -166,20 +217,63 @@ def pull_verified_image(image: dict, sha: str, username: str, token: str) -> Non
         shutil.rmtree(docker_config, ignore_errors=True)
 
 
-def main() -> int:
+def image_preflight(sha: str, api_image: str, worker_image: str) -> int:
+    try:
+        if os.environ.get("MAXIBOT_IMAGE_TRANSPORT") != "GHCR_VPS_DIRECT":
+            raise ArtifactError("Direct GHCR image transport was not authorized by the release wrapper")
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ArtifactError("Candidate SHA is invalid")
+        expected_tag = f"maxibot-vps-api:{sha}"
+        if api_image != expected_tag or worker_image != expected_tag:
+            raise ArtifactError("API and worker must use the exact candidate image tag")
+        receipt_path = Path(os.environ["RELEASE_PREPARE_RECEIPT"])
+        if receipt_path.is_symlink() or not receipt_path.is_file() or not 0 < receipt_path.stat().st_size <= 2 * 1024 * 1024:
+            raise ArtifactError("Exact Prepare receipt file is unavailable or unbounded")
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ArtifactError("Exact Prepare receipt file is invalid JSON") from exc
+        run_id, attempt = os.environ["PREPARE_RUN_ID"], os.environ["PREPARE_RUN_ATTEMPT"]
+        validate_prepare_receipt(receipt, sha, run_id, attempt)
+        image = receipt["image"]
+        expected = {
+            "repository": os.environ["RELEASE_IMAGE_REPOSITORY"],
+            "digest": os.environ["RELEASE_IMAGE_DIGEST"],
+            "config_digest": os.environ["RELEASE_IMAGE_ID"],
+        }
+        if any(image.get(key) != value for key, value in expected.items()):
+            raise ArtifactError("Selected GHCR image identity differs from exact Prepare receipt")
+        verify_image_config_digest(image, os.environ["GITHUB_ACTOR"],
+                                   os.environ["GITHUB_TOKEN"], sha)
+        print("IMAGE_READY=YES")
+        print(f"API_IMAGE_SHA={sha}")
+        print(f"WORKER_IMAGE_SHA={sha}")
+        print(f"IMAGE_ID={image['config_digest']}")
+        print("IMAGE_PLATFORM=linux/amd64")
+        return 0
+    except (KeyError, OSError, ArtifactError, ValueError):
+        print("IMAGE_PREFLIGHT=NO\nIMAGE_PREFLIGHT_REASON=trusted_oci_metadata_validation_failed", file=sys.stderr)
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "image-preflight":
+        if len(argv) != 4:
+            print("usage: ghcr_prepare_cache.py image-preflight SHA API_IMAGE WORKER_IMAGE", file=sys.stderr)
+            return 2
+        return image_preflight(argv[1], argv[2], argv[3])
     try:
         result = resolve_prepare(os.environ["CANDIDATE_SHA"], os.environ["PREPARE_RUN_ID"],
             os.environ["PREPARE_RUN_ATTEMPT"], os.environ["PREPARE_RECEIPT_DIGEST"],
             os.environ["GITHUB_ACTOR"], os.environ["GITHUB_TOKEN"],
             Path(os.environ["ARTIFACT_DESTINATION"]))
-        pull_verified_image(result["image"], os.environ["CANDIDATE_SHA"],
-                            os.environ["GITHUB_ACTOR"], os.environ["GITHUB_TOKEN"])
         output = Path(os.environ["GITHUB_OUTPUT"])
         with output.open("a", encoding="utf-8") as stream:
             stream.write(f"prepare_receipt_digest={result['digest']}\n")
             stream.write(f"image_digest={result['image']['digest']}\n")
             stream.write(f"image_config_digest={result['image']['config_digest']}\n")
-        print(f"MAXIBOT_GHCR_PREPARE_READBACK=PASS RECEIPT={result['digest']} IMAGE={result['image']['digest']}")
+        print(f"MAXIBOT_GHCR_PREPARE_READBACK=PASS RECEIPT={result['digest']} IMAGE={result['image']['digest']} CONFIG={result['image']['config_digest']} PLATFORM=linux/amd64")
         return 0
     except (KeyError, OSError, ArtifactError) as exc:
         print(f"MAXIBOT_GHCR_PREPARE_READBACK=BLOCKED REASON={exc}", file=sys.stderr)
