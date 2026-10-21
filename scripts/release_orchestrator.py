@@ -32,6 +32,17 @@ PREPARE_PATH = ".github/workflows/maxibot-prepare.yml"
 DEPLOY_WORKFLOW = "maxibot-deploy.yml"
 EVIDENCE_PUBLISH_STEP = "Publish immutable Deploy evidence to GHCR and verify digest readback"
 PREPARE_PUBLISH_STEP = "Publish immutable Prepare receipt to GHCR and verify digest readback"
+DEPLOY_VALIDATE_STEP = "Verify approval, current main and latest successful Prepare"
+DEPLOY_VALIDATE_JOB_STEPS = (
+    ("Set up job", "success"),
+    ("Initialize shared retry budget", "success"),
+    ("Checkout trusted main workflow source", "success"),
+    (DEPLOY_VALIDATE_STEP, "failure"),
+)
+DEPLOY_VALIDATE_POST_STEPS = (
+    ("Post Checkout trusted main workflow source", "success"),
+    ("Complete job", "success"),
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 AUTH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 CONTROLLER_RETRY_BUDGET_SECONDS = NETWORK_RETRY_BUDGET_SECONDS
@@ -236,6 +247,130 @@ def _verified_deploy_evidence(api, run: dict) -> tuple[str, dict] | None:
     return digest, result
 
 
+def _log_content(line: str) -> str:
+    # Preserve indentation after GitHub's ISO timestamp prefix. Untimestamped
+    # lines intentionally remain unchanged and cannot prove runner env values.
+    return re.sub(r"^\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z ", "", line.removeprefix("\ufeff"))
+
+
+def _has_runner_timestamp(line: str) -> bool:
+    return re.match(r"^\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z ", line.removeprefix("\ufeff")) is not None
+
+
+def _validation_log_inputs(text: str) -> dict[str, str] | None:
+    lines = text.splitlines()
+    command = "##[group]Run python3 scripts/validate_release_dispatch.py"
+    starts = [i for i, line in enumerate(lines) if _log_content(line) == command]
+    if len(starts) != 1 or not _has_runner_timestamp(lines[starts[0]]):
+        return None
+    start = starts[0]
+    end = next((i for i in range(start + 1, len(lines))
+                if _log_content(lines[i]) == "##[endgroup]"), None)
+    if end is None or any(_log_content(lines[i]).startswith("##[group]")
+                          for i in range(start + 1, end)):
+        return None
+    body = lines[start + 1:end]
+    if not all(_has_runner_timestamp(line) for line in lines[start:end + 1]):
+        return None
+    env_sections = [i for i, line in enumerate(body) if _log_content(line) == "env:"]
+    if len(env_sections) != 1:
+        return None
+    values: dict[str, str] = {}
+    for line in body[env_sections[0] + 1:]:
+        content = _log_content(line)
+        if not content.strip():
+            continue
+        match = re.fullmatch(r"\s{2,}([A-Z][A-Z0-9_]*):\s?(.*)", content)
+        if not match or match.group(1) in values:
+            return None
+        values[match.group(1)] = match.group(2)
+    return values
+
+
+def _prove_safe_predeploy_failure(api, run: dict, candidate: str, prepare_run_id: str,
+                                  prepare_attempt: str, authorization_id: str) -> bool:
+    run_id, run_attempt = str(run.get("id", "")), str(run.get("run_attempt", ""))
+    if (not SHA_RE.fullmatch(candidate)
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
+            or not re.fullmatch(r"[1-9][0-9]{0,5}", run_attempt)
+            or run.get("head_sha") != candidate or run.get("head_branch") != "main"
+            or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+            or run.get("event") != "workflow_dispatch"
+            or run.get("status") != "completed" or run.get("conclusion") != "failure"):
+        return False
+    try:
+        response = api.get(f"actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100")
+    except Exception:
+        return False
+    jobs, total = response.get("jobs"), response.get("total_count")
+    if not isinstance(jobs, list) or total != 3 or len(jobs) != 3:
+        return False
+    job_ids = []
+    for job in jobs:
+        if (not isinstance(job, dict)
+                or str(job.get("run_id", "")) != run_id
+                or str(job.get("run_attempt", "")) != run_attempt
+                or (job.get("head_sha") is not None and job.get("head_sha") != candidate)
+                or not re.fullmatch(r"[1-9][0-9]{0,19}", str(job.get("id", "")))):
+            return False
+        job_ids.append(str(job["id"]))
+    if len(set(job_ids)) != len(job_ids):
+        return False
+    by_name: dict[str, list[dict]] = {}
+    for job in jobs:
+        by_name.setdefault(job.get("name", ""), []).append(job)
+    if set(by_name) != {"validate", "deploy", "publish"} or any(len(v) != 1 for v in by_name.values()):
+        return False
+    validate_job, deploy_job, publish_job = (by_name[name][0] for name in ("validate", "deploy", "publish"))
+    validate_steps = validate_job.get("steps")
+    deploy_steps = deploy_job.get("steps")
+    validate_step_results = ([(step.get("name"), step.get("status"), step.get("conclusion"))
+                              for step in validate_steps]
+                             if isinstance(validate_steps, list)
+                             and all(isinstance(step, dict) for step in validate_steps) else [])
+    expected_validate_prefix = [(name, "completed", conclusion)
+                                for name, conclusion in DEPLOY_VALIDATE_JOB_STEPS]
+    allowed_post = [(name, "completed", conclusion)
+                    for name, conclusion in DEPLOY_VALIDATE_POST_STEPS]
+    if (len(validate_step_results) < len(expected_validate_prefix)
+            or validate_step_results[:len(expected_validate_prefix)] != expected_validate_prefix):
+        return False
+    tail = validate_step_results[len(expected_validate_prefix):]
+    # GitHub may report checkout's post action and its synthetic completion
+    # step. Permit only this ordered suffix after the failed validator.
+    if (len(tail) > len(allowed_post)
+            or tail != allowed_post[:len(tail)]
+            or (tail and tail[-1][0] == "Complete job" and tail != allowed_post)):
+        return False
+    if (validate_job.get("status") != "completed" or validate_job.get("conclusion") != "failure"
+            or not isinstance(validate_steps, list)
+            or len(validate_step_results) != len(validate_steps)):
+        return False
+    if (deploy_job.get("status") != "completed" or deploy_job.get("conclusion") != "skipped"
+            or deploy_steps != []):
+        return False
+    if (publish_job.get("status") != "completed"
+            or publish_job.get("conclusion") not in {"success", "failure"}):
+        return False
+    try:
+        log = api.get_job_log_archive(str(validate_job.get("id", "")))
+    except Exception:
+        return False
+    env = _validation_log_inputs(log) if isinstance(log, str) else None
+    if env is None:
+        return False
+    expected = {
+        "CANDIDATE_SHA": candidate,
+        "RELEASE_MODE": "task-scoped-auto",
+        "PREPARE_RUN_ID": prepare_run_id,
+        "PREPARE_RUN_ATTEMPT": prepare_attempt,
+        "TASK_AUTHORIZATION_ID": authorization_id,
+        "APPROVE_PRODUCTION": "false",
+        "APPROVE_WORKER_BOOTSTRAP": "false",
+    }
+    return all(env.get(key) == value for key, value in expected.items())
+
+
 def publisher_logged_digest(api, run_id: str, attempt: str, publisher_step: str,
                             marker_prefix: str) -> str:
     """Bind a publisher's durable artifact digest to one successful run attempt log."""
@@ -284,18 +419,24 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
     candidates = [run for run in runs if run.get("head_sha") == candidate
                   and run.get("path") == ".github/workflows/maxibot-deploy.yml"
                   and run.get("event") == "workflow_dispatch"]
-    matching = []
+    if not candidates:
+        raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
+    safe_prior_runs = 0
     for run in candidates:
+        if _prove_safe_predeploy_failure(api, run, candidate, prepare_run_id,
+                                         prepare_attempt, authorization_id):
+            safe_prior_runs += 1
+            continue
         run_id, attempt = str(run.get("id", "")), str(run.get("run_attempt", ""))
         if (not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
                 or not re.fullmatch(r"[1-9][0-9]{0,5}", attempt)):
-            continue
+            raise OrchestrationError("Prior task-scoped Deploy identity is unknown")
         try:
             verified = _verified_deploy_evidence(api, run)
         except OrchestrationError:
-            continue
+            raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required") from None
         if verified is None:
-            continue
+            raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
         _digest, result = verified
         if (result.get("candidate_sha") == candidate
                 and str(result.get("github_run_id", "")) == run_id
@@ -304,18 +445,19 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
                 and str(result.get("prepare_run_attempt", "")) == prepare_attempt
                 and result.get("task_authorization_id") == authorization_id
                 and result.get("mode") == "task-scoped-auto"):
-            matching.append((run, result))
-    if len(matching) != 1:
+            if (run.get("status") != "completed" or run.get("conclusion") != "failure"
+                    or result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+                    or result.get("status") != "FAILED_PRE_SWITCH"
+                    or result.get("release_state") != "FAILED_PRE_SWITCH"
+                    or result.get("production_changed") is not False
+                    or result.get("authorization_consumed") is not False
+                    or result.get("production_baseline_sha") != production_baseline_sha):
+                raise OrchestrationError("Prior task-scoped Deploy was not proven safe to retry")
+            safe_prior_runs += 1
+            continue
         raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
-    run, result = matching[0]
-    if (run.get("status") != "completed" or run.get("conclusion") != "failure"
-            or result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
-            or result.get("status") != "FAILED_PRE_SWITCH"
-            or result.get("release_state") != "FAILED_PRE_SWITCH"
-            or result.get("production_changed") is not False
-            or result.get("authorization_consumed") is not False
-            or result.get("production_baseline_sha") != production_baseline_sha):
-        raise OrchestrationError("Prior task-scoped Deploy was not proven safe to retry")
+    if safe_prior_runs != len(candidates):
+        raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
 
 
 def _find_task_authorization(repo_root: Path, candidate_sha: str, api) -> dict[str, str]:

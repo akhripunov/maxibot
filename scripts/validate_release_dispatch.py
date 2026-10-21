@@ -55,10 +55,10 @@ def github_get(path: str, token: str, opener=urllib.request.urlopen, *,
                                   budget=budget or NETWORK_BUDGET, **(retry_options or {}))
     except NetworkUnavailable:
         raise ValidationError("NETWORK_UNAVAILABLE stage=release_provenance") from None
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValidationError("GHCR Prepare provenance could not be verified") from exc
     except urllib.error.HTTPError as exc:
         raise ValidationError(f"GitHub provenance request failed (HTTP {exc.code})") from None
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValidationError("GHCR Prepare provenance could not be verified") from exc
 
 
 def read_prepare_publisher_digest(run_id: str, attempt: str, token: str, api_get) -> str:
