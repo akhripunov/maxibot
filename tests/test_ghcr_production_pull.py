@@ -18,6 +18,28 @@ CONFIG = "sha256:" + "c" * 64
 REFERENCE = artifacts.IMAGE_REPOSITORY + "@" + MANIFEST
 
 
+@pytest.mark.parametrize("actor,token,accepted", [
+    ("github-actions[bot]", "fixture-workflow-secret", True),
+    ("akhripunov", "fixture-workflow-secret", True),
+    ("github-actions[bot]", "", False),
+    ("", "fixture-workflow-secret", False),
+    ("github-actions[bot];echo unsafe", "fixture-workflow-secret", False),
+    ("owner\nother", "fixture-workflow-secret", False),
+    ("[bot]", "fixture-workflow-secret", False),
+])
+def test_production_pull_credential_gate_accepts_controller_bot_without_weakening_token(actor, token, accepted):
+    source = (ROOT / "scripts/release_prod.sh").read_text()
+    gate = source[source.index('[[ -n "${GITHUB_TOKEN:-}"'):source.index('RELEASE_IMAGE_ID=${RELEASE_IMAGE_ID:-}')]
+    env = os.environ.copy()
+    env.update(GITHUB_ACTOR=actor, GITHUB_TOKEN=token)
+    result = subprocess.run(
+        ["bash", "-c", 'set -Eeuo pipefail\ndie() { echo BLOCKED >&2; exit 1; }\n' + gate],
+        env=env, capture_output=True, text=True, timeout=5,
+    )
+    assert (result.returncode == 0) is accepted
+    assert "fixture-workflow-secret" not in result.stdout + result.stderr
+
+
 def response(body):
     class Response:
         def __enter__(self): return self

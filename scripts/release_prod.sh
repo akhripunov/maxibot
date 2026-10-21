@@ -408,7 +408,8 @@ RELEASE_IMAGE_REPOSITORY=${RELEASE_IMAGE_REPOSITORY:-}
 RELEASE_IMAGE_DIGEST=${RELEASE_IMAGE_DIGEST:-}
 [[ "$RELEASE_IMAGE_REPOSITORY" == "ghcr.io/akhripunov/maxibot-vps-api" ]] || die "RELEASE_IMAGE_REPOSITORY is not the approved MAXIBOT GHCR repository"
 [[ "$RELEASE_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_DIGEST must be the verified OCI manifest digest"
-[[ -n "${GITHUB_TOKEN:-}" && "${GITHUB_ACTOR:-}" =~ ^[A-Za-z0-9-]{1,39}$ ]] || die "A workflow token is required to mint a scoped GHCR pull token"
+# Automatic workflow_dispatch uses GitHub's literal built-in bot login.
+[[ -n "${GITHUB_TOKEN:-}" && "${GITHUB_ACTOR:-}" =~ ^([A-Za-z0-9-]{1,39}|github-actions\[bot\])$ ]] || die "A workflow token and supported GitHub actor are required to mint a scoped GHCR pull token"
 RELEASE_IMAGE_ID=${RELEASE_IMAGE_ID:-}
 [[ "$RELEASE_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]] || die "RELEASE_IMAGE_ID must be the verified image config digest"
 
