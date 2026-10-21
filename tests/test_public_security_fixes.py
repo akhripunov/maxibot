@@ -363,3 +363,21 @@ async def test_webhook_startup_requires_url_and_secret_before_database(monkeypat
     with pytest.raises(RuntimeError, match="MAX_WEBHOOK_URL and MAX_WEBHOOK_SECRET"):
         async with main.lifespan(main.app):
             pass
+
+@pytest.mark.asyncio
+async def test_demo_menu_cannot_send_or_edit_messages_in_real_mode(monkeypatch):
+    from app import main
+    from app.core.config import settings
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(settings, 'max_client_mode', 'real')
+    calls = []
+    async def forbidden(*args, **kwargs):
+        calls.append('provider')
+        raise AssertionError('Demo must not reach production provider')
+    monkeypatch.setattr(main, 'client', SimpleNamespace(send_message=forbidden, edit_message=forbidden))
+    for message_id in (None, 'fixture-message'):
+        with pytest.raises(HTTPException) as error:
+            await main.demo_menu(admin_id='fixture-admin', message_id=message_id)
+        assert error.value.status_code == 404
+    assert calls == []

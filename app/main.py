@@ -2708,6 +2708,9 @@ async def landing_click(public_id: str, token: str, request: Request, db: AsyncS
 
 @app.post("/api/demo/menu")
 async def demo_menu(admin_id: str = "demo", screen: str = "home", message_id: str | None = None):
+    # A public demo must never drive the production MAX client or database.
+    if settings.is_real_max:
+        raise HTTPException(404, "Not found")
     text = "🤖 MAXIBOT\n\nДобро пожаловать!"
     buttons = [[{"text": "📋 Мои каналы", "callback_data": "channels"}], [{"text": "🤖 Мои боты", "callback_data": "bots"}]]
     if message_id:
