@@ -678,6 +678,105 @@ def publisher_logged_digest(api, run_id: str, attempt: str, publisher_step: str,
     return digests[0]
 
 
+def _prove_historical_receipt_failure_before_execute(api, run: dict, candidate: str,
+                                                     prepare_run_id: str, prepare_attempt: str,
+                                                     authorization_id: str,
+                                                     repo_root: Path | None) -> bool:
+    """Read-only proof for both known attempts that never entered release_prod.
+
+    This is not a synthetic deployment result or a generic skipped-step bypass.
+    The historical source and every attempt are pinned; an additional attempt,
+    any execution of the release step, or incomplete evidence remains unknown.
+    """
+    if (repo_root is None or candidate != "dc7c5acfee1f6978dc11945b1a342e9bee11a75f"
+            or str(run.get("id")) != "39570151060" or str(run.get("run_attempt")) != "2"
+            or run.get("head_sha") != candidate or run.get("head_branch") != "main"
+            or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+            or run.get("event") != "workflow_dispatch" or run.get("status") != "completed"
+            or run.get("conclusion") != "failure"
+            or not isinstance(run.get("actor"), dict)
+            or run["actor"].get("login") != "github-actions[bot]"
+            or prepare_run_id != "39567592711" or prepare_attempt != "1"):
+        return False
+    pins = {
+        ".github/workflows/maxibot-deploy.yml": "e3b6b4cf210c34102add9b0c8b267f5b509151da52949a919fa142f7461b764b",
+        "scripts/ghcr_prepare_cache.py": "e96e1ee59d984dc24390cfb743d1dc21c3cac81c3dcc4c6d874e17be8eb963ab",
+        "scripts/run_release_workflow.py": "b0cef2ee9e1ba8cc0d20c1518422d3fa9d1ddd051c2b449c06cf1283c7668f20",
+    }
+    try:
+        for path, expected in pins.items():
+            blob = subprocess.check_output(["git", "show", f"{candidate}:{path}"],
+                cwd=repo_root, stderr=subprocess.DEVNULL, timeout=10)
+            if hashlib.sha256(blob).hexdigest() != expected:
+                return False
+        deployments = api.get(f"deployments?sha={candidate}&environment=maxibot-production&per_page=100&page=1")
+    except Exception:
+        return False
+    if deployments != []:
+        return False
+    ids = {1: (119122003592, 119122088345, 119125203086),
+           2: (119128556433, 119128555077, 119129985371)}
+    required_env = {"CANDIDATE_SHA": candidate, "RELEASE_MODE": "task-scoped-auto",
+                    "PREPARE_RUN_ID": prepare_run_id, "PREPARE_RUN_ATTEMPT": prepare_attempt,
+                    "TASK_AUTHORIZATION_ID": authorization_id, "APPROVE_PRODUCTION": "false",
+                    "APPROVE_WORKER_BOOTSTRAP": "false"}
+    receipt_overrides = {"Resolve and verify exact Prepare receipt from GHCR": "failure",
+                        "Verify exact candidate checkout is still clean": "skipped",
+                        "Run production preflight and requested release mode": "skipped",
+                        EVIDENCE_PUBLISH_STEP: "skipped"}
+    deploy_steps = tuple((name, receipt_overrides.get(name, state))
+                        for name, state in HISTORICAL_GUARD_DEPLOY_STEPS)
+    publish_steps = tuple((name, "skipped" if name in {
+        "Read immutable GHCR evidence by exact digest", "Publish production result to MAXIBOT Linear"}
+        else state) for name, state in HISTORICAL_GUARD_PUBLISH_STEPS)
+    for attempt in (1, 2):
+        try:
+            response = api.get(f"actions/runs/39570151060/attempts/{attempt}/jobs?per_page=100")
+        except Exception:
+            return False
+        if not isinstance(response, dict):
+            return False
+        jobs = response.get("jobs")
+        if not isinstance(jobs, list) or response.get("total_count") != 3 or len(jobs) != 3:
+            return False
+        by_name = {}
+        for job in jobs:
+            if (not isinstance(job, dict) or job.get("name") in by_name
+                    or str(job.get("run_id")) != "39570151060"
+                    or str(job.get("run_attempt")) != str(attempt)
+                    or job.get("head_sha") != candidate or job.get("status") != "completed"):
+                return False
+            by_name[job.get("name")] = job
+        if set(by_name) != {"validate", "deploy", "publish"}:
+            return False
+        if tuple(by_name[name].get("id") for name in ("validate", "deploy", "publish")) != ids[attempt]:
+            return False
+        expected = {"validate": ("success", HISTORICAL_GUARD_VALIDATOR_STEPS),
+                    "publish": ("success", publish_steps)}
+        if attempt == 1:
+            deploy = by_name["deploy"]
+            if (deploy.get("conclusion") != "cancelled" or "steps" not in deploy
+                    or deploy["steps"] not in (None, [])):
+                return False
+        else:
+            expected["deploy"] = ("failure", deploy_steps)
+        for name, (conclusion, steps) in expected.items():
+            job = by_name[name]
+            actual = job.get("steps")
+            if (job.get("conclusion") != conclusion or not isinstance(actual, list)
+                    or not all(isinstance(step, dict) for step in actual)
+                    or [(step.get("name"), step.get("status"), step.get("conclusion")) for step in actual]
+                    != [(name, "completed", state) for name, state in steps]):
+                return False
+        try:
+            env = _validation_log_inputs(api.get_job_log_archive(str(ids[attempt][0])))
+        except Exception:
+            return False
+        if env is None or any(env.get(key) != value for key, value in required_env.items()):
+            return False
+    return True
+
+
 def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
                                authorization_id: str, production_baseline_sha: str,
                                repo_root: Path | None = None) -> None:
@@ -694,6 +793,10 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
         raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
     safe_prior_runs = 0
     for run in candidates:
+        if _prove_historical_receipt_failure_before_execute(api, run, candidate, prepare_run_id,
+                                                           prepare_attempt, authorization_id, repo_root):
+            safe_prior_runs += 1
+            continue
         if _prove_historical_guard_failure(api, run, candidate, prepare_run_id,
                                            prepare_attempt, authorization_id, repo_root):
             safe_prior_runs += 1

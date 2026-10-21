@@ -349,6 +349,8 @@ def main() -> int:
         env["RELEASE_IMAGE_REPOSITORY"] = image_record["repository"]
         env["RELEASE_IMAGE_DIGEST"] = image_digest
         env["RELEASE_IMAGE_ID"] = image_id
+        env["MAXIBOT_IMAGE_TRANSPORT"] = "GHCR_VPS_DIRECT"
+        env["RELEASE_PREPARE_RECEIPT"] = os.environ.get("IMAGE_RESULT", "")
         result["image_platform"] = "linux/amd64"
         result["image_source_sha"] = sha
         result["image_config_digest"] = image_id

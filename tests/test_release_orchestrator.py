@@ -497,6 +497,84 @@ class ReleaseOrchestratorTests(unittest.TestCase):
                     self.api, {"id": 119043003895}, HISTORICAL_GUARD_SHA, "39544452691", "1",
                     "maxibot-task-guardproof-20261021"))
 
+    def _set_receipt_failure_before_execute(self):
+        import copy
+        self._set_historical_guard_failure()
+        template = self.api.jobs_by_attempt["39545600520/1"]
+        candidate = "dc7c5acfee1f6978dc11945b1a342e9bee11a75f"
+        run_id = 39570151060
+        ids = {1: (119122003592, 119122088345, 119125203086),
+               2: (119128556433, 119128555077, 119129985371)}
+        env = {"CANDIDATE_SHA": candidate, "RELEASE_MODE": "task-scoped-auto",
+               "PREPARE_RUN_ID": "39567592711", "PREPARE_RUN_ATTEMPT": "1",
+               "TASK_AUTHORIZATION_ID": "maxibot-preexecute-test", "APPROVE_PRODUCTION": "false",
+               "APPROVE_WORKER_BOOTSTRAP": "false"}
+        log = ('2026-10-21T08:33:00.0000000Z ##[group]Run python3 scripts/validate_release_dispatch.py\n'
+               '2026-10-21T08:33:00.0000000Z env:\n' +
+               "\n".join(f"2026-10-21T08:33:00.0000000Z   {key}: {value}" for key, value in env.items()) +
+               '\n2026-10-21T08:33:00.0000000Z ##[endgroup]\n')
+        for attempt in (1, 2):
+            jobs = copy.deepcopy(template)
+            for job, job_id in zip(jobs, ids[attempt]):
+                job.update(id=job_id, run_id=run_id, run_attempt=attempt, head_sha=candidate)
+            deploy, publish = jobs[1:]
+            publish["conclusion"] = "success"
+            for step in publish["steps"]:
+                if step["name"] in {"Read immutable GHCR evidence by exact digest", "Publish production result to MAXIBOT Linear"}:
+                    step["conclusion"] = "skipped"
+            if attempt == 1:
+                deploy.update(conclusion="cancelled", steps=[])
+            else:
+                for step in deploy["steps"]:
+                    if step["name"] == "Resolve and verify exact Prepare receipt from GHCR":
+                        step["conclusion"] = "failure"
+                    elif step["name"] in {"Verify exact candidate checkout is still clean", "Run production preflight and requested release mode", "Publish immutable Deploy evidence to GHCR and verify digest readback"}:
+                        step["conclusion"] = "skipped"
+            self.api.jobs_by_attempt[f"{run_id}/{attempt}"] = jobs
+            self.api.logs_by_job[str(ids[attempt][0])] = log
+        self.api.deployments = []
+        return {"id": run_id, "run_attempt": 2, "head_sha": candidate, "head_branch": "main",
+                "path": ".github/workflows/maxibot-deploy.yml", "event": "workflow_dispatch",
+                "actor": {"login": "github-actions[bot]"}, "status": "completed", "conclusion": "failure"}
+
+    def test_receipt_failure_with_every_attempt_before_execute_is_safe(self):
+        run = self._set_receipt_failure_before_execute()
+        marker = {"ref": "refs/tags/maxibot-task-auth/maxibot-preexecute-test/dispatches/prepare-39567592711-1",
+                  "sha": run["head_sha"]}
+        orchestrator._prove_safe_prior_dispatch(
+            self.api, marker, [run], "maxibot-preexecute-test", "d" * 40, repo_root=ROOT)
+
+    def test_receipt_failure_proof_rejects_executed_or_missing_prior_attempts(self):
+        for mutation in ("executed_first", "executed_second", "missing_first", "wrong_task", "extra_deployment", "extra_attempt", "extra_job", "unknown_sibling"):
+            with self.subTest(mutation=mutation):
+                self.api = FakeAPI()
+                run = self._set_receipt_failure_before_execute()
+                if mutation == "executed_first":
+                    self.api.jobs_by_attempt["39570151060/1"][1]["steps"] = [{"name": "Run production preflight and requested release mode", "status": "completed", "conclusion": "success"}]
+                elif mutation == "executed_second":
+                    for step in self.api.jobs_by_attempt["39570151060/2"][1]["steps"]:
+                        if step["name"] == "Run production preflight and requested release mode": step["conclusion"] = "failure"
+                elif mutation == "missing_first":
+                    del self.api.jobs_by_attempt["39570151060/1"]
+                elif mutation == "wrong_task":
+                    self.api.logs_by_job["119128556433"] = self.api.logs_by_job["119128556433"].replace("maxibot-preexecute-test", "different-task")
+                elif mutation == "extra_deployment":
+                    self.api.deployments = [{"id": 77}]
+                elif mutation == "extra_attempt":
+                    run["run_attempt"] = 3
+                elif mutation == "extra_job":
+                    self.api.jobs_by_attempt["39570151060/1"].append({"name": "unknown"})
+                marker = {"ref": "refs/tags/maxibot-task-auth/maxibot-preexecute-test/dispatches/prepare-39567592711-1", "sha": run["head_sha"]}
+                with self.assertRaises(orchestrator.OrchestrationError):
+                    orchestrator._prove_safe_prior_dispatch(
+                        self.api, marker, [run, {**run, "id": 999}] if mutation == "unknown_sibling" else [run], "maxibot-preexecute-test", "d" * 40, repo_root=ROOT)
+
+    def test_receipt_failure_proof_rejects_changed_historical_source(self):
+        run = self._set_receipt_failure_before_execute()
+        with patch.object(orchestrator.subprocess, "check_output", return_value=b"tampered source"):
+            self.assertFalse(orchestrator._prove_historical_receipt_failure_before_execute(
+                self.api, run, run["head_sha"], "39567592711", "1", "maxibot-preexecute-test", ROOT))
+
     def test_historical_guard_proof_rejects_malformed_timeline_and_unaccounted_sibling(self):
         authorization_id = "maxibot-task-guardproof-20261021"
         marker = {"ref": "maxibot-task-auth/" + authorization_id + "/dispatches/prepare-39544452691-1",

@@ -81,9 +81,91 @@ def test_prebuilt_wrong_architecture_is_denied(tmp_path):
 def test_release_dry_run_has_prebuilt_image_gate():
     source = SCRIPT.read_text()
     assert "release_image_preflight.py" in source
+    assert "GHCR_VPS_DIRECT" in source
     assert "API_WORKER_IMAGE_PARITY PASS" in source
     assert "RELEASE_READY YES" in source
     assert "docker compose" not in source[source.index("if [[ \"$MODE\" == DRY_RUN ]]; then"):source.index("fi\n\n[[ \"${OWNER_APPROVED")]
+
+
+def _run_direct_transport_preflight(tmp_path, *, transport="GHCR_VPS_DIRECT", helper_success=True,
+                                    receipt_exists=True):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    python = tmp_path / "python3"
+    helper_calls = tmp_path / "helper-calls"
+    helper_output = (f"IMAGE_READY=YES\nAPI_IMAGE_SHA={sha}\nWORKER_IMAGE_SHA={sha}\n"
+                     "IMAGE_ID=sha256:" + "1" * 64 + "\nIMAGE_PLATFORM=linux/amd64\n")
+    helper_result = (f" print({helper_output!r},end='')\n sys.exit(0)\n" if helper_success
+                     else " print('receipt_invalid',file=sys.stderr)\n sys.exit(7)\n")
+    python.write_text(
+        f"#!{sys.executable}\nimport os,sys\n"
+        f"helper={str(ROOT / 'scripts/ghcr_prepare_cache.py')!r}\n"
+        "if len(sys.argv)>2 and sys.argv[1]==helper and sys.argv[2]=='image-preflight':\n"
+        " open(os.environ['HELPER_CALLS'],'a').write(os.environ.get('RELEASE_PREPARE_RECEIPT','')+' '+' '.join(sys.argv[1:])+'\\n')\n"
+        + helper_result
+        + "os.execv(sys.executable,[sys.executable]+sys.argv[1:])\n")
+    python.chmod(0o755)
+    ssh = tmp_path / "ssh"
+    ssh.write_text(
+        "#!/bin/sh\nprintf 'ssh\\n' >> \"$SSH_CALLS\"\ncat >/dev/null\ncat <<'OUT'\n"
+        f"PROD_DB_HEAD={CANDIDATE_HEAD_MIGRATION}\nPROD_READY=ready\nPROD_RELEASE_SHA={sha}\n"
+        f"PROD_API_IMAGE=maxibot-vps-api:{sha}\nPROD_WORKER_IMAGE=maxibot-vps-api:{sha}\n"
+        "PROD_WORKER_HEALTH=PASS\nROLLBACK_CONFIG=/opt/maxibot/releases/previous/docker-compose.vps.yml\n"
+        "PROD_WRITE_FLAGS=ADS_AUTOPILOT_ENABLED=false,ADS_WRITE_ACTIONS_ENABLED=false\nOUT\n")
+    ssh.chmod(0o755)
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\nprintf 'docker\\n' >> \"$DOCKER_CALLS\"\nexit 99\n")
+    docker.chmod(0o755)
+    key = tmp_path / "ssh-key"
+    key.write_text("fake test key")
+    receipt = tmp_path / "prepare-receipt.json"
+    if receipt_exists:
+        receipt.write_text("{}")
+    helper_counter, ssh_counter, docker_counter = (tmp_path / name for name in
+                                                    ("helper-count", "ssh-count", "docker-count"))
+    env = os.environ.copy()
+    env.update({"PATH": f"{tmp_path}:{env['PATH']}", "TARGET_MIGRATION": CANDIDATE_HEAD_MIGRATION,
+        "PRODUCTION_HOST": "135.106.166.46", "PRODUCTION_SSH_KEY": str(key),
+        "MAXIBOT_IMAGE_TRANSPORT": transport, "RELEASE_PREPARE_RECEIPT": str(receipt),
+        "API_CANDIDATE_IMAGE": f"maxibot-vps-api:{sha}", "WORKER_CANDIDATE_IMAGE": f"maxibot-vps-api:{sha}",
+        "RELEASE_IMAGE_ID": "sha256:" + "1" * 64, "HELPER_CALLS": str(helper_counter),
+        "SSH_CALLS": str(ssh_counter), "DOCKER_CALLS": str(docker_counter)})
+    result = subprocess.run([str(SCRIPT), sha, "--dry-run"], cwd=ROOT,
+                            capture_output=True, text=True, env=env)
+    return result, helper_counter, ssh_counter, docker_counter, sha
+
+
+def test_vps_direct_image_preflight_uses_metadata_helper_without_local_docker(tmp_path):
+    result, helper_calls, ssh_calls, docker_calls, sha = _run_direct_transport_preflight(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "SAFE_TO_RELEASE=YES" in result.stdout
+    assert "API_IMAGE_SHA=" + sha in result.stdout
+    helper_line = helper_calls.read_text()
+    assert helper_line.count("image-preflight") == 1
+    assert str(tmp_path / "prepare-receipt.json") in helper_line
+    assert f"maxibot-vps-api:{sha}" in helper_line
+    assert ssh_calls.read_text().splitlines() == ["ssh"]
+    assert not docker_calls.exists()
+
+
+def test_invalid_direct_transport_or_receipt_never_falls_back_to_local_docker(tmp_path):
+    result, helper_calls, ssh_calls, docker_calls, _ = _run_direct_transport_preflight(
+        tmp_path / "unknown", transport="UNSUPPORTED")
+    assert result.returncode != 0 and "image transport" in result.stderr.lower()
+    assert not helper_calls.exists() and not ssh_calls.exists() and not docker_calls.exists()
+    result, helper_calls, ssh_calls, docker_calls, _ = _run_direct_transport_preflight(
+        tmp_path / "missing-receipt", receipt_exists=False)
+    assert result.returncode != 0 and "receipt" in result.stderr.lower()
+    assert not helper_calls.exists() and not ssh_calls.exists() and not docker_calls.exists()
+
+
+def test_direct_helper_receipt_failure_cannot_fall_back_to_local_image_inspection(tmp_path):
+    result, helper_calls, ssh_calls, docker_calls, _ = _run_direct_transport_preflight(
+        tmp_path, helper_success=False)
+    assert not docker_calls.exists()
+    assert not ssh_calls.exists()
+    assert "image-preflight" in helper_calls.read_text()
+    assert "IMAGE_READY=YES" not in result.stdout and "SAFE_TO_RELEASE=YES" not in result.stdout
 
 
 def test_production_dry_run_uses_one_ssh_session_and_names_failed_checks():
