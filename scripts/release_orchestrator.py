@@ -34,7 +34,7 @@ EVIDENCE_PUBLISH_STEP = "Publish immutable Deploy evidence to GHCR and verify di
 PREPARE_PUBLISH_STEP = "Publish immutable Prepare receipt to GHCR and verify digest readback"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 AUTH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
-CONTROLLER_RETRY_BUDGET_SECONDS = min(90, NETWORK_RETRY_BUDGET_SECONDS)
+CONTROLLER_RETRY_BUDGET_SECONDS = NETWORK_RETRY_BUDGET_SECONDS
 NETWORK_BUDGET = RetryBudget(seconds=CONTROLLER_RETRY_BUDGET_SECONDS)
 retry_jitter = random.uniform
 

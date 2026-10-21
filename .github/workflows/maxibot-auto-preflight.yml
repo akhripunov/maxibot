@@ -22,7 +22,9 @@ jobs:
       github.event.workflow_run.head_sha == github.sha &&
       github.event.workflow_run.path == '.github/workflows/maxibot-prepare.yml'
     runs-on: [self-hosted, macOS, maxibot-production]
-    timeout-minutes: 5
+    # Native action download/setup happens before project retries are loaded.
+    # Reserve ten minutes for bootstrap in addition to the shared read budget.
+    timeout-minutes: 40
     permissions:
       contents: write
       actions: write
