@@ -1,0 +1,50 @@
+"""Guard public workflow action pins and executor image publication trust."""
+
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOWS = ROOT / ".github/workflows"
+
+
+def test_public_workflows_pin_every_action_to_a_full_commit_sha():
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text())
+        for job_name, job in workflow.get("jobs", {}).items():
+            for step in job.get("steps", []):
+                action = step.get("uses", "")
+                if not action or action.startswith("./"):
+                    continue
+                reference = action.rsplit("@", 1)[-1]
+                assert len(reference) == 40 and all(c in "0123456789abcdef" for c in reference), (
+                    f"{path.name}:{job_name} uses mutable/non-SHA action ref {action}"
+                )
+
+
+def test_executor_publication_is_gated_by_read_only_trust_validation():
+    workflow = yaml.safe_load((WORKFLOWS / "telegram-executor-ghcr.yml").read_text())
+    jobs = workflow["jobs"]
+    validate = jobs["validate"]
+    publish = jobs["publish"]
+
+    assert workflow["permissions"] == {}
+    assert validate["permissions"] == {"contents": "read"}
+    assert "github.repository == 'akhripunov/maxibot'" in validate["if"]
+    assert "github.actor == 'akhripunov'" in validate["if"]
+    assert validate["steps"][0]["with"]["ref"] == "${{ github.sha }}"
+
+    validation_script = validate["steps"][1]["run"]
+    assert 'test "$SOURCE_SHA" = "$EVENT_SHA"' in validation_script
+    assert 'test "$(git rev-parse HEAD)" = "$SOURCE_SHA"' in validation_script
+    assert "git merge-base --is-ancestor" in validation_script
+    assert "refs/remotes/origin/main" in validation_script
+
+    assert publish["needs"] == "validate"
+    assert "needs.validate.result == 'success'" in publish["if"]
+    assert publish["permissions"] == {"contents": "write", "packages": "write"}
+    assert publish["env"]["SOURCE_SHA"] == "${{ needs.validate.outputs.source_sha }}"
+    assert publish["steps"][0]["with"]["ref"] == "${{ needs.validate.outputs.source_sha }}"
+    assert "github.repository == 'akhripunov/maxibot'" in publish["if"]
+    assert "github.actor == 'akhripunov'" in publish["if"]

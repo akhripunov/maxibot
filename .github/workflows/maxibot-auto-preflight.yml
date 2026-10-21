@@ -36,7 +36,7 @@ jobs:
           echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-auto-release-network-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           printf '0\n' > "$RUNNER_TEMP/maxibot-auto-release-network-budget-$GITHUB_RUN_ID"
       - name: Checkout trusted current main controller code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: refs/heads/main
           # Authorization scope proof walks ancestry from the production baseline.

@@ -50,6 +50,7 @@ services:
           memory: 512M
     networks:
       - maxibot_internal
+      - maxibot_frontend
 
   worker:
     image: maxibot-vps-api:9b3a0f6ce14d8503cf581a50b954d467caeb53a5
@@ -91,7 +92,7 @@ services:
     environment:
       POSTGRES_DB: maxibot
       POSTGRES_USER: maxibot
-      POSTGRES_PASSWORD: maxibot
+      POSTGRES_PASSWORD: ${MAXIBOT_POSTGRES_PASSWORD:?MAXIBOT_POSTGRES_PASSWORD is required}
     expose:
       - "5432"
     volumes:
@@ -130,7 +131,8 @@ services:
   https:
     image: caddy:2.10-alpine
     restart: unless-stopped
-    env_file: /opt/maxibot/.env
+    environment:
+      WEB_ADMIN_INTERNAL_TOKEN: ${WEB_ADMIN_INTERNAL_TOKEN:?WEB_ADMIN_INTERNAL_TOKEN is required}
     ports:
       - "80:80"
       - "443:443"
@@ -147,7 +149,7 @@ services:
           cpus: "0.10"
           memory: 96M
     networks:
-      - maxibot_internal
+      - maxibot_frontend
 
 volumes:
   maxibot_postgres_data:
@@ -159,4 +161,8 @@ volumes:
 networks:
   maxibot_internal:
     name: maxibot-vps-internal
+    driver: bridge
+
+  maxibot_frontend:
+    name: maxibot-vps-frontend
     driver: bridge

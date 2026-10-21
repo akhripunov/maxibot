@@ -101,7 +101,7 @@ jobs:
           echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
           printf '0\n' > "$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID"
       - name: Checkout trusted main workflow source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -171,7 +171,7 @@ jobs:
           echo "RUNNER_TOOL_CACHE=$HOME/.cache/maxibot-release/toolcache" >> "$GITHUB_ENV"
 
       - name: Checkout the approved candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.validate.outputs.candidate }}
           fetch-depth: 0
@@ -275,7 +275,7 @@ jobs:
       - name: Set publication evidence path
         shell: bash
         run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/result.json" >> "$GITHUB_ENV"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
       - name: Measure release runner usage

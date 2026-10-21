@@ -678,11 +678,11 @@ say BACKUP_PATH "$BACKUP_PATH"
 say ROLLBACK_READY YES
 
 # This is the migration safety gate. No DB write or runtime switch precedes it.
-remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose -p maxibot-vps -f docker-compose.vps.yml config --quiet; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx api; docker compose -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx worker"
+remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f docker-compose.vps.yml config --quiet; docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx api; docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f docker-compose.vps.yml config --services | grep -qx worker"
 remote "set -eu; test \"\$(docker info --format '{{.Architecture}}')\" = x86_64; test \"\$(docker image inspect maxibot-vps-api:$TARGET_SHA --format '{{.Os}}/{{.Architecture}}')\" = linux/amd64"
 # Resolve the effective compose configuration and prove both runtime roles
 # point at the exact approved candidate before any migration can start.
-EFFECTIVE_IMAGES=$(remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose -p maxibot-vps -f docker-compose.vps.yml config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)[\"services\"]; print(s[\"api\"].get(\"image\",\"\")); print(s[\"worker\"].get(\"image\",\"\"))'")
+EFFECTIVE_IMAGES=$(remote "set -eu; cd $PRODUCTION_ROOT/releases/$TARGET_SHA; docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f docker-compose.vps.yml config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)[\"services\"]; print(s[\"api\"].get(\"image\",\"\")); print(s[\"worker\"].get(\"image\",\"\"))'")
 API_EFFECTIVE_IMAGE=$(printf '%s\n' "$EFFECTIVE_IMAGES" | sed -n '1p')
 WORKER_EFFECTIVE_IMAGE=$(printf '%s\n' "$EFFECTIVE_IMAGES" | sed -n '2p')
 [[ "$API_EFFECTIVE_IMAGE" == "maxibot-vps-api:$TARGET_SHA" ]] || die "effective API image does not match approved candidate"
@@ -693,8 +693,10 @@ say PRE_APPLY_IMAGE_PARITY PASS
 remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic heads | grep -q '^$TARGET_MIGRATION'"
 say MIGRATION_ALLOWED YES
 
+# Validate candidate crypto settings before any database migration.
+timed_stage SECURITY_CONFIG remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA python -c 'from app.security_tokens import validate_crypto_settings; validate_crypto_settings(); print(\"SECURITY_CONFIG_PASS\")'"
 timed_stage MIGRATION remote "set -eu; docker run --rm --network maxibot-vps-internal --env-file $PRODUCTION_ROOT/.env -e MAX_RUN_POLLING=false maxibot-vps-api:$TARGET_SHA alembic upgrade $TARGET_MIGRATION"
-timed_stage RUNTIME_SWITCH remote "set -eu; docker compose -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d --no-build --force-recreate api worker"
+timed_stage RUNTIME_SWITCH remote "set -eu; docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d --no-build --force-recreate api worker https"
 if ! timed_stage HEALTH remote "set -Eeuo pipefail
 deadline=\$((\$(date +%s) + $HEALTH_TIMEOUT_SECONDS))
 while true; do
@@ -718,7 +720,7 @@ while true; do
   sleep $HEALTH_POLL_INTERVAL_SECONDS
 done"; then
   echo "POSTDEPLOY_HEALTH=FAIL" >&2
-  [[ -n "$PREVIOUS_CONFIG" ]] && remote "docker compose -p maxibot-vps -f $PREVIOUS_CONFIG up -d --no-build --force-recreate api worker" || true
+  [[ -n "$PREVIOUS_CONFIG" ]] && remote "docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f $PREVIOUS_CONFIG up -d --no-build --force-recreate api worker https" || true
   die "runtime rollback attempted; DB rollback remains a separate safety decision"
 fi
 # A fresh baseline follows the intentional runtime switch. No restart waiver.

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import secrets
 import hashlib
+import hmac
+import base64
+import binascii
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 
@@ -57,6 +60,62 @@ def _redis() -> Redis:
     return Redis.from_url(settings.redis_url, decode_responses=True)
 
 
+def _oauth_ticket_signature(body: bytes) -> str:
+    key = hmac.new(settings.app_secret.encode(), b"MAXIBOT\x00OAUTH-INIT-TICKET\x00V1", hashlib.sha256).digest()
+    return hmac.new(key, b"yandex-oauth-init\x00" + body, hashlib.sha256).hexdigest()
+
+
+async def issue_oauth_ticket(admin_external_id: str, service: str, resource_id: str | None = None) -> str:
+    """Issue a short-lived, single-use OAuth initiation ticket for an authenticated menu."""
+    if service not in {"metrica", "direct", "system", "bot"}:
+        raise ValueError("YANDEX_OAUTH_SERVICE_UNSUPPORTED")
+    if (service in {"metrica", "direct", "bot"}) != bool(resource_id):
+        raise ValueError("YANDEX_OAUTH_RESOURCE_INVALID")
+    payload = {"admin": str(admin_external_id), "service": service, "resource": str(resource_id) if resource_id else None,
+               "nonce": secrets.token_urlsafe(24), "exp": int(datetime.now(timezone.utc).timestamp()) + 600}
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    encoded = base64.urlsafe_b64encode(body).decode().rstrip("=")
+    ticket = encoded + "." + _oauth_ticket_signature(body)
+    client = _redis()
+    try:
+        reserved = await client.set(f"yandex:oauth:init:{payload['nonce']}", ticket, ex=600, nx=True)
+        if not reserved:
+            raise RuntimeError("YANDEX_OAUTH_TICKET_RESERVATION_FAILED")
+    finally:
+        await client.aclose()
+    return ticket
+
+
+async def consume_oauth_ticket(ticket: str, expected_service: str) -> dict | None:
+    """Validate ticket claims and atomically reserve the nonce for one callback start."""
+    if not ticket or len(ticket) > 2048:
+        return None
+    try:
+        encoded, signature = ticket.split(".", 1)
+        if len(signature) != 64 or any(ch not in "0123456789abcdef" for ch in signature):
+            return None
+        body = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        if not hmac.compare_digest(_oauth_ticket_signature(body), signature):
+            return None
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("service") != expected_service or int(payload.get("exp", 0)) < int(datetime.now(timezone.utc).timestamp()):
+            return None
+        if not payload.get("admin") or not payload.get("nonce"):
+            return None
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError, binascii.Error):
+        return None
+    client = _redis()
+    try:
+        reserved_ticket = await client.getdel(f"yandex:oauth:init:{payload['nonce']}")
+        if not reserved_ticket or not hmac.compare_digest(reserved_ticket, ticket):
+            return None
+    finally:
+        await client.aclose()
+    return payload
+
+
 async def create_state(admin_external_id: str, channel_id: str, *, service: str = "metrica") -> str:
     state = secrets.token_urlsafe(32)
     client = _redis()
@@ -93,10 +152,9 @@ async def consume_state(state: str) -> dict | None:
     client = _redis()
     try:
         key = f"yandex:oauth:state:{state}"
-        raw = await client.get(key)
+        raw = await client.getdel(key)
         if raw is None:
             return None
-        await client.delete(key)
         return json.loads(raw)
     finally:
         await client.aclose()

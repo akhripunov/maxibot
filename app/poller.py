@@ -20,11 +20,13 @@ from app.traffic.membership_reconciliation import reconcile_active_memberships
 from app.traffic.metrica_upload_tracker import refresh_metrica_upload_statuses
 from app.traffic.system_conversion_processor import process_system_conversions
 from app.traffic.bot_start_observability import process_bot_start_timeouts
+from app.security_tokens import validate_crypto_settings
 
 logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
+    validate_crypto_settings()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     client = RealMaxClient()

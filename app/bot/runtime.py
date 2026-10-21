@@ -93,6 +93,8 @@ class MaxBotRuntime:
             await client.close()
 
     async def run_forever(self):
+        from app.security_tokens import validate_crypto_settings
+        validate_crypto_settings()
         # This task lives in the same dedicated worker as the only official
         # MAX polling loop.  It never opens another update stream.
         if self._daily_report_task is None or self._daily_report_task.done():

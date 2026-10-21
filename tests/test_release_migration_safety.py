@@ -41,5 +41,5 @@ def test_release_script_requires_validated_backup_before_migration():
 def test_release_script_keeps_migration_and_runtime_switch_order():
     source = RELEASE.read_text(encoding="utf-8")
     migration = source.index("alembic upgrade $TARGET_MIGRATION")
-    switch = source.index("docker compose -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d")
+    switch = source.index("docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d")
     assert migration < switch

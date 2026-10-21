@@ -23,7 +23,7 @@ from app.traffic.attribution import decide_scored, HIGH, MEDIUM, EXACT, can_send
 from app.domain.services import menu_text, WELCOME, SENT, editable_welcome, normalize_channel_welcome, normalize_channel_sent, promotion_landing_description
 from app.core.config import settings
 from app.traffic.deep_link import valid_max_target
-from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, get_direct_encrypted_token, system_connection_status
+from app.integrations.yandex_oauth import authorize_url, configured, connection_status, create_state, get_encrypted_token, get_direct_encrypted_token, issue_oauth_ticket, system_connection_status
 from app.integrations.yandex_direct import YandexDirectClient
 from app.integrations.yandex_metrica import channel_setup_status, ensure_channel_goals_for_existing_counter, YandexMetricaClient
 from app.security_tokens import decrypt_token
@@ -1145,11 +1145,11 @@ def bot_landing_url(public_id: str) -> str:
     return public_landing_url(public_id)
 
 
-def yandex_direct_oauth_url(admin_external_id: str, channel_id: str) -> str:
-    """Build the channel-scoped OAuth entry point for Yandex Direct."""
+def yandex_direct_oauth_url(ticket: str) -> str:
+    """Build the channel-scoped OAuth entry point from a menu-issued ticket."""
     return (
         f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/direct/start"
-        f"?admin_id={quote(admin_external_id, safe='')}&channel_id={quote(channel_id, safe='')}"
+        f"?ticket={quote(ticket, safe='')}"
     )
 
 
@@ -1925,7 +1925,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             status = await system_connection_status(db=db)
             body = f"🔗 Яндекс.Директ\n\n🤖 MAXIBOT\n\nСтатус: {'подключено' if status else 'не подключено'}\nСистемный счётчик: {counter}\nЦель: {goal}\n\nИспользуется только отдельная system-scoped конфигурация."
             if configured():
-                system_oauth_url = f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/system/start?admin_id={quote(str(admin.external_id), safe='')}"
+                ticket = await issue_oauth_ticket(str(admin.external_id), "system")
+                system_oauth_url = f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/system/start?ticket={quote(ticket, safe='')}"
                 oauth_label = "Авторизоваться в Яндекс"
                 return (body, [[{"text": oauth_label, "type": "link", "url": system_oauth_url}], [{"text": "⬅️ Назад", "callback_data": "promotion_maxibot"}]])
         elif screen == "promotion_maxibot_analytics":
@@ -1968,9 +1969,10 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         }
         title, detail = labels[screen.split(":", 1)[0]]
         if screen.startswith("promotion_bot_yandex:") and configured():
+            ticket = await issue_oauth_ticket(str(admin.external_id), "bot", str(bot.id))
             return (
                 detail,
-                [[{"text": "Авторизоваться в Яндекс", "type": "link", "url": f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/bot/start?admin_id={quote(str(admin.external_id), safe='')}&bot_id={quote(str(bot.id), safe='')}",}],
+                [[{"text": "Авторизоваться в Яндекс", "type": "link", "url": f"{settings.traffic_public_base_url.rstrip('/')}/oauth/yandex/bot/start?ticket={quote(ticket, safe='')}",}],
                  [{"text": "⬅️ Назад", "callback_data": f"promotion_bot:{bot.id}"}]],
             )
         return (f"{title}\n\n🤖 {bot.display_name or bot.username}\n\n{detail}",

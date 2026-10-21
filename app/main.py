@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -26,8 +27,8 @@ from app.domain.services import WELCOME, SENT, editable_welcome, render_channel_
 from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
 from app.core.config import settings
-from app.security import validate_max_init_data
-from app.integrations.yandex_oauth import authorize_url, combined_scope, configured, consume_state, create_bot_state, create_state, create_system_state, direct_scope, exchange_code, get_encrypted_token, save_bot_token, save_token, save_system_token
+from app.security import enforce_public_message_rate_limit, validate_max_init_data
+from app.integrations.yandex_oauth import authorize_url, combined_scope, configured, consume_oauth_ticket, consume_state, create_bot_state, create_state, create_system_state, direct_scope, exchange_code, get_encrypted_token, save_bot_token, save_token, save_system_token
 from app.integrations.yandex_metrica import ensure_channel_setup, ensure_system_setup
 from app.integrations.yandex_direct import YandexDirectAPIError, YandexDirectClient
 from app.db.models import now as model_now
@@ -256,6 +257,10 @@ async def refresh_avatar_cache() -> None:
 @asynccontextmanager
 async def lifespan(app):
     global bot_runtime
+    from app.security_tokens import validate_crypto_settings
+    validate_crypto_settings()
+    if settings.max_updates_mode.lower() == "webhook" and (not settings.max_webhook_url or not settings.max_webhook_secret):
+        raise RuntimeError("MAX_WEBHOOK_URL and MAX_WEBHOOK_SECRET are required in webhook mode")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     if settings.is_real_max:
@@ -1061,9 +1066,10 @@ async def traffic_readiness(channel_id: str | None = Query(default=None), db: As
 
 @app.post("/max/webhook")
 async def max_webhook(request: Request):
-    if not settings.is_real_max or bot_runtime is None:
+    if not settings.is_real_max or settings.max_updates_mode.lower() != "webhook" or bot_runtime is None:
         raise HTTPException(503, "real MAX client is disabled")
-    if settings.max_webhook_secret and request.headers.get("X-Max-Bot-Api-Secret") != settings.max_webhook_secret:
+    provided_secret = request.headers.get("X-Max-Bot-Api-Secret", "")
+    if not settings.max_webhook_secret or not hmac.compare_digest(provided_secret.encode("utf-8"), settings.max_webhook_secret.encode("utf-8")):
         raise HTTPException(401, "invalid webhook secret")
     from app.integrations.max_client import MaxUpdate
     payload = await request.json()
@@ -2049,7 +2055,18 @@ async def public_start(channel: str, db: AsyncSession = Depends(get_session)):
     return {"channel": c.title, "text": render_channel_welcome_message(c.welcome_text)}
 
 @app.post("/api/public/messages", status_code=201)
-async def public_message(channel: str, user_id: str, user_name: str, payload: MessageIn, db: AsyncSession = Depends(get_session)):
+async def public_message(channel: str, payload: MessageIn, user_id: str | None = None, x_max_init_data: str | None = Header(default=None, alias="X-MAX-Init-Data"), db: AsyncSession = Depends(get_session)):
+    identity = validate_max_init_data(x_max_init_data or "")
+    signed_user_id = identity["external_id"]
+    if user_id is not None and not hmac.compare_digest(user_id.encode("utf-8"), signed_user_id.encode("utf-8")):
+        raise HTTPException(403, "MAX user identity does not match signed authorization")
+    user_id = signed_user_id
+    max_user = identity["user"]
+    name = max_user.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = " ".join(part.strip() for part in (max_user.get("first_name"), max_user.get("last_name")) if isinstance(part, str) and part.strip()) or max_user.get("username") or user_id
+    user_name = str(name).strip()[:255]
+    await enforce_public_message_rate_limit(user_id)
     c = await db.scalar(select(Channel).where(Channel.public_slug == channel))
     if not c: raise HTTPException(410, "Канал недоступен.")
     if not c.accepting: raise HTTPException(409, "receiving is disabled")
@@ -2063,23 +2080,29 @@ async def public_message(channel: str, user_id: str, user_name: str, payload: Me
 
 
 @app.get("/oauth/yandex/start")
-async def yandex_oauth_start(admin_id: str, channel_id: str, db: AsyncSession = Depends(get_session)):
+async def yandex_oauth_start(ticket: str, db: AsyncSession = Depends(get_session)):
     if not configured():
         raise HTTPException(503, "Yandex Metrica OAuth is not configured")
-    admin = await db.scalar(select(Admin).where(Admin.external_id == admin_id))
-    channel = await db.scalar(select(Channel).where(Channel.id == channel_id, Channel.admin_id == admin.id if admin else False))
+    claims = await consume_oauth_ticket(ticket, "metrica")
+    if not claims:
+        raise HTTPException(401, "invalid or expired OAuth initiation ticket")
+    admin = await db.scalar(select(Admin).where(Admin.external_id == claims["admin"]))
+    channel = await db.scalar(select(Channel).where(Channel.id == claims["resource"], Channel.admin_id == admin.id if admin else False))
     if not admin or not channel:
         raise HTTPException(404, "channel not found")
     return RedirectResponse(authorize_url(await create_state(admin.external_id, channel.id, service="metrica")), status_code=302)
 
 
 @app.get("/oauth/yandex/direct/start")
-async def yandex_direct_oauth_start(admin_id: str, channel_id: str, db: AsyncSession = Depends(get_session)):
+async def yandex_direct_oauth_start(ticket: str, db: AsyncSession = Depends(get_session)):
     """Start the combined OAuth flow required before a Direct API read."""
     if not configured() or "direct:api" not in (settings.yandex_oauth_scope or "").split():
         raise HTTPException(503, "Yandex Direct API OAuth is not configured")
-    admin = await db.scalar(select(Admin).where(Admin.external_id == admin_id))
-    channel = await db.scalar(select(Channel).where(Channel.id == channel_id, Channel.admin_id == admin.id if admin else False))
+    claims = await consume_oauth_ticket(ticket, "direct")
+    if not claims:
+        raise HTTPException(401, "invalid or expired OAuth initiation ticket")
+    admin = await db.scalar(select(Admin).where(Admin.external_id == claims["admin"]))
+    channel = await db.scalar(select(Channel).where(Channel.id == claims["resource"], Channel.admin_id == admin.id if admin else False))
     if not admin or not channel:
         raise HTTPException(404, "channel not found")
     state = await create_state(admin.external_id, channel.id, service="direct")
@@ -2087,10 +2110,13 @@ async def yandex_direct_oauth_start(admin_id: str, channel_id: str, db: AsyncSes
 
 
 @app.get("/oauth/yandex/system/start")
-async def yandex_system_oauth_start(admin_id: str, db: AsyncSession = Depends(get_session)):
+async def yandex_system_oauth_start(ticket: str, db: AsyncSession = Depends(get_session)):
     if not configured():
         raise HTTPException(503, "Yandex Metrica OAuth is not configured")
-    admin = await db.scalar(select(Admin).where(Admin.external_id == admin_id))
+    claims = await consume_oauth_ticket(ticket, "system")
+    if not claims:
+        raise HTTPException(401, "invalid or expired OAuth initiation ticket")
+    admin = await db.scalar(select(Admin).where(Admin.external_id == claims["admin"]))
     if not admin or str(admin.external_id) != str(settings.maxibot_owner_user_id or ""):
         raise HTTPException(404, "system promotion not found")
     state = await create_system_state(admin.external_id)
@@ -2098,11 +2124,14 @@ async def yandex_system_oauth_start(admin_id: str, db: AsyncSession = Depends(ge
 
 
 @app.get("/oauth/yandex/bot/start")
-async def yandex_bot_oauth_start(admin_id: str, bot_id: str, db: AsyncSession = Depends(get_session)):
+async def yandex_bot_oauth_start(ticket: str, db: AsyncSession = Depends(get_session)):
     if not configured():
         raise HTTPException(503, "Yandex OAuth is not configured")
-    admin = await db.scalar(select(Admin).where(Admin.external_id == admin_id))
-    bot = await db.scalar(select(BotConnection).where(BotConnection.id == bot_id, BotConnection.owner_admin_id == admin.id if admin else False))
+    claims = await consume_oauth_ticket(ticket, "bot")
+    if not claims:
+        raise HTTPException(401, "invalid or expired OAuth initiation ticket")
+    admin = await db.scalar(select(Admin).where(Admin.external_id == claims["admin"]))
+    bot = await db.scalar(select(BotConnection).where(BotConnection.id == claims["resource"], BotConnection.owner_admin_id == admin.id if admin else False))
     if not admin or not bot:
         raise HTTPException(404, "bot not found")
     state = await create_bot_state(admin.external_id, bot.id)
