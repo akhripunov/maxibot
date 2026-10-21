@@ -57,6 +57,7 @@ class FakeAPI:
         self.workflow_runs = []
         self.jobs_by_attempt = {}
         self.logs_by_job = {}
+        self.job_total_override = None
 
     def get(self, path):
         self.calls.append(("GET", path))
@@ -67,7 +68,8 @@ class FakeAPI:
         job_match = re.fullmatch(r"actions/runs/([0-9]+)/attempts/([0-9]+)/jobs\?per_page=100", path)
         if job_match:
             jobs = self.jobs_by_attempt.get("/".join(job_match.groups()), [])
-            return {"total_count": len(jobs), "jobs": jobs}
+            return {"total_count": self.job_total_override if self.job_total_override is not None else len(jobs),
+                    "jobs": jobs}
         if path.startswith("releases/tags/"):
             tag = path.rsplit("/", 1)[1]
             return {"tag_name": tag, "draft": False, "immutable": True, "assets": [{
@@ -301,6 +303,129 @@ class ReleaseOrchestratorTests(unittest.TestCase):
                 orchestrator._prove_safe_prior_dispatch(self.api, marker, runs, "auth-id", "d" * 40)
         with self.assertRaisesRegex(orchestrator.OrchestrationError, "unknown"):
             orchestrator._prove_safe_prior_dispatch(self.api, marker, [], "auth-id", "d" * 40)
+
+    def _set_predeploy_failure(self, *, candidate=SHA, prepare_id="123", prepare_attempt="2",
+                                authorization_id="auth-id", deploy_steps=None,
+                                validate_steps=None, total_count=3, duplicate_env=False,
+                                mode="task-scoped-auto", job_run_id=None, missing_deploy_steps=False):
+        run_id, attempt = "991", "1"
+        validate_steps = validate_steps or [
+            {"name": "Set up job", "status": "completed", "conclusion": "success"},
+            {"name": "Initialize shared retry budget", "status": "completed", "conclusion": "success"},
+            {"name": "Checkout trusted main workflow source", "status": "completed", "conclusion": "success"},
+            {"name": "Verify approval, current main and latest successful Prepare", "status": "completed", "conclusion": "failure"},
+        ]
+        jobs = [
+            {"id": 992, "run_id": job_run_id if job_run_id is not None else int(run_id), "run_attempt": int(attempt), "head_sha": candidate, "name": "validate",
+             "status": "completed", "conclusion": "failure", "steps": validate_steps},
+            {"id": 993, "run_id": int(run_id), "run_attempt": int(attempt), "head_sha": candidate, "name": "deploy",
+             "status": "completed", "conclusion": "skipped", "steps": None if missing_deploy_steps else (deploy_steps or [])},
+            {"id": 994, "run_id": int(run_id), "run_attempt": int(attempt), "head_sha": candidate, "name": "publish",
+             "status": "completed", "conclusion": "failure", "steps": []},
+        ]
+        self.api.jobs_by_attempt[f"{run_id}/{attempt}"] = jobs
+        self.api.job_total_override = total_count
+        fields = {"CANDIDATE_SHA": candidate, "RELEASE_MODE": mode,
+                  "PREPARE_RUN_ID": prepare_id, "PREPARE_RUN_ATTEMPT": prepare_attempt,
+                  "TASK_AUTHORIZATION_ID": authorization_id, "APPROVE_PRODUCTION": "false",
+                  "APPROVE_WORKER_BOOTSTRAP": "false"}
+        env = "\n".join(f"2026-10-21T04:01:38.8820000Z   {key}: {value}" for key, value in fields.items())
+        section = ("2026-10-21T04:01:38.8820000Z ##[group]Run python3 scripts/validate_release_dispatch.py\n"
+                   "2026-10-21T04:01:38.8820000Z   python3 scripts/validate_release_dispatch.py\n"
+                   "2026-10-21T04:01:38.8820000Z env:\n" + env + "\n"
+                   "2026-10-21T04:01:38.8820000Z ##[endgroup]\n"
+                   "2026-10-21T04:01:38.8820000Z RELEASE_PROVENANCE=BLOCKED REASON=validation failed\n")
+        if duplicate_env:
+            section += section
+        self.api.logs_by_job["992"] = section
+        return {"id": int(run_id), "run_attempt": int(attempt), "head_sha": candidate,
+                "head_branch": "main", "path": ".github/workflows/maxibot-deploy.yml",
+                "event": "workflow_dispatch", "status": "completed", "conclusion": "failure"}
+
+    def test_validate_failure_with_skipped_empty_deploy_is_safe_to_retry(self):
+        authorization_id = "auth-id"
+        prior_sha = "c" * 40
+        marker = {"ref": "maxibot-task-auth/auth-id/dispatches/prepare-123-2", "sha": prior_sha}
+        run = self._set_predeploy_failure(candidate=prior_sha)
+        with patch.object(orchestrator, "resolve_oci_artifact",
+                          side_effect=orchestrator.ArtifactError("no evidence is published before deploy")):
+            orchestrator._prove_safe_prior_dispatch(
+                self.api, marker, [run], authorization_id, "d" * 40)
+
+    def test_predeploy_failure_proof_allows_only_known_post_checkout_completion_steps(self):
+        marker = {"ref": "maxibot-task-auth/auth-id/dispatches/prepare-123-2", "sha": "c" * 40}
+        steps = [
+            {"name": "Set up job", "status": "completed", "conclusion": "success"},
+            {"name": "Initialize shared retry budget", "status": "completed", "conclusion": "success"},
+            {"name": "Checkout trusted main workflow source", "status": "completed", "conclusion": "success"},
+            {"name": orchestrator.DEPLOY_VALIDATE_STEP, "status": "completed", "conclusion": "failure"},
+            {"name": "Post Checkout trusted main workflow source", "status": "completed", "conclusion": "success"},
+            {"name": "Complete job", "status": "completed", "conclusion": "success"},
+        ]
+        run = self._set_predeploy_failure(candidate="c" * 40, validate_steps=steps)
+        orchestrator._prove_safe_prior_dispatch(self.api, marker, [run], "auth-id", "d" * 40)
+
+    def test_predeploy_failure_proof_uses_first_group_end_and_requires_timestamp(self):
+        marker = {"ref": "maxibot-task-auth/auth-id/dispatches/prepare-123-2", "sha": "c" * 40}
+        run = self._set_predeploy_failure(candidate="c" * 40)
+        self.api.logs_by_job["992"] += (
+            "2026-10-21T04:01:40.0000000Z ##[group]Post Checkout\n"
+            "2026-10-21T04:01:40.0000000Z ##[endgroup]\n"
+        )
+        orchestrator._prove_safe_prior_dispatch(self.api, marker, [run], "auth-id", "d" * 40)
+
+        self.api.logs_by_job["992"] = self.api.logs_by_job["992"].replace(
+            "2026-10-21T04:01:38.8820000Z   CANDIDATE_SHA:", "CANDIDATE_SHA:")
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator._prove_safe_prior_dispatch(self.api, marker, [run], "auth-id", "d" * 40)
+
+    def test_predeploy_failure_proof_rejects_wrong_job_identity_and_unknown_sibling_run(self):
+        marker = {"ref": "maxibot-task-auth/auth-id/dispatches/prepare-123-2", "sha": "c" * 40}
+        run = self._set_predeploy_failure(candidate="c" * 40)
+        self.api.jobs_by_attempt["991/1"][0]["head_sha"] = "d" * 40
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator._prove_safe_prior_dispatch(self.api, marker, [run], "auth-id", "d" * 40)
+
+        run = self._set_predeploy_failure(candidate="c" * 40)
+        unknown = dict(run, id=992, run_attempt=2)
+        self.api.jobs_by_attempt["991/2"] = []
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator._prove_safe_prior_dispatch(self.api, marker, [run, unknown], "auth-id", "d" * 40)
+
+    def test_predeploy_failure_proof_rejects_missing_or_running_validate_step(self):
+        marker = {"ref": "maxibot-task-auth/auth-id/dispatches/prepare-123-2", "sha": "c" * 40}
+        steps = [
+            {"name": "Set up job", "status": "completed", "conclusion": "success"},
+            {"name": "Initialize shared retry budget", "status": "completed", "conclusion": "success"},
+            {"name": "Checkout trusted main workflow source", "status": "completed", "conclusion": "success"},
+            {"name": orchestrator.DEPLOY_VALIDATE_STEP, "status": "in_progress", "conclusion": None},
+        ]
+        run = self._set_predeploy_failure(candidate="c" * 40, validate_steps=steps)
+        with self.assertRaises(orchestrator.OrchestrationError):
+            orchestrator._prove_safe_prior_dispatch(self.api, marker, [run], "auth-id", "d" * 40)
+
+    def test_predeploy_failure_proof_rejects_partial_or_ambiguous_execution(self):
+        marker = {"ref": "maxibot-task-auth/auth-id/dispatches/prepare-123-2", "sha": "c" * 40}
+        cases = [
+            {"total_count": 4},
+            {"deploy_steps": [{"name": "Run production apply", "conclusion": "success"}]},
+            {"authorization_id": "different-auth"},
+            {"prepare_id": "999"},
+            {"prepare_attempt": "3"},
+            {"mode": "manual"},
+            {"job_run_id": 777},
+            {"missing_deploy_steps": True},
+            {"duplicate_env": True},
+            {"validate_steps": [{"name": "Checkout trusted main workflow source", "conclusion": "success"}]},
+        ]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                run = self._set_predeploy_failure(candidate="c" * 40, **overrides)
+                with patch.object(orchestrator, "resolve_oci_artifact",
+                                  side_effect=orchestrator.ArtifactError("no evidence")):
+                    with self.assertRaises(orchestrator.OrchestrationError):
+                        orchestrator._prove_safe_prior_dispatch(
+                            self.api, marker, [run], "auth-id", "d" * 40)
 
     def test_replacement_candidate_dispatches_only_after_proven_safe_prior_failure(self):
         authorization_id = "maxibot-task-2026-10-16-001"
