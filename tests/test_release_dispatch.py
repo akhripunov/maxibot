@@ -141,6 +141,24 @@ def test_dispatch_selects_exact_current_main_and_latest_successful_prepare():
     assert any(f"head_sha={SHA}" in path for path in github.paths)
 
 
+@pytest.mark.parametrize("status", [404, 401, 403])
+def test_github_get_preserves_http_status_without_retry_or_private_detail(status):
+    import urllib.error
+
+    calls = []
+
+    def opener(request, timeout):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(
+            request.full_url, status, "private-upstream-detail", {}, None)
+
+    with pytest.raises(ValidationError, match=f"HTTP {status}") as failure:
+        github_get("git/ref/tags/test/revoked", "test-token", opener)
+
+    assert len(calls) == 1
+    assert "private-upstream-detail" not in str(failure.value)
+
+
 def test_github_get_recovers_after_extended_tls_outage_and_continues_read():
     class Response:
         def __enter__(self):
@@ -701,8 +719,22 @@ def test_task_scoped_auto_requires_durable_record_but_runs_preflight_inside_depl
     github = FakeGitHub()
     github.authorization_markers.add(
         "git/ref/tags/maxibot-task-auth/maxibot-task-2026-10-06-001/claimed")
+
+    def api_with_real_optional_ref_http_errors(path, token):
+        if path.endswith(("/revoked", "/consumed")):
+            import urllib.error
+
+            github.paths.append(path)
+
+            def opener(request, timeout):
+                raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+            return github_get(path, token, opener)
+        return github(path, token)
+
     selected = validate(values(RELEASE_MODE="task-scoped-auto", TASK_AUTHORIZATION_ID="maxibot-task-2026-10-06-001"),
-                        github, lambda *_args: pytest.fail("prior preflight must not be required"))
+                        api_with_real_optional_ref_http_errors,
+                        lambda *_args: pytest.fail("prior preflight must not be required"))
     assert selected["mode"] == "task-scoped-auto"
     assert selected["task_authorization_id"] == "maxibot-task-2026-10-06-001"
     assert selected["task_authorization_changed_paths"] == "app/bot/menu.py"
