@@ -334,34 +334,89 @@ def publish_oci_artifact(repository: str, kind: str, sha: str, run_id: str | int
 
 
 def _run_oras(args, input=None):
-    try:
-        result = subprocess.run(args, input=input, text=True, capture_output=True,
-                                check=True, timeout=300, env=os.environ.copy())
-    except subprocess.CalledProcessError as exc:
-        # Only emit a small, aggressively redacted suffix. These diagnostics may
-        # appear in public Actions logs, so never include commands or exceptions.
-        detail = "\n".join(str(value) for value in (exc.stderr, exc.stdout) if value).lower()
-        status = re.search(r"\b(401|403|404|405|406|409|413|415|422|429|500|502|503)\b", detail)
-        if status:
-            category = "HTTP " + status.group(1)
-        elif "unauthorized" in detail or "authentication required" in detail:
-            category = "unauthorized"
-        elif "denied" in detail or "forbidden" in detail:
-            category = "permission denied"
-        elif "unsupported" in detail:
-            category = "unsupported request"
-        else:
-            category = "registry request rejected"
-        operation = args[1] if len(args) > 1 and args[1] in {"login", "push"} else "operation"
-        diagnostic = _redacted_oras_diagnostic(
-            "\n".join(str(value) for value in (exc.stderr, exc.stdout) if value),
-            secrets=[input, os.environ.get("GITHUB_TOKEN"), os.environ.get("GHCR_READ_TOKEN")],
-        )
-        suffix = f"; detail: {diagnostic}" if diagnostic else ""
-        raise ArtifactError(f"ORAS {operation} failed (exit {exc.returncode}; {category}{suffix})") from None
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ArtifactError("ORAS OCI publication failed") from exc
-    return result.stdout
+    operation = args[1] if len(args) > 1 and args[1] in {"login", "push"} else "operation"
+    is_login = operation == "login"
+    budget = NETWORK_BUDGET
+    login_started = budget.clock() if is_login else 0.0
+    login_spent_before = budget.spent if is_login else 0.0
+
+    def run_once():
+        timeout = 300
+        if is_login:
+            elapsed = max(0.0, budget.clock() - login_started)
+            remaining = max(0.0, budget.remaining_seconds() - elapsed)
+            # Reserve time for retry_network_read to stop/retry and persist the
+            # shared budget if a subprocess itself consumes its timeout.
+            timeout = min(timeout, remaining * 0.9)
+        try:
+            result = subprocess.run(args, input=input, text=True, capture_output=True,
+                                    check=True, timeout=timeout, env=os.environ.copy())
+        except subprocess.CalledProcessError as exc:
+            # Only a small, aggressively redacted suffix is suitable for public logs.
+            detail = "\n".join(str(value) for value in (exc.stderr, exc.stdout) if value).lower()
+            if is_login and _retryable_oras_login_transport(detail):
+                raise ConnectionError("Transient ORAS login transport failure") from None
+            status = re.search(r"\b(401|403|404|405|406|409|413|415|422|429|500|502|503)\b", detail)
+            if status:
+                category = "HTTP " + status.group(1)
+            elif "unauthorized" in detail or "authentication required" in detail:
+                category = "unauthorized"
+            elif "denied" in detail or "forbidden" in detail:
+                category = "permission denied"
+            elif "unsupported" in detail:
+                category = "unsupported request"
+            else:
+                category = "registry request rejected"
+            diagnostic = _redacted_oras_diagnostic(
+                "\n".join(str(value) for value in (exc.stderr, exc.stdout) if value),
+                secrets=[input, os.environ.get("GITHUB_TOKEN"), os.environ.get("GHCR_READ_TOKEN")],
+            )
+            suffix = f"; detail: {diagnostic}" if diagnostic else ""
+            raise ArtifactError(f"ORAS {operation} failed (exit {exc.returncode}; {category}{suffix})") from None
+        except subprocess.TimeoutExpired:
+            if is_login:
+                raise TimeoutError("ORAS login timed out") from None
+            raise ArtifactError("ORAS OCI publication failed") from None
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ArtifactError("ORAS OCI publication failed") from exc
+        return result.stdout
+
+    if is_login:
+        try:
+            return retry_network_read(run_once, "ghcr_oras_login", is_retryable_network_error,
+                                      budget=budget)
+        except NetworkUnavailable:
+            # retry_network_read persists elapsed time after scheduled retries;
+            # charge a single timed-out attempt too, so later GHCR reads cannot
+            # receive a fresh budget after this login consumed the deadline.
+            if budget.spent == login_spent_before:
+                budget.persist_interval(login_started, budget.clock())
+            raise ArtifactError("ORAS login failed (NETWORK_UNAVAILABLE)") from None
+    return run_once()
+
+
+def _retryable_oras_login_transport(detail: str) -> bool:
+    """Recognize transient registry transport errors, excluding credentials and TLS trust."""
+    value = detail.lower()
+    if (re.search(r"\b(?:401|403)\b", value)
+            or re.search(r"\b(?:HTTP(?:/\d(?:\.\d)?)?\s+|status(?:\s+code)?\s*[:=]?\s*)[45]\d{2}\b", value)
+            or re.search(r"\b[45]\d{2}\s+(?:bad request|unauthorized|forbidden|not found|method not allowed|conflict|too many requests|internal server error|bad gateway|service unavailable|gateway timeout)\b", value)
+            or any(marker in value for marker in (
+                "unauthorized", "authentication required", "authentication failed", "forbidden",
+                "denied", "permission denied", "x509", "certificate", "unknown authority",
+                "certificate verify", "tls: bad certificate", "wrong version number",
+                "protocol version", "unsupported protocol", "handshake failure",
+                "first record does not look like a tls handshake", "tlsv1 alert",
+            ))):
+        return False
+    if re.search(r"\b(?:tls handshake timeout|context deadline exceeded|i/o timeout|timeout awaiting response headers)\b", value):
+        return True
+    if re.search(r"\b(?:connection reset by peer|connection refused|connection aborted|broken pipe|network is unreachable|no route to host)\b", value):
+        return True
+    return re.search(
+        r"\b(?:head|get|post)\s+\"?https://[^\s\"]+\"?\s*:\s*(?:tls:\s*)?(?:unexpected\s+)?eof\b",
+        value,
+    ) is not None
 
 
 def _redacted_oras_diagnostic(value: str, secrets=()) -> str:
