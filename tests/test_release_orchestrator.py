@@ -489,3 +489,11 @@ class ReleaseOrchestratorTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "no exact-candidate atomic Deploy claim"):
                         run_release_workflow.verify_task_authorization(
                             authorization_id, SHA, "d" * 40, require_claim=True)
+
+
+def test_controller_allows_shared_network_budget_after_native_action_bootstrap():
+    import yaml
+    workflow = yaml.safe_load((ROOT / '.github/workflows/maxibot-auto-preflight.yml').read_text())
+    timeout_seconds = workflow['jobs']['dispatch-authorized-deploy']['timeout-minutes'] * 60
+    assert orchestrator.CONTROLLER_RETRY_BUDGET_SECONDS == orchestrator.NETWORK_RETRY_BUDGET_SECONDS
+    assert timeout_seconds >= orchestrator.CONTROLLER_RETRY_BUDGET_SECONDS + 10 * 60
