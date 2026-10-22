@@ -17,6 +17,7 @@ RUN update-ca-certificates
 # has several top-level non-package directories, so the production image's
 # `pip install .[test]` packaging step is not suitable for this isolated QA
 # image.
+RUN python -m pip install --no-cache-dir pip==26.2.2
 RUN pip install --no-cache-dir \
     "fastapi>=0.115" "uvicorn[standard]>=0.34" "sqlalchemy>=2.0" \
     "asyncpg>=0.30" "alembic>=1.14" "psycopg2-binary>=2.9" \

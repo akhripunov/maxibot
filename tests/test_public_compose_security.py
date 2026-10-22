@@ -3,6 +3,13 @@ import yaml
 
 ROOT = Path(__file__).parents[1]
 
+def test_python_images_upgrade_pip_before_installing_project():
+    for path in ("Dockerfile", "Dockerfile.staging", "Dockerfile.qa.local", "deploy/telegram-executor/Dockerfile"):
+        dockerfile = (ROOT / path).read_text()
+        bootstrap = "RUN python -m pip install --no-cache-dir pip==26.2.2"
+        assert bootstrap in dockerfile, path
+        assert dockerfile.index(bootstrap) < dockerfile.index("RUN pip install"), path
+
 def test_proxy_secrets():
     s = yaml.safe_load((ROOT/'docker-compose.vps.yml').read_text())['services']
     assert 'env_file' not in s['https']

@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml .
+RUN python -m pip install --no-cache-dir pip==26.2.2
 RUN pip install --no-cache-dir .
 COPY app ./app
 RUN mkdir -p /var/lib/maxibot/identities && chown -R 65532:65532 /var/lib/maxibot

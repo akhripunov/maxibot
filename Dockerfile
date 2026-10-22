@@ -18,6 +18,7 @@ RUN update-ca-certificates
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 COPY pyproject.toml .
+RUN python -m pip install --no-cache-dir pip==26.2.2
 RUN pip install --no-cache-dir --timeout 120 --retries 10 .[test]
 COPY . .
 RUN { cat /etc/ssl/certs/ca-certificates.crt; printf '\\n'; \
