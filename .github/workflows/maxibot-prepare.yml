@@ -129,6 +129,7 @@ jobs:
           requirements = config["dependencies"] + config["optional-dependencies"]["test"]
           print("\n".join(requirements))
           PY
+          python3 -m pip install --no-cache-dir pip==26.2.2
           python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/maxibot-test-requirements.txt"
 
       - name: Pin Docker build version; rehearse production store separately
@@ -396,6 +397,7 @@ jobs:
           requirements = config["dependencies"] + config["optional-dependencies"]["test"]
           print("\n".join(requirements))
           PY
+          python3 -m pip install --no-cache-dir pip==26.2.2
           python3 -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/maxibot-test-requirements.txt"
 
       - name: Execute complete MAXIBOT safety and application test suite

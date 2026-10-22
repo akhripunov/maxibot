@@ -9,6 +9,19 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
 
 
+def test_prepare_bootstraps_patched_pip_before_test_dependencies():
+    workflow = yaml.safe_load((WORKFLOWS / "maxibot-prepare.yml").read_text())
+    installs = [
+        step["run"] for job in workflow["jobs"].values() for step in job.get("steps", [])
+        if step.get("name") == "Install isolated test dependencies"
+    ]
+    assert len(installs) == 2  # canonical main and isolated branch-check paths
+    for script in installs:
+        bootstrap = "python3 -m pip install --no-cache-dir pip==26.2.2"
+        assert bootstrap in script
+        assert script.index(bootstrap) < script.index("python3 -m pip install --disable-pip-version-check -r")
+
+
 def test_public_workflows_pin_every_action_to_a_full_commit_sha():
     for path in sorted(WORKFLOWS.glob("*.yml")):
         workflow = yaml.safe_load(path.read_text())
