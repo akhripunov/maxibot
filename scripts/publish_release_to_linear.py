@@ -29,6 +29,7 @@ HANDOFF_TITLE = "Архитектор — Handoff"
 JOURNAL_ID = "13df4e43-f252-424c-afca-fdb2a37eaf29"
 JOURNAL_TITLE = "Журнал релизов MAXIBOT"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 MIGRATION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
 PHASES = {"candidate", "preflight", "production"}
 STATUSES = {
@@ -135,6 +136,33 @@ def latest_runs(workflow: str) -> list[dict]:
     return github_json(f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?branch=main&per_page=100").get("workflow_runs", [])
 
 
+def release_jobs(run: dict) -> dict[str, dict]:
+    run_id = str(run.get("id", ""))
+    attempt = str(run.get("run_attempt", "1"))
+    if not run_id.isdigit() or not attempt.isdigit():
+        return {}
+    jobs = github_json(
+        f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+    ).get("jobs", [])
+    return {job.get("name"): job for job in jobs if isinstance(job, dict) and isinstance(job.get("name"), str)}
+
+
+def trusted_production_run(run: dict, jobs: dict[str, dict]) -> bool:
+    if any(jobs.get(name, {}).get("status") != "completed"
+           or jobs.get(name, {}).get("conclusion") != "success"
+           for name in ("validate", "deploy")):
+        return False
+    publish = jobs.get("publish", {})
+    if run.get("status") == "in_progress":
+        return publish.get("status") == "in_progress"
+    if run.get("status") != "completed":
+        return False
+    if run.get("conclusion") == "success":
+        return publish.get("status") == "completed" and publish.get("conclusion") == "success"
+    return (run.get("conclusion") == "failure" and publish.get("status") == "completed"
+            and publish.get("conclusion") == "failure")
+
+
 def current_candidate_status(main_sha: str, current_main_run: dict | None, event: dict | None = None) -> str:
     if current_main_run and current_main_run.get("status") == "completed" and current_main_run.get("conclusion") == "success":
         return "READY"
@@ -157,34 +185,56 @@ def current_state(event: dict | None = None) -> dict:
     current_prepare = max((r for r in prepare_runs if r.get("head_sha") == main_sha),
                           key=lambda r: (r.get("created_at", ""), r.get("run_attempt", 0), r.get("id", 0)), default=None)
     deploy_runs = latest_runs("maxibot-deploy.yml")
-    production_runs = sorted((r for r in deploy_runs if r.get("conclusion") == "success" and
+    production_runs = sorted((r for r in deploy_runs if
+                              (r.get("conclusion") == "success" or r.get("status") == "in_progress"
+                               or (r.get("status") == "completed" and r.get("conclusion") == "failure")) and
                               any(marker in (r.get("name") or r.get("display_title") or "").lower()
                                   for marker in ("production ", "task-scoped-auto ", "publication-recovery "))),
                              key=lambda r: r.get("created_at", ""), reverse=True)
     deployment = evidence = None
     for run in production_runs:
+        jobs = release_jobs(run)
+        if not trusted_production_run(run, jobs):
+            continue
         result = read_result_artifact(run)
         mode = result.get("mode")
         is_reconciliation = mode == "publication-recovery"
         if ((mode in {"production", "task-scoped-auto"} or is_reconciliation)
                 and result.get("status") == "COMPLETE"):
-            if result.get("github_run_id") != str(run.get("id")):
+            if (str(result.get("github_run_id")) != str(run.get("id"))
+                    or str(result.get("github_run_attempt")) != str(run.get("run_attempt", "1"))):
                 raise SyncError("MAXIBOT production result artifact run identity mismatch")
             if result.get("final_runtime_sha") != result.get("candidate_sha"):
                 raise SyncError("MAXIBOT production result artifact SHA mismatch")
             if result.get("candidate_sha") != run.get("head_sha"):
                 raise SyncError("MAXIBOT production result artifact does not match its workflow head SHA")
+            is_publisher_recovery = run.get("status") == "in_progress" or run.get("conclusion") == "failure"
+            if is_publisher_recovery and not DIGEST_RE.fullmatch(str(result.get("evidence_digest", ""))):
+                raise SyncError("MAXIBOT publisher recovery requires exact immutable Deploy evidence")
             deployment_id = result.get("github_deployment_id")
-            if deployment_id is None:  # Historical runs predate V5 deployment tracking.
+            if deployment_id is None and not is_publisher_recovery:  # Historical runs predate V5 deployment tracking.
                 result["deployment_status"] = "LEGACY_NOT_TRACKED"
             else:
                 if not isinstance(deployment_id, int) or deployment_id <= 0:
                     raise SyncError("MAXIBOT production result has an invalid GitHub Deployment identity")
                 deployment_record = github_json(f"repos/{REPOSITORY}/deployments/{deployment_id}")
                 statuses = github_json(f"repos/{REPOSITORY}/deployments/{deployment_id}/statuses?per_page=100")
+                payload = deployment_record.get("payload")
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except json.JSONDecodeError:
+                        payload = None
+                linked_run_id = result.get("reconciles_deploy_run_id") if is_reconciliation else run.get("id")
+                linked_attempt = (result.get("reconciles_deploy_run_attempt") if is_reconciliation
+                                  else run.get("run_attempt", "1"))
                 if (deployment_record.get("sha") != result.get("candidate_sha")
                         or deployment_record.get("environment") != "maxibot-production"
+                        or not isinstance(payload, dict)
+                        or str(payload.get("workflow_run_id")) != str(linked_run_id)
+                        or str(payload.get("workflow_run_attempt")) != str(linked_attempt)
                         or not isinstance(statuses, list) or not statuses
+                        or not isinstance(statuses[0], dict)
                         or statuses[0].get("state") != "success"):
                     raise SyncError("MAXIBOT GitHub Deployment readback is not a successful exact-SHA release")
                 result["deployment_status"] = statuses[0].get("state")

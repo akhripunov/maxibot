@@ -582,10 +582,15 @@ def test_prepare_failure_for_current_main_does_not_reuse_old_success(monkeypatch
     monkeypatch.setattr(publish_release_to_linear, "latest_runs", lambda workflow: [
         {"id":1,"head_sha":"a"*40,"created_at":"2026-10-03T06:00:00Z","conclusion":"success","status":"completed"},
         {"id":2,"head_sha":"a"*40,"created_at":"2026-10-03T07:00:00Z","conclusion":"failure","status":"completed"},
-    ] if "prepare" in workflow else [{"id":3,"head_sha":"b"*40,"conclusion":"success","name":"MAXIBOT production candidate"}])
+    ] if "prepare" in workflow else [{"id":3,"head_sha":"b"*40,"status":"completed","conclusion":"success","name":"MAXIBOT production candidate"}])
     monkeypatch.setattr(publish_release_to_linear, "read_result_artifact", lambda run: {
-        "mode":"production", "status":"COMPLETE", "github_run_id":"3", "final_runtime_sha":"b"*40, "candidate_sha":"b"*40,
+        "mode":"production", "status":"COMPLETE", "github_run_id":"3", "github_run_attempt":"1",
+        "final_runtime_sha":"b"*40, "candidate_sha":"b"*40,
         "final_migration":"0098"})
+    monkeypatch.setattr(publish_release_to_linear, "release_jobs", lambda _run: {
+        name: {"status":"completed", "conclusion":"success"}
+        for name in ("validate", "deploy", "publish")
+    })
     monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: (
         {"sha":"a"*40,"commit":{"committer":{"date":"t"}}} if "commits/main" in path else {"workflow_runs":[]}))
     state = publish_release_to_linear.current_state()
@@ -607,12 +612,16 @@ def test_task_scoped_auto_complete_is_reconciled_as_production(monkeypatch):
         if "prepare" in workflow else [task_run]
     ))
     result = {
-        "mode": "task-scoped-auto", "status": "COMPLETE", "github_run_id": "7",
+        "mode": "task-scoped-auto", "status": "COMPLETE", "github_run_id": "7", "github_run_attempt": "1",
         "candidate_sha": SHA, "final_runtime_sha": SHA,
         "target_migration": MIGRATION, "final_migration": MIGRATION,
         "production_changed": True, "github_deployment_id": None,
     }
     monkeypatch.setattr(publish_release_to_linear, "read_result_artifact", lambda run: result)
+    monkeypatch.setattr(publish_release_to_linear, "release_jobs", lambda _run: {
+        name: {"status":"completed", "conclusion":"success"}
+        for name in ("validate", "deploy", "publish")
+    })
     monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: (
         {"sha": SHA, "commit": {"committer": {"date": "t"}}}
         if "commits/main" in path else {"workflow_runs": []}
@@ -648,6 +657,10 @@ def test_read_only_publication_reconciliation_becomes_canonical_linear_state(mon
         "reconciles_deploy_run_id": "8", "reconciles_deploy_run_attempt": "1",
     }
     monkeypatch.setattr(publish_release_to_linear, "read_result_artifact", lambda run: recovery_result)
+    monkeypatch.setattr(publish_release_to_linear, "release_jobs", lambda _run: {
+        name: {"status":"completed", "conclusion":"success"}
+        for name in ("validate", "deploy", "publish")
+    })
     monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: (
         {"sha": SHA, "commit": {"committer": {"date": "t"}}}
         if "commits/main" in path else {"workflow_runs": []}
@@ -662,6 +675,176 @@ def test_read_only_publication_reconciliation_becomes_canonical_linear_state(mon
     rendered = publish_release_to_linear.render_current_state(state)
     assert "read-only reconciliation" in rendered.lower()
     assert "Последний production Deploy" not in rendered
+
+
+def _publisher_recovery_fixture(monkeypatch, *, run_status="in_progress", conclusion=None,
+                                validate_conclusion="success", deploy_conclusion="success",
+                                evidence_sha=SHA, evidence_attempt="2", evidence_digest="sha256:" + "f" * 64,
+                                deployment_state="success", mode="publication-recovery",
+                                deployment_payload=None, main_sha=SHA, old_sha=SHA,
+                                old_deployment_state="inactive"):
+    run = {
+        "id": 970, "run_attempt": 2, "head_sha": main_sha, "head_branch": "main",
+        "event": "workflow_dispatch", "path": ".github/workflows/maxibot-deploy.yml",
+        "status": run_status, "conclusion": conclusion,
+        "name": f"MAXIBOT {mode} {main_sha}", "html_url": "https://github.com/akhripunov/maxibot/actions/runs/970",
+        "created_at": "2026-10-22T10:00:00Z",
+    }
+    result = {
+        "mode": mode, "status": "COMPLETE", "github_run_id": "970",
+        "github_run_attempt": evidence_attempt, "candidate_sha": evidence_sha,
+        "final_runtime_sha": evidence_sha, "target_migration": MIGRATION,
+        "final_migration": MIGRATION, "production_changed": mode != "publication-recovery",
+        "recovery": "READ_ONLY_RECONCILIATION_PASS" if mode == "publication-recovery" else None,
+        "reconciles_deploy_run_id": "969" if mode == "publication-recovery" else None,
+        "reconciles_deploy_run_attempt": "1" if mode == "publication-recovery" else None,
+        "github_deployment_id": 12345, "evidence_digest": evidence_digest,
+    }
+    old = {
+        "id": 968, "run_attempt": 1, "head_sha": old_sha, "head_branch": "main",
+        "event": "workflow_dispatch", "path": ".github/workflows/maxibot-deploy.yml",
+        "status": "completed", "conclusion": "success",
+        "name": f"MAXIBOT production {old_sha}", "html_url": "https://github.com/akhripunov/maxibot/actions/runs/968",
+        "created_at": "2026-10-20T10:00:00Z",
+    }
+    old_result = {**result, "mode": "production", "github_run_id": "968", "github_run_attempt": "1",
+                  "candidate_sha": old_sha, "final_runtime_sha": old_sha,
+                  "github_deployment_id": 12344, "recovery": None,
+                  "reconciles_deploy_run_id": None, "reconciles_deploy_run_attempt": None}
+    monkeypatch.setattr(publish_release_to_linear, "latest_runs", lambda workflow: (
+        [{"id": 4, "head_sha": SHA, "status": "completed", "conclusion": "success"}]
+        if "prepare" in workflow else [run, old]
+    ))
+    monkeypatch.setattr(publish_release_to_linear, "read_result_artifact",
+                        lambda selected: result if str(selected["id"]) == "970" else old_result)
+    jobs = {
+        "970": [
+            {"name": "validate", "status": "completed", "conclusion": validate_conclusion},
+            {"name": "deploy", "status": "completed", "conclusion": deploy_conclusion},
+            {"name": "publish", "status": "in_progress" if run_status == "in_progress" else "completed",
+             "conclusion": None if run_status == "in_progress" else ("failure" if conclusion == "failure" else "success")},
+        ],
+        "968": [
+            {"name": "validate", "status": "completed", "conclusion": "success"},
+            {"name": "deploy", "status": "completed", "conclusion": "success"},
+            {"name": "publish", "status": "completed", "conclusion": "success"},
+        ],
+    }
+    calls = []
+
+    def api(path):
+        calls.append(path)
+        if path.endswith("/commits/main"):
+            return {"sha": main_sha, "commit": {"committer": {"date": "t"}}}
+        if path.endswith("/deployments/12345"):
+            payload = deployment_payload
+            if payload is None:
+                payload = {"workflow_run_id": "969", "workflow_run_attempt": "1"}
+            return {"sha": evidence_sha, "environment": "maxibot-production", "payload": payload}
+        if path.endswith("/deployments/12345/statuses?per_page=100"):
+            return [{"state": deployment_state}]
+        if path.endswith("/deployments/12344"):
+            return {"sha": old_sha, "environment": "maxibot-production",
+                    "payload": {"workflow_run_id": "968", "workflow_run_attempt": "1"}}
+        if path.endswith("/deployments/12344/statuses?per_page=100"):
+            return [{"state": old_deployment_state}]
+        if "/actions/runs/970/attempts/2/jobs?per_page=100" in path:
+            return {"jobs": jobs["970"]}
+        if "/actions/runs/968/attempts/1/jobs?per_page=100" in path:
+            return {"jobs": jobs["968"]}
+        if path.endswith("/actions/workflows/maxibot-prepare.yml/runs?branch=main&per_page=100"):
+            return {"workflow_runs": []}
+        if path.endswith("/actions/workflows/maxibot-deploy.yml/runs?branch=main&per_page=100"):
+            return {"workflow_runs": [run, old]}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(publish_release_to_linear, "github_json", api)
+    return run, result, calls
+
+
+def test_publisher_accepts_current_run_while_linear_publisher_job_is_still_running(monkeypatch):
+    run, _result, calls = _publisher_recovery_fixture(monkeypatch)
+
+    state = publish_release_to_linear.current_state()
+
+    assert state["deploy"] == run
+    assert state["reconciliation"] is True
+    assert any("/actions/runs/970/attempts/2/jobs" in path for path in calls)
+
+
+def test_publisher_recovers_publisher_only_failed_run_and_skips_inactive_previous_deployment(monkeypatch):
+    run, _result, calls = _publisher_recovery_fixture(
+        monkeypatch, run_status="completed", conclusion="failure")
+
+    state = publish_release_to_linear.current_state()
+
+    assert state["deploy"] == run
+    assert state["reconciliation"] is True
+    assert any("/deployments/12345" in path for path in calls)
+    assert not any("/deployments/12344" in path for path in calls)
+
+
+@pytest.mark.parametrize(("validate_conclusion", "deploy_conclusion"), [
+    ("failure", "success"), ("success", "failure"),
+])
+def test_publisher_rejects_run_with_failed_validate_or_deploy_job(monkeypatch, validate_conclusion,
+                                                                  deploy_conclusion):
+    _run, _result, calls = _publisher_recovery_fixture(
+        monkeypatch, run_status="completed", conclusion="failure",
+        validate_conclusion=validate_conclusion, deploy_conclusion=deploy_conclusion)
+
+    with pytest.raises(SyncError):
+        publish_release_to_linear.current_state()
+    assert not any("/deployments/12345" in path for path in calls)
+
+
+def test_failed_new_candidate_keeps_old_successful_runtime_as_factual_state(monkeypatch):
+    old_sha = SHA
+    new_sha = "b" * 40
+    _publisher_recovery_fixture(
+        monkeypatch, run_status="completed", conclusion="failure",
+        validate_conclusion="failure", deploy_conclusion="failure",
+        evidence_sha=new_sha, main_sha=new_sha, old_sha=old_sha,
+        old_deployment_state="success")
+
+    state = publish_release_to_linear.current_state()
+
+    assert state["main_sha"] == new_sha
+    assert state["production_sha"] == old_sha
+    assert state["in_sync"] is False
+    assert state["deploy"]["id"] == 968
+    assert state["production_status"] == "COMPLETE"
+
+
+@pytest.mark.parametrize(("evidence_sha", "evidence_attempt", "evidence_digest"), [
+    ("b" * 40, "2", "sha256:" + "f" * 64),
+    (SHA, "1", "sha256:" + "f" * 64),
+    (SHA, "2", None),
+])
+def test_publisher_rejects_mismatched_or_missing_immutable_attempt_evidence(monkeypatch, evidence_sha,
+                                                                             evidence_attempt,
+                                                                             evidence_digest):
+    _publisher_recovery_fixture(monkeypatch, evidence_sha=evidence_sha,
+                                evidence_attempt=evidence_attempt, evidence_digest=evidence_digest)
+
+    with pytest.raises(SyncError):
+        publish_release_to_linear.current_state()
+
+
+def test_publisher_rejects_non_success_deployment_without_falling_back_to_old_inactive_run(monkeypatch):
+    _publisher_recovery_fixture(monkeypatch, deployment_state="failure")
+
+    with pytest.raises(SyncError):
+        publish_release_to_linear.current_state()
+
+
+def test_publisher_rejects_recovery_deployment_with_mismatched_original_run_linkage(monkeypatch):
+    _publisher_recovery_fixture(monkeypatch, deployment_payload={
+        "workflow_run_id": "968", "workflow_run_attempt": "1",
+    })
+
+    with pytest.raises(SyncError):
+        publish_release_to_linear.current_state()
 
 
 def test_prepare_write_permission_is_main_only():
