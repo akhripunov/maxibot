@@ -61,3 +61,23 @@ def test_executor_publication_is_gated_by_read_only_trust_validation():
     assert publish["steps"][0]["with"]["ref"] == "${{ needs.validate.outputs.source_sha }}"
     assert "github.repository == 'akhripunov/maxibot'" in publish["if"]
     assert "github.actor == 'akhripunov'" in publish["if"]
+
+
+def test_host_ssh_policy_preserves_keys_and_disables_password_login():
+    policy = ROOT / "deploy/security/sshd-key-only.conf"
+    settings = {}
+    for line in policy.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            name, value = line.split(maxsplit=1)
+            assert name.lower() not in settings
+            settings[name.lower()] = value
+    assert settings == {
+        "pubkeyauthentication": "yes",
+        "passwordauthentication": "no",
+        "kbdinteractiveauthentication": "no",
+        "permitrootlogin": "prohibit-password",
+        "permitemptypasswords": "no",
+        "permituserenvironment": "no",
+        "x11forwarding": "no",
+    }
