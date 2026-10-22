@@ -374,7 +374,9 @@ def test_shared_retry_budget_is_carried_across_release_stages_and_never_wraps_ap
     assert 'network_retry_read ssh_preflight' in source
     assert 'timed_stage MIGRATION' in source
     mutation_section = source[source.index('timed_stage SOURCE_UPLOAD'):]
-    assert 'network_retry_read' not in mutation_section
+    assert 'network_retry_read release_ref_readback git ls-remote' in mutation_section
+    assert 'timed_stage FINALIZATION git push' in mutation_section
+    assert 'network_retry_read FINALIZATION' not in mutation_section
     assert 'timed_stage IMAGE_PULL' in mutation_section
     assert 'timed_stage MIGRATION' in mutation_section
 

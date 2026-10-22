@@ -30,20 +30,31 @@ timed_stage() {
 # mutation command here; apply-stage writes continue to fail closed as-is.
 NETWORK_RETRY_BUDGET_SECONDS=1800
 NETWORK_RETRY_SPENT_SECONDS=0
-if [[ -n "${NETWORK_RETRY_BUDGET_STATE:-}" && -f "$NETWORK_RETRY_BUDGET_STATE" ]]; then
-  NETWORK_RETRY_SPENT_SECONDS=$(<"$NETWORK_RETRY_BUDGET_STATE")
-  [[ "$NETWORK_RETRY_SPENT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "invalid shared network retry budget state"
-fi
+load_network_retry_spent() {
+  [[ -n "${NETWORK_RETRY_BUDGET_STATE:-}" && -f "$NETWORK_RETRY_BUDGET_STATE" ]] || return 0
+  local raw whole fraction parsed
+  raw=$(<"$NETWORK_RETRY_BUDGET_STATE")
+  [[ "$raw" =~ ^([0-9]+)([.]([0-9]+))?$ ]] || die "invalid shared network retry budget state"
+  whole=${BASH_REMATCH[1]}
+  fraction=${BASH_REMATCH[3]:-}
+  parsed=$((10#$whole))
+  [[ -z "$fraction" || "$fraction" =~ ^0+$ ]] || parsed=$((parsed + 1))
+  if (( parsed > NETWORK_RETRY_SPENT_SECONDS )); then NETWORK_RETRY_SPENT_SECONDS=$parsed; fi
+}
+load_network_retry_spent
 NETWORK_LAST_ERROR=
 NETWORK_LAST_STATUS=
 persist_network_retry_budget() {
   [[ -n "${NETWORK_RETRY_BUDGET_STATE:-}" ]] || return 0
-  local temporary="${NETWORK_RETRY_BUDGET_STATE}.$$"
-  printf '%s\n' "${1:-$NETWORK_RETRY_SPENT_SECONDS}" > "$temporary"
+  local temporary="${NETWORK_RETRY_BUDGET_STATE}.$$" requested=${1:-$NETWORK_RETRY_SPENT_SECONDS}
+  load_network_retry_spent
+  if (( requested > NETWORK_RETRY_SPENT_SECONDS )); then NETWORK_RETRY_SPENT_SECONDS=$requested; fi
+  printf '%s\n' "$NETWORK_RETRY_SPENT_SECONDS" > "$temporary"
   mv -f "$temporary" "$NETWORK_RETRY_BUDGET_STATE"
 }
 network_retry_read() {
-  local stage=$1 attempt=0 cap=1 remaining delay elapsed output error status started=$SECONDS
+  load_network_retry_spent
+  local stage=$1 attempt=0 cap=1 remaining delay elapsed output error status started=$SECONDS base_spent=$NETWORK_RETRY_SPENT_SECONDS
   shift
   NETWORK_LAST_ERROR=
   NETWORK_LAST_STATUS=
@@ -68,8 +79,7 @@ network_retry_read() {
       fi
       NETWORK_LAST_STATUS=PASS
       if (( attempt > 0 )); then
-        NETWORK_RETRY_SPENT_SECONDS=$((NETWORK_RETRY_SPENT_SECONDS + elapsed))
-        persist_network_retry_budget
+        persist_network_retry_budget "$((base_spent + elapsed))"
         printf 'NETWORK_RESTORED stage=%s elapsed_s=%s\n' "$stage" "$elapsed" >&2
       fi
       printf 'RELEASE_CONTINUING stage=%s\n' "$stage" >&2
@@ -78,22 +88,42 @@ network_retry_read() {
       return 0
     fi
     NETWORK_LAST_ERROR=$error
-    if [[ "$status" != 255 ]] || [[ "$error" =~ [Pp]ermission\ denied|[Hh]ost\ key\ verification\ failed|[Aa]uthentication\ failed|[Nn]o\ matching\ host\ key|[Tt]oo\ many\ authentication ]]; then
+    local transient_read_error='[Cc]ould not resolve|[Nn]odename nor servname|[Tt]emporary failure in name resolution|[Nn]ame or service not known|[Ee][Aa][Ii]_[Aa][Gg][Aa][Ii][Nn]|[Ee][Nn][Oo][Ff][Oo][Uu][Nn][Dd]|[Cc]onnection timed out|[Oo]peration timed out|[Cc]onnection reset|[Cc]onnection closed|[Bb]anner exchange|[Cc]onnection refused|[Nn]etwork is unreachable|[Nn]o route to host|[Ss]oftware caused connection abort|[Ee]nd of file|[Ss]ocket is not connected'
+    local ssh_auth_error='[Pp]ermission denied|[Hh]ost key verification failed|[Aa]uthentication failed|[Nn]o matching host key|[Tt]oo many authentication'
+    local git_tls_error='SSL_ERROR_SYSCALL|[Cc]onnection reset by peer|[Cc]onnection timed out|[Oo]peration timed out|[Ee]nd of file|[Ee]OF'
+    local fatal_git_read_error='[Aa]uthentication failed|[Pp]ermission denied|[Rr]emote rejected|[Pp]rotected branch|[Nn]on-fast-forward|[Ss]tale info|HTTP 40[13]|[Tt]he requested URL returned error: 40[13]|[Hh]ost key verification failed|[Nn]o matching host key|[Tt]oo many authentication'
+    if [[ "$stage" == release_ref_readback ]]; then
+      if [[ "$error" =~ $fatal_git_read_error|[Cc]ertificate|[Nn]ot\ trusted|[Vv]erify\ failed ]]; then
+        NETWORK_LAST_STATUS=BLOCKED
+        printf '%s\n' "$error" >&2
+        rm -f "$stderr_file"
+        return "$status"
+      fi
+      if [[ "$status" != 255 && ! ( "$status" == 128 && "$error" =~ $git_tls_error ) ]]; then
+        NETWORK_LAST_STATUS=BLOCKED
+        printf '%s\n' "$error" >&2
+        rm -f "$stderr_file"
+        return "$status"
+      fi
+    elif [[ "$status" != 255 ]] || [[ "$error" =~ $ssh_auth_error ]]; then
       NETWORK_LAST_STATUS=BLOCKED
+      printf '%s\n' "$error" >&2
       rm -f "$stderr_file"
       return "$status"
     fi
-    if ! [[ "$error" =~ [Cc]ould\ not\ resolve|[Nn]odename\ nor\ servname|[Tt]emporary\ failure\ in\ name\ resolution|[Nn]ame\ or\ service\ not\ known|[Ee][Aa][Ii]_[Aa][Gg][Aa][Ii][Nn]|[Ee][Nn][Oo][Ff][Oo][Uu][Nn][Dd]|[Cc]onnection\ timed\ out|[Oo]peration\ timed\ out|[Cc]onnection\ reset|[Cc]onnection\ closed|[Bb]anner\ exchange|[Cc]onnection\ refused|[Nn]etwork\ is\ unreachable|[Nn]o\ route\ to\ host|[Ss]oftware\ caused\ connection\ abort|[Ee]nd\ of\ file|[Ss]ocket\ is\ not\ connected ]]; then
+    if [[ "$stage" == release_ref_readback ]]; then
+      [[ "$error" =~ $git_tls_error ]] || { NETWORK_LAST_STATUS=BLOCKED; printf '%s\n' "$error" >&2; rm -f "$stderr_file"; return "$status"; }
+    elif ! [[ "$error" =~ $transient_read_error ]]; then
       NETWORK_LAST_STATUS=BLOCKED
+      printf '%s\n' "$error" >&2
       rm -f "$stderr_file"
       return "$status"
     fi
     elapsed=$((SECONDS - started))
-    remaining=$((NETWORK_RETRY_BUDGET_SECONDS - NETWORK_RETRY_SPENT_SECONDS - elapsed))
+    remaining=$((NETWORK_RETRY_BUDGET_SECONDS - base_spent - elapsed))
     if (( remaining <= 0 )); then
       NETWORK_LAST_STATUS=NETWORK_UNAVAILABLE
-      NETWORK_RETRY_SPENT_SECONDS=$NETWORK_RETRY_BUDGET_SECONDS
-      persist_network_retry_budget
+      persist_network_retry_budget "$NETWORK_RETRY_BUDGET_SECONDS"
       printf 'NETWORK_UNAVAILABLE stage=%s elapsed_s=%s budget_s=%s\n' "$stage" "$elapsed" "$NETWORK_RETRY_BUDGET_SECONDS" >&2
       rm -f "$stderr_file"
       return 75
@@ -104,7 +134,7 @@ network_retry_read() {
     attempt=$((attempt + 1))
     sleep "$delay"
     elapsed=$((SECONDS - started))
-    persist_network_retry_budget "$((NETWORK_RETRY_SPENT_SECONDS + elapsed))"
+    persist_network_retry_budget "$((base_spent + elapsed))"
     if (( cap < 32 )); then cap=$((cap * 2)); else cap=60; fi
   done
 }
@@ -769,11 +799,74 @@ EOF"
 RELEASE_REF="refs/maxibot/release/$TARGET_SHA"
 [[ "$(git rev-parse HEAD)" == "$TARGET_SHA" ]] || die "candidate checkout SHA changed before finalization"
 [[ -z "$(git status --porcelain)" ]] || die "candidate checkout changed before finalization"
-EXISTING_RELEASE_REF_SHA=$(git ls-remote --refs origin "$RELEASE_REF" | awk 'NR == 1 {print $1}')
+read_remote_release_ref() {
+  local output
+  output=$(network_retry_read release_ref_readback git ls-remote --refs origin "$RELEASE_REF") || return $?
+  if [[ -z "$output" ]]; then
+    printf '\n'
+    return 0
+  fi
+  [[ "$output" =~ ^([0-9a-f]{40})[[:space:]]+${RELEASE_REF}$ ]] || {
+    echo "RELEASE_BLOCKED=malformed immutable release ref readback" >&2
+    return 1
+  }
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+EXISTING_RELEASE_REF_SHA=$(read_remote_release_ref) || die "immutable release ref read failed"
+load_network_retry_spent
 [[ -z "$EXISTING_RELEASE_REF_SHA" || "$EXISTING_RELEASE_REF_SHA" == "$TARGET_SHA" ]] || die "immutable release ref already names another candidate"
-timed_stage FINALIZATION git push --force-with-lease="$RELEASE_REF:$EXISTING_RELEASE_REF_SHA" origin "$TARGET_SHA:$RELEASE_REF"
+if [[ "$EXISTING_RELEASE_REF_SHA" != "$TARGET_SHA" ]]; then
+  RELEASE_PUSH_ATTEMPT=0
+  RELEASE_PUSH_CAP=1
+  while :; do
+    load_network_retry_spent
+    (( NETWORK_RETRY_SPENT_SECONDS < NETWORK_RETRY_BUDGET_SECONDS )) || die "shared network retry budget exhausted during release finalization"
+    RELEASE_PUSH_ATTEMPT=$((RELEASE_PUSH_ATTEMPT + 1))
+    RELEASE_PUSH_STARTED=$SECONDS
+    RELEASE_PUSH_ERROR_FILE=$(mktemp "${TMPDIR:-/tmp}/maxibot-release-push.XXXXXX") || die "cannot allocate release push diagnostics"
+    if timed_stage FINALIZATION git push --force-with-lease="$RELEASE_REF:$EXISTING_RELEASE_REF_SHA" origin "$TARGET_SHA:$RELEASE_REF" 2>"$RELEASE_PUSH_ERROR_FILE"; then
+      RELEASE_PUSH_STATUS=0
+    else
+      RELEASE_PUSH_STATUS=$?
+    fi
+    RELEASE_PUSH_ERROR=$(cat "$RELEASE_PUSH_ERROR_FILE")
+    rm -f "$RELEASE_PUSH_ERROR_FILE"
+    RELEASE_PUSH_ELAPSED=$((SECONDS - RELEASE_PUSH_STARTED))
+    (( RELEASE_PUSH_STATUS == 0 || RELEASE_PUSH_ELAPSED > 0 )) || RELEASE_PUSH_ELAPSED=1
+    if (( RELEASE_PUSH_STATUS != 0 )); then
+      NETWORK_RETRY_SPENT_SECONDS=$((NETWORK_RETRY_SPENT_SECONDS + RELEASE_PUSH_ELAPSED))
+      persist_network_retry_budget
+      REMOTE_RELEASE_REF_SHA=$(read_remote_release_ref) || die "release ref readback failed after push error"
+      load_network_retry_spent
+      [[ "$REMOTE_RELEASE_REF_SHA" != "$TARGET_SHA" ]] || break
+      [[ -z "$REMOTE_RELEASE_REF_SHA" ]] || die "immutable release ref already names another candidate"
+      if [[ "$RELEASE_PUSH_ERROR" =~ [Aa]uthentication\ failed|[Pp]ermission\ denied|[Rr]emote\ rejected|[Pp]rotected\ branch|[Nn]on-fast-forward|[Ss]tale\ info|HTTP\ 40[13]|[Tt]he\ requested\ URL\ returned\ error:\ 40[13] ]]; then
+        printf '%s\n' "$RELEASE_PUSH_ERROR" >&2
+        die "immutable release ref push rejected; no retry"
+      fi
+      if [[ "$RELEASE_PUSH_ERROR" =~ [Cc]ertificate|[Nn]ot\ trusted|[Vv]erify\ failed ]] || ! [[ "$RELEASE_PUSH_ERROR" =~ SSL_ERROR_SYSCALL|[Cc]onnection\ reset|[Cc]onnection\ timed\ out|[Oo]peration\ timed\ out|[Ee]nd\ of\ file|[Ee]OF|[Nn]etwork\ is\ unreachable|[Nn]o\ route\ to\ host|[Rr]emote\ end\ hung\ up|[Ff]ailed\ to\ connect|[Cc]ould\ not\ resolve|[Tt]emporary\ failure ]]; then
+        printf '%s\n' "$RELEASE_PUSH_ERROR" >&2
+        die "immutable release ref push failed with non-retryable error"
+      fi
+      (( NETWORK_RETRY_SPENT_SECONDS < NETWORK_RETRY_BUDGET_SECONDS )) || die "shared network retry budget exhausted during release finalization"
+      RELEASE_PUSH_DELAY=$RELEASE_PUSH_CAP
+      RELEASE_PUSH_REMAINING=$((NETWORK_RETRY_BUDGET_SECONDS - NETWORK_RETRY_SPENT_SECONDS))
+      (( RELEASE_PUSH_DELAY <= RELEASE_PUSH_REMAINING )) || RELEASE_PUSH_DELAY=$RELEASE_PUSH_REMAINING
+      sleep "$RELEASE_PUSH_DELAY"
+      NETWORK_RETRY_SPENT_SECONDS=$((NETWORK_RETRY_SPENT_SECONDS + RELEASE_PUSH_DELAY))
+      persist_network_retry_budget
+      (( RELEASE_PUSH_CAP < 32 )) && RELEASE_PUSH_CAP=$((RELEASE_PUSH_CAP * 2)) || RELEASE_PUSH_CAP=60
+      continue
+    fi
+    REMOTE_RELEASE_REF_SHA=$(read_remote_release_ref) || die "release ref readback failed after successful push"
+    load_network_retry_spent
+    [[ "$REMOTE_RELEASE_REF_SHA" == "$TARGET_SHA" ]] || die "successful push did not confirm immutable release ref"
+    break
+  done
+fi
 git update-ref "$RELEASE_REF" "$TARGET_SHA"
-REMOTE_RELEASE_REF_SHA=$(git ls-remote --refs origin "$RELEASE_REF" | awk 'NR == 1 {print $1}')
+REMOTE_RELEASE_REF_SHA=$(read_remote_release_ref) || die "remote release ref verification failed"
+load_network_retry_spent
 [[ "$REMOTE_RELEASE_REF_SHA" == "$TARGET_SHA" ]] || die "remote release ref verification failed"
 say RELEASE_REF "$RELEASE_REF"
 say RELEASE_REF_PUSHED YES
