@@ -6,13 +6,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import subprocess
+import threading
 import time
 import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    from scripts.release_network_retry import (NetworkUnavailable, RetryBudget,
+                                               is_retryable_network_error, retry_network_read)
+except ModuleNotFoundError:  # Direct script execution sets sys.path to scripts/.
+    from release_network_retry import (NetworkUnavailable, RetryBudget,
+                                       is_retryable_network_error, retry_network_read)
 
 try:
     from scripts.ghcr_release_artifacts import IMAGE_REPOSITORY, validate_prepare_receipt
@@ -72,6 +81,61 @@ def write_result(path: str, result: dict[str, object]) -> None:
     temporary.replace(target)
 
 
+def deployment_api_retryable(error: BaseException) -> bool:
+    return isinstance(error, NetworkUnavailable) or is_retryable_network_error(error)
+
+
+def deployment_api_json(request: urllib.request.Request, budget: RetryBudget) -> object:
+    remaining = budget.deadline - time.monotonic()
+    if remaining <= 0:
+        raise NetworkUnavailable("deployment_network_budget")
+    with urllib.request.urlopen(request, timeout=min(30, remaining)) as response:
+        completed = threading.Event()
+        result: list[bytes] = []
+        failure: list[BaseException] = []
+
+        def read() -> None:
+            try:
+                result.append(response.read(1_048_577))
+            except BaseException as error:
+                failure.append(error)
+            finally:
+                completed.set()
+
+        threading.Thread(target=read, name="maxibot-deployment-response-read", daemon=True).start()
+        if not completed.wait(max(0.0, budget.deadline - time.monotonic())):
+            try:
+                response.fp.raw._sock.shutdown(socket.SHUT_RDWR)
+            except (AttributeError, OSError):
+                pass
+            try:
+                response.close()
+            except OSError:
+                pass
+            raise NetworkUnavailable("deployment_network_budget")
+        if time.monotonic() >= budget.deadline:
+            raise NetworkUnavailable("deployment_network_budget")
+        if failure:
+            raise failure[0]
+        raw = result[0]
+        if len(raw) > 1_048_576:
+            raise ValueError("GitHub Deployment metadata response exceeded size limit")
+        return json.loads(raw.decode("utf-8"))
+
+
+def deployment_status_matches(deployment_id: int, state: str, description: str,
+                              token: str, budget: RetryBudget) -> bool:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/akhripunov/maxibot/deployments/{deployment_id}/statuses?per_page=100",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"})
+    statuses = deployment_api_json(request, budget)
+    if not isinstance(statuses, list) or not statuses or not isinstance(statuses[0], dict):
+        return False
+    latest = statuses[0]
+    return latest.get("state") == state and latest.get("description") == description[:140]
+
+
 def update_github_deployment(deployment_id: int, state: str, description: str, token: str) -> None:
     if state not in {"in_progress", "success", "failure", "error"} or not token:
         raise ValueError("Invalid GitHub Deployment status request")
@@ -82,12 +146,51 @@ def update_github_deployment(deployment_id: int, state: str, description: str, t
         method="POST", headers={"Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json"})
+    budget = RetryBudget()
+    started = time.monotonic()
+    retries = 0
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            if response.status not in {200, 201}:
-                raise ValueError("GitHub Deployment status write was not confirmed")
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ValueError("GitHub Deployment status write failed") from exc
+        while True:
+            remaining = budget.deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("GitHub Deployment status write was not confirmed within the shared network budget")
+            ambiguous = False
+            try:
+                with urllib.request.urlopen(request, timeout=min(30, remaining)) as response:
+                    if response.status not in {200, 201}:
+                        raise ValueError("GitHub Deployment status write was not confirmed")
+                return
+            except urllib.error.HTTPError as exc:
+                if not deployment_api_retryable(exc):
+                    raise ValueError(f"GitHub Deployment status write failed (HTTP {exc.code})") from None
+                ambiguous = True
+            except (urllib.error.URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as exc:
+                if not deployment_api_retryable(exc):
+                    raise ValueError("GitHub Deployment status write failed") from None
+                ambiguous = True
+
+            if ambiguous:
+                try:
+                    confirmed = retry_network_read(
+                        lambda: deployment_status_matches(deployment_id, state, description, token, budget),
+                        "deployment_status_readback", deployment_api_retryable, budget=budget)
+                except urllib.error.HTTPError as exc:
+                    raise ValueError(f"GitHub Deployment status readback failed (HTTP {exc.code})") from None
+                except (NetworkUnavailable, urllib.error.URLError, TimeoutError,
+                        socket.timeout, ConnectionError, OSError) as exc:
+                    if not deployment_api_retryable(exc):
+                        raise ValueError("GitHub Deployment status readback failed") from None
+                    confirmed = False
+                if confirmed:
+                    return
+                remaining = budget.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError("GitHub Deployment status write was not confirmed within the shared network budget")
+                delay = min(60, 2 ** min(retries, 6), remaining)
+                time.sleep(delay)
+                retries += 1
+    finally:
+        budget.persist_interval(started, time.monotonic())
 
 
 def create_github_deployment(sha: str, migration: str, mode: str, token: str,
@@ -122,7 +225,20 @@ def create_github_deployment(sha: str, migration: str, mode: str, token: str,
     deployment_id = result.get("id") if isinstance(result, dict) else None
     if not isinstance(deployment_id, int) or deployment_id <= 0:
         raise ValueError("GitHub Deployment creation returned no valid ID")
-    update_github_deployment(deployment_id, "in_progress", "MAXIBOT production apply started", token)
+    return deployment_id
+
+
+def start_github_deployment(sha: str, migration: str, mode: str, token: str,
+                            run_id: str, prepare_digest: str,
+                            result: dict[str, object]) -> int:
+    deployment_id = create_github_deployment(sha, migration, mode, token, run_id, prepare_digest)
+    result["github_deployment_id"] = deployment_id
+    try:
+        update_github_deployment(deployment_id, "in_progress", "MAXIBOT production apply started", token)
+    except ValueError:
+        result["github_deployment_state"] = "PUBLICATION_FAILED"
+        raise
+    result["github_deployment_state"] = "in_progress"
     return deployment_id
 
 
@@ -445,10 +561,10 @@ def main() -> int:
                 result["task_authorization_changed_paths"] = task_authorization["changed_paths"]
             result["release_state"] = "APPROVED"
             if mode in {"production", "task-scoped-auto"}:
-                deployment_id = create_github_deployment(
+                deployment_id = start_github_deployment(
                     sha, migration, mode, os.environ.get("GITHUB_TOKEN", ""),
-                    os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("PREPARE_RECEIPT_DIGEST", ""))
-                result["github_deployment_id"] = deployment_id
+                    os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("PREPARE_RECEIPT_DIGEST", ""),
+                    result)
             env["EXPECTED_PRODUCTION_SHA"] = result["production_baseline_sha"]
             env["EXPECTED_PRODUCTION_DB_HEAD"] = result["db_migration_baseline"]
             env["OWNER_APPROVED"] = "1"
@@ -492,6 +608,7 @@ def main() -> int:
             result["release_state"] = "FAILED_PRE_SWITCH"
         return_code = 1
     finally:
+        deployment_id = deployment_id or result.get("github_deployment_id")
         if deployment_id is not None:
             deployment_state = "success" if result.get("status") == "COMPLETE" else "failure"
             try:
