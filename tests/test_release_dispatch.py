@@ -1438,3 +1438,82 @@ def test_consumption_conflicting_marker_never_retries_post(monkeypatch):
     with pytest.raises(ValueError, match="conflicts"):
         run_release_workflow.consume_task_authorization("maxibot-task-2026-10-06-001", SHA)
     assert calls == ["post"]
+
+
+
+def _consumption_reconciled_fixture(monkeypatch, *, marker_sha=SHA, deployment_state="success"):
+    run, result, calls = _publisher_recovery_fixture(monkeypatch,
+        run_status="completed", conclusion="failure", deploy_conclusion="failure",
+        mode="task-scoped-auto", deployment_state=deployment_state,
+        deployment_payload={"workflow_run_id": "970", "workflow_run_attempt": "2"})
+    result.update(schema="MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", status="RECOVERY_REQUIRED",
+        release_state="RECOVERY_REQUIRED", preflight="PASS", authorization_consumed=False,
+        task_authorization_state="CONSUMPTION_PENDING", task_authorization_id="maxibot-task-2026-10-06-001",
+        task_authorization_record_sha256="d" * 64,
+        error="Production completed but durable TASK_SCOPED_AUTO consumption needs reconciliation",
+        production_evidence={"RELEASE_STATUS": "PASS", "BACKUP": "PASS", "BACKUP_VALIDATION": "PASS",
+            "BACKUP_DISK_PREFLIGHT": "PASS", "API_WORKER_IMAGE_PARITY": "PASS", "POLLING_ROLES": "PASS",
+            "MIGRATION_ALLOWED": "YES", "FINAL_RUNTIME_SHA": SHA, "TARGET_SHA": SHA,
+            "TARGET_MIGRATION": MIGRATION, "POSTDEPLOY_WORKER_HEALTH": json.dumps({"status": "PASS", "release": SHA, "restart_delta": 0})})
+    api = publish_release_to_linear.github_json
+    def reconciled_api(path):
+        if "/git/ref/tags/maxibot-task-auth/" in path:
+            calls.append(path)
+            return {"object": {"type": "commit", "sha": marker_sha}}
+        if "/actions/runs/970/attempts/2/jobs" in path:
+            body = api(path)
+            body["jobs"][-1]["conclusion"] = "success"
+            return body
+        return api(path)
+    monkeypatch.setattr(publish_release_to_linear, "github_json", reconciled_api)
+    return run, result, calls
+
+
+def test_current_state_recovers_consumption_only_after_exact_durable_reconciliation(monkeypatch):
+    run, original, calls = _consumption_reconciled_fixture(monkeypatch)
+    before = json.loads(json.dumps(original))
+    state = publish_release_to_linear.current_state()
+    assert state["deploy"] == run and state["production_sha"] == SHA
+    assert state["production_status"] == "COMPLETE"
+    assert state["evidence"]["metadata_reconciled"] is True
+    assert state["evidence"]["original_status"] == "RECOVERY_REQUIRED"
+    assert original == before
+    assert any(path.endswith("/claimed") for path in calls)
+    assert any(path.endswith("/consumed") for path in calls)
+    assert not any("/deployments/12344" in path for path in calls)
+    rendered = publish_release_to_linear.render_current_state(state)
+    assert "RECOVERY_REQUIRED" in rendered and "metadata" in rendered.lower()
+
+
+@pytest.mark.parametrize("broken", ["marker", "deployment", "worker", "backup", "runtime", "error"])
+def test_consumption_reconciliation_remains_fail_closed_for_incomplete_proof(monkeypatch, broken):
+    _run, result, _calls = _consumption_reconciled_fixture(monkeypatch,
+        marker_sha="b" * 40 if broken == "marker" else SHA,
+        deployment_state="failure" if broken == "deployment" else "success")
+    if broken == "worker": result["production_evidence"]["POSTDEPLOY_WORKER_HEALTH"] = "{}"
+    if broken == "backup": result["production_evidence"]["BACKUP_VALIDATION"] = "FAILED"
+    if broken == "runtime": result["final_runtime_sha"] = "b" * 40
+    if broken == "error": result["error"] = "some other Apply failure"
+    with pytest.raises(SyncError): publish_release_to_linear.current_state()
+
+
+@pytest.mark.parametrize("broken", ["branch", "event", "workflow", "validation"])
+def test_consumption_reconciliation_rejects_untrusted_source_run(monkeypatch, broken):
+    run, _result, calls = _consumption_reconciled_fixture(monkeypatch)
+    if broken == "branch":
+        run["head_branch"] = "untrusted-branch"
+    elif broken == "event":
+        run["event"] = "pull_request"
+    elif broken == "workflow":
+        run["path"] = ".github/workflows/untrusted.yml"
+    else:
+        release_jobs = publish_release_to_linear.release_jobs
+        def invalid_jobs(source_run):
+            jobs = release_jobs(source_run)
+            if source_run["id"] == run["id"]:
+                jobs["validate"]["conclusion"] = "failure"
+            return jobs
+        monkeypatch.setattr(publish_release_to_linear, "release_jobs", invalid_jobs)
+    with pytest.raises(SyncError):
+        publish_release_to_linear.current_state()
+    assert not any("/deployments/12345" in path for path in calls)
