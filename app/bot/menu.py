@@ -117,7 +117,7 @@ def support_button() -> dict:
 
 
 def is_maxibot_owner(admin: Admin) -> bool:
-    """Expose system MAXIBOT promotion only to its configured owner."""
+    """Show the three promotion buttons only to MAXIBOT's configured owner."""
     owner_id = (settings.maxibot_owner_user_id or "").strip()
     return bool(owner_id and owner_id == str(admin.external_id))
 
