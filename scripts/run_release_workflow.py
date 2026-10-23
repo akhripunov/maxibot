@@ -193,14 +193,55 @@ def update_github_deployment(deployment_id: int, state: str, description: str, t
         budget.persist_interval(started, time.monotonic())
 
 
+def find_deployment_after_ambiguous_create(sha: str, migration: str, mode: str,
+                                          run_id: str, attempt: str,
+                                          prepare_digest: str, token: str) -> int:
+    url = ("https://api.github.com/repos/akhripunov/maxibot/deployments?sha="
+           f"{sha}&environment=maxibot-production&per_page=100")
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            deployments = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        raise ValueError("GitHub Deployment readback failed after an ambiguous create response") from None
+
+    matches = []
+    if isinstance(deployments, list):
+        for deployment in deployments:
+            payload = deployment.get("payload") if isinstance(deployment, dict) else None
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+            deployment_id = deployment.get("id") if isinstance(deployment, dict) else None
+            if (isinstance(payload, dict)
+                    and type(deployment_id) is int and deployment_id > 0
+                    and deployment.get("ref") == sha
+                    and deployment.get("task") == "maxibot-production-deploy"
+                    and deployment.get("environment") == "maxibot-production"
+                    and payload.get("candidate_sha") == sha
+                    and payload.get("target_migration") == migration
+                    and payload.get("mode") == mode
+                    and str(payload.get("workflow_run_id")) == run_id
+                    and str(payload.get("workflow_run_attempt")) == attempt
+                    and payload.get("prepare_receipt_digest") == prepare_digest):
+                matches.append(deployment_id)
+    if len(matches) != 1:
+        raise ValueError("GitHub Deployment readback cannot confirm one exact Deployment")
+    return matches[0]
+
+
 def create_github_deployment(sha: str, migration: str, mode: str, token: str,
                              run_id: str, prepare_digest: str) -> int:
-    # The exact Prepare workflow run was verified before this call. Requiring
-    # only its successful check avoids making this Deploy wait on its own
-    # still-running `deploy` check, while retaining GitHub's Prepare gate.
+    # The caller independently verified the exact successful Prepare run,
+    # immutable receipt/image digests and candidate SHA. Prepare is an Actions
+    # Check Run, not a Commit Status context; V5 provenance remains required
+    # before this request, while GitHub Deployment status checks are unused.
     body = {"ref": sha, "task": "maxibot-production-deploy",
         "environment": "maxibot-production", "auto_merge": False,
-        "required_contexts": ["prepare"],
+        "required_contexts": [],
         "description": f"MAXIBOT {mode} {sha[:12]}",
         "payload": {"candidate_sha": sha, "target_migration": migration, "mode": mode,
                     "workflow_run_id": run_id,
@@ -220,10 +261,14 @@ def create_github_deployment(sha: str, migration: str, mode: str, token: str,
         raise ValueError(
             f"GitHub Deployment creation failed (HTTP {exc.code}); production apply was not started"
         ) from None
-    except Exception as exc:
-        raise ValueError("GitHub Deployment creation failed; production apply was not started") from exc
+    except Exception:
+        # POST is not retryable. A lost response may follow a successful create,
+        # so reconcile the exact SHA/environment/run/attempt/receipt once by GET.
+        return find_deployment_after_ambiguous_create(
+            sha, migration, mode, run_id, os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+            prepare_digest, token)
     deployment_id = result.get("id") if isinstance(result, dict) else None
-    if not isinstance(deployment_id, int) or deployment_id <= 0:
+    if type(deployment_id) is not int or deployment_id <= 0:
         raise ValueError("GitHub Deployment creation returned no valid ID")
     return deployment_id
 
