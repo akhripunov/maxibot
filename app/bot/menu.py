@@ -2634,14 +2634,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             return "Канал уже удалён.", buttons(("📋 Мои каналы", "channels"))
         return (
             "🗑 Удаление канала\n\n"
-                f"Вы действительно хотите удалить\n«{channel.title}» из MAXIBOT?\n\n"
-            "Будут удалены:\n\n"
-            "• подключение канала;\n"
-            "• подключение чата для обращений;\n"
-            "• история обращений этого канала в MAXIBOT;\n"
-            "• все внутренние привязки и настройки.\n\n"
-            "MAXIBOT также покинет канал и чат для обращений.\n\n"
-            "Сам канал и групповой чат в MAX останутся.",
+            f"Вы действительно хотите удалить «{channel.title}» из MAXIBOT?",
             buttons(
                 ("🗑 Да, удалить", f"delete_channel_confirm:{channel.id}"),
                 ("❌ Отмена", f"delete_cancel:{channel.id}"),
