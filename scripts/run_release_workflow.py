@@ -288,13 +288,15 @@ def start_github_deployment(sha: str, migration: str, mode: str, token: str,
 
 
 def find_recoverable_deployment(sha: str, run_id: str, attempt: str, token: str) -> int:
+    budget = RetryBudget()
     url = ("https://api.github.com/repos/akhripunov/maxibot/deployments?sha="
            f"{sha}&environment=maxibot-production&per_page=100")
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            deployments = json.loads(response.read().decode("utf-8"))
+        deployments = retry_network_read(
+            lambda: deployment_api_json(request, budget), "deployment_recovery_read",
+            deployment_api_retryable, budget=budget)
     except Exception as exc:
         raise ValueError("GitHub Deployment read failed during metadata-only recovery") from exc
     matches = []
@@ -318,8 +320,9 @@ def find_recoverable_deployment(sha: str, run_id: str, attempt: str, token: str)
     request = urllib.request.Request(status_url, headers={"Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            statuses = json.loads(response.read().decode("utf-8"))
+        statuses = retry_network_read(
+            lambda: deployment_api_json(request, budget), "deployment_recovery_status_read",
+            deployment_api_retryable, budget=budget)
     except Exception as exc:
         raise ValueError("Original GitHub Deployment status read failed") from exc
     if (not isinstance(statuses, list) or not statuses
@@ -379,25 +382,41 @@ def consume_task_authorization(authorization_id: str, candidate_sha: str) -> Non
         data=json.dumps({"ref": ref, "sha": candidate_sha}).encode("utf-8"), method="POST",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            if response.status != 201:
-                raise ValueError("Durable TASK_SCOPED_AUTO consumption record was not created")
-    except urllib.error.HTTPError as error:
-        if error.code != 422:
-            raise ValueError(f"TASK_SCOPED_AUTO consumption write failed (HTTP {error.code})") from None
-        from validate_release_dispatch import github_get
-        existing = github_get("git/ref/tags/" + ref.removeprefix("refs/tags/"), token)
+    from validate_release_dispatch import ValidationError, github_get
+    budget = RetryBudget()
+    for attempt in range(3):
+        remaining = budget.deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("TASK_SCOPED_AUTO consumption network budget exhausted")
+        retryable = False
+        try:
+            with urllib.request.urlopen(request, timeout=min(20, remaining)) as response:
+                if response.status != 201:
+                    raise ValueError("Durable TASK_SCOPED_AUTO consumption record was not created")
+            return
+        except urllib.error.HTTPError as error:
+            if error.code != 422 and not is_retryable_network_error(error):
+                raise ValueError(f"TASK_SCOPED_AUTO consumption write failed (HTTP {error.code})") from None
+            retryable = error.code != 422
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            retryable = is_retryable_network_error(error)
+        # The ref is immutable and its request bytes never change. A new write
+        # is allowed only after an exact read proves it is still absent.
+        try:
+            existing = github_get("git/ref/tags/" + ref.removeprefix("refs/tags/"), token)
+        except ValidationError as error:
+            if "HTTP 404" not in str(error) or not retryable:
+                raise ValueError("TASK_SCOPED_AUTO consumption marker readback unconfirmed") from None
+            if attempt == 2:
+                raise ValueError("TASK_SCOPED_AUTO consumption marker absent after bounded reconciliation") from None
+            delay = min(2 ** attempt, max(0, budget.deadline - time.monotonic()))
+            time.sleep(delay)
+            continue
+        except Exception:
+            raise ValueError("TASK_SCOPED_AUTO consumption marker readback unconfirmed") from None
         if existing.get("object", {}).get("sha") != candidate_sha:
             raise ValueError("TASK_SCOPED_AUTO consumption marker conflicts with candidate") from None
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        try:
-            from validate_release_dispatch import github_get
-            existing = github_get("git/ref/tags/" + ref.removeprefix("refs/tags/"), token)
-        except Exception:
-            raise ValueError("TASK_SCOPED_AUTO consumption response was lost and marker readback failed") from None
-        if existing.get("object", {}).get("sha") != candidate_sha:
-            raise ValueError(f"TASK_SCOPED_AUTO consumption write failed ({type(error).__name__})") from None
+        return
 
 
 def main() -> int:
@@ -588,8 +607,6 @@ def main() -> int:
             original_attempt = os.environ["RECONCILES_DEPLOY_RUN_ATTEMPT"]
             prior_deployment_id = find_recoverable_deployment(sha, original_run, original_attempt,
                                                               os.environ.get("GITHUB_TOKEN", ""))
-            update_github_deployment(prior_deployment_id, "success",
-                "MAXIBOT runtime reconciled by read-only recovery", os.environ.get("GITHUB_TOKEN", ""))
             result["github_deployment_id"] = prior_deployment_id
             result["github_deployment_state"] = "success"
         else:
@@ -641,7 +658,12 @@ def main() -> int:
                     consume_task_authorization(os.environ["TASK_AUTHORIZATION_ID"], sha)
                     result["task_authorization_state"] = "CONSUMED"
                     result["authorization_consumed"] = True
-                except ValueError:
+                except ValueError as error:
+                    http_status = re.fullmatch(
+                        r"TASK_SCOPED_AUTO consumption write failed \(HTTP ([0-9]{3})\)", str(error))
+                    error_code = "HTTP_" + http_status.group(1) if http_status else "CONSUMPTION_UNCONFIRMED"
+                    result["task_authorization_error_code"] = error_code
+                    print(f"RELEASE_FINALIZATION_ERROR={error_code}", flush=True)
                     result["status"] = "RECOVERY_REQUIRED"
                     result["release_state"] = "RECOVERY_REQUIRED"
                     result["task_authorization_state"] = "CONSUMPTION_PENDING"
@@ -661,6 +683,7 @@ def main() -> int:
                     f"MAXIBOT release {result.get('status', 'FAILED')}", os.environ.get("GITHUB_TOKEN", ""))
                 result["github_deployment_state"] = deployment_state
             except ValueError:
+                return_code = 1
                 result["github_deployment_state"] = "PUBLICATION_FAILED"
                 if result.get("status") == "COMPLETE":
                     result["status"] = "RECOVERY_REQUIRED"

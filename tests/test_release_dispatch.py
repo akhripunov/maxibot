@@ -1369,3 +1369,72 @@ def test_prepare_publisher_adapter_checks_exact_attempt_and_timestamped_real_log
     monkeypatch.setattr(GitHubAPI, "get_job_log_archive", lambda self, job: "2026-10-20T17:19:54.2975796Z MAXIBOT_GHCR_PREPARE_RECEIPT=PASS DIGEST=" + expected + "\n")
     assert READ_PREPARE_PUBLISHER_DIGEST("123", "2", "isolated-test-token", lookup) == expected
     assert paths == ["actions/runs/123/attempts/2/jobs?per_page=100"]
+
+
+@pytest.mark.parametrize("prior_mode", ["production", "task-scoped-auto"])
+def test_publication_recovery_accepts_both_production_modes(prior_mode):
+    class PriorMode(FakeGitHub):
+        def __call__(self, path, token):
+            result = super().__call__(path, token)
+            if path == "actions/runs/777":
+                result["display_title"] = f"MAXIBOT {prior_mode} {SHA} by owner"
+            return result
+    selected = validate(values(RELEASE_MODE="publication-recovery",
+        RECONCILES_DEPLOY_RUN_ID="777", RECONCILES_DEPLOY_RUN_ATTEMPT="3"), PriorMode())
+    assert selected["mode"] == "publication-recovery"
+
+
+def test_consumption_retries_only_after_confirmed_missing_exact_ref(monkeypatch):
+    events = []
+    from validate_release_dispatch import ValidationError
+    def post(request, **kwargs):
+        events.append(("post", json.loads(request.data)))
+        if len([x for x in events if x[0] == "post"]) == 1:
+            raise run_release_workflow.urllib.error.URLError(ConnectionResetError("connection reset"))
+        class Created:
+            status = 201
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+        return Created()
+    def read(path, token):
+        events.append(("read", path))
+        if len([x for x in events if x[0] == "post"]) < 2:
+            raise ValidationError("GitHub release provenance request failed (HTTP 404)")
+        return {"object": {"type": "commit", "sha": SHA}}
+    monkeypatch.setattr(run_release_workflow.urllib.request, "urlopen", post)
+    monkeypatch.setattr("validate_release_dispatch.github_get", read)
+    monkeypatch.setattr(run_release_workflow.time, "sleep", lambda _: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    run_release_workflow.consume_task_authorization("maxibot-task-2026-10-06-001", SHA)
+    posts = [i for i,x in enumerate(events) if x[0] == "post"]
+    assert len(posts) == 2
+    assert any(x[0] == "read" for x in events[posts[0]+1:posts[1]])
+    assert events[posts[0]][1] == events[posts[1]][1]
+
+
+def test_consumption_unknown_readback_never_repeats_post(monkeypatch):
+    calls = []
+    def post(*args, **kwargs):
+        calls.append("post")
+        raise run_release_workflow.urllib.error.URLError(ConnectionResetError("connection reset"))
+    def unknown(*args):
+        raise ValidationError("read failed (HTTP 503)")
+    monkeypatch.setattr(run_release_workflow.urllib.request, "urlopen", post)
+    monkeypatch.setattr("validate_release_dispatch.github_get", unknown)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    with pytest.raises(ValueError):
+        run_release_workflow.consume_task_authorization("maxibot-task-2026-10-06-001", SHA)
+    assert calls == ["post"]
+
+
+def test_consumption_conflicting_marker_never_retries_post(monkeypatch):
+    calls = []
+    def post(*args, **kwargs):
+        calls.append("post")
+        raise run_release_workflow.urllib.error.URLError(ConnectionResetError("reset"))
+    monkeypatch.setattr(run_release_workflow.urllib.request, "urlopen", post)
+    monkeypatch.setattr("validate_release_dispatch.github_get", lambda *_: {"object": {"sha": "b" * 40}})
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    with pytest.raises(ValueError, match="conflicts"):
+        run_release_workflow.consume_task_authorization("maxibot-task-2026-10-06-001", SHA)
+    assert calls == ["post"]
