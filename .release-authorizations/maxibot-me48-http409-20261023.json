@@ -1,0 +1,157 @@
+{
+  "schema_version": 3,
+  "authorization_id": "maxibot-me48-http409-20261023",
+  "project": "maxibot",
+  "environment": "production",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_TASK_MAXIBOT_ME48_V5_HTTP409_FIX_20261023",
+  "owner_task_reference": "Direct OWNER instruction in the attached ME-48 V5 Deployment HTTP 409 Fix & Release Continuation. Authorizes this one full ME-48 release continuation and scoped release-infrastructure repair.",
+  "source_reference": "https://linear.app/bestuzhev/issue/ME-48/maxibot-skryt-tri-knopki-prodvizheniya-ot-ne-vladelcev",
+  "production_baseline_sha": "a8c84df642838e89221b0cee23449e63ac25b3b5",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "task": "Continue the authorized ME-48 V5 production cycle. Preserve the merged owner-only visibility change for the three specified controls. Fix only GitHub Deployment creation/recovery in scripts/run_release_workflow.py and enforce the release-infrastructure risk contract for that path in scripts/release_authorization.py, with focused regression tests. No product behavior beyond the already merged ME-48 menu change.",
+  "allowed_paths": [
+    ".release-authorizations/maxibot-me48-owner-menu-20261023.json",
+    ".release-authorizations/maxibot-me48-http409-20261023.json",
+    "app/bot/menu.py",
+    "scripts/release_authorization.py",
+    "scripts/run_release_workflow.py",
+    "tests/regression/test_owner_only_channel_menu_buttons.py",
+    "tests/test_deployment_api_errors.py",
+    "tests/test_release_authorization.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "coalesce",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "publish_evidence"
+  ],
+  "preauthorized_commits": [
+    "a0674e7665010b9c85bdc666224942197419eade",
+    "2111d31b50087f14791280964e9df5f954a3f821",
+    "5a0f0d8fbfc6d70dc8f9117d41b3aa3003efff64"
+  ],
+  "preauthorized_paths": [
+    ".release-authorizations/maxibot-me48-owner-menu-20261023.json",
+    "app/bot/menu.py",
+    "tests/regression/test_owner_only_channel_menu_buttons.py"
+  ],
+  "acceptance_criteria": [
+    "This durable task authorization is the first commit for the new work, precedes implementation, and remains unchanged.",
+    "The baseline-to-candidate diff contains only the inventoried earlier ME-48 paths and the allowed release runner, authorization validator, focused tests and this record.",
+    "Successful exact-SHA Prepare Check Run, exact receipt/image provenance and immutable digest readback independently gate Deployment creation; no Commit Status context is required.",
+    "Deployment API HTTP 409 does not reach Apply; an ambiguous lost POST performs exact read-only reconciliation and never repeats the POST blindly.",
+    "Missing/mismatched Prepare, receipt/digest, authorization/claim, candidate or baseline remains fail-closed.",
+    "Full Python 3.12 suite, targeted release authorization/API tests, frozen-path guard, independent QA and security review, canonical V5 Prepare/controller/Deploy, runtime health and immutable evidence pass.",
+    "Production remains at DB head 0098_durable_autopilot_execution_claim_v1, API polling false, sole VPS Worker polling true and ADS write flags false.",
+    "Real MAX owner/non-owner smoke is separately recorded as VERIFIED or NOT_VERIFIED."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "security",
+    "secrets",
+    "payments",
+    "ads",
+    "paid_traffic",
+    "max_polling",
+    "worker_runtime"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "baseline_sha": "a8c84df642838e89221b0cee23449e63ac25b3b5",
+      "allowed_paths": [
+        ".release-authorizations/maxibot-me48-owner-menu-20261023.json",
+        ".release-authorizations/maxibot-me48-http409-20261023.json",
+        "app/bot/menu.py",
+        "scripts/release_authorization.py",
+        "scripts/run_release_workflow.py",
+        "tests/regression/test_owner_only_channel_menu_buttons.py",
+        "tests/test_deployment_api_errors.py",
+        "tests/test_release_authorization.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "coalesce",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "publish_evidence"
+      ],
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "prepare_provenance",
+        "immutable_artifact",
+        "security_review",
+        "preflight",
+        "rollback_readiness",
+        "worker_compatibility",
+        "postdeploy_health",
+        "reconciliation"
+      ],
+      "risk_description": "One ME-48 full-cycle continuation repairs only the GitHub Deployment registration gate and its authorization coverage. It also preserves the already merged owner-only menu change. Production runtime code, database, worker, ads and polling behavior are out of scope.",
+      "backup_plan": "Use the canonical Deploy read-only preflight and require a verified production backup before any Apply. Confirm live production SHA a8c84df642838e89221b0cee23449e63ac25b3b5 and DB head 0098_durable_autopilot_execution_claim_v1; no migration is permitted by this scope. Stop if backup identity or baseline is missing or changed.",
+      "rollback_plan": "If canonical Apply reports an uncertain or partial result, do not repeat it. Reconcile production read-only first. If rollback is authorized by the existing V5 contract, restore only the prior immutable production image/source SHA a8c84df642838e89221b0cee23449e63ac25b3b5 through the canonical rollback path, then prove API/Worker parity, health and DB head.",
+      "stop_conditions": [
+        "Stop if exact main, production SHA, DB head, authorization record, claim, Prepare attempt or GHCR digest differs or is ambiguous.",
+        "Stop before Apply if canonical preflight, verified backup, rollback readiness, Worker compatibility, ADS flags, image parity or health gates fail.",
+        "Stop and reconcile read-only if a Deployment POST outcome is ambiguous, more than one exact run/attempt Deployment exists, or Apply may have started.",
+        "Stop if scope contains any change beyond the listed ME-48 paths and the scoped release API/authorization coverage."
+      ],
+      "prior_authorization_and_claim": {
+        "authorization_id": "maxibot-me48-owner-menu-20261023",
+        "record_path": ".release-authorizations/maxibot-me48-owner-menu-20261023.json",
+        "record_canonical_sha256": "e7824e2ace07d24300d7d154c8ac17afacc09a276f60dd995f1769779027b2d8",
+        "record_git_blob_sha_at_main": "d76bc84b796d6199b2001626b737f55a3a9a7275",
+        "claimed_ref": "refs/tags/maxibot-task-auth/maxibot-me48-owner-menu-20261023/claimed",
+        "claimed_sha": "5a0f0d8fbfc6d70dc8f9117d41b3aa3003efff64",
+        "consumed_ref": "NOT_FOUND",
+        "revoked_ref": "NOT_FOUND"
+      },
+      "prior_prepare": {
+        "run_id": "39914578352",
+        "attempt": "1",
+        "receipt_digest": "sha256:ac26a12b6e45e6acf49735a1f4e76a7bebf2a9999a9fc61f54820c32a08e0322",
+        "image_digest": "sha256:9329c87db1a90c187f9f3785f910e066f38d5ade4364c62d7859e029490a6b50"
+      },
+      "prior_deploy": {
+        "run_id": "39915468860",
+        "attempt": "1",
+        "state": "FAILED_PRE_SWITCH",
+        "production_changed": false,
+        "evidence_digest": "sha256:94712be45dab99fc2fbf9e68cfbb2b5cd7635a73d52592ca21b4cd926136cb30",
+        "confirmed_error_category": "HTTP 409 from create Deployment with required_contexts=[prepare], where the exact SHA has no Commit Status contexts; no Deployment ID returned and no Apply started."
+      },
+      "prior_unreleased_candidate_changes": {
+        "baseline_to_main_paths": [
+          ".release-authorizations/maxibot-me48-owner-menu-20261023.json",
+          "app/bot/menu.py",
+          "tests/regression/test_owner_only_channel_menu_buttons.py"
+        ],
+        "baseline_to_main_commits": [
+          "a0674e7665010b9c85bdc666224942197419eade",
+          "2111d31b50087f14791280964e9df5f954a3f821",
+          "5a0f0d8fbfc6d70dc8f9117d41b3aa3003efff64"
+        ]
+      },
+      "success_signals": [
+        "Exact current-main candidate passes successful Prepare, immutable GHCR image/receipt readback, trusted controller and canonical Deploy.",
+        "Preflight proves unchanged production baseline and DB target 0098_durable_autopilot_execution_claim_v1, verified backup and rollback readiness before Apply.",
+        "After Apply, VPS API and sole Worker prove exact candidate image/SHA, linux/amd64, expected polling topology, ADS write flags off and health; GitHub Deployment and immutable evidence read back; Linear records COMPLETE.",
+        "Real MAX owner/non-owner smoke is reported separately as VERIFIED or NOT_VERIFIED."
+      ]
+    }
+  },
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "8b956eda389730925baa7e993702e4290299242947d50ecce364fe1c138cbc1e"
+}

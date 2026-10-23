@@ -67,6 +67,7 @@ def _verify_owner_task(record: dict[str, Any]) -> None:
 def _release_infrastructure_path(path: str) -> bool:
     # This category cannot absorb application/security/database or secret paths.
     return (path.startswith((".github/workflows/maxibot-", ".release-authorizations/"))
+            or path == "scripts/run_release_workflow.py"
             or path in {"AGENTS.md", "docs/RELEASE_AUTHORIZATION.md", "docs/RELEASE_AUTOMATION.md", "Dockerfile", "docker-compose.vps.yml"}
             or path.startswith(("docs/release/", "scripts/release", "scripts/prepare", "scripts/publish_release", "scripts/publish_maxibot_image", "scripts/validate_release", "scripts/verify_prepared_image", "scripts/verify_loaded_prepared_image", "scripts/ghcr_")))
 

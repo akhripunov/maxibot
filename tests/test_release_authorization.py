@@ -244,3 +244,41 @@ def test_scope_diff_rejects_squash_merge_that_erases_record_order(tmp_path):
     candidate = git("rev-parse", "HEAD")
     with pytest.raises(AuthorizationError, match="precede every implementation change"):
         candidate_scope_diff(tmp_path, AUTH_ID, baseline, candidate)
+
+
+def _release_infrastructure_contract(paths):
+    from release_authorization import RELEASE_OPERATIONS, INFRASTRUCTURE_GATES
+    return {
+        "baseline_sha": BASELINE,
+        "allowed_paths": paths,
+        "allowed_operations": sorted(RELEASE_OPERATIONS),
+        "required_gates": sorted(INFRASTRUCTURE_GATES),
+        "risk_description": "Repair one scoped production deployment registration gate.",
+        "backup_plan": "Require a verified backup and unchanged baseline before Apply.",
+        "rollback_plan": "Use the prior immutable production SHA through canonical rollback.",
+        "stop_conditions": [
+            "Stop on any SHA, authorization, or provenance mismatch.",
+            "Stop if backup, preflight, or rollback readiness fails.",
+        ],
+    }
+
+
+def test_task_authorization_requires_risk_contract_for_deployment_runner_script():
+    path = "scripts/run_release_workflow.py"
+    with pytest.raises(AuthorizationError, match="owner-only"):
+        validate(record=record(allowed_paths=[path]), changed_paths=[path])
+
+
+def test_task_authorization_accepts_deployment_runner_with_complete_risk_contract():
+    path = "scripts/run_release_workflow.py"
+    contract = _release_infrastructure_contract([path])
+    exclusions = [item for item in record()["exclusions"] if item != "release_infrastructure"]
+    proof = validate(
+        record=record(
+            allowed_paths=[path],
+            exclusions=exclusions,
+            risk_contracts={"release_infrastructure": contract},
+        ),
+        changed_paths=[path],
+    )
+    assert proof["changed_paths"] == path
