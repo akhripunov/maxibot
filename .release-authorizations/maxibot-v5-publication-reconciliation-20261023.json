@@ -1,0 +1,112 @@
+{
+  "schema_version": 3,
+  "authorization_id": "maxibot-v5-publication-reconciliation-20261023",
+  "project": "maxibot",
+  "environment": "production",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_TASK_MAXIBOT_V5_PUBLICATION_RECONCILIATION_20261023",
+  "owner_task_reference": "OWNER request in Codex chat01a167f3-dd07-75d2-a5de-5195d3ca67ac to repair release failures and finish MAXIBOT, with DevOps authority transferred here and explicit PR/merge/Actions/full V5 release permission. This bounded follow-up repairs the observed Prepare39942212394 publication blocker without weakening production gates.",
+  "source_reference": "https://linear.app/bestuzhev/issue/ME-48/maxibot-skryt-tri-knopki-prodvizheniya-ot-ne-vladelcev",
+  "production_baseline_sha": "5dea6eec02dadf6b5eec9467511d48779547ed19",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "task": "Preserve reviewed V5 finalization fixes and repair strict Linear current-state reconstruction for a successful immutable TASK_SCOPED_AUTO Apply whose consumption metadata was independently reconciled. Require exact immutable evidence, original trusted run, matching consumed/claimed refs and same successful GitHub Deployment. Never fabricate original workflow success or rerun Apply.",
+  "allowed_paths": [
+    ".release-authorizations/maxibot-v5-publication-reconciliation-20261023.json",
+    ".release-authorizations/maxibot-v5-recovery-speed-20261023.json",
+    "scripts/publish_release_to_linear.py",
+    "scripts/run_release_workflow.py",
+    "scripts/validate_release_dispatch.py",
+    "tests/test_deployment_api_errors.py",
+    "tests/test_release_dispatch.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "coalesce",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "publish_evidence"
+  ],
+  "preauthorized_commits": [
+    "a7359cf1721f8069732bf0dba4fba282e57a8956",
+    "5c0c63038012b42e4ecf311ed7323a9341d7c66e",
+    "b8f2fb412eab7c82e2702ab548d553a273b5c133"
+  ],
+  "preauthorized_paths": [
+    ".release-authorizations/maxibot-v5-recovery-speed-20261023.json",
+    "scripts/run_release_workflow.py",
+    "scripts/validate_release_dispatch.py",
+    "tests/test_deployment_api_errors.py",
+    "tests/test_release_dispatch.py"
+  ],
+  "acceptance_criteria": [
+    "This immutable authorization precedes new implementation; exact earlier commits and paths inventoried.",
+    "Admit reconciled state only after strict exact-SHA immutable evidence proves successful runtime and consumption was the sole pending step; exact claimed/consumed markers and original Deployment success required.",
+    "Missing/conflicting provenance, marker, Worker health, backup, runtime/DB identity or status remains blocked.",
+    "Preserve original failed workflow and immutable RECOVERY_REQUIRED evidence, explicitly identify derived metadata reconciliation in Linear.",
+    "No second Apply, no weakened security/provenance/production gate, no DB/Worker/ADS/permissions/network change.",
+    "Red-green regressions, full suite, independent review and SHA-bound clean handoff PASS; canonical exact-main Prepare/controller/Deploy and independent readback."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "security",
+    "secrets",
+    "payments",
+    "ads",
+    "paid_traffic",
+    "max_polling",
+    "worker_runtime"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "baseline_sha": "5dea6eec02dadf6b5eec9467511d48779547ed19",
+      "allowed_paths": [
+        ".release-authorizations/maxibot-v5-publication-reconciliation-20261023.json",
+        ".release-authorizations/maxibot-v5-recovery-speed-20261023.json",
+        "scripts/publish_release_to_linear.py",
+        "scripts/run_release_workflow.py",
+        "scripts/validate_release_dispatch.py",
+        "tests/test_deployment_api_errors.py",
+        "tests/test_release_dispatch.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "coalesce",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "publish_evidence"
+      ],
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "prepare_provenance",
+        "immutable_artifact",
+        "security_review",
+        "preflight",
+        "rollback_readiness",
+        "worker_compatibility",
+        "postdeploy_health",
+        "reconciliation"
+      ],
+      "risk_description": "Bounded follow-up of the same V5 repair: strict reconstruction of already successful runtime from original immutable evidence plus exact durable reconciliation markers. Original failed history remains unchanged; no bypass or runtime mutation in reporting.",
+      "backup_plan": "Preserve existing canonical verified VPS backup and DB0098 contract; no DB writes in metadata recovery. New runtime release still requires canonical backup.",
+      "rollback_plan": "Revert only tooling commit when necessary. Metadata conflicts block; never rewrite history or repeat Apply to repair publication.",
+      "stop_conditions": [
+        "Unknown live SHA/DB or partial Apply requires read-only reconciliation.",
+        "Conflicting ref, invalid provenance, digest, scope or authorization blocks.",
+        "No concurrent release or mutation; no security/credentials/permissions/network changes."
+      ]
+    }
+  },
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "20f8fd004b1bce199addbaf609c8e0cd47530128aac9e9e3360bdfaebb2bfa9d"
+}

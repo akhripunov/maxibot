@@ -163,6 +163,59 @@ def trusted_production_run(run: dict, jobs: dict[str, dict]) -> bool:
             and publish.get("conclusion") == "failure")
 
 
+def reconciled_consumption_result(run: dict, result: dict) -> dict:
+    """Derive completion from immutable runtime proof plus immutable auth refs.
+
+    The failed run and its original OCI result are never changed. Ordinary
+    failed Apply or missing evidence cannot enter this metadata-only path.
+    """
+    from release_authorization import AuthorizationError, authorization_state_ref
+
+    sha = result.get("candidate_sha")
+    production = result.get("production_evidence")
+    migration = result.get("final_migration")
+    if (result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+            or result.get("mode") != "task-scoped-auto"
+            or result.get("status") != "RECOVERY_REQUIRED"
+            or result.get("release_state") != "RECOVERY_REQUIRED"
+            or result.get("task_authorization_state") != "CONSUMPTION_PENDING"
+            or result.get("authorization_consumed") is not False
+            or result.get("production_changed") is not True
+            or result.get("preflight") != "PASS"
+            or result.get("error") != "Production completed but durable TASK_SCOPED_AUTO consumption needs reconciliation"
+            or not SHA_RE.fullmatch(str(sha)) or sha != run.get("head_sha")
+            or result.get("final_runtime_sha") != sha
+            or not MIGRATION_RE.fullmatch(str(migration)) or migration != result.get("target_migration")
+            or not DIGEST_RE.fullmatch(str(result.get("evidence_digest")))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(result.get("task_authorization_record_sha256")))
+            or not isinstance(production, dict)
+            or any(production.get(key) != "PASS" for key in (
+                "RELEASE_STATUS", "BACKUP", "BACKUP_VALIDATION", "BACKUP_DISK_PREFLIGHT",
+                "API_WORKER_IMAGE_PARITY", "POLLING_ROLES"))
+            or production.get("MIGRATION_ALLOWED") != "YES"
+            or production.get("FINAL_RUNTIME_SHA") != sha or production.get("TARGET_SHA") != sha
+            or production.get("TARGET_MIGRATION") != migration):
+        raise SyncError("TASK_SCOPED_AUTO runtime completion proof is incomplete")
+    try:
+        worker = json.loads(production.get("POSTDEPLOY_WORKER_HEALTH", ""))
+    except (ValueError, TypeError):
+        raise SyncError("TASK_SCOPED_AUTO completed Worker proof is invalid") from None
+    if (not isinstance(worker, dict) or worker.get("status") != "PASS" or worker.get("release") != sha
+            or type(worker.get("restart_delta")) is not int or worker["restart_delta"] != 0):
+        raise SyncError("TASK_SCOPED_AUTO completed Worker proof is invalid")
+    for state in ("claimed", "consumed"):
+        try:
+            ref = authorization_state_ref("maxibot", result.get("task_authorization_id", ""), state)
+        except AuthorizationError:
+            raise SyncError("TASK_SCOPED_AUTO reconciliation authorization identity is invalid") from None
+        marker = github_json(f"repos/{REPOSITORY}/git/ref/" + ref.removeprefix("refs/"))
+        if marker.get("object", {}).get("type") != "commit" or marker.get("object", {}).get("sha") != sha:
+            raise SyncError("TASK_SCOPED_AUTO reconciliation marker differs from exact completed SHA")
+    return {**result, "status": "COMPLETE", "original_status": result["status"],
+            "metadata_reconciled": True, "task_authorization_state": "CONSUMED",
+            "authorization_consumed": True}
+
+
 def current_candidate_status(main_sha: str, current_main_run: dict | None, event: dict | None = None) -> str:
     if current_main_run and current_main_run.get("status") == "completed" and current_main_run.get("conclusion") == "success":
         return "READY"
@@ -194,9 +247,22 @@ def current_state(event: dict | None = None) -> dict:
     deployment = evidence = None
     for run in production_runs:
         jobs = release_jobs(run)
-        if not trusted_production_run(run, jobs):
+        trusted = trusted_production_run(run, jobs)
+        consumption_recovery = (
+            run.get("status") == "completed" and run.get("conclusion") == "failure"
+            and run.get("head_branch") == "main" and run.get("event") == "workflow_dispatch"
+            and run.get("path") == ".github/workflows/maxibot-deploy.yml"
+            and all(jobs.get(name, {}).get("status") == "completed" for name in ("validate", "deploy", "publish"))
+            and jobs["validate"].get("conclusion") == "success"
+            and jobs["deploy"].get("conclusion") == "failure"
+            and jobs["publish"].get("conclusion") == "success")
+        if not trusted and not consumption_recovery:
             continue
         result = read_result_artifact(run)
+        if not trusted:
+            if result.get("task_authorization_state") != "CONSUMPTION_PENDING":
+                continue
+            result = reconciled_consumption_result(run, result)
         mode = result.get("mode")
         is_reconciliation = mode == "publication-recovery"
         if ((mode in {"production", "task-scoped-auto"} or is_reconciliation)
@@ -313,6 +379,10 @@ def render_current_state(state: dict) -> str:
         "Пользовательская приёмка: **OWNER_ACCEPTANCE_NOT_RECORDED**; technical COMPLETE её не подтверждает.",
         "Следующее действие: подготовить/рассмотреть текущий main только в рамках отдельного разрешённого релиза; production здесь не менялся.",
     ]
+    if evidence.get("metadata_reconciled"):
+        lines.insert(3, "Metadata reconciliation: исходный immutable result **RECOVERY_REQUIRED** сохранён; "
+            "runtime PASS подтверждён его evidence, exact claimed/consumed refs и success того же GitHub Deployment. "
+            "Исходный workflow остаётся failure; новый Apply не выполнялся.")
     return f"<!-- {CURRENT_MARKER}_START -->\n\n" + "\n\n".join(lines) + f"\n\n<!-- {CURRENT_MARKER}_END -->"
 
 
