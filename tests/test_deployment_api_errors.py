@@ -214,7 +214,8 @@ def test_wrapper_gate_failure_never_creates_deployment_or_applies(monkeypatch, t
     assert commands == [["bash", "scripts/release_prod.sh", sha, "--dry-run"]]
 
 
-def test_wrapper_registers_deployment_after_preflight_and_authorization_before_apply(monkeypatch, tmp_path):
+@pytest.mark.parametrize("status_fails", [False, True])
+def test_wrapper_registers_deployment_after_preflight_and_authorization_before_apply(monkeypatch, tmp_path, status_fails):
     sha, migration, result_path = setup_task_scoped_wrapper(monkeypatch, tmp_path)
     events = []
 
@@ -234,13 +235,15 @@ def test_wrapper_registers_deployment_after_preflight_and_authorization_before_a
     monkeypatch.setattr(run_release_workflow, "consume_task_authorization", lambda *_args: events.append("consume"))
     monkeypatch.setattr(run_release_workflow, "create_github_deployment",
                         lambda *_args, **_kwargs: events.append("deployment") or 987)
-    monkeypatch.setattr(run_release_workflow, "update_github_deployment", lambda *_args, **_kwargs: None)
+    def publish_status(*_args, **_kwargs):
+        if status_fails and _args[1] == "success": raise ValueError("status write unconfirmed")
+    monkeypatch.setattr(run_release_workflow, "update_github_deployment", publish_status)
 
-    assert run_release_workflow.main() == 0
+    assert run_release_workflow.main() == (1 if status_fails else 0)
 
     result = json.loads(result_path.read_text())
     assert result["candidate_sha"] == sha
-    assert result["status"] == "COMPLETE"
+    assert result["status"] == ("RECOVERY_REQUIRED" if status_fails else "COMPLETE")
     assert result["production_changed"] is True
     assert events == ["preflight", "authorization", "deployment", "apply", "consume"]
 
@@ -497,3 +500,82 @@ def test_deployment_http_409_is_sanitized_and_not_retried(monkeypatch):
         )
     assert "private status-check" not in str(exc.value)
     assert calls == ["POST"]
+
+
+def test_metadata_recovery_retries_transient_deployment_read(monkeypatch):
+    calls = []
+    sha = "a" * 40
+    def read(request, **kwargs):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise urllib.error.URLError(ssl.SSLEOFError("unexpected EOF"))
+        if "/statuses" in request.full_url:
+            return JsonResponse([{"state": "failure"}])
+        return JsonResponse([{"id": 727, "ref": sha, "environment": "maxibot-production",
+            "payload": {"workflow_run_id": "777", "workflow_run_attempt": "2"}}])
+    monkeypatch.setattr(run_release_workflow.urllib.request, "urlopen", read)
+    monkeypatch.setattr(run_release_workflow.time, "sleep", lambda _: None)
+    assert run_release_workflow.find_recoverable_deployment(sha, "777", "2", "test-token") == 727
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("failure,expected", [
+    ("TASK_SCOPED_AUTO consumption write failed (HTTP 403)", "HTTP_403"),
+    ("private secret response payload", "CONSUMPTION_UNCONFIRMED"),
+])
+def test_finalization_reports_safe_category_without_losing_completed_runtime(monkeypatch, tmp_path, capsys, failure, expected):
+    sha, migration, result_path = setup_task_scoped_wrapper(monkeypatch, tmp_path)
+    commands = []
+    def execute(command, _env):
+        commands.append(command)
+        if command[-1] == "--dry-run":
+            return 0, f"SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration}\n"
+        return 0, "MIGRATION_ALLOWED=YES\nRELEASE_STATUS=PASS\n"
+    monkeypatch.setattr(run_release_workflow, "run", execute)
+    monkeypatch.setattr(run_release_workflow, "verify_task_authorization", lambda *_args, **_kwargs: {
+        "record_sha256": "b" * 64, "source_reference": "owner-task", "changed_paths": "scripts/run_release_workflow.py",
+        "_record": {}, "_changed_paths_list": []})
+    monkeypatch.setattr(run_release_workflow, "assert_task_scoped_no_migration", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_release_workflow, "create_github_deployment", lambda *_args: 987)
+    monkeypatch.setattr(run_release_workflow, "update_github_deployment", lambda *_args: None)
+    def fail(*_args): raise ValueError(failure)
+    monkeypatch.setattr(run_release_workflow, "consume_task_authorization", fail)
+    assert run_release_workflow.main() == 1
+    result = json.loads(result_path.read_text())
+    assert result["status"] == "RECOVERY_REQUIRED"
+    assert result["production_changed"] is True
+    assert result["task_authorization_error_code"] == expected
+    output = capsys.readouterr().out
+    assert "RELEASE_FINALIZATION_ERROR=" + expected in output
+    assert "private secret response payload" not in output + result_path.read_text()
+    assert sum(command[-1] == "--apply" for command in commands) == 1
+
+
+@pytest.mark.parametrize("status_fails", [False, True])
+def test_metadata_recovery_finalizes_same_deployment_once_without_apply(monkeypatch, tmp_path, status_fails):
+    sha, migration, result_path = setup_task_scoped_wrapper(monkeypatch, tmp_path)
+    monkeypatch.setenv("RELEASE_MODE", "publication-recovery")
+    monkeypatch.setenv("TASK_AUTHORIZATION_ID", "")
+    monkeypatch.setenv("RECONCILES_DEPLOY_RUN_ID", "777")
+    monkeypatch.setenv("RECONCILES_DEPLOY_RUN_ATTEMPT", "2")
+    commands, writes = [], []
+    def execute(command, _env):
+        commands.append(command)
+        assert command[-1] == "--dry-run"
+        return 0, (f"SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration}\n"
+            f"PROD_READY=ready\nPROD_API_IMAGE=maxibot-vps-api:{sha}\nPROD_WORKER_IMAGE=maxibot-vps-api:{sha}\n"
+            "PROD_WRITE_FLAGS=ADS_AUTOPILOT_ENABLED=false,ADS_WRITE_ACTIONS_ENABLED=false\n"
+            "PROD_WORKER_HEALTH=PASS\nROLLBACK_CONFIG=/verified/compose.yml\nROLLBACK_READY=PASS\n")
+    def status(*args):
+        writes.append(args)
+        if status_fails or len(writes) > 1: raise ValueError("status write failed")
+    monkeypatch.setattr(run_release_workflow, "run", execute)
+    monkeypatch.setattr(run_release_workflow, "find_recoverable_deployment", lambda *_args: 987)
+    monkeypatch.setattr(run_release_workflow, "update_github_deployment", status)
+    assert run_release_workflow.main() == (1 if status_fails else 0)
+    result = json.loads(result_path.read_text())
+    assert result["status"] == ("RECOVERY_REQUIRED" if status_fails else "COMPLETE")
+    assert result["production_changed"] is False
+    assert result["github_deployment_id"] == 987
+    assert len(writes) == 1 and writes[0][0:2] == (987, "success")
+    assert commands == [["bash", "scripts/release_prod.sh", sha, "--dry-run"]]

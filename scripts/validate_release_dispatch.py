@@ -213,7 +213,8 @@ def validate(values: dict[str, str], api_get=github_get,
                 or prior.get("event") != "workflow_dispatch"
                 or prior.get("status") != "completed"
                 or prior.get("conclusion") != "failure"
-                or not str(prior.get("display_title", "")).startswith(f"MAXIBOT production {sha} by ")):
+                or not str(prior.get("display_title", "")).startswith((
+                    f"MAXIBOT production {sha} by ", f"MAXIBOT task-scoped-auto {sha} by "))):
             raise ValidationError("Publication recovery does not match a failed prior trusted production Deploy for this exact SHA/attempt")
 
     return {
