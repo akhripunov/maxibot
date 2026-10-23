@@ -1,0 +1,94 @@
+{
+  "schema_version": 3,
+  "authorization_id": "maxibot-me49-full-release-20261023",
+  "project": "maxibot",
+  "environment": "production",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_TASK_MAXIBOT_ME49_FULL_RELEASE_20261023",
+  "owner_task_reference": "Direct OWNER instruction in this Codex chat dated 2026-10-23: release MAXIBOT ME-49 to production within the stated scope, use the existing V5 task-scoped authorization when valid, and complete Prepare through production verification.",
+  "source_reference": "https://linear.app/bestuzhev/issue/ME-49/maxibot-sokratit-podtverzhdenie-udaleniya-kanala",
+  "production_baseline_sha": "d620e8a6d0b1eaeb140b64e58074913d4fdc39ef",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "task": "Ship ME-49: shorten only the channel deletion confirmation prompt in My Channels to the OWNER-approved two-line copy. Preserve the existing Yes/Delete and Cancel buttons, callback data, deletion behavior, permissions, database, migrations, advertising, V5 implementation, and all unrelated MAXIBOT/GPoint changes. Complete one canonical V5 production cycle from the exact current main based on the verified production baseline.",
+  "allowed_paths": [
+    ".release-authorizations/maxibot-me49-full-release-20261023.json",
+    "app/bot/menu.py",
+    "tests/test_channel_delete_confirmation_copy.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "coalesce",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "publish_evidence"
+  ],
+  "preauthorized_commits": [
+    "8aed433c3d6d1fe09f2c71a2347acba13502f476"
+  ],
+  "preauthorized_paths": [
+    "app/bot/menu.py",
+    "tests/test_channel_delete_confirmation_copy.py"
+  ],
+  "acceptance_criteria": [
+    "The immutable record is added after and explicitly inventories the exact verified ME-49 local implementation commit and its two paths.",
+    "The integrated candidate is exact current main and its full production-baseline diff contains only the ME-49 implementation, regression test, and this authorization record.",
+    "Frozen Path Guard passes for the OWNER-authorized app/bot/menu.py change; all mandatory Prepare checks run on the exact final SHA.",
+    "Successful exact-SHA Prepare publishes and reads back the immutable GHCR image and receipt; the trusted controller selects this active TASK_SCOPED_AUTO record and starts one canonical Deploy without repeated human SHA approval.",
+    "Deploy performs canonical read-only preflight before Apply, verifies the unchanged production DB head, preserves production lock, backup, rollback, API/Worker image parity and sole-worker safeguards, then verifies runtime health and publishes immutable evidence.",
+    "ME-49, the shared Release Queue, and MAXIBOT release journal record matching final run and production evidence; UI smoke is marked NOT_VERIFIED if MAX interface access is unavailable."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "security",
+    "secrets",
+    "payments",
+    "ads",
+    "paid_traffic"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "baseline_sha": "d620e8a6d0b1eaeb140b64e58074913d4fdc39ef",
+      "allowed_paths": [
+        ".release-authorizations/maxibot-me49-full-release-20261023.json"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "coalesce",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "publish_evidence"
+      ],
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "prepare_provenance",
+        "immutable_artifact",
+        "security_review",
+        "preflight",
+        "rollback_readiness",
+        "worker_compatibility",
+        "postdeploy_health",
+        "reconciliation"
+      ],
+      "risk_description": "This task adds one immutable record that scopes the existing V5 authorization to ME-49 and the verified production baseline; it does not change release code, workflow definitions, runner configuration, credentials, or deployment mechanics.",
+      "backup_plan": "Canonical production Apply must validate a MAXIBOT-only PostgreSQL backup before changing runtime state and retain the exact prior API and Worker image digests.",
+      "rollback_plan": "Use the canonical rollback path to restore the exact prior API and Worker image digests with the existing production lock and verify health before declaring recovery.",
+      "stop_conditions": [
+        "Stop if the production baseline, exact-main candidate, task scope, immutable receipt, or authorization state differs.",
+        "Stop before Apply if preflight, backup, rollback, lock, image parity, Worker, or health gates fail."
+      ]
+    }
+  },
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "4228e8275443c27e9727757aebfd5b88628e8d48234a9bcac2cfd60d530f20df"
+}
