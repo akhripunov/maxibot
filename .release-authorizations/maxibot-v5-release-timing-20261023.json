@@ -1,0 +1,86 @@
+{
+  "schema_version": 3,
+  "authorization_id": "maxibot-v5-release-timing-20261023",
+  "project": "maxibot",
+  "environment": "production",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_TASK_MAXIBOT_V5_TEST_RELEASE_AND_TIMING_20261023",
+  "owner_task_reference": "OWNER request in current Codex chat to make a harmless MAXIBOT change, execute one full canonical V5 release, and measure wall-clock stages. Explicit user request authorizes one production cycle to measure the route.",
+  "source_reference": "https://linear.app/bestuzhev/issue/ME-48/maxibot-skryt-tri-knopki-prodvizheniya-ot-ne-vladelcev",
+  "production_baseline_sha": "27799b920d1b4a0fb351b48c24db5dd118ff285c",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "task": "Make one comment-only clarification on the existing MAXIBOT owner helper, preserving all behavior; run the complete normal V5 path once and measure timings for each workflow/job/stage.",
+  "allowed_paths": [
+    ".release-authorizations/maxibot-v5-release-timing-20261023.json",
+    "app/bot/menu.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "coalesce",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "publish_evidence"
+  ],
+  "acceptance_criteria": [
+    "Authorization committed before source change and selected candidate remains exact current main.",
+    "Change is comment-only; existing owner/non-owner menu behavior and frozen paid traffic are unchanged.",
+    "A single normal exact-main Prepare/controller/canonical Deploy completes with independent runtime/DB/Worker/health/evidence readback.",
+    "Record exact wall-clock and workflow stage timings; do not initiate a duplicate run."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "worker_runtime",
+    "security",
+    "secrets",
+    "permissions",
+    "network_configuration",
+    "ads",
+    "paid_traffic",
+    "max_polling",
+    "GPoint"
+  ],
+  "risk_contracts": {
+    "production_runtime": {
+      "baseline_sha": "27799b920d1b4a0fb351b48c24db5dd118ff285c",
+      "allowed_paths": [
+        ".release-authorizations/maxibot-v5-release-timing-20261023.json",
+        "app/bot/menu.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "coalesce",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "publish_evidence"
+      ],
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "Prepare",
+        "security",
+        "backup",
+        "worker_parity",
+        "preflight",
+        "rollback",
+        "postdeploy_health",
+        "Linear_reconciliation"
+      ],
+      "risk_description": "Comment-only clarification; no executable behavior changes. Production cycle is explicitly requested solely as an end-to-end timing test.",
+      "backup_plan": "Canonical V5 backup must pass before Apply.",
+      "rollback_plan": "Canonical V5 rollback to exact previous runtime if required by health gates.",
+      "stop_conditions": [
+        "Any behavioral diff, scope drift, baseline change, active release, authorization conflict, or failed mandatory gate blocks Apply."
+      ]
+    }
+  },
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "2e72d6b29e9850460e94cbdf0ab75771407b4c858b1ae5b5346e65e01521189d"
+}
