@@ -1698,10 +1698,11 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             BotConnection.owner_admin_id == admin.id,
             BotConnection.status != "DISABLED",
         )) or 0
+        owner_controls = [("🤖 AI Продвижение", "subscription_ai")] if is_maxibot_owner(admin) else []
         return subscription_management_text(admin, channel_count=channel_count, bot_count=bot_count), buttons(
             ("Тариф Start", "subscription_tariff:start"),
             ("Тариф Pro", "subscription_tariff:pro"),
-            ("🤖 AI Продвижение", "subscription_ai"),
+            *owner_controls,
             ("⬅️ Назад", "home"),
         )
     if screen.startswith("subscription_limit:"):
@@ -2014,16 +2015,20 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         yandex_value = metrica.get("owner_login") or ("Подключён" if yandex else None)
         counter_id = (profile.yandex_counter_id if profile else None) or metrica.get("counter_id")
         yandex_button = "🔗 Яндекс.Директ ✅" if yandex else "🔗 Яндекс.Директ ⚠️ не подключен"
-        controls = [
-            (yandex_button, f"promotion_yandex:{channel.id}"),
-            ("🤖 AI Продвижение", f"ads:{channel.id}"),
+        controls = [(yandex_button, f"promotion_yandex:{channel.id}")]
+        if is_maxibot_owner(admin):
+            controls.append(("🤖 AI Продвижение", f"ads:{channel.id}"))
+        controls.extend([
             ("📊 Аналитика", f"promotion_analytics:{channel.id}"),
             (("⛔ Отключить ежедневные отчёты" if channel.daily_reports_enabled else "✅ Включить ежедневные отчёты"),
              f"daily_reports:{channel.id}:{'off' if channel.daily_reports_enabled else 'on'}"),
-            ("📩 Обращения / Предложка", f"channel:{channel.id}"),
+        ])
+        if is_maxibot_owner(admin):
+            controls.append(("📩 Обращения / Предложка", f"channel:{channel.id}"))
+        controls.extend([
             ("🗑 Удалить канал", f"delete:{channel.id}"),
             ("⬅️ Назад", "promotion"),
-        ]
+        ])
         logger.warning(
             "ADS_MENU_TRACE screen=promotion_channel instance=%s host=%s pid=%s "
             "owner=%s ads_enabled=%s ads_admin_only=%s can_access_ads=%s buttons=%s",
