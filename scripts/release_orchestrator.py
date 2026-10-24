@@ -544,8 +544,12 @@ def assert_production_history(api, repo_root: Path, baseline: str, *, runs=None,
         latest = listed.get("run_attempt")
         if (not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
                 or type(latest) is not int or not 1 <= latest <= 999999
-                or listed.get("path") != ".github/workflows/maxibot-deploy.yml"
-                or listed.get("event") != "workflow_dispatch"):
+                or listed.get("path") != ".github/workflows/maxibot-deploy.yml"):
+            raise OrchestrationError("Production attempt inventory is unknown; reconciliation required")
+        if (run_id != current_run_id and checkpoint and listed.get("status") == "completed"
+                and _history_time(listed.get("updated_at")) < checkpoint):
+            continue  # Retire completed legacy event schemas only behind a proven checkpoint.
+        if listed.get("event") != "workflow_dispatch":
             raise OrchestrationError("Production attempt inventory is unknown; reconciliation required")
         for number in range(1, latest + 1):
             key = (run_id, str(number))
@@ -555,8 +559,6 @@ def assert_production_history(api, repo_root: Path, baseline: str, *, runs=None,
                 continue
             if key in proven_attempts:
                 verified[key] = proven_attempts[key]
-                continue
-            if checkpoint and listed.get("status") == "completed" and _history_time(listed.get("updated_at")) < checkpoint:
                 continue
             run = listed if latest == 1 else api.get(f"actions/runs/{run_id}/attempts/{number}")
             if (not isinstance(run, dict) or str(run.get("id")) != run_id

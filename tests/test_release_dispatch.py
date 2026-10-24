@@ -1873,7 +1873,8 @@ def test_verified_checkpoint_retires_only_completed_older_history(tmp_path, monk
                     'commit', '--allow-empty', '-qm', 'installed baseline'], cwd=tmp_path, check=True)
     baseline = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=tmp_path, text=True).strip()
     anchor = _history_run(992, head_sha=baseline, conclusion='success')
-    old = _history_run(991, updated_at='2026-10-24T09:00:00Z')
+    # Live history includes the retired push-triggered Deploy schema from Oct 1.
+    old = _history_run(991, event='push', updated_at='2026-10-24T09:00:00Z')
     proof = _history_failure(mode='production', status='COMPLETE', release_state='COMPLETE',
         production_changed=True, final_runtime_sha=baseline, _verified_deployment_api_match='success')
     monkeypatch.setattr(orchestrator, '_verified_deploy_evidence',
