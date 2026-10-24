@@ -1,0 +1,170 @@
+{
+  "schema_version": 3,
+  "authorization_id": "maxibot-me50-diagnostics-recovery-20261024",
+  "project": "maxibot",
+  "environment": "production",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_TASK_MAXIBOT_ME50_DIAGNOSTICS_RECOVERY_20261024",
+  "owner_task_reference": "Direct OWNER-pasted MAXIBOT V5 ME-50 recovery specification in this Codex task dated 2026-10-24. It authorizes the exact diagnostic and release-infrastructure paths below, creation of this separate schema-v3 record before new implementation commits, and one canonical production cycle only after original evidence, Deployment identity, safe-retry gates, and all V5 checks are proven.",
+  "production_baseline_sha": "ae6f5ea623e12fde4d0e2271023f7822a3f9822f",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "task": "Recover and complete ME-50 using MAXIBOT V5. Preserve the already-authorized menu and Prepare-authorization implementation as inventoried history. Add explicit original candidate/run/attempt/digest arguments for read-only immutable evidence retrieval; add a trusted-main read-only diagnostic route with minimum GitHub package/actions/deployment read scopes; use verified original evidence to diagnose FAILED_PRE_SWITCH and safe-retry state; fix only reproduced Linear publication defects; measure release stage time and optimize only proven redundant work. Production Apply remains prohibited unless exact evidence, Deployment state, baseline, claim state and all canonical safe-retry/preflight gates prove it safe.",
+  "allowed_paths": [
+    ".github/workflows/maxibot-prepare.yml",
+    ".github/workflows/maxibot-release-diagnostics.yml",
+    ".release-authorizations/maxibot-me50-diagnostics-recovery-20261024.json",
+    ".release-authorizations/maxibot-me50-v5-release-infra-20261024.json",
+    "app/bot/menu.py",
+    "scripts/frozen_path_guard.sh",
+    "scripts/ghcr_release_artifacts.py",
+    "scripts/maxibot_release_diagnostics.py",
+    "scripts/prepare_frozen_path_guard.py",
+    "scripts/publish_release_to_linear.py",
+    "scripts/release_authorization.py",
+    "scripts/release_network_retry.py",
+    "scripts/release_orchestrator.py",
+    "scripts/run_release_workflow.py",
+    "scripts/validate_release_dispatch.py",
+    "tests/regression/test_owner_only_channel_menu_buttons.py",
+    "tests/test_deployment_api_errors.py",
+    "tests/test_frozen_path_guard.py",
+    "tests/test_ghcr_release_artifacts.py",
+    "tests/test_maxibot_release_diagnostics.py",
+    "tests/test_owner_task_release.py",
+    "tests/test_prepare_frozen_path_authorization.py",
+    "tests/test_release_dispatch.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "coalesce",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "publish_evidence"
+  ],
+  "preauthorized_commits": [
+    "2c68056dc43abf2472bf6a3693a8b0fc8c09ae52",
+    "b695c8fe409428e223d0c6f0d59e24cf9f38d082",
+    "f8dbb8413868fcc06cb72d020f5ae2ff56cb2818",
+    "e66d77594ff257e566a88ebf156dd0b4e2edeedb",
+    "d38e3613f50a5659c463572064272e4438763ea4"
+  ],
+  "preauthorized_paths": [
+    ".github/workflows/maxibot-prepare.yml",
+    ".release-authorizations/maxibot-me50-v5-release-infra-20261024.json",
+    "app/bot/menu.py",
+    "scripts/frozen_path_guard.sh",
+    "scripts/prepare_frozen_path_guard.py",
+    "scripts/release_authorization.py",
+    "scripts/release_orchestrator.py",
+    "tests/regression/test_owner_only_channel_menu_buttons.py",
+    "tests/test_frozen_path_guard.py",
+    "tests/test_owner_task_release.py",
+    "tests/test_prepare_frozen_path_authorization.py"
+  ],
+  "acceptance_criteria": [
+    "The immutable authorization record is the first commit after exact current main and records the production baseline and every preceding candidate commit/path without claiming the authorization existed earlier.",
+    "The complete production-baseline-to-candidate diff contains only paths in this record; no earlier authorization record or claim ref is edited.",
+    "read-evidence supports explicit candidate SHA, original run ID, attempt and expected OCI digest while retaining ordinary workflow defaults and rejecting mismatched OCI digest, schema, artifact type, candidate or run identity.",
+    "A trusted-main diagnostics workflow reads only the original workflow run, exact immutable GHCR evidence and matching GitHub Deployment/status via GET; permissions are minimum read-only and the workflow has no production SSH or VPS secrets.",
+    "The exact error, release state, preflight result, production_changed flag, authorization claim/consumption and Deployment identity/status are derived from original immutable evidence and read-only API facts.",
+    "Only a reproduced Linear read-back defect is changed; writes remain idempotent and bounded readback retries do not repeat a document mutation or modify unrelated Linear sections.",
+    "Existing bounded retry, TLS verification, exact SHA/digest/provenance, frozen-path, DB, backup, rollback, lock, Worker, ADS and health gates remain fail-closed; any unknown runtime or deployment state stops Apply.",
+    "Run timing evidence is measured by stage. No optimization is made without proof of duplicated work and regression coverage.",
+    "After independent security review and successful exact-main V5 Prepare, continue only through canonical controller, preflight, one authorized Deploy, verification, GitHub Deployment/evidence and Linear reconciliation. Never repeat Apply after uncertain mutation or metadata failure."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "security",
+    "secrets",
+    "payments",
+    "ads",
+    "paid_traffic"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "baseline_sha": "ae6f5ea623e12fde4d0e2271023f7822a3f9822f",
+      "allowed_paths": [
+        ".github/workflows/maxibot-prepare.yml",
+        ".github/workflows/maxibot-release-diagnostics.yml",
+        ".release-authorizations/maxibot-me50-diagnostics-recovery-20261024.json",
+        ".release-authorizations/maxibot-me50-v5-release-infra-20261024.json",
+        "scripts/frozen_path_guard.sh",
+        "scripts/ghcr_release_artifacts.py",
+        "scripts/maxibot_release_diagnostics.py",
+        "scripts/prepare_frozen_path_guard.py",
+        "scripts/publish_release_to_linear.py",
+        "scripts/release_authorization.py",
+        "scripts/release_network_retry.py",
+        "scripts/release_orchestrator.py",
+        "scripts/run_release_workflow.py",
+        "scripts/validate_release_dispatch.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "coalesce",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "publish_evidence"
+      ],
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "prepare_provenance",
+        "immutable_artifact",
+        "security_review",
+        "preflight",
+        "rollback_readiness",
+        "worker_compatibility",
+        "postdeploy_health",
+        "reconciliation"
+      ],
+      "risk_description": "The scoped changes read historical immutable release evidence, verify exact GitHub Deployment identity/status, and improve error/publication diagnostics in existing V5. A defect could misattribute an old artifact, accept a stale/foreign authorization or deployment, publish false production status, or permit an unsafe retry. All validation is bound to candidate, original run and attempt, expected digest, production baseline, full ancestry and exact scope; diagnostic workflow has GET-only permissions and cannot access VPS SSH or mutate deployments.",
+      "backup_plan": "Before any Apply, canonical MAXIBOT V5 must create and validate its restricted database backup, capture exact current API/Worker image identities and rollback metadata, and pass disk/restore safety checks. This diagnostic and authorization work creates no production backup and makes no production mutation.",
+      "rollback_plan": "If runtime verification fails before completion, use only canonical V5 rollback under the production lock to restore the exact previously verified API and Worker image digests and confirm DB head/health. Any uncertain Apply or evidence publication is reconciled read-only before further mutation; never blind-retry Apply.",
+      "stop_conditions": [
+        "Stop before Apply if original evidence digest, run/attempt/SHA, immutable schema or Deployment match is missing, ambiguous or inconsistent.",
+        "Stop on baseline/DB drift, consumed/revoked/ambiguous authorization, active Deploy, unknown VPS state, missing backup, rollback readiness, worker compatibility or health proof.",
+        "Stop if any change exceeds the enumerated paths or if security review, frozen-path, Prepare provenance, immutable artifact or canonical preflight fails."
+      ]
+    },
+    "permissions": {
+      "allowed_paths": [
+        ".github/workflows/maxibot-release-diagnostics.yml"
+      ],
+      "minimum_github_token_permissions": {
+        "contents": "read",
+        "actions": "read",
+        "packages": "read",
+        "deployments": "read"
+      },
+      "prohibited_permissions": [
+        "contents:write",
+        "actions:write",
+        "packages:write",
+        "deployments:write",
+        "administration:write"
+      ],
+      "secret_access": "none; no SSH identity, VPS secret or LINEAR_API_KEY",
+      "risk_description": "The separate trusted-main diagnostic job needs only read access to the checked-in verifier, original Actions run metadata, private GHCR evidence and GitHub Deployment/status records. It must not receive any production mutation or persistent credential capability.",
+      "required_checks": [
+        "workflow_dispatch only on trusted main",
+        "explicit original SHA/run/attempt/digest inputs",
+        "read-only GET operations only",
+        "no production SSH or VPS secret references",
+        "reject ambiguous identity matches"
+      ]
+    }
+  },
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "3ad140c8ea05c1907363685aad6f924faf41a4a4936666fdd6a5a588f83d9df3"
+}
