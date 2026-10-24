@@ -332,6 +332,11 @@ def _task_authorization_dispatch_history(api, repo_root: Path, production_baseli
         for marker in markers:
             if marker["ref"] == current_event_ref:
                 continue
+            if _prove_me50_orphaned_controller_dispatch(
+                    api, marker, runs, authorization_id, production_baseline_sha, repo_root):
+                # Known non-executing event; its persistent marker stays untouched.
+                # Only a *new* exact-main Prepare may create its own atomic dispatch marker.
+                continue
             proven.update(_prove_safe_prior_dispatch(api, marker, runs, authorization_id,
                                        production_baseline_sha, repo_root=repo_root))
     return proven
@@ -1300,6 +1305,130 @@ def _prove_historical_receipt_failure_before_execute(api, run: dict, candidate: 
         if env is None or any(env.get(key) != value for key, value in required_env.items()):
             return False
     return True
+
+
+
+def _prove_me50_orphaned_controller_dispatch(api, marker: dict, runs: list[dict],
+                                             authorization_id: str, baseline: str,
+                                             repo_root: Path | None) -> bool:
+    """Read-only attestation for the single ME-50 marker with no Deploy run.
+
+    The Controller's POST response was lost after writing its durable marker.
+    Accept this historical *non-executing* marker only with exact immutable
+    Controller attempt evidence, a complete absence of Deploy runs/Deployments,
+    and untouched OWNER authorization state. All other orphan markers fail closed.
+    This function NEVER sends a dispatch or creates a synthetic Apply result.
+    """
+    candidate = "a1cdb5235cc443e7a1cd050ebeda487fd70e4f0a"
+    auth = "maxibot-me50-diagnostics-recovery-20261024"
+    source_pins = {
+        ".github/workflows/maxibot-auto-preflight.yml":
+            "12706adacec8024d8c99d7ff6b0dc1523d926063c835715f822275b9860080f5",
+        "scripts/release_orchestrator.py":
+            "7353edd6164858e0c15429dc8eb5efe3144631f1a5caef1fde53db603984dde2",
+        ".github/workflows/maxibot-deploy.yml":
+            "6c8d76d24ef5847d3ec0539cc282d1a9e319134a3ecad093cd5709b502da7e9c",
+    }
+    if (repo_root is None or authorization_id != auth
+            or baseline != "ae6f5ea623e12fde4d0e2271023f7822a3f9822f"
+            or marker != {"ref": f"tags/maxibot-task-auth/{auth}/dispatches/prepare-40093485327-1",
+                          "sha": candidate}
+            or any(run.get("head_sha") == candidate for run in runs)):
+        return False
+    try:
+        # Verify precisely the historical code that created the orphan marker.
+        for path, digest in source_pins.items():
+            blob = subprocess.check_output(["git", "show", f"{candidate}:{path}"],
+                cwd=repo_root, stderr=subprocess.DEVNULL, timeout=10)
+            if hashlib.sha256(blob).hexdigest() != digest:
+                return False
+
+        # Authoritative remote readbacks: one exact claim, no consumption/revocation
+        # and no GitHub Deployment. A missing API response is not an empty list.
+        claim = api.get(f"git/ref/tags/maxibot-task-auth/{auth}/claimed")
+        claim_obj = claim.get("object", {})
+        if (claim_obj.get("type") != "commit"
+                or claim_obj.get("sha") != "e7661c52d4a0683d9331c3e28e7af19cdf62c86c"):
+            return False
+        for state in ("consumed", "revoked"):
+            try:
+                api.get(f"git/ref/tags/maxibot-task-auth/{auth}/{state}")
+            except APIError as error:
+                if error.status != 404:
+                    return False
+            else:
+                return False
+        deployments = api.get(
+            f"deployments?sha={candidate}&environment=maxibot-production&per_page=100&page=1")
+        if deployments != []:
+            return False
+
+        controller = api.get("actions/runs/40093864867")
+        if (str(controller.get("id")) != "40093864867"
+                or controller.get("run_attempt") != 3
+                or controller.get("head_sha") != candidate
+                or controller.get("head_branch") != "main"
+                or controller.get("path") != ".github/workflows/maxibot-auto-preflight.yml"
+                or controller.get("event") != "workflow_run"
+                or controller.get("status") != "completed"
+                or controller.get("conclusion") != "failure"):
+            return False
+        closed = dt.datetime.fromisoformat(
+            controller["updated_at"].replace("Z", "+00:00"))
+        if (closed.tzinfo is None or
+                not dt.timedelta(minutes=15) < dt.datetime.now(dt.timezone.utc) - closed
+                < dt.timedelta(days=7)):
+            return False
+
+        ids = (120871937203, 120873720003, 120877360263)
+        for attempt, expected_id in enumerate(ids, 1):
+            response = api.get(
+                f"actions/runs/40093864867/attempts/{attempt}/jobs?per_page=100")
+            jobs = response.get("jobs")
+            if (response.get("total_count") != 1 or not isinstance(jobs, list)
+                    or len(jobs) != 1 or not isinstance(jobs[0], dict)):
+                return False
+            job = jobs[0]
+            if (job.get("id") != expected_id or str(job.get("run_id")) != "40093864867"
+                    or job.get("run_attempt") != attempt
+                    or job.get("name") != "dispatch-authorized-deploy"
+                    or job.get("status") != "completed"):
+                return False
+            if attempt in (1, 2):
+                if (job.get("conclusion") != "cancelled"
+                        or job.get("runner_id") != 0
+                        or job.get("steps") not in ([], None)):
+                    return False
+                continue
+            steps = job.get("steps")
+            expected_steps = (
+                ("Set up job", "success"),
+                ("Initialize shared bounded controller network-read budget", "success"),
+                ("Checkout trusted current main controller code", "success"),
+                ("Verify assigned runner before controller/API work", "success"),
+                ("Dispatch one authorized Deploy or leave exact-SHA approval required", "failure"),
+                ("Post Checkout trusted current main controller code", "success"),
+                ("Complete job", "success"),
+            )
+            if (job.get("conclusion") != "failure" or job.get("runner_name") != "maxibot-owner-mac"
+                    or type(job.get("runner_id")) is not int or job["runner_id"] <= 0
+                    or not isinstance(steps, list)
+                    or [(x.get("name"), x.get("status"), x.get("conclusion")) for x in steps]
+                       != [(name, "completed", conclusion) for name, conclusion in expected_steps]):
+                return False
+        log = api.get_job_log_archive(str(ids[-1]))
+        errors = [line for line in log.splitlines()
+                  if "MAXIBOT_AUTO_RELEASE=BLOCKED TYPE=OrchestrationError REASON=" in line]
+        expected_error = ("MAXIBOT_AUTO_RELEASE=BLOCKED TYPE=OrchestrationError "
+                          "REASON=dispatch_after_claim_failed_reconciliation_required")
+        if (len(errors) != 1 or not _has_runner_timestamp(errors[0])
+                or _log_content(errors[0]) != expected_error
+                or "TASK_SCOPED_AUTO_DISPATCHED" in log):
+            return False
+    except (APIError, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        return False
+    return True
+
 
 
 def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
