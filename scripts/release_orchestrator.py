@@ -26,6 +26,7 @@ from release_network_retry import (NETWORK_RETRY_BUDGET_SECONDS, NetworkUnavaila
     RetryBudget, RETRYABLE_HTTP_STATUS, is_retryable_network_error, retry_network_read)
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
+                                   resolve_prepare_authorization,
                                    validate_claim_candidate,
                                    validate_task_authorization)
 
@@ -839,39 +840,26 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
 
 
 def _find_task_authorization(repo_root: Path, candidate_sha: str, api) -> dict[str, str]:
-    directory = repo_root / ".release-authorizations"
-    if not directory.is_dir():
-        return {"authorization_id": "", "ambiguous": "false"}
-    matches = []
-    for path in sorted(directory.glob("*.json")):
-        authorization_id = path.stem
-        if not AUTH_ID_RE.fullmatch(authorization_id):
-            continue
+    def state_ref_exists(authorization_id: str, state: str) -> bool:
+        route = "git/ref/tags/" + authorization_state_ref(
+            "maxibot", authorization_id, state).removeprefix("refs/tags/")
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            changed_paths = candidate_scope_diff(repo_root, authorization_id,
-                                                 record.get("production_baseline_sha", ""), candidate_sha)
-            proof = validate_task_authorization(
-                record=record, project="maxibot", authorization_id=authorization_id,
-                candidate_sha=candidate_sha, current_main_sha=candidate_sha,
-                production_sha=record.get("production_baseline_sha", ""), changed_paths=changed_paths)
-            inactive = False
-            for state in ("revoked", "consumed"):
-                route = "git/ref/tags/" + authorization_state_ref("maxibot", authorization_id, state).removeprefix("refs/tags/")
-                try:
-                    api.get(route)
-                    inactive = True
-                except APIError as error:
-                    if error.status != 404:
-                        raise
-            if not inactive:
-                matches.append((authorization_id, proof))
-        except (OSError, ValueError, AuthorizationError, APIError, OrchestrationError):
-            # Invalid/stale records cannot authorize a release; absent authorization remains exact-SHA only.
-            continue
-    if len(matches) == 1:
-        return {"authorization_id": matches[0][0], "ambiguous": "false"}
-    return {"authorization_id": "", "ambiguous": str(len(matches) > 1).lower()}
+            api.get(route)
+            return True
+        except APIError as error:
+            if error.status == 404:
+                return False
+            raise
+
+    try:
+        result = resolve_prepare_authorization(
+            repo_root, candidate_sha, candidate_sha, state_ref_exists)
+    except Exception as error:
+        raise OrchestrationError("Task authorization state could not be authoritatively checked") from error
+    if result is None:
+        return {"authorization_id": "", "ambiguous": "false"}
+    return {"authorization_id": result["authorization_id"],
+            "ambiguous": str(result["ambiguous"]).lower()}
 
 
 def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | None = None,

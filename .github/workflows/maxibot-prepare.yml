@@ -44,6 +44,8 @@ jobs:
       CANDIDATE_SHA: ${{ inputs.candidate || github.sha }}
       OWNER_APPROVED_TASK: ${{ inputs.owner_approved_task }}
       OWNER_APPROVED_PATHS: ${{ inputs.owner_approved_paths }}
+      RELEASE_TRIGGER_ACTOR: ${{ github.actor }}
+      RELEASE_REPOSITORY_OWNER: ${{ github.repository_owner }}
       MAX_CLIENT_MODE: stub
       MAX_RUN_POLLING: 'false'
       ADS_AUTOPILOT_ENABLED: 'false'
@@ -88,27 +90,6 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Validate patch and frozen paid-traffic paths
-        if: steps.coalesce.outputs.result == 'WINNER'
-        id: frozen
-        run: |
-          set -euo pipefail
-          BASE_SHA="$(git rev-parse "$CANDIDATE_SHA^")"
-          git diff --check "$BASE_SHA" "$CANDIDATE_SHA"
-          args=()
-          if [[ -n "$OWNER_APPROVED_TASK" ]]; then
-            args+=(--owner-approved-task "$OWNER_APPROVED_TASK")
-          fi
-          if [[ -n "$OWNER_APPROVED_PATHS" ]]; then
-            IFS=',' read -r -a paths <<< "$OWNER_APPROVED_PATHS"
-            for path in "${paths[@]}"; do
-              [[ -n "$path" ]]
-              args+=(--owner-approved-path "$path")
-            done
-          fi
-          bash scripts/frozen_path_guard.sh --base "$BASE_SHA" --head "$CANDIDATE_SHA" "${args[@]}"
-          echo "FROZEN_PATH_GUARD=PASS" >> "$GITHUB_STEP_SUMMARY"
-
       - name: Plan MAXIBOT V3 from immutable production evidence
         if: steps.coalesce.outputs.result == 'WINNER'
         id: impact
@@ -117,6 +98,18 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --output "$RUNNER_TEMP/maxibot-v3-impact.json"
+
+      - name: Validate patch and frozen paid-traffic paths
+        if: steps.coalesce.outputs.result == 'WINNER'
+        id: frozen
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          IMPACT_PLAN: ${{ runner.temp }}/maxibot-v3-impact.json
+        run: |
+          set -euo pipefail
+          git diff --check "$(git rev-parse "$CANDIDATE_SHA^")" "$CANDIDATE_SHA"
+          python3 -B scripts/prepare_frozen_path_guard.py
+          echo "FROZEN_PATH_GUARD=PASS" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install isolated test dependencies
         if: steps.coalesce.outputs.result == 'WINNER'

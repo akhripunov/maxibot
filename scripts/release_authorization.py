@@ -289,6 +289,46 @@ def candidate_scope_diff(repo_root: Path, authorization_id: str,
     return paths
 
 
+def resolve_prepare_authorization(repo_root: Path, candidate_sha: str,
+                                 current_main_sha: str, state_ref_exists) -> dict[str, Any] | None:
+    """Resolve the single active, pre-created task record covering this candidate.
+
+    ``state_ref_exists`` must read the immutable GitHub revoked/consumed markers
+    and fail closed on errors other than 404.
+    """
+    if candidate_sha != current_main_sha or not SHA_RE.fullmatch(candidate_sha or ""):
+        raise AuthorizationError("Candidate must be the exact current main SHA")
+    directory = repo_root / ".release-authorizations"
+    if not directory.is_dir():
+        return None
+    matches = []
+    for path in sorted(directory.glob("*.json")):
+        authorization_id = path.stem
+        if not AUTH_ID_RE.fullmatch(authorization_id):
+            continue
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            baseline = record.get("production_baseline_sha")
+            changed = candidate_scope_diff(repo_root, authorization_id, baseline, candidate_sha)
+            proof = validate_task_authorization(
+                record=record, project="maxibot", authorization_id=authorization_id,
+                candidate_sha=candidate_sha, current_main_sha=current_main_sha,
+                production_sha=baseline, changed_paths=changed)
+            if any(state_ref_exists(authorization_id, state) for state in ("revoked", "consumed")):
+                continue
+            matches.append((authorization_id, proof, record, changed))
+        except (OSError, ValueError, AuthorizationError, subprocess.SubprocessError):
+            continue
+    if len(matches) > 1:
+        return {"authorization_id": "", "ambiguous": True}
+    if not matches:
+        return None
+    authorization_id, proof, record, changed = matches[0]
+    return {"authorization_id": authorization_id, "ambiguous": False,
+            "production_baseline_sha": record["production_baseline_sha"],
+            "changed_paths": changed, "proof": proof}
+
+
 def validate_claim_candidate(repo_root: Path, authorization_id: str, record: dict,
                              claim: dict, candidate_sha: str) -> None:
     """The immutable activation claim may name an earlier verified task candidate."""

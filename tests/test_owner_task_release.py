@@ -97,6 +97,96 @@ def test_candidate_sha_cannot_be_pinned_in_task():
         check(record)
 
 
+def test_prepare_resolves_the_precreated_record_for_exact_candidate_scope(tmp_path):
+    git, baseline = git_fixture(tmp_path)
+    paths = ['app/bot/menu.py', 'tests/regression/test_owner_only_channel_menu_buttons.py']
+    record = task_record(paths, baseline=baseline)
+    record_path = tmp_path / auth.record_path(ID)
+    record_path.parent.mkdir()
+    record_path.write_text(json.dumps(record))
+    git('add', '.')
+    git('commit', '-qm', 'record owner task before implementation')
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('authorized change\n')
+    git('add', '.')
+    git('commit', '-qm', 'implement authorized task')
+    candidate = git('rev-parse', 'HEAD')
+
+    result = auth.resolve_prepare_authorization(
+        tmp_path, candidate, candidate, lambda _authorization_id, _state: False)
+
+    assert result['authorization_id'] == ID
+    assert result['production_baseline_sha'] == baseline
+    assert result['changed_paths'] == paths
+
+
+def test_prepare_does_not_resolve_late_or_out_of_scope_authorization(tmp_path):
+    git, baseline = git_fixture(tmp_path)
+    paths = ['app/bot/menu.py', 'tests/regression/test_owner_only_channel_menu_buttons.py']
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('change\n')
+    git('add', '.')
+    git('commit', '-qm', 'implement before owner task record')
+    record = task_record(paths[:1], baseline=baseline)
+    record_path = tmp_path / auth.record_path(ID)
+    record_path.parent.mkdir()
+    record_path.write_text(json.dumps(record))
+    git('add', '.')
+    git('commit', '-qm', 'add authorization after implementation')
+    candidate = git('rev-parse', 'HEAD')
+
+    result = auth.resolve_prepare_authorization(
+        tmp_path, candidate, candidate, lambda _authorization_id, _state: False)
+
+    assert result is None
+
+
+def test_prepare_rejects_stale_main_and_inactive_durable_authorization(tmp_path):
+    git, baseline = git_fixture(tmp_path)
+    record = task_record(['app/bot/menu.py'], baseline=baseline)
+    record_path = tmp_path / auth.record_path(ID)
+    record_path.parent.mkdir()
+    record_path.write_text(json.dumps(record))
+    git('add', '.')
+    git('commit', '-qm', 'record owner task')
+    target = tmp_path / 'app/bot/menu.py'
+    target.parent.mkdir(parents=True)
+    target.write_text('authorized change\n')
+    git('add', '.')
+    git('commit', '-qm', 'implement authorized task')
+    candidate = git('rev-parse', 'HEAD')
+
+    with pytest.raises(auth.AuthorizationError, match='exact current main'):
+        auth.resolve_prepare_authorization(
+            tmp_path, candidate, baseline, lambda _authorization_id, _state: False)
+    assert auth.resolve_prepare_authorization(
+        tmp_path, candidate, candidate,
+        lambda _authorization_id, state: state == 'consumed') is None
+
+
+def test_prepare_fails_closed_when_authorization_state_cannot_be_read(tmp_path):
+    git, baseline = git_fixture(tmp_path)
+    record = task_record(['app/bot/menu.py'], baseline=baseline)
+    record_path = tmp_path / auth.record_path(ID)
+    record_path.parent.mkdir()
+    record_path.write_text(json.dumps(record))
+    git('add', '.'); git('commit', '-qm', 'record owner task')
+    target = tmp_path / 'app/bot/menu.py'
+    target.parent.mkdir(parents=True); target.write_text('change\n')
+    git('add', '.'); git('commit', '-qm', 'implementation')
+    candidate = git('rev-parse', 'HEAD')
+
+    def unavailable(_authorization_id, _state):
+        raise RuntimeError('GitHub API unavailable')
+
+    with pytest.raises(RuntimeError, match='unavailable'):
+        auth.resolve_prepare_authorization(tmp_path, candidate, candidate, unavailable)
+
+
 def git_fixture(tmp_path):
     def git(*args):
         return subprocess.check_output(['git', *args], cwd=tmp_path, text=True, stderr=subprocess.DEVNULL).strip()

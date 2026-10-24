@@ -321,7 +321,7 @@ channel_direct = [p for p in changed if any(matches(x, p) for x in lists.get("ch
 shared = [p for p in changed if any(matches(x, p) for x in lists.get("shared_dependencies", []))]
 shared_for_impact = [p for p in shared if p not in bot_scoped and not ads_only_shared_change(p)]
 protected = sorted(set(bot_direct + channel_direct + shared_for_impact))
-approval_paths = [p for p in protected if owner_task and any(matches(a, p) for a in approved)]
+approval_paths = [p for p in protected if owner_task and any(a == p for a in approved)]
 approval_complete = bool(protected) and len(approval_paths) == len(protected)
 
 def state(direct: list[str], shared_hit: bool) -> str:
