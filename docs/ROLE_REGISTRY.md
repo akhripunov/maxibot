@@ -21,12 +21,12 @@ Load only the relevant canonical project context for the current task. A documen
 
 | Role | Canonical Linear context |
 |---|---|
-| ARCHITECT / ARCHITECT SOL | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [MAXIBOT release rules](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588) when release scope applies |
+| ARCHITECT / ARCHITECT SOL | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [PROSTOR canonical release rules](https://linear.app/bestuzhev/document/pravila-relizov-fac48f62832a) when release scope applies |
 | DEV | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1) for worker scope |
 | WEBDEV | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95) |
 | ДИРЕКТОЛОГ | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1) only for Ads Worker scope |
 | QA | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [QA](https://linear.app/bestuzhev/document/qa-7a34fcf9286c) |
-| SYSADMIN | [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [MAXIBOT release rules](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588) when deployment scope applies |
+| SYSADMIN | [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [PROSTOR canonical release rules](https://linear.app/bestuzhev/document/pravila-relizov-fac48f62832a) when deployment scope applies |
 
 ## Separate runtime subsystem
 
