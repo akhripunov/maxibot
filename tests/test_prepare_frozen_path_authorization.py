@@ -20,3 +20,11 @@ def test_prepare_auth_resolver_uses_durable_state_and_owner_identity():
     assert 'for state in ("revoked", "consumed")' in (ROOT / "scripts/release_authorization.py").read_text()
     assert 'event_name != "workflow_dispatch" or not actor or actor.casefold() != owner.casefold()' in helper
     assert '"*" in p or "?" in p' in helper
+
+
+def test_manual_frozen_path_approval_is_bound_to_main_ref():
+    helper = (ROOT / "scripts/prepare_frozen_path_guard.py").read_text()
+    manual_approval = helper[helper.index("if requested_task or requested_paths:"):]
+    assert 'os.environ.get("GITHUB_REF", "") != "refs/heads/main"' in manual_approval
+    assert '["git", "fetch", "--quiet", "origin", "main"]' in manual_approval
+    assert 'current_main != candidate or checked_out != candidate' in manual_approval

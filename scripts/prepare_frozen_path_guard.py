@@ -78,6 +78,15 @@ def main() -> int:
         if requested_task or requested_paths:
             if event_name != "workflow_dispatch" or not actor or actor.casefold() != owner.casefold():
                 raise AuthorizationError("Manual frozen-path approval requires repository-owner workflow_dispatch")
+            if os.environ.get("GITHUB_REF", "") != "refs/heads/main":
+                raise AuthorizationError("Manual frozen-path approval is restricted to the main ref")
+            subprocess.run(["git", "fetch", "--quiet", "origin", "main"], check=True)
+            current_main = subprocess.check_output(
+                ["git", "rev-parse", "refs/remotes/origin/main"], text=True).strip()
+            checked_out = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True).strip()
+            if current_main != candidate or checked_out != candidate:
+                raise AuthorizationError("Manual frozen-path approval requires the exact current-main candidate")
             if not requested_task or not requested_paths or any("*" in p or "?" in p for p in requested_paths):
                 raise AuthorizationError("Manual frozen-path approval requires task ID and exact literal paths")
             task, paths = requested_task, requested_paths
