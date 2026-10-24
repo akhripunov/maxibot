@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import json
 import os
+import re
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,8 @@ READ_PREPARE_PUBLISHER_DIGEST = dispatch_module.read_prepare_publisher_digest
 from publish_release_to_linear import SyncError, append_journal_event, upsert_block, write_document  # noqa: E402
 import publish_release_to_linear  # noqa: E402
 import run_release_workflow  # noqa: E402
+import release_orchestrator as orchestrator  # noqa: E402
+from release_authorization import owner_task_commitment_sha256  # noqa: E402
 
 
 SHA = "a" * 40
@@ -1110,6 +1114,7 @@ def test_apply_wrapper_never_runs_without_owner_confirmation(monkeypatch, tmp_pa
 
 
 def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeypatch, tmp_path):
+    monkeypatch.setattr(orchestrator, "assert_production_history", lambda *_a, **_kw: None)
     manifest = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
     rehearsal_path = tmp_path / "prepare-result.json"
@@ -1162,6 +1167,7 @@ def test_failed_apply_bookkeeping_does_not_push_main_or_change_candidate(monkeyp
 
 
 def _setup_task_scoped_wrapper(monkeypatch, tmp_path, migration_head):
+    monkeypatch.setattr(orchestrator, "assert_production_history", lambda *_a, **_kw: None)
     manifest = tmp_path / "manifest.json"
     result_path = tmp_path / "result.json"
     rehearsal_path = tmp_path / "prepare-result.json"
@@ -1517,3 +1523,363 @@ def test_consumption_reconciliation_rejects_untrusted_source_run(monkeypatch, br
     with pytest.raises(SyncError):
         publish_release_to_linear.current_state()
     assert not any("/deployments/12345" in path for path in calls)
+
+
+class _ControllerHistoryAPI:
+    def __init__(self, *, old_evidence=None, old_attempt_count=1, old_evidence_by_attempt=None):
+        self.token = "test-token"
+        self.calls = []
+        self.refs = {}
+        self.deploy_runs = []
+        self.logs = {}
+        self.old_evidence_by_attempt = dict(old_evidence_by_attempt or {})
+        if old_evidence is not None:
+            self.old_evidence_by_attempt.setdefault("1", old_evidence)
+        self.deploy_dispatches = []
+        self.refs["refs/tags/maxibot-task-auth/maxibot-old-auth-20261023/claimed"] = "b" * 40
+        self.refs["refs/tags/maxibot-task-auth/maxibot-old-auth-20261023/dispatches/prepare-456-1"] = "b" * 40
+        self.deploy_runs = [{"id": 991, "run_attempt": old_attempt_count, "head_sha": "b" * 40,
+            "path": ".github/workflows/maxibot-deploy.yml", "event": "workflow_dispatch",
+            "status": "completed", "conclusion": "failure"}]
+        self.logs["124"] = ("2026-10-24T09:00:00Z MAXIBOT_GHCR_PREPARE_RECEIPT=PASS DIGEST=sha256:"
+                            + "e" * 64 + "\n")
+        for attempt in self.old_evidence_by_attempt:
+            self.logs[str(991 + int(attempt))] = (
+                "2026-10-24T09:00:00Z MAXIBOT_GHCR_DEPLOY_EVIDENCE=PASS DIGEST=sha256:"
+                + "f" * 64 + "\n")
+
+    def get(self, path):
+        self.calls.append(("GET", path))
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": "a" * 40}}
+        if path == "actions/runs/123":
+            return {"id": 123, "run_attempt": 2, "head_sha": "a" * 40, "head_branch": "main",
+                "status": "completed", "conclusion": "success", "event": "push",
+                "path": ".github/workflows/maxibot-prepare.yml"}
+        match = re.fullmatch(r"actions/runs/(\d+)/attempts/(\d+)/jobs\?per_page=100", path)
+        if match:
+            run_id, attempt = match.groups()
+            if (run_id, attempt) == ("123", "2"):
+                return {"total_count": 1, "jobs": [{"id": 124, "run_id": 123, "run_attempt": 2,
+                    "steps": [{"name": orchestrator.PREPARE_PUBLISH_STEP, "conclusion": "success"}]}]}
+            if (run_id, attempt) == ("991", attempt) and attempt in self.old_evidence_by_attempt:
+                return {"total_count": 1, "jobs": [{"id": 991 + int(attempt), "run_id": 991,
+                    "run_attempt": int(attempt),
+                    "steps": [{"name": orchestrator.EVIDENCE_PUBLISH_STEP, "conclusion": "success"}]}]}
+            if run_id == "991" and attempt.isdigit():
+                return {"total_count": 0, "jobs": []}
+            return {"total_count": 0, "jobs": []}
+        attempt_match = re.fullmatch(r"actions/runs/991/attempts/([1-9][0-9]*)", path)
+        if attempt_match:
+            attempt = attempt_match.group(1)
+            return {"id": 991, "run_attempt": int(attempt), "head_sha": "b" * 40,
+                "head_branch": "main", "path": ".github/workflows/maxibot-deploy.yml",
+                "event": "workflow_dispatch", "status": "completed", "conclusion": "failure"}
+        if path.startswith("actions/workflows/maxibot-deploy.yml/runs?"):
+            return {"total_count": len(self.deploy_runs), "workflow_runs": self.deploy_runs}
+        if path.startswith("git/matching-refs/tags/"):
+            prefix = "refs/tags/" + path.removeprefix("git/matching-refs/tags/")
+            return [{"ref": ref, "object": {"type": "commit", "sha": sha}}
+                    for ref, sha in self.refs.items() if ref.startswith(prefix)]
+        if path.startswith("deployments?"):
+            return []
+        raise orchestrator.APIError(404, "", path)
+
+    def get_job_log_archive(self, job_id):
+        return self.logs[str(job_id)]
+
+    def post(self, path, body):
+        self.calls.append(("POST", path, body))
+        if path == "git/refs":
+            self.refs[body["ref"]] = body["sha"]
+            return {"ref": body["ref"]}
+        if path.endswith("/dispatches"):
+            self.deploy_dispatches.append(body)
+            return {}
+        raise AssertionError(path)
+
+
+def _controller_task_record(authorization_id):
+    record = {"schema_version": 3, "project": "maxibot", "environment": "production",
+        "authorization_mode": "TASK_SCOPED_AUTO", "authorization_id": authorization_id,
+        "source_instruction_identifier": "OWNER_TASK_MAXIBOT_ME50_P0_CONTROLLER",
+        "owner_task_reference": "Direct OWNER authorization for the MAXIBOT P0 release guard.",
+        "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+        "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+        "production_baseline_sha": "d" * 40, "task": "Bounded controller release safety task",
+        "allowed_paths": ["scripts/release_orchestrator.py"],
+        "allowed_operations": ["integrate", "coalesce", "prepare", "preflight", "deploy", "verify", "rollback", "publish_evidence"],
+        "preauthorized_commits": [], "preauthorized_paths": [],
+        "acceptance_criteria": ["Unresolved same-baseline Deploy attempts block dispatch."],
+        "exclusions": ["database", "migrations", "security", "secrets", "payments", "ads", "paid_traffic"],
+        "risk_contracts": {}, "state": "ACTIVE", "revoked": False, "consumed": False}
+    record["owner_task_commitment_sha256"] = owner_task_commitment_sha256(record)
+    return record
+
+
+def _call_controller_with_prior_auth(tmp_path, api, monkeypatch):
+    current_id = "maxibot-new-auth-20261024"
+    old_id = "maxibot-old-auth-20261023"
+    records = tmp_path / ".release-authorizations"
+    records.mkdir()
+    for auth_id in (current_id, old_id):
+        (records / f"{auth_id}.json").write_text(json.dumps(_controller_task_record(auth_id)))
+    receipt = {"schema": "MAXIBOT_PREPARE_RECEIPT_V2", "candidate_sha": "a" * 40,
+        "github_run_id": "123", "github_run_attempt": "2", "status": "READY",
+        "tests": "success", "frozen_path_guard": "success", "linux_amd64_image": "success",
+        "ghcr_image_publish": "success", "private_docker_rehearsal": "PASS",
+        "image": {"repository": "ghcr.io/akhripunov/maxibot-vps-api",
+            "tag": orchestrator.artifact_tag("prepare", "a" * 40, "123", "2"),
+            "digest": "sha256:" + "c" * 64, "config_digest": "sha256:" + "d" * 64,
+            "platform": "linux/amd64", "labels": {
+                "org.opencontainers.image.revision": "a" * 40,
+                "org.opencontainers.image.source-sha": "a" * 40,
+                "org.maxibot.release.sha": "a" * 40}}}
+    def resolve(_repository, tag, *_args):
+        if tag.startswith("prepare-"):
+            return "sha256:" + "e" * 64, json.dumps(receipt).encode()
+        prior_attempt = tag.rsplit("-", 1)[-1]
+        prior_evidence = api.old_evidence_by_attempt.get(prior_attempt)
+        if prior_evidence is None:
+            raise orchestrator.ArtifactError("original evidence unavailable")
+        return "sha256:" + "f" * 64, json.dumps(prior_evidence).encode()
+    monkeypatch.setattr(orchestrator, "_find_task_authorization",
+        lambda *_args: {"authorization_id": current_id, "ambiguous": "false"})
+    monkeypatch.setattr(orchestrator, "resolve_oci_artifact", resolve)
+    monkeypatch.setattr(orchestrator, "_registry_fetch", lambda *_args, **_kwargs: None)
+    event = {"repository": {"full_name": "akhripunov/maxibot"}, "workflow_run": {
+        "id": 123, "run_attempt": 2, "head_sha": "a" * 40, "head_branch": "main",
+        "status": "completed", "conclusion": "success", "event": "push",
+        "path": ".github/workflows/maxibot-prepare.yml"}}
+    return orchestrator.dispatch_prepare(event, api, repo_root=tmp_path, migration="0098_test")
+
+
+def test_new_authorization_cannot_bypass_unresolved_other_authorization_deploy(tmp_path, monkeypatch):
+    api = _ControllerHistoryAPI()  # Original FAILED_PRE_SWITCH evidence is not confirmed.
+    with pytest.raises(orchestrator.OrchestrationError, match="reconciliation|required|unknown"):
+        _call_controller_with_prior_auth(tmp_path, api, monkeypatch)
+    assert not api.deploy_dispatches
+
+
+def test_new_authorization_may_continue_after_exact_prior_attempt_reconciliation(tmp_path, monkeypatch):
+    prior = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": "b" * 40,
+        "github_run_id": "991", "github_run_attempt": "1", "prepare_run_id": "456",
+        "prepare_run_attempt": "1", "task_authorization_id": "maxibot-old-auth-20261023",
+        "mode": "task-scoped-auto", "target_migration": "0098_test",
+        "status": "FAILED_PRE_SWITCH", "release_state": "FAILED_PRE_SWITCH",
+        "production_changed": False, "authorization_consumed": False,
+        "production_baseline_sha": "d" * 40,
+        "github_deployment_id": None, "github_deployment_state": None}
+    api = _ControllerHistoryAPI(old_evidence=prior)
+
+    result = _call_controller_with_prior_auth(tmp_path, api, monkeypatch)
+
+    assert result["state"] == "TASK_SCOPED_AUTO_DISPATCHED"
+    assert len(api.deploy_dispatches) == 1
+    assert any(path.startswith("deployments?sha=" + "b" * 40) for _, path, *_ in api.calls)
+
+
+def test_unreconciled_second_attempt_blocks_even_when_first_attempt_is_proven_safe(tmp_path, monkeypatch):
+    first_attempt = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": "b" * 40,
+        "github_run_id": "991", "github_run_attempt": "1", "prepare_run_id": "456",
+        "prepare_run_attempt": "1", "task_authorization_id": "maxibot-old-auth-20261023",
+        "mode": "task-scoped-auto", "target_migration": "0098_test",
+        "status": "FAILED_PRE_SWITCH", "release_state": "FAILED_PRE_SWITCH",
+        "production_changed": False, "authorization_consumed": False,
+        "production_baseline_sha": "d" * 40,
+        "github_deployment_id": None, "github_deployment_state": None}
+    api = _ControllerHistoryAPI(old_attempt_count=2, old_evidence_by_attempt={"1": first_attempt})
+
+    with pytest.raises(orchestrator.OrchestrationError, match="reconciliation|required|unknown"):
+        _call_controller_with_prior_auth(tmp_path, api, monkeypatch)
+
+    assert any(path == "actions/runs/991/attempts/2" for _, path, *_ in api.calls)
+    assert not api.deploy_dispatches
+
+
+def test_unmarked_exact_sha_deploy_cannot_bypass_controller_history(tmp_path, monkeypatch):
+    api = _ControllerHistoryAPI()
+    api.refs.clear()  # Exact-SHA releases have no TASK_SCOPED_AUTO marker.
+    with pytest.raises(orchestrator.OrchestrationError, match="reconciliation|required|unknown"):
+        _call_controller_with_prior_auth(tmp_path, api, monkeypatch)
+    assert not api.deploy_dispatches
+
+
+class _EnvironmentHistoryAPI:
+    token = 'test-token'
+
+    def __init__(self, runs, results=None, deployments=None):
+        self.runs = runs
+        self.results = results or {}
+        self.deployments = deployments or []
+
+    def get(self, path):
+        if path.startswith('actions/workflows/'):
+            return {'total_count': len(self.runs), 'workflow_runs': self.runs}
+        if path.startswith('deployments?'):
+            return self.deployments
+        raise AssertionError(path)
+
+
+def _history_run(run_id=991, **updates):
+    return {'id': run_id, 'run_attempt': 1, 'head_sha': 'b' * 40,
+            'path': '.github/workflows/maxibot-deploy.yml', 'event': 'workflow_dispatch',
+            'status': 'completed', 'conclusion': 'failure', 'updated_at': '2026-10-24T10:00:00Z', **updates}
+
+
+def _history_failure(**updates):
+    return {'mode': 'production', 'status': 'FAILED_PRE_SWITCH',
+            'release_state': 'FAILED_PRE_SWITCH', 'production_changed': False,
+            'authorization_consumed': False, '_verified_deployment_api_match': 'NOT_CREATED', **updates}
+
+
+@pytest.mark.parametrize('updates', [
+    {'status': 'RECOVERY_REQUIRED', 'release_state': 'RECOVERY_REQUIRED', 'production_changed': 'POSSIBLE'},
+    {'status': 'COMPLETE', 'release_state': 'COMPLETE', 'production_changed': True,
+     'final_runtime_sha': 'b' * 40, '_verified_deployment_api_match': 'PUBLICATION_FAILED'},
+    {'_verified_deployment_api_match': 'in_progress'},
+    {'_verified_deployment_api_match': 'success'},
+])
+def test_environment_guard_blocks_uncertain_apply_and_metadata_only_recovery(tmp_path, monkeypatch, updates):
+    api = _EnvironmentHistoryAPI([_history_run()])
+    monkeypatch.setattr(orchestrator, '_verified_deploy_evidence', lambda *_a: ('digest', _history_failure(**updates)))
+    with pytest.raises(orchestrator.OrchestrationError, match='reconciliation'):
+        orchestrator.assert_production_history(api, tmp_path, 'd' * 40)
+
+
+def test_environment_guard_accepts_proven_safe_exact_sha_failure(tmp_path, monkeypatch):
+    api = _EnvironmentHistoryAPI([_history_run()])
+    monkeypatch.setattr(orchestrator, '_verified_deploy_evidence', lambda *_a: ('digest', _history_failure()))
+    orchestrator.assert_production_history(api, tmp_path, 'd' * 40)
+
+
+def test_environment_guard_blocks_orphan_deployment_even_when_no_run_or_task_ref(tmp_path):
+    api = _EnvironmentHistoryAPI([], deployments=[{'id': 47, 'environment': 'maxibot-production',
+        'task': 'maxibot-production-deploy', 'payload': {'workflow_run_id': '991', 'workflow_run_attempt': '1'}}])
+    with pytest.raises(orchestrator.OrchestrationError, match='Deployment lacks'):
+        orchestrator.assert_production_history(api, tmp_path, 'd' * 40)
+
+
+@pytest.mark.parametrize('inventory', [
+    {'total_count': 2, 'workflow_runs': [_history_run()]},
+    {'total_count': 2, 'workflow_runs': [_history_run(), _history_run()]},
+    {'total_count': True, 'workflow_runs': [_history_run()]},
+])
+def test_environment_guard_rejects_incomplete_or_duplicate_run_inventory(tmp_path, inventory):
+    class BrokenAPI:
+        def get(self, _path): return inventory
+    with pytest.raises(orchestrator.OrchestrationError):
+        orchestrator.assert_production_history(BrokenAPI(), tmp_path, 'd' * 40)
+
+
+def test_safe_prior_task_with_exact_failed_deployment_preserves_retry(tmp_path, monkeypatch):
+    prior = {'schema': 'MAXIBOT_RELEASE_WORKFLOW_RESULT_V1', 'candidate_sha': 'b' * 40,
+        'github_run_id': '991', 'github_run_attempt': '1', 'prepare_run_id': '456',
+        'prepare_run_attempt': '1', 'task_authorization_id': 'maxibot-old-auth-20261023',
+        'mode': 'task-scoped-auto', 'target_migration': '0098_test',
+        'prepare_receipt_digest': 'sha256:' + 'c' * 64,
+        'status': 'FAILED_PRE_SWITCH', 'release_state': 'FAILED_PRE_SWITCH',
+        'production_changed': False, 'authorization_consumed': False,
+        'production_baseline_sha': 'd' * 40, 'github_deployment_id': 47,
+        'github_deployment_state': 'failure'}
+    deployment = {'id': 47, 'sha': 'b' * 40, 'ref': 'b' * 40,
+        'task': 'maxibot-production-deploy', 'environment': 'maxibot-production',
+        'payload': {'candidate_sha': 'b' * 40, 'workflow_run_id': '991',
+            'workflow_run_attempt': '1', 'mode': 'task-scoped-auto',
+            'target_migration': '0098_test', 'prepare_receipt_digest': prior['prepare_receipt_digest']}}
+    class PriorDeploymentAPI(_ControllerHistoryAPI):
+        def get(self, path):
+            if path.startswith('deployments?'):
+                return [deployment]
+            if path == 'deployments/47/statuses?per_page=100':
+                return [{'state': 'failure'}]
+            return super().get(path)
+    api = PriorDeploymentAPI(old_evidence=prior)
+    assert _call_controller_with_prior_auth(tmp_path, api, monkeypatch)['state'] == 'TASK_SCOPED_AUTO_DISPATCHED'
+    assert len(api.deploy_dispatches) == 1
+
+
+def test_environment_guard_accepts_completed_release_at_verified_baseline(tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '--allow-empty', '-qm', 'installed baseline'], cwd=tmp_path, check=True)
+    baseline = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=tmp_path, text=True).strip()
+    api = _EnvironmentHistoryAPI([_history_run(head_sha=baseline, conclusion='success')])
+    evidence = _history_failure(mode='production', status='COMPLETE', release_state='COMPLETE',
+        production_changed=True, authorization_consumed=True, final_runtime_sha=baseline,
+        _verified_deployment_api_match='success')
+    monkeypatch.setattr(orchestrator, '_verified_deploy_evidence', lambda *_a: ('digest', evidence))
+    orchestrator.assert_production_history(api, tmp_path, baseline)
+
+
+def test_metadata_recovery_resolves_only_its_exact_original_attempt(tmp_path, monkeypatch):
+    original = _history_run(991)
+    recovery = _history_run(992, conclusion='success')
+    api = _EnvironmentHistoryAPI([original, recovery])  # Original may be returned first.
+    proof = _history_failure(mode='publication-recovery', status='COMPLETE', release_state='COMPLETE',
+        production_changed=False, final_runtime_sha='b' * 40, recovery='READ_ONLY_RECONCILIATION_PASS',
+        reconciles_deploy_run_id='991', reconciles_deploy_run_attempt='1',
+        _verified_deployment_api_match='success', _reconciles_attempt=('991', '1'))
+    monkeypatch.setattr(orchestrator, '_verified_deploy_evidence',
+        lambda _api, run: ('digest', proof) if run['id'] == 992 else None)
+    # This test's baseline represents the already-installed candidate, so no new Apply is needed.
+    import subprocess
+    monkeypatch.setattr(orchestrator.subprocess, 'run', lambda *_a, **_kw: subprocess.CompletedProcess([], 0))
+    orchestrator.assert_production_history(api, tmp_path, 'b' * 40)
+
+    api.runs.append(_history_run(993))  # Recovery of 991 must not mask another unknown operation.
+    with pytest.raises(orchestrator.OrchestrationError, match='reconciliation'):
+        orchestrator.assert_production_history(api, tmp_path, 'b' * 40)
+
+
+@pytest.mark.parametrize('original_mode', ['production', 'task-scoped-auto'])
+def test_verified_metadata_recovery_binds_original_evidence_and_same_deployment(tmp_path, monkeypatch, original_mode):
+    original = _history_run(991)
+    recovery_run = _history_run(992, conclusion='success')
+    original_evidence = {'schema': 'MAXIBOT_RELEASE_WORKFLOW_RESULT_V1', 'candidate_sha': 'b' * 40,
+        'mode': original_mode, 'target_migration': '0098_test', 'production_changed': True,
+        'github_deployment_id': 47, 'prepare_receipt_digest': 'sha256:' + 'c' * 64,
+        'task_authorization_id': 'maxibot-old-auth-20261023'}
+    recovery = {**original_evidence, 'mode': 'publication-recovery', 'production_changed': False,
+        'github_run_id': '992', 'github_run_attempt': '1',
+        'status': 'COMPLETE', 'release_state': 'COMPLETE', 'final_runtime_sha': 'b' * 40,
+        'github_deployment_state': 'success', 'recovery': 'READ_ONLY_RECONCILIATION_PASS',
+        'reconciles_deploy_run_id': '991', 'reconciles_deploy_run_attempt': '1'}
+    deployment = {'id': 47, 'sha': 'b' * 40, 'ref': 'b' * 40, 'environment': 'maxibot-production',
+        'task': 'maxibot-production-deploy', 'payload': {'candidate_sha': 'b' * 40,
+            'workflow_run_id': '991', 'workflow_run_attempt': '1', 'mode': original_mode,
+            'target_migration': '0098_test', 'prepare_receipt_digest': 'sha256:' + 'c' * 64}}
+    class RecoveryAPI:
+        token = 'test-token'
+        def get(self, path):
+            if path == 'actions/runs/991/attempts/1': return original
+            if path.startswith('deployments?'): return [deployment]
+            if path == 'deployments/47/statuses?per_page=100': return [{'state': 'success'}]
+            if path.endswith('/consumed'): return {'object': {'type': 'commit', 'sha': 'b' * 40}}
+            if path.endswith('/revoked'): raise orchestrator.APIError(404)
+            raise AssertionError(path)
+    monkeypatch.setattr(orchestrator, '_deploy_evidence_payload',
+        lambda _api, run: ('digest', recovery if run['id'] == 992 else original_evidence))
+    assert orchestrator._verified_deploy_evidence(RecoveryAPI(), recovery_run)[1]['_reconciles_attempt'] == ('991', '1')
+    original_evidence['github_deployment_id'] = 48
+    assert orchestrator._verified_deploy_evidence(RecoveryAPI(), recovery_run) is None
+
+
+def test_verified_checkpoint_retires_only_completed_older_history(tmp_path, monkeypatch):
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '--allow-empty', '-qm', 'installed baseline'], cwd=tmp_path, check=True)
+    baseline = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=tmp_path, text=True).strip()
+    anchor = _history_run(992, head_sha=baseline, conclusion='success')
+    old = _history_run(991, updated_at='2026-10-24T09:00:00Z')
+    proof = _history_failure(mode='production', status='COMPLETE', release_state='COMPLETE',
+        production_changed=True, final_runtime_sha=baseline, _verified_deployment_api_match='success')
+    monkeypatch.setattr(orchestrator, '_verified_deploy_evidence',
+        lambda _api, run: ('digest', proof) if run['id'] == 992 else None)
+    api = _EnvironmentHistoryAPI([old, anchor])
+    orchestrator.assert_production_history(api, tmp_path, baseline)
+    old['updated_at'] = '2026-10-24T10:01:00Z'  # A later retry is not retired.
+    with pytest.raises(orchestrator.OrchestrationError, match='reconciliation'):
+        orchestrator.assert_production_history(api, tmp_path, baseline)

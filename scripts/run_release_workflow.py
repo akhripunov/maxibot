@@ -630,7 +630,20 @@ def main() -> int:
             env["EXPECTED_PRODUCTION_SHA"] = result["production_baseline_sha"]
             env["EXPECTED_PRODUCTION_DB_HEAD"] = result["db_migration_baseline"]
             env["OWNER_APPROVED"] = "1"
-            result["release_state"] = "DEPLOYING"
+            # Deploy workflow concurrency and release_prod's atomic Apply lock remain
+            # authoritative. Re-read environment history here: Controller's earlier
+            # task-ID check cannot authorize retry after an intervening failed Apply.
+            from release_orchestrator import GitHubAPI, assert_production_history
+            assert_production_history(GitHubAPI(os.environ.get("GITHUB_TOKEN", "")),
+                checkout, result["production_baseline_sha"],
+                current_run_id=os.environ.get("GITHUB_RUN_ID", ""),
+                current_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                current_sha=sha, current_deployment_id=deployment_id)
+            # Once execution can have started, missing process output is not proof
+            # of a pre-switch failure. Only a returned canonical result can narrow it.
+            result["status"] = "RECOVERY_REQUIRED"
+            result["release_state"] = "RECOVERY_REQUIRED"
+            result["production_changed"] = "POSSIBLE"
             apply_started = time.monotonic()
             apply_code, apply_output = run(["bash", "scripts/release_prod.sh", sha, "--apply"], env)
             result["production_evidence"] = safe_evidence(apply_output)
