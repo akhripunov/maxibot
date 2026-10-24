@@ -89,3 +89,10 @@ def test_task_scoped_owner_approval_allows_exact_path(tmp_path):
     assert result.returncode == 0
     assert "OWNER_FROZEN_CHANGE_APPROVAL=YES" in result.stdout
     assert "FROZEN_PATH_GUARD=PASS" in result.stdout
+
+
+def test_task_scoped_owner_approval_rejects_wildcard_path(tmp_path):
+    repo, base, head = _repo(tmp_path, "app/main.py")
+    result = _run(repo, base, head, "--owner-approved-task", "OWNER-123", "--owner-approved-path", "app/*")
+    assert result.returncode == 1
+    assert "FROZEN_PATH_GUARD=BLOCK" in result.stdout
