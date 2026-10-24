@@ -1,0 +1,117 @@
+{
+  "schema_version": 3,
+  "authorization_id": "maxibot-me50-v5-release-infra-20261024",
+  "project": "maxibot",
+  "environment": "production",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_TASK_MAXIBOT_ME50_FULL_RELEASE_INFRA_20261024",
+  "owner_task_reference": "Direct OWNER instruction in this Codex task dated 2026-10-24 authorizing one complete V5 production cycle for ME-50 and the exact Prepare authorization fix at f8dbb8413868fcc06cb72d020f5ae2ff56cb2818, with explicit release-infrastructure risk contract.",
+  "production_baseline_sha": "ae6f5ea623e12fde4d0e2271023f7822a3f9822f",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "task": "Complete one canonical MAXIBOT V5 production cycle for ME-50: integrate the already-reviewed base-menu change and the exact Prepare authorization correction. The authorization is created after those implementations; inventory every historical commit and path from the confirmed production baseline below as preauthorized implementation. Preserve ancestry and do not squash. Do not include any path or operation outside this record.",
+  "allowed_paths": [
+    ".github/workflows/maxibot-prepare.yml",
+    ".release-authorizations/maxibot-me50-v5-release-infra-20261024.json",
+    "app/bot/menu.py",
+    "scripts/frozen_path_guard.sh",
+    "scripts/prepare_frozen_path_guard.py",
+    "scripts/release_authorization.py",
+    "scripts/release_orchestrator.py",
+    "tests/regression/test_owner_only_channel_menu_buttons.py",
+    "tests/test_frozen_path_guard.py",
+    "tests/test_owner_task_release.py",
+    "tests/test_prepare_frozen_path_authorization.py"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "coalesce",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "publish_evidence"
+  ],
+  "preauthorized_commits": [
+    "2c68056dc43abf2472bf6a3693a8b0fc8c09ae52",
+    "b695c8fe409428e223d0c6f0d59e24cf9f38d082",
+    "f8dbb8413868fcc06cb72d020f5ae2ff56cb2818"
+  ],
+  "preauthorized_paths": [
+    ".github/workflows/maxibot-prepare.yml",
+    "app/bot/menu.py",
+    "scripts/frozen_path_guard.sh",
+    "scripts/prepare_frozen_path_guard.py",
+    "scripts/release_authorization.py",
+    "scripts/release_orchestrator.py",
+    "tests/regression/test_owner_only_channel_menu_buttons.py",
+    "tests/test_frozen_path_guard.py",
+    "tests/test_owner_task_release.py",
+    "tests/test_prepare_frozen_path_authorization.py"
+  ],
+  "acceptance_criteria": [
+    "This record is a separate new commit after the exact inventoried implementation history; it does not claim that authorization existed before those commits.",
+    "The complete first-parent diff from the confirmed production baseline contains only the ten inventoried implementation paths and this one authorization record.",
+    "The resulting candidate is selected from current main and passes exact SHA, full ancestry, durable authorization, frozen-path, immutable artifact, provenance, independent security review, and every mandatory Prepare gate.",
+    "The trusted controller validates the active one-shot record and starts at most one canonical Deploy; the Deploy performs read-only preflight before any Apply.",
+    "Apply requires fresh baseline/DB confirmation, validated backup, lock, exact rollback metadata, API/Worker image parity, sole Worker, health and all canonical safety gates.",
+    "After Apply, verify exact runtime SHA, DB head, Worker health, GitHub Deployment and immutable GHCR evidence before publishing Linear COMPLETE; reconcile any uncertain state read-only and never repeat Apply blindly."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "security",
+    "secrets",
+    "payments",
+    "ads",
+    "paid_traffic"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "baseline_sha": "ae6f5ea623e12fde4d0e2271023f7822a3f9822f",
+      "allowed_paths": [
+        ".github/workflows/maxibot-prepare.yml",
+        ".release-authorizations/maxibot-me50-v5-release-infra-20261024.json",
+        "scripts/frozen_path_guard.sh",
+        "scripts/prepare_frozen_path_guard.py",
+        "scripts/release_authorization.py",
+        "scripts/release_orchestrator.py"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "coalesce",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "publish_evidence"
+      ],
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "prepare_provenance",
+        "immutable_artifact",
+        "security_review",
+        "preflight",
+        "rollback_readiness",
+        "worker_compatibility",
+        "postdeploy_health",
+        "reconciliation"
+      ],
+      "risk_description": "This change alters only the existing Prepare V5 authorization and frozen-path decision mechanism. A defect could admit an unauthorized candidate or reject this approved one; exact-main and owner identity checks, precreated durable authorization, consumed/revoked state, exact path inventory, full ancestry, frozen-path validation and independent security review remain mandatory. No general user permissions, secrets, application security controls or deployment architecture are changed.",
+      "backup_plan": "Before Apply, canonical MAXIBOT V5 Deploy must create and validate its restricted production PostgreSQL backup and preserve exact current API and Worker image digests and rollback metadata. No backup is created by Prepare or this authorization-record commit.",
+      "rollback_plan": "If runtime verification fails before completion, use only the existing canonical V5 rollback under the production lock to restore the exact previously confirmed API and Worker image digests, then verify health and DB state. Uncertain Apply or publication state requires read-only reconciliation before any further action.",
+      "stop_conditions": [
+        "Stop before publication or Apply if current main, full candidate history, exact path scope, active authorization, production SHA or DB head differs from this record.",
+        "Stop before Apply on missing or mismatched Prepare provenance, immutable GHCR receipt, independent security review, preflight, backup, lock, rollback readiness, Worker compatibility, health or any required safety gate.",
+        "Stop and reconcile read-only on any active conflicting Deploy, uncertain dispatch, partial Apply or unknown VPS/DB state; never retry Apply blindly."
+      ]
+    }
+  },
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false,
+  "owner_task_commitment_sha256": "92923ccb595255c2b6e33f6c1c9b1f1b44e3e8f32626c9fc13d8c8563fd523ac"
+}
