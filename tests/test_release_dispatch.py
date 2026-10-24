@@ -2084,7 +2084,7 @@ def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper):
     import copy
     old_sha = "a1cdb5235cc443e7a1cd050ebeda487fd70e4f0a"
     auth = "maxibot-me50-diagnostics-recovery-20261024"
-    marker = {"ref": f"tags/maxibot-task-auth/{auth}/dispatches/prepare-40093485327-1",
+    marker = {"ref": f"maxibot-task-auth/{auth}/dispatches/prepare-40093485327-1",
               "sha": old_sha}
     controller = {
         "id": 40093864867, "run_attempt": 3, "head_sha": old_sha,
@@ -2127,7 +2127,7 @@ def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper):
     )
     runs = []
     if tamper == "marker":
-        marker["sha"] = "f" * 40
+        marker["ref"] = "tags/" + marker["ref"]
     elif tamper == "candidate_deploy":
         runs.append({"head_sha": old_sha, "status": "queued"})
     elif tamper == "deployment":

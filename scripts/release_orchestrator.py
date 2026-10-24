@@ -1331,7 +1331,7 @@ def _prove_me50_orphaned_controller_dispatch(api, marker: dict, runs: list[dict]
     }
     if (repo_root is None or authorization_id != auth
             or baseline != "ae6f5ea623e12fde4d0e2271023f7822a3f9822f"
-            or marker != {"ref": f"tags/maxibot-task-auth/{auth}/dispatches/prepare-40093485327-1",
+            or marker != {"ref": f"maxibot-task-auth/{auth}/dispatches/prepare-40093485327-1",
                           "sha": candidate}
             or any(run.get("head_sha") == candidate for run in runs)):
         return False
