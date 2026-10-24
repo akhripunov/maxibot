@@ -2073,3 +2073,99 @@ def test_me50_bootstrap_only_publisher_skips_nonexecuted_attempt(monkeypatch, br
         with pytest.raises(SyncError, match="Expected one MAXIBOT canonical result artifact"):
             publish_release_to_linear.current_state()
         assert called == [failed["id"]]
+
+
+@pytest.mark.parametrize("tamper", [
+    None, "marker", "candidate_deploy", "deployment", "claim", "consumed",
+    "controller_sha", "controller_conclusion", "job_extra_step", "job_runner",
+    "job_attempt", "job_cancelled_has_steps", "log", "deploy_api_unknown",
+])
+def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper):
+    import copy
+    old_sha = "a1cdb5235cc443e7a1cd050ebeda487fd70e4f0a"
+    auth = "maxibot-me50-diagnostics-recovery-20261024"
+    marker = {"ref": f"tags/maxibot-task-auth/{auth}/dispatches/prepare-40093485327-1",
+              "sha": old_sha}
+    controller = {
+        "id": 40093864867, "run_attempt": 3, "head_sha": old_sha,
+        "head_branch": "main", "path": ".github/workflows/maxibot-auto-preflight.yml",
+        "event": "workflow_run", "status": "completed", "conclusion": "failure",
+        "updated_at": "2026-10-24T13:00:35Z",
+    }
+    first_steps = [
+        {"name": name, "status": "completed", "conclusion": conclusion}
+        for name, conclusion in (
+            ("Set up job", "success"),
+            ("Initialize shared bounded controller network-read budget", "success"),
+            ("Checkout trusted current main controller code", "success"),
+            ("Verify assigned runner before controller/API work", "success"),
+            ("Dispatch one authorized Deploy or leave exact-SHA approval required", "failure"),
+            ("Post Checkout trusted current main controller code", "success"),
+            ("Complete job", "success"),
+        )
+    ]
+    api_payloads = {
+        f"git/ref/tags/maxibot-task-auth/{auth}/claimed": {
+            "object": {"type": "commit", "sha": "e7661c52d4a0683d9331c3e28e7af19cdf62c86c"}},
+        f"deployments?sha={old_sha}&environment=maxibot-production&per_page=100&page=1": [],
+        "actions/runs/40093864867": controller,
+    }
+    for number, job_id in enumerate((120871937203, 120873720003, 120877360263), 1):
+        job = {
+            "id": job_id, "run_id": 40093864867, "run_attempt": number,
+            "name": "dispatch-authorized-deploy", "status": "completed",
+            "conclusion": "cancelled" if number < 3 else "failure",
+            "runner_id": 0 if number < 3 else 21,
+            "runner_name": "" if number < 3 else "maxibot-owner-mac",
+            "steps": [] if number < 3 else first_steps,
+        }
+        api_payloads[f"actions/runs/40093864867/attempts/{number}/jobs?per_page=100"] = {
+            "total_count": 1, "jobs": [job]}
+    log = (
+        "2026-10-24T12:57:49.4915450Z MAXIBOT_AUTO_RELEASE=BLOCKED "
+        "TYPE=OrchestrationError REASON=dispatch_after_claim_failed_reconciliation_required\n"
+    )
+    runs = []
+    if tamper == "marker":
+        marker["sha"] = "f" * 40
+    elif tamper == "candidate_deploy":
+        runs.append({"head_sha": old_sha, "status": "queued"})
+    elif tamper == "deployment":
+        api_payloads[f"deployments?sha={old_sha}&environment=maxibot-production&per_page=100&page=1"] = [
+            {"id": 42000, "sha": old_sha}]
+    elif tamper == "claim":
+        api_payloads[f"git/ref/tags/maxibot-task-auth/{auth}/claimed"]["object"]["sha"] = "f" * 40
+    elif tamper == "consumed":
+        api_payloads[f"git/ref/tags/maxibot-task-auth/{auth}/consumed"] = {"object": {"sha": old_sha}}
+    elif tamper == "controller_sha":
+        controller["head_sha"] = "f" * 40
+    elif tamper == "controller_conclusion":
+        controller["conclusion"] = "success"
+    elif tamper == "job_extra_step":
+        first_steps.insert(4, {"name": "Apply", "status": "completed", "conclusion": "success"})
+    elif tamper == "job_runner":
+        api_payloads["actions/runs/40093864867/attempts/3/jobs?per_page=100"]["jobs"][0]["runner_name"] = "unknown"
+    elif tamper == "job_attempt":
+        api_payloads["actions/runs/40093864867/attempts/3/jobs?per_page=100"]["jobs"][0]["run_attempt"] = 4
+    elif tamper == "job_cancelled_has_steps":
+        api_payloads["actions/runs/40093864867/attempts/1/jobs?per_page=100"]["jobs"][0]["steps"] = [
+            {"name": "suspicious", "status": "completed", "conclusion": "success"}]
+    elif tamper == "log":
+        log = "2026-10-24T12:57:49.4915450Z TASK_SCOPED_AUTO_DISPATCHED\n"
+
+    class ReadOnlySnapshot:
+        def get(self, path):
+            if tamper == "deploy_api_unknown" and path.startswith("deployments?"):
+                raise orchestrator.APIError(503)
+            if path.endswith("/consumed") or path.endswith("/revoked"):
+                if path not in api_payloads:
+                    raise orchestrator.APIError(404)
+            return copy.deepcopy(api_payloads[path])
+
+        def get_job_log_archive(self, job_id):
+            assert job_id == "120877360263"
+            return log
+
+    assert orchestrator._prove_me50_orphaned_controller_dispatch(
+        ReadOnlySnapshot(), marker, runs, auth,
+        "ae6f5ea623e12fde4d0e2271023f7822a3f9822f", ROOT) is (tamper is None)
