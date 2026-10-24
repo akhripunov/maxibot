@@ -163,6 +163,44 @@ def trusted_production_run(run: dict, jobs: dict[str, dict]) -> bool:
             and publish.get("conclusion") == "failure")
 
 
+def known_me50_precheckout_failure(run: dict, jobs: dict[str, dict]) -> bool:
+    """Do not demand Apply evidence from one exact run that never left runner setup.
+
+    This affects only read-only current-state publication. It grants no safe-retry
+    authority: release_orchestrator independently proves the full attempt history
+    and deployment/authorization state before it may dispatch any Deploy.
+    """
+    sha = "e7661c52d4a0683d9331c3e28e7af19cdf62c86c"
+    if (type(run.get("id")) is not int or run["id"] != 40088981534
+            or str(run.get("run_attempt")) != "1"
+            or run.get("head_sha") != sha or run.get("head_branch") != "main"
+            or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+            or run.get("event") != "workflow_dispatch"
+            or run.get("status") != "completed" or run.get("conclusion") != "failure"
+            or not (run.get("name") or run.get("display_title") or "").startswith(
+                "MAXIBOT task-scoped-auto " + sha)
+            or set(jobs) != {"validate", "deploy", "publish"}):
+        return False
+    validator, deploy, publisher = (jobs[name] for name in ("validate", "deploy", "publish"))
+    steps = deploy.get("steps")
+    return (
+        validator.get("status") == "completed"
+        and validator.get("conclusion") == "success"
+        and deploy.get("status") == "completed"
+        and deploy.get("conclusion") == "failure"
+        and type(deploy.get("runner_id")) is int
+        and deploy["runner_id"] > 0
+        and deploy.get("runner_name") == "maxibot-owner-mac"
+        and isinstance(steps, list)
+        and len(steps) == 1
+        and steps[0].get("name") == "Set up job"
+        and steps[0].get("status") == "completed"
+        and steps[0].get("conclusion") == "failure"
+        and publisher.get("status") == "completed"
+        and publisher.get("conclusion") == "success"
+    )
+
+
 def reconciled_consumption_result(run: dict, result: dict) -> dict:
     """Derive completion from immutable runtime proof plus immutable auth refs.
 
@@ -247,6 +285,12 @@ def current_state(event: dict | None = None) -> dict:
     deployment = evidence = None
     for run in production_runs:
         jobs = release_jobs(run)
+        # The pinned native checkout-download failure had no checkout, preflight
+        # or Apply execution, hence no canonical result. Do not mistake that
+        # missing artifact for completed production; keep the last verified
+        # production evidence as the read-only state instead.
+        if known_me50_precheckout_failure(run, jobs):
+            continue
         trusted = trusted_production_run(run, jobs)
         consumption_recovery = (
             run.get("status") == "completed" and run.get("conclusion") == "failure"

@@ -2000,3 +2000,76 @@ def test_me50_native_bootstrap_failure_is_nonexecution_only(monkeypatch, broken)
         def get_job_log_archive(self,_id):return log
     proof=getattr(orchestrator,'_prove_me50_bootstrap_failure',lambda *_a:False)
     assert proof(API(),run,ROOT,'ae6f5ea623e12fde4d0e2271023f7822a3f9822f') is (broken is None)
+
+
+@pytest.mark.parametrize("broken", [None, "extra_step", "runner", "attempt", "sha", "id", "extra_job"])
+def test_me50_bootstrap_only_publisher_skips_nonexecuted_attempt(monkeypatch, broken):
+    """A lost bootstrap result must not hide an Apply attempt or synthesize COMPLETE."""
+    failed_sha = "e7661c52d4a0683d9331c3e28e7af19cdf62c86c"
+    old_sha = "ae6f5ea623e12fde4d0e2271023f7822a3f9822f"
+    new_sha = "c40c0bf36eb3c647240c2c70b348cc93546bda45"
+    failed = {
+        "id": 40088981534, "run_attempt": 1, "head_sha": failed_sha,
+        "head_branch": "main", "path": ".github/workflows/maxibot-deploy.yml",
+        "event": "workflow_dispatch", "status": "completed", "conclusion": "failure",
+        "name": f"MAXIBOT task-scoped-auto {failed_sha} by github-actions[bot]",
+        "created_at": "2026-10-24T11:12:42Z",
+    }
+    old = {
+        "id": 40007537523, "run_attempt": 1, "head_sha": old_sha,
+        "status": "completed", "conclusion": "success",
+        "name": f"MAXIBOT task-scoped-auto {old_sha}",
+        "created_at": "2026-10-23T18:57:21Z",
+    }
+    failure_jobs = {
+        "validate": {"status": "completed", "conclusion": "success"},
+        "deploy": {"status": "completed", "conclusion": "failure", "runner_id": 21,
+                   "runner_name": "maxibot-owner-mac",
+                   "steps": [{"name": "Set up job", "status": "completed", "conclusion": "failure"}]},
+        "publish": {"status": "completed", "conclusion": "success"},
+    }
+    if broken == "extra_step":
+        failure_jobs["deploy"]["steps"].append(
+            {"name": "Checkout the approved candidate", "status": "completed", "conclusion": "success"})
+    if broken == "runner":
+        failure_jobs["deploy"]["runner_name"] = "untrusted"
+    if broken == "attempt":
+        failed["run_attempt"] = 2
+    if broken == "sha":
+        failed["head_sha"] = "a" * 40
+    if broken == "id":
+        failed["id"] = 40088981535
+    if broken == "extra_job":
+        failure_jobs["unexpected"] = {"status": "completed", "conclusion": "success"}
+    called = []
+    monkeypatch.setattr(publish_release_to_linear, "latest_runs", lambda workflow: (
+        [{"id": 77, "head_sha": new_sha, "created_at": "2026-10-24T12:05:48Z",
+          "status": "completed", "conclusion": "failure"}]
+        if workflow == "maxibot-prepare.yml" else [failed, old]))
+    monkeypatch.setattr(publish_release_to_linear, "release_jobs", lambda run: (
+        failure_jobs if run is failed else
+        {n: {"status": "completed", "conclusion": "success"} for n in ("validate", "deploy", "publish")}))
+    monkeypatch.setattr(publish_release_to_linear, "github_json", lambda path: (
+        {"sha": new_sha, "commit": {"committer": {"date": "t"}}}
+        if path.endswith("/commits/main") else {"workflow_runs": []}))
+
+    def read_result(run):
+        called.append(run["id"])
+        if run is failed:
+            raise SyncError("Expected one MAXIBOT canonical result artifact; found 0")
+        return {"mode": "task-scoped-auto", "status": "COMPLETE",
+                "github_run_id": str(old["id"]), "github_run_attempt": "1",
+                "candidate_sha": old_sha, "final_runtime_sha": old_sha,
+                "final_migration": "0098"}
+    monkeypatch.setattr(publish_release_to_linear, "read_result_artifact", read_result)
+
+    if broken is None:
+        state = publish_release_to_linear.current_state()
+        assert state["production_sha"] == old_sha
+        assert state["deploy"]["id"] == old["id"]
+        assert state["candidate"] == "NOT_PREPARED_FOR_CURRENT_MAIN"
+        assert called == [old["id"]]
+    else:
+        with pytest.raises(SyncError, match="Expected one MAXIBOT canonical result artifact"):
+            publish_release_to_linear.current_state()
+        assert called == [failed["id"]]
