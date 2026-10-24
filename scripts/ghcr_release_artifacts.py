@@ -492,39 +492,73 @@ def publish_deploy_evidence(sha: str, run_id: str, attempt: str, evidence_path,
     return digest
 
 
+def read_deploy_evidence(sha: str, run_id: str, attempt: str,
+                         expected_digest: str, destination: str | Path,
+                         actor: str, token: str,
+                         fetch_factory=_registry_fetch) -> dict:
+    """Read historical evidence by explicit immutable identity, not this job's run."""
+    if not SHA40.fullmatch(sha) or not DIGEST.fullmatch(expected_digest):
+        raise ArtifactError("Explicit Deploy evidence SHA or digest is invalid")
+    tag = artifact_tag("evidence", sha, run_id, attempt)
+    digest, payload = resolve_oci_artifact(
+        EVIDENCE_REPOSITORY, tag, EVIDENCE_ARTIFACT_TYPE,
+        EVIDENCE_LAYER_MEDIA_TYPE,
+        fetch_factory(EVIDENCE_REPOSITORY, actor, token))
+    if digest != expected_digest:
+        raise ArtifactError("GHCR Deploy evidence differs from the explicitly expected digest")
+    try:
+        evidence = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactError("GHCR Deploy evidence payload is invalid JSON") from exc
+    if (not isinstance(evidence, dict)
+            or evidence.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+            or evidence.get("candidate_sha") != sha
+            or str(evidence.get("github_run_id")) != str(run_id)
+            or str(evidence.get("github_run_attempt")) != str(attempt)):
+        raise ArtifactError("GHCR Deploy evidence identity does not match the explicit original attempt")
+    target = Path(destination) / "result.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+    return evidence
+
+
 def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=("publish-prepare", "publish-evidence", "read-evidence", "mint-pull-token"))
+    parser.add_argument("--candidate-sha")
+    parser.add_argument("--run-id")
+    parser.add_argument("--run-attempt")
+    parser.add_argument("--expected-digest")
     args = parser.parse_args()
     try:
         if args.operation == "mint-pull-token":
             return main_pull_token()
+        if args.operation == "read-evidence":
+            sha = args.candidate_sha or os.environ.get("CANDIDATE_SHA", "")
+            run_id = args.run_id or os.environ.get("GITHUB_RUN_ID", "")
+            attempt = args.run_attempt or os.environ.get("GITHUB_RUN_ATTEMPT", "")
+            expected_digest = args.expected_digest or os.environ.get("DEPLOY_EVIDENCE_DIGEST", "")
+            destination = os.environ.get("EVIDENCE_DESTINATION", "")
+            if not destination or not expected_digest:
+                raise ArtifactError("Deploy evidence destination and expected digest are required")
+            evidence = read_deploy_evidence(sha, run_id, attempt, expected_digest,
+                destination, os.environ.get("GITHUB_ACTOR", ""),
+                os.environ.get("GITHUB_TOKEN", ""))
+            print(f"MAXIBOT_GHCR_EVIDENCE_READBACK=PASS DIGEST={expected_digest}")
+            print(json.dumps({key: evidence.get(key) for key in (
+                "error", "release_state", "preflight", "production_changed",
+                "github_deployment_id", "github_deployment_state", "authorization_consumed")},
+                sort_keys=True, separators=(",", ":")))
+            return 0
         sha, run_id = os.environ["CANDIDATE_SHA"], os.environ["GITHUB_RUN_ID"]
         attempt, output = os.environ["GITHUB_RUN_ATTEMPT"], os.environ["GITHUB_OUTPUT"]
         if args.operation == "publish-prepare":
             publish_prepare_receipt(sha, run_id, attempt,
                 os.environ["PREPARE_RECEIPT"], os.environ["IMAGE_MANIFEST"], output)
-        elif args.operation == "publish-evidence":
-            publish_deploy_evidence(sha, run_id, attempt, os.environ["RELEASE_RESULT"], output)
         else:
-            digest, payload = resolve_oci_artifact(EVIDENCE_REPOSITORY,
-                artifact_tag("evidence", sha, run_id, attempt), EVIDENCE_ARTIFACT_TYPE,
-                EVIDENCE_LAYER_MEDIA_TYPE,
-                _registry_fetch(EVIDENCE_REPOSITORY, os.environ["GITHUB_ACTOR"], os.environ["GITHUB_TOKEN"]))
-            if digest != os.environ["DEPLOY_EVIDENCE_DIGEST"]:
-                raise ArtifactError("GHCR Deploy evidence differs from the exact publisher digest")
-            evidence = json.loads(payload.decode("utf-8"))
-            if (evidence.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
-                    or evidence.get("candidate_sha") != sha
-                    or str(evidence.get("github_run_id")) != run_id
-                    or str(evidence.get("github_run_attempt")) != attempt):
-                raise ArtifactError("GHCR Deploy evidence identity does not match this workflow attempt")
-            target = Path(os.environ["EVIDENCE_DESTINATION"]) / "result.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
-            print(f"MAXIBOT_GHCR_EVIDENCE_READBACK=PASS DIGEST={digest}")
+            publish_deploy_evidence(sha, run_id, attempt, os.environ["RELEASE_RESULT"], output)
         return 0
     except (KeyError, OSError, ArtifactError) as exc:
         print(f"MAXIBOT_GHCR_ARTIFACT=BLOCKED REASON={exc}", file=sys.stderr)

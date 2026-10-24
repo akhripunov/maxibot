@@ -736,6 +736,72 @@ def test_read_deploy_evidence_writes_verified_payload_to_destination(tmp_path, m
     assert (tmp_path / "evidence" / "result.json").read_bytes() == payload
 
 
+def test_read_deploy_evidence_uses_explicit_original_identity_over_current_workflow(tmp_path, monkeypatch, capsys):
+    original_sha = "d38e3613f50a5659c463572064272e4438763ea4"
+    original_run, original_attempt = "40077453537", "2"
+    digest = "sha256:c1cb813bc2c0ace2931e226935a2b830119c7c6ac5c5a48ce3a2dfbc1584a121"
+    evidence = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": original_sha,
+        "github_run_id": original_run, "github_run_attempt": original_attempt,
+        "error": "NETWORK_UNAVAILABLE stage=release_provenance",
+        "release_state": "FAILED_PRE_SWITCH", "preflight": "PASS",
+        "production_changed": False, "github_deployment_id": None,
+        "github_deployment_state": None, "authorization_consumed": False}
+    payload = json.dumps(evidence).encode()
+    calls = []
+    monkeypatch.setattr(artifacts.sys, "argv", [
+        "ghcr_release_artifacts.py", "read-evidence", "--candidate-sha", original_sha,
+        "--run-id", original_run, "--run-attempt", original_attempt, "--expected-digest", digest])
+    for key, value in {
+        "CANDIDATE_SHA": "f" * 40, "GITHUB_RUN_ID": "99999999999", "GITHUB_RUN_ATTEMPT": "3",
+        "GITHUB_ACTOR": "github-actions[bot]", "GITHUB_TOKEN": "workflow-token",
+        "DEPLOY_EVIDENCE_DIGEST": "sha256:" + "0" * 64,
+        "EVIDENCE_DESTINATION": str(tmp_path / "historical"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    def resolve(repository, tag, artifact_type, layer_type, fetch):
+        calls.append((repository, tag, artifact_type, layer_type))
+        return digest, payload
+    monkeypatch.setattr(artifacts, "resolve_oci_artifact", resolve)
+
+    assert artifacts.main() == 0
+    assert calls == [(artifacts.EVIDENCE_REPOSITORY,
+        f"evidence-{original_sha}-{original_run}-{original_attempt}",
+        artifacts.EVIDENCE_ARTIFACT_TYPE, artifacts.EVIDENCE_LAYER_MEDIA_TYPE)]
+    assert json.loads((tmp_path / "historical" / "result.json").read_text()) == evidence
+    assert "NETWORK_UNAVAILABLE stage=release_provenance" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mutation", ["digest", "sha", "run", "attempt", "schema"])
+def test_read_deploy_evidence_rejects_historical_identity_mismatch(tmp_path, mutation, monkeypatch):
+    sha, run_id, attempt = "d38e3613f50a5659c463572064272e4438763ea4", "40077453537", "2"
+    digest = "sha256:c1cb813bc2c0ace2931e226935a2b830119c7c6ac5c5a48ce3a2dfbc1584a121"
+    evidence = {"schema": "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1", "candidate_sha": sha,
+        "github_run_id": run_id, "github_run_attempt": attempt}
+    expected_digest = digest
+    if mutation == "digest": expected_digest = "sha256:" + "0" * 64
+    elif mutation == "sha": evidence["candidate_sha"] = "f" * 40
+    elif mutation == "run": evidence["github_run_id"] = "40077453538"
+    elif mutation == "attempt": evidence["github_run_attempt"] = "3"
+    else: evidence["schema"] = "MAXIBOT_RELEASE_WORKFLOW_RESULT_V0"
+    payload = json.dumps(evidence).encode()
+    monkeypatch.setattr(artifacts, "resolve_oci_artifact", lambda *_args: (digest, payload))
+    with pytest.raises(artifacts.ArtifactError):
+        artifacts.read_deploy_evidence(sha, run_id, attempt, expected_digest,
+            tmp_path / "evidence", "github-actions[bot]", "token",
+            fetch_factory=lambda *_: (lambda *_args: None))
+
+
+def test_read_deploy_evidence_reports_missing_historical_artifact(tmp_path, monkeypatch):
+    def missing(*_args):
+        raise artifacts.MissingArtifactError("GHCR artifact tag is not published")
+
+    monkeypatch.setattr(artifacts, "resolve_oci_artifact", missing)
+    with pytest.raises(artifacts.MissingArtifactError, match="not published"):
+        artifacts.read_deploy_evidence(SHA, RUN_ID, "2", "sha256:" + "e" * 64,
+            tmp_path / "evidence", "github-actions[bot]", "token",
+            fetch_factory=lambda *_: (lambda *_args: None))
+
+
 def test_pull_token_is_short_lived_and_scoped_to_image_package(monkeypatch):
     from scripts.ghcr_release_artifacts import registry_pull_token
     class Response:
