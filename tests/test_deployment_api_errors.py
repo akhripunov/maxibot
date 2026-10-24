@@ -31,6 +31,10 @@ class JsonResponse:
 
 
 def setup_task_scoped_wrapper(monkeypatch, tmp_path):
+    # These wrapper unit tests isolate Deployment API/finalization behavior.
+    # Environment history has its own real guard tests in test_release_dispatch.
+    import release_orchestrator
+    monkeypatch.setattr(release_orchestrator, "assert_production_history", lambda *_a, **_kw: None)
     sha = "a" * 40
     migration = "0098_durable_autopilot_execution_claim_v1"
     manifest = tmp_path / "manifest.json"
@@ -579,3 +583,48 @@ def test_metadata_recovery_finalizes_same_deployment_once_without_apply(monkeypa
     assert result["github_deployment_id"] == 987
     assert len(writes) == 1 and writes[0][0:2] == (987, "success")
     assert commands == [["bash", "scripts/release_prod.sh", sha, "--dry-run"]]
+
+
+def test_history_drift_after_controller_blocks_apply(monkeypatch, tmp_path):
+    sha, migration, result_path = setup_task_scoped_wrapper(monkeypatch, tmp_path)
+    commands = []
+    def execute(command, _env):
+        commands.append(command)
+        if command[-1] == '--dry-run':
+            return 0, f'SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration}\nPROD_RELEASE_SHA={"d" * 40}\n'
+        return 0, 'MIGRATION_ALLOWED=YES\nRELEASE_STATUS=PASS\n'
+    monkeypatch.setattr(run_release_workflow, 'run', execute)
+    monkeypatch.setattr(run_release_workflow, 'verify_task_authorization', lambda *_a, **_kw: {
+        'record_sha256': 'b' * 64, 'source_reference': 'owner-task', 'changed_paths': '',
+        '_record': {}, '_changed_paths_list': []})
+    monkeypatch.setattr(run_release_workflow, 'assert_task_scoped_no_migration', lambda *_a, **_kw: None)
+    monkeypatch.setattr(run_release_workflow, 'start_github_deployment', lambda *_a: 987)
+    monkeypatch.setattr(run_release_workflow, 'consume_task_authorization', lambda *_a: None)
+    monkeypatch.setattr(run_release_workflow, 'update_github_deployment', lambda *_a: None)
+    # A previous operation becomes unresolved after Controller validation.
+    import release_orchestrator
+    def unresolved(*_a, **_kw):
+        raise release_orchestrator.OrchestrationError('Production history requires read-only reconciliation')
+    monkeypatch.setattr(release_orchestrator, 'assert_production_history', unresolved, raising=False)
+    assert run_release_workflow.main() == 1
+    assert all(command[-1] != '--apply' for command in commands)
+    assert json.loads(result_path.read_text())['production_changed'] is False
+
+
+def test_apply_exception_requires_reconciliation_and_never_claims_safe_failure(monkeypatch, tmp_path):
+    sha, migration, result_path = setup_task_scoped_wrapper(monkeypatch, tmp_path)
+    def execute(command, _env):
+        if command[-1] == '--dry-run':
+            return 0, f'SAFE_TO_RELEASE=YES\nDRY_RUN_RESULT=PASS\nPROD_DB_HEAD={migration}\n'
+        raise OSError('apply output lost after process start')
+    monkeypatch.setattr(run_release_workflow, 'run', execute)
+    monkeypatch.setattr(run_release_workflow, 'verify_task_authorization', lambda *_a, **_kw: {
+        'record_sha256': 'b' * 64, 'source_reference': 'owner-task', 'changed_paths': '',
+        '_record': {}, '_changed_paths_list': []})
+    monkeypatch.setattr(run_release_workflow, 'assert_task_scoped_no_migration', lambda *_a, **_kw: None)
+    monkeypatch.setattr(run_release_workflow, 'start_github_deployment', lambda *_a: 987)
+    monkeypatch.setattr(run_release_workflow, 'update_github_deployment', lambda *_a: None)
+    assert run_release_workflow.main() == 1
+    result = json.loads(result_path.read_text())
+    assert result['status'] == result['release_state'] == 'RECOVERY_REQUIRED'
+    assert result['production_changed'] == 'POSSIBLE'

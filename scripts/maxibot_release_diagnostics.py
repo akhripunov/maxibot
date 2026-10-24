@@ -73,15 +73,61 @@ def _deployment_matches(item: object, *, sha: str, run_id: str, attempt: str,
 def _all_deployments(sha: str, token: str, budget: RetryBudget, api_get) -> list[dict]:
     result: list[dict] = []
     for page in range(1, 11):
-        query = urlencode({"sha": sha, "environment": ENVIRONMENT,
+        query = urlencode({**({"sha": sha} if sha else {}), "environment": ENVIRONMENT,
                            "per_page": "100", "page": str(page)})
         items = api_get(f"deployments?{query}", token, budget=budget)
         if not isinstance(items, list):
             raise DiagnosticError("GitHub Deployment GET returned an invalid response")
-        result.extend(item for item in items if isinstance(item, dict))
+        if any(not isinstance(item, dict) or item.get("environment") != ENVIRONMENT for item in items):
+            raise DiagnosticError("GitHub Deployment inventory contains an invalid entry")
+        result.extend(items)
         if len(items) < 100:
             return result
     raise DiagnosticError("GitHub Deployment pagination exceeded the diagnostic limit")
+
+
+def reconcile_deployment(*, sha: str, run_id: str, attempt: str,
+                         prepare_digest: str, target_migration: str, mode: str,
+                         evidence_id: object, evidence_state: object, token: str,
+                         budget: RetryBudget, api_get=github_get) -> dict:
+    """Match immutable evidence to the one exact original Deployment and latest status."""
+    deployments = _all_deployments(sha, token, budget, api_get)
+    for item in deployments:
+        payload = _deployment_payload(item.get("payload"))
+        if payload is None or item.get("sha") != sha:
+            raise DiagnosticError("GitHub Deployment identity is incomplete")
+        if (str(payload.get("workflow_run_id")) == run_id
+                and str(payload.get("workflow_run_attempt")) == attempt
+                and not _deployment_matches(item, sha=sha, run_id=run_id, attempt=attempt,
+                    prepare_digest=prepare_digest, target_migration=target_migration, mode=mode)):
+            raise DiagnosticError("Original Deployment identity contradicts immutable evidence")
+    matches = [item for item in deployments if _deployment_matches(item, sha=sha,
+        run_id=run_id, attempt=attempt, prepare_digest=prepare_digest,
+        target_migration=target_migration, mode=mode)]
+    if len(matches) > 1:
+        raise DiagnosticError("Multiple GitHub Deployments match the exact original attempt")
+    if not matches:
+        if evidence_id is not None or evidence_state is not None:
+            raise DiagnosticError("Evidence names a GitHub Deployment that does not match the original attempt")
+        return {"github_deployment_id": None, "github_deployment_state": None,
+                "github_deployment_api_state": None,
+                "github_deployment_api_match": "NOT_CREATED"}
+
+    deployment_id = matches[0].get("id")
+    if type(deployment_id) is not int or deployment_id <= 0 or evidence_id != deployment_id:
+        raise DiagnosticError("Deployment ID does not match immutable evidence")
+    statuses = api_get(f"deployments/{deployment_id}/statuses?per_page=100",
+                       token, budget=budget)
+    if not isinstance(statuses, list):
+        raise DiagnosticError("GitHub Deployment status GET returned an invalid response")
+    latest_state = statuses[0].get("state") if statuses and isinstance(statuses[0], dict) else None
+    if (latest_state not in {"queued", "in_progress", "success", "failure", "error", "inactive"}
+            or evidence_state != latest_state):
+        raise DiagnosticError("Original Deployment status is absent or differs from immutable evidence")
+    return {"github_deployment_id": deployment_id,
+            "github_deployment_state": evidence_state,
+            "github_deployment_api_state": latest_state,
+            "github_deployment_api_match": latest_state}
 
 
 def diagnose(*, sha: str, run_id: str, attempt: str, evidence_digest: str,
@@ -113,33 +159,13 @@ def diagnose(*, sha: str, run_id: str, attempt: str, evidence_digest: str,
             or not MIGRATION_RE.fullmatch(target_migration)):
         raise DiagnosticError("Original release evidence has an invalid mode or migration identity")
 
-    deployments = _all_deployments(sha, token, budget, api_get)
-    matches = [item for item in deployments if _deployment_matches(item, sha=sha,
-        run_id=run_id, attempt=attempt, prepare_digest=prepare_digest,
-        target_migration=target_migration, mode=mode)]
-    evidence_id = evidence.get("github_deployment_id")
-    evidence_state = evidence.get("github_deployment_state")
-    if len(matches) > 1:
-        raise DiagnosticError("Multiple GitHub Deployments match the exact original attempt")
-    if not matches:
-        if evidence_id is not None or evidence_state is not None:
-            raise DiagnosticError("Evidence names a GitHub Deployment that does not match the original attempt")
-        deployment_id = None
-        latest_state = None
-        deployment_api_state = "NOT_CREATED"
-    else:
-        deployment = matches[0]
-        deployment_id = deployment.get("id")
-        if type(deployment_id) is not int or deployment_id <= 0 or evidence_id != deployment_id:
-            raise DiagnosticError("Deployment ID does not match immutable evidence")
-        statuses = api_get(f"deployments/{deployment_id}/statuses?per_page=100", token, budget=budget)
-        if not isinstance(statuses, list):
-            raise DiagnosticError("GitHub Deployment status GET returned an invalid response")
-        latest_state = statuses[0].get("state") if statuses and isinstance(statuses[0], dict) else None
-        if (latest_state not in {"queued", "in_progress", "success", "failure", "error", "inactive"}
-                or evidence_state != latest_state):
-            raise DiagnosticError("Original Deployment status is absent or differs from immutable evidence")
-        deployment_api_state = latest_state
+    deployment = reconcile_deployment(sha=sha, run_id=run_id, attempt=attempt,
+        prepare_digest=prepare_digest, target_migration=target_migration, mode=mode,
+        evidence_id=evidence.get("github_deployment_id"),
+        evidence_state=evidence.get("github_deployment_state"), token=token,
+        budget=budget, api_get=api_get)
+    evidence_id = deployment["github_deployment_id"]
+    evidence_state = deployment["github_deployment_state"]
 
     claim = _exact_ref_state(authorization_id, "claimed", sha, token, budget)
     consumed = _exact_ref_state(authorization_id, "consumed", sha, token, budget)
@@ -162,8 +188,8 @@ def diagnose(*, sha: str, run_id: str, attempt: str, evidence_digest: str,
         "production_changed": evidence.get("production_changed"),
         "github_deployment_id": evidence_id,
         "github_deployment_state": evidence_state,
-        "github_deployment_api_state": latest_state,
-        "github_deployment_api_match": deployment_api_state,
+        "github_deployment_api_state": deployment["github_deployment_api_state"],
+        "github_deployment_api_match": deployment["github_deployment_api_match"],
         "authorization_id": authorization_id,
         "authorization_claim": claim,
         "authorization_consumed": evidence.get("authorization_consumed"),

@@ -22,13 +22,15 @@ from ghcr_release_artifacts import (PREPARE_ARTIFACT_TYPE, PREPARE_LAYER_MEDIA_T
     PREPARE_REPOSITORY, EVIDENCE_ARTIFACT_TYPE, EVIDENCE_LAYER_MEDIA_TYPE,
     EVIDENCE_REPOSITORY, ArtifactError, _registry_fetch, artifact_tag,
     resolve_oci_artifact, validate_prepare_receipt)
+from maxibot_release_diagnostics import DiagnosticError, reconcile_deployment
 from release_network_retry import (NETWORK_RETRY_BUDGET_SECONDS, NetworkUnavailable,
     RetryBudget, RETRYABLE_HTTP_STATUS, is_retryable_network_error, retry_network_read)
 from release_authorization import (AuthorizationError, authorization_state_ref,
                                    candidate_scope_diff, record_path,
                                    resolve_prepare_authorization,
                                    validate_claim_candidate,
-                                   validate_task_authorization)
+                                   validate_task_authorization,
+                                   owner_task_commitment_sha256)
 
 REPOSITORY = "akhripunov/maxibot"
 PREPARE_PATH = ".github/workflows/maxibot-prepare.yml"
@@ -234,13 +236,19 @@ def _deploy_runs(api) -> list[dict]:
     for page in range(1, 11):
         data = api.get(f"actions/workflows/{DEPLOY_WORKFLOW}/runs?branch=main&per_page=100&page={page}")
         page_runs, page_total = data.get("workflow_runs"), data.get("total_count")
-        if (not isinstance(page_runs, list) or not isinstance(page_total, int)
+        if (not isinstance(page_runs, list) or type(page_total) is not int
                 or page_total < 0 or (total is not None and page_total != total)):
             raise OrchestrationError("Deploy run inventory is incomplete")
         total = page_total
         runs.extend(page_runs)
-        if len(runs) >= total:
-            return runs[:total]
+        if len(runs) == total:
+            identities = [str(run.get("id", "")) for run in runs if isinstance(run, dict)]
+            if (len(identities) != total or len(set(identities)) != total
+                    or any(not re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in identities)):
+                raise OrchestrationError("Deploy run inventory is incomplete")
+            return runs
+        if len(runs) > total:
+            raise OrchestrationError("Deploy run inventory is incomplete")
         if len(page_runs) < 100:
             break
     raise OrchestrationError("Deploy run inventory exceeds the bounded controller limit")
@@ -268,7 +276,375 @@ def _task_dispatch_refs(api, authorization_id: str) -> list[dict]:
     return result
 
 
-def _verified_deploy_evidence(api, run: dict) -> tuple[str, dict] | None:
+def _task_authorization_dispatch_history(api, repo_root: Path, production_baseline_sha: str,
+                                        current_authorization_id: str, current_event_ref: str,
+                                        runs: list[dict]) -> dict[tuple[str, str], dict | None]:
+    """Reconcile every durable TASK_SCOPED_AUTO dispatch at this production baseline."""
+    refs = api.get("git/matching-refs/tags/maxibot-task-auth/")
+    if not isinstance(refs, list):
+        raise OrchestrationError("Task-scoped authorization history inventory is invalid")
+    pattern = re.compile(
+        r"^refs/tags/maxibot-task-auth/([A-Za-z0-9][A-Za-z0-9._-]{7,127})/"
+        r"(claimed|consumed|revoked|dispatches/(prepare-[1-9][0-9]{0,19}-[1-9][0-9]{0,5}))$")
+    grouped: dict[str, dict[str, object]] = {}
+    for item in refs:
+        name = item.get("ref", "") if isinstance(item, dict) else ""
+        obj = item.get("object", {}) if isinstance(item, dict) else {}
+        match = pattern.fullmatch(name)
+        if (not match or not isinstance(obj, dict)
+                or obj.get("type", "commit") != "commit"
+                or not SHA_RE.fullmatch(str(obj.get("sha", "")))):
+            raise OrchestrationError("Task-scoped authorization history contains an invalid ref")
+        authorization_id, kind, _marker = match.groups()
+        state = grouped.setdefault(authorization_id, {"claimed": False, "dispatches": []})
+        if kind == "claimed":
+            state["claimed"] = True
+        elif kind.startswith("dispatches/"):
+            state["dispatches"].append({"ref": name.removeprefix("refs/tags/"),
+                                         "sha": obj["sha"]})
+
+    proven = {}
+    for authorization_id, state in grouped.items():
+        markers = state["dispatches"]
+        if not state["claimed"] and not markers:
+            continue
+        try:
+            record = json.loads((repo_root / record_path(authorization_id)).read_text(encoding="utf-8"))
+            baseline = record.get("production_baseline_sha") if isinstance(record, dict) else None
+            if (not isinstance(record, dict) or record.get("schema_version") != 3
+                    or record.get("authorization_id") != authorization_id
+                    or record.get("project") != "maxibot"
+                    or record.get("environment") != "production"
+                    or record.get("authorization_mode") != "TASK_SCOPED_AUTO"
+                    or record.get("owner_instruction_scope") != "FULL_PRODUCTION_CYCLE"
+                    or not SHA_RE.fullmatch(str(baseline or ""))
+                    or record.get("owner_task_commitment_sha256")
+                       != owner_task_commitment_sha256(record)):
+                raise ValueError("authorization identity or commitment mismatch")
+        except (OSError, ValueError, TypeError):
+            raise OrchestrationError(
+                "Prior task authorization baseline is unverified; read-only reconciliation required") from None
+        if baseline != production_baseline_sha:
+            continue
+        if authorization_id != current_authorization_id and (not state["claimed"] or not markers):
+            raise OrchestrationError(
+                "Prior same-baseline task claim has no exact dispatch inventory; read-only reconciliation required")
+        for marker in markers:
+            if marker["ref"] == current_event_ref:
+                continue
+            proven.update(_prove_safe_prior_dispatch(api, marker, runs, authorization_id,
+                                       production_baseline_sha, repo_root=repo_root))
+    return proven
+
+
+def _verify_consumed_ref(api, authorization_id, candidate: str) -> None:
+    try:
+        prefix = "git/ref/tags/" + authorization_state_ref("maxibot", authorization_id, "consumed").removeprefix("refs/tags/")
+        consumed = api.get(prefix)
+        obj = consumed.get("object", {})
+        if obj.get("type") != "commit" or obj.get("sha") != candidate:
+            raise OrchestrationError("Production consumption is unverified")
+        revoked = "git/ref/tags/" + authorization_state_ref("maxibot", authorization_id, "revoked").removeprefix("refs/tags/")
+        try:
+            api.get(revoked)
+        except APIError as error:
+            if error.status == 404:
+                return
+            raise
+    except (AuthorizationError, TypeError, AttributeError):
+        raise OrchestrationError("Production consumption identity is unverified") from None
+    raise OrchestrationError("Production authorization was revoked")
+
+
+def _history_time(value):
+    if not isinstance(value, str):
+        raise OrchestrationError("Production history timestamp is unknown; reconciliation required")
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError()
+        return parsed
+    except ValueError:
+        raise OrchestrationError("Production history timestamp is unknown; reconciliation required") from None
+
+
+def _prove_me50_nonexecuting_attempt(api, run: dict, repo_root: Path | None) -> bool:
+    """Read-only proof for the original queued cancellation and publisher-only rerun.
+
+    Evidence remains attributed to attempt 2. No result artifact for 1 or 3 is
+    synthesized, and no other run, SHA, attempt or workflow version is admitted.
+    """
+    sha = "d38e3613f50a5659c463572064272e4438763ea4"
+    attempt = str(run.get("run_attempt", ""))
+    if (repo_root is None or str(run.get("id")) != "40077453537" or attempt not in {"1", "3"}
+            or run.get("head_sha") != sha or run.get("head_branch") != "main"
+            or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+            or run.get("event") != "workflow_dispatch" or run.get("status") != "completed"
+            or run.get("conclusion") not in {"cancelled", "failure"}):
+        return False
+    pins = {
+        ".github/workflows/maxibot-deploy.yml": "6c8d76d24ef5847d3ec0539cc282d1a9e319134a3ecad093cd5709b502da7e9c",
+        "scripts/run_release_workflow.py": "95043c6471973dc4ce33a26989028812fd2472c7c0260018f9208a8a65c87c65",
+        "scripts/release_prod.sh": "16d3d60ba59df4603291cb644fd90114e01b51ffa01ccd618ca70a9682c3691d",
+        "scripts/publish_release_to_linear.py": "90fc7dabd12245bc3d80d9c034fde06496f3ba896fd363b211a070186b32fe6f",
+        "scripts/ghcr_release_artifacts.py": "6bd4a7fd22af996f39368c3968cc7de9bd6cfeb320a009be724753fd74e8f356",
+    }
+    def jobs_for(number):
+        response = api.get(f"actions/runs/40077453537/attempts/{number}/jobs?per_page=100")
+        items = response.get("jobs")
+        if not isinstance(items, list) or response.get("total_count") != 3 or len(items) != 3:
+            raise ValueError("Incomplete historical job inventory")
+        by_name = {item.get("name"): item for item in items if isinstance(item, dict)}
+        if (set(by_name) != {"validate", "deploy", "publish"}
+                or len({item.get("id") for item in items}) != 3):
+            raise ValueError("Ambiguous historical job inventory")
+        for item in items:
+            if (str(item.get("run_id")) != "40077453537" or str(item.get("run_attempt")) != str(number)
+                    or item.get("head_sha") != sha or item.get("status") != "completed"
+                    or type(item.get("id")) is not int or item["id"] <= 0):
+                raise ValueError("Historical job identity changed")
+        return by_name
+    try:
+        for path, expected in pins.items():
+            blob = subprocess.check_output(["git", "show", f"{sha}:{path}"], cwd=repo_root,
+                stderr=subprocess.DEVNULL, timeout=10)
+            if hashlib.sha256(blob).hexdigest() != expected:
+                return False
+        auth = "maxibot-me50-v5-release-infra-20261024"
+        claim = api.get(f"git/ref/tags/maxibot-task-auth/{auth}/claimed")
+        if claim.get("object", {}).get("sha") != sha or claim.get("object", {}).get("type") != "commit":
+            return False
+        for state in ("consumed", "revoked"):
+            try:
+                api.get(f"git/ref/tags/maxibot-task-auth/{auth}/{state}")
+                return False
+            except APIError as error:
+                if error.status != 404:
+                    return False
+        from maxibot_release_diagnostics import _all_deployments, _deployment_payload
+        for deployment in _all_deployments(sha, api.token, RetryBudget(), lambda p, *_a, **_kw: api.get(p)):
+            payload = _deployment_payload(deployment.get("payload"))
+            if payload is None or (str(payload.get("workflow_run_id")) == "40077453537"
+                    and str(payload.get("workflow_run_attempt")) == attempt):
+                return False
+        jobs = jobs_for(attempt)
+        env = _validation_log_inputs(api.get_job_log_archive(str(jobs["validate"]["id"])))
+        expected_env = {"CANDIDATE_SHA": sha, "RELEASE_MODE": "task-scoped-auto",
+            "PREPARE_RUN_ID": "40076645136", "PREPARE_RUN_ATTEMPT": "1",
+            "TASK_AUTHORIZATION_ID": auth, "APPROVE_PRODUCTION": "false",
+            "APPROVE_WORKER_BOOTSTRAP": "false"}
+        if env is None or any(env.get(k) != v for k, v in expected_env.items()):
+            return False
+        if attempt == "1":
+            validate = jobs["validate"]
+            names = [name for name, _state in DEPLOY_VALIDATE_JOB_STEPS + DEPLOY_VALIDATE_POST_STEPS]
+            if (validate.get("conclusion") != "success"
+                    or [(s.get("name"), s.get("status"), s.get("conclusion")) for s in validate.get("steps", [])]
+                       != [(name, "completed", "success") for name in names]):
+                return False
+            deploy = jobs["deploy"]
+            return (deploy.get("conclusion") == "cancelled" and type(deploy.get("runner_id")) is int
+                    and deploy["runner_id"] == 0 and "runner_name" in deploy
+                    and deploy.get("runner_name") in {"", None}
+                    and deploy.get("steps") == [] and jobs["publish"].get("conclusion") in {"success", "failure"})
+        original = api.get("actions/runs/40077453537/attempts/2")
+        if (str(original.get("id")) != "40077453537" or str(original.get("run_attempt")) != "2"
+                or original.get("head_sha") != sha or original.get("head_branch") != "main"
+                or original.get("status") != "completed" or original.get("conclusion") != "failure"
+                or original.get("path") != run.get("path") or original.get("event") != "workflow_dispatch"):
+            return False
+        source_jobs = jobs_for("2")
+        rerun_start = _history_time(run.get("run_started_at"))
+        source_end = _history_time(original.get("updated_at"))
+        if source_end >= rerun_start:
+            return False
+        for name in ("validate", "deploy"):
+            previous, snapshot = source_jobs[name], jobs[name]
+            fields = ("name", "status", "conclusion", "head_sha", "head_branch", "labels", "runner_id",
+                      "runner_name", "runner_group_id", "runner_group_name", "started_at", "completed_at", "steps")
+            if any(previous.get(field) != snapshot.get(field) for field in fields):
+                return False
+            if type(snapshot.get("runner_id")) is not int or snapshot["runner_id"] <= 0:
+                return False
+            if not isinstance(snapshot.get("steps"), list) or not snapshot["steps"]:
+                return False
+            for item in [snapshot] + snapshot["steps"]:
+                if (not isinstance(item, dict) or item.get("status") != "completed"
+                        or item.get("conclusion") not in {"success", "failure", "skipped", "cancelled"}
+                        or _history_time(item.get("started_at")) > _history_time(item.get("completed_at"))):
+                    return False
+                for field in ("started_at", "completed_at"):
+                    stamp = _history_time(item.get(field))
+                    if stamp > source_end or stamp >= rerun_start:
+                        return False
+            if api.get_job_log_archive(str(previous["id"])) != api.get_job_log_archive(str(snapshot["id"])):
+                return False
+        source_log = api.get_job_log_archive(str(source_jobs["deploy"]["id"]))
+        if not re.search(r"\bGITHUB_RUN_ATTEMPT: 2\s*$", source_log, re.M):
+            return False
+        proof = _verified_deploy_evidence(api, original)
+        if proof is None or proof[0] != "sha256:c1cb813bc2c0ace2931e226935a2b830119c7c6ac5c5a48ce3a2dfbc1584a121":
+            return False
+        evidence = proof[1]
+        return (evidence.get("task_authorization_id") == auth and evidence.get("mode") == "task-scoped-auto"
+            and str(evidence.get("prepare_run_id")) == "40076645136" and str(evidence.get("prepare_run_attempt")) == "1"
+            and evidence.get("status") == evidence.get("release_state") == "FAILED_PRE_SWITCH"
+            and evidence.get("production_changed") is False and evidence.get("authorization_consumed") is False
+            and evidence.get("production_baseline_sha") == "ae6f5ea623e12fde4d0e2271023f7822a3f9822f"
+            and evidence.get("_verified_deployment_api_match") == "NOT_CREATED")
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError,
+            APIError, OrchestrationError, DiagnosticError, ArtifactError):
+        return False
+
+
+def assert_production_history(api, repo_root: Path, baseline: str, *, runs=None,
+                              proven_attempts=None, current_run_id="",
+                              current_attempt="", current_sha="", current_deployment_id=None) -> None:
+    """Fail closed on unresolved environment operations, regardless of task ID or mode.
+
+    Called by Controller and freshly by the serialized Deploy immediately before Apply.
+    Unknown older history requires read-only reconciliation, never an automatic retry.
+    """
+    if not SHA_RE.fullmatch(str(baseline)):
+        raise OrchestrationError("Production baseline is unknown; reconciliation required")
+    runs = _deploy_runs(api) if runs is None else runs
+    proven_attempts = proven_attempts or {}
+    if current_sha and api.get("git/ref/heads/main").get("object", {}).get("sha") != current_sha:
+        raise OrchestrationError("Production candidate is no longer current main")
+    if current_run_id and not any(str(run.get("id")) == current_run_id for run in runs):
+        raise OrchestrationError("Current production run is absent from inventory")
+    # An installed, fully finalized release is the existing checkpoint. Completed
+    # earlier operations cannot still run; newer/rerun/active operations stay in scope.
+    checkpoint = None
+    cached = {}
+    for run in runs:
+        if (run.get("head_sha") == baseline and run.get("status") == "completed"
+                and run.get("conclusion") == "success"):
+            try:
+                evidence = _verified_deploy_evidence(api, run)
+            except (OrchestrationError, APIError, ArtifactError):
+                continue
+            if evidence is None:
+                continue
+            result = evidence[1]
+            cached[(str(run["id"]), str(run["run_attempt"]))] = evidence
+            if (result.get("status") == result.get("release_state") == "COMPLETE"
+                    and result.get("final_runtime_sha") == baseline
+                    and result.get("_verified_deployment_api_match") == "success"):
+                if result.get("mode") == "task-scoped-auto":
+                    if result.get("authorization_consumed") is not True:
+                        continue
+                    _verify_consumed_ref(api, result.get("task_authorization_id"), baseline)
+                stamp = _history_time(run.get("updated_at"))
+                checkpoint = max(checkpoint, stamp) if checkpoint else stamp
+    verified = {}
+    pending = {}
+    for listed in runs:
+        run_id = str(listed.get("id", ""))
+        latest = listed.get("run_attempt")
+        if (not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
+                or type(latest) is not int or not 1 <= latest <= 999999
+                or listed.get("path") != ".github/workflows/maxibot-deploy.yml"):
+            raise OrchestrationError("Production attempt inventory is unknown; reconciliation required")
+        if (run_id != current_run_id and checkpoint and listed.get("status") == "completed"
+                and _history_time(listed.get("updated_at")) < checkpoint):
+            continue  # Retire completed legacy event schemas only behind a proven checkpoint.
+        if listed.get("event") != "workflow_dispatch":
+            raise OrchestrationError("Production attempt inventory is unknown; reconciliation required")
+        for number in range(1, latest + 1):
+            key = (run_id, str(number))
+            if key == (current_run_id, current_attempt):
+                if listed.get("head_sha") != current_sha or number != latest:
+                    raise OrchestrationError("Current production operation identity changed")
+                continue
+            if key in proven_attempts:
+                verified[key] = proven_attempts[key]
+                continue
+            run = listed if latest == 1 else api.get(f"actions/runs/{run_id}/attempts/{number}")
+            if (not isinstance(run, dict) or str(run.get("id")) != run_id
+                    or str(run.get("run_attempt")) != str(number)
+                    or run.get("head_sha") != listed.get("head_sha")
+                    or run.get("path") != listed.get("path") or run.get("event") != listed.get("event")
+                    or run.get("status") != "completed"):
+                raise OrchestrationError("Production operation is unresolved; reconciliation required")
+            if _prove_me50_nonexecuting_attempt(api, run, repo_root):
+                verified[key] = None
+                continue
+            try:
+                evidence = cached.get(key) or _verified_deploy_evidence(api, run)
+            except (OrchestrationError, APIError, ArtifactError):
+                evidence = None
+            pending[key] = (run, evidence)
+    reconciled = {}
+    for key, (run, evidence) in pending.items():
+        if evidence and evidence[1].get("_reconciles_attempt"):
+            original_key = tuple(evidence[1]["_reconciles_attempt"])
+            original = pending.get(original_key)
+            retired = next((item for item in runs if str(item.get("id")) == original_key[0]), None)
+            if (original is None and retired is not None and checkpoint
+                    and retired.get("status") == "completed"
+                    and _history_time(retired.get("updated_at")) < checkpoint):
+                continue
+            if (original is None or original[0].get("head_sha") != run.get("head_sha")
+                    or original_key in reconciled):
+                raise OrchestrationError("Metadata recovery attempt is ambiguous")
+            reconciled[original_key] = evidence[1]
+    for key, (run, evidence) in pending.items():
+        if key in reconciled:
+            verified[key] = reconciled[key]
+            continue
+        if evidence is None:
+            raise OrchestrationError("Production evidence is unknown; reconciliation required")
+        result = evidence[1]
+        state = result.get("_verified_deployment_api_match")
+        no_change = result.get("production_changed") is False
+        safe_failure = (no_change and run.get("conclusion") == "failure"
+            and result.get("status") == result.get("release_state") == "FAILED_PRE_SWITCH"
+            and result.get("authorization_consumed") is False
+            and state in {"NOT_CREATED", "failure", "error"})
+        read_only = (no_change and result.get("mode") == "preflight"
+            and result.get("status") == "PLANNED" and result.get("release_state") == "READY_FOR_OWNER"
+            and run.get("conclusion") == "success" and state == "NOT_CREATED")
+        complete = (result.get("status") == result.get("release_state") == "COMPLETE"
+            and result.get("final_runtime_sha") == run.get("head_sha")
+            and state == "success" and run.get("conclusion") == "success"
+            and (result.get("mode") != "task-scoped-auto" or result.get("authorization_consumed") is True))
+        if complete:
+            ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", run["head_sha"], baseline],
+                cwd=repo_root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            complete = ancestor.returncode == 0
+        if not (safe_failure or read_only or complete):
+            raise OrchestrationError("Production operation needs read-only or metadata-only reconciliation")
+        verified[key] = result
+    # Deployment inventory also catches orphan operations with no task ref or visible run.
+    from maxibot_release_diagnostics import _all_deployments, _deployment_payload
+    deployments = _all_deployments("", api.token, RetryBudget(),
+        lambda path, *_args, **_kwargs: api.get(path))
+    ids = [item.get("id") for item in deployments]
+    if any(type(value) is not int or value <= 0 for value in ids) or len(set(ids)) != len(ids):
+        raise OrchestrationError("Production Deployment inventory is incomplete")
+    for deployment in deployments:
+        payload = _deployment_payload(deployment.get("payload"))
+        if not payload or deployment.get("task") != "maxibot-production-deploy":
+            raise OrchestrationError("Production Deployment identity is unknown; reconciliation required")
+        key = (str(payload.get("workflow_run_id", "")), str(payload.get("workflow_run_attempt", "")))
+        if key == (current_run_id, current_attempt) and deployment.get("id") == current_deployment_id:
+            if deployment.get("sha") == deployment.get("ref") == current_sha:
+                continue
+        if checkpoint and _history_time(deployment.get("created_at")) < checkpoint:
+            statuses = api.get(f"deployments/{deployment['id']}/statuses?per_page=100")
+            if (isinstance(statuses, list) and statuses and isinstance(statuses[0], dict)
+                    and statuses[0].get("state") in {"success", "failure", "error", "inactive"}
+                    and _history_time(statuses[0].get("created_at")) <= checkpoint):
+                continue
+            raise OrchestrationError("Older Deployment is unresolved; reconciliation required")
+        prior = verified.get(key)
+        if (prior is None or prior.get("github_deployment_id") != deployment.get("id")
+                or prior.get("candidate_sha") != deployment.get("sha")):
+            raise OrchestrationError("Production Deployment lacks exact reconciled evidence")
+
+
+def _deploy_evidence_payload(api, run: dict) -> tuple[str, dict] | None:
     run_id, attempt = str(run.get("id", "")), str(run.get("run_attempt", ""))
     if (not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
             or not re.fullmatch(r"[1-9][0-9]{0,5}", attempt)):
@@ -287,11 +663,66 @@ def _verified_deploy_evidence(api, run: dict) -> tuple[str, dict] | None:
         return None
     if resolved_digest != digest:
         return None
-    if (result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+    if (not isinstance(result, dict) or result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
             or result.get("candidate_sha") != candidate
             or str(result.get("github_run_id", "")) != run_id
             or str(result.get("github_run_attempt", "")) != attempt):
         return None
+    return digest, result
+
+
+def _verified_deploy_evidence(api, run: dict) -> tuple[str, dict] | None:
+    verified = _deploy_evidence_payload(api, run)
+    if verified is None:
+        return None
+    digest, result = verified
+    candidate = result["candidate_sha"]
+    run_id, attempt = str(run["id"]), str(run["run_attempt"])
+    identity = result
+    try:
+        if result.get("mode") == "publication-recovery":
+            original_id = str(result.get("reconciles_deploy_run_id", ""))
+            original_attempt = str(result.get("reconciles_deploy_run_attempt", ""))
+            if (not re.fullmatch(r"[1-9][0-9]{0,19}", original_id)
+                    or not re.fullmatch(r"[1-9][0-9]{0,5}", original_attempt)
+                    or original_id == run_id or result.get("status") != "COMPLETE"
+                    or result.get("release_state") != "COMPLETE"
+                    or result.get("production_changed") is not False
+                    or result.get("final_runtime_sha") != candidate
+                    or result.get("recovery") != "READ_ONLY_RECONCILIATION_PASS"):
+                return None
+            original = api.get(f"actions/runs/{original_id}/attempts/{original_attempt}")
+            if (not isinstance(original, dict) or str(original.get("id")) != original_id
+                    or str(original.get("run_attempt")) != original_attempt
+                    or original.get("head_sha") != candidate or original.get("status") != "completed"
+                    or original.get("path") != ".github/workflows/maxibot-deploy.yml"
+                    or original.get("event") != "workflow_dispatch"):
+                return None
+            original_proof = _deploy_evidence_payload(api, original)
+            if original_proof is None:
+                return None
+            identity = original_proof[1]
+            if (identity.get("mode") not in {"production", "task-scoped-auto"}
+                    or identity.get("production_changed") not in (True, "POSSIBLE")
+                    or identity.get("github_deployment_id") != result.get("github_deployment_id")
+                    or identity.get("target_migration") != result.get("target_migration")
+                    or identity.get("prepare_receipt_digest") != result.get("prepare_receipt_digest")):
+                return None
+            if identity.get("mode") == "task-scoped-auto":
+                _verify_consumed_ref(api, identity.get("task_authorization_id"), candidate)
+            run_id, attempt = original_id, original_attempt
+            result["_reconciles_attempt"] = (run_id, attempt)
+        deployment = reconcile_deployment(sha=candidate, run_id=run_id, attempt=attempt,
+            prepare_digest=str(identity.get("prepare_receipt_digest", "")),
+            target_migration=str(identity.get("target_migration", "")),
+            mode=str(identity.get("mode", "")),
+            evidence_id=result.get("github_deployment_id"),
+            evidence_state=result.get("github_deployment_state"), token=api.token,
+            budget=RetryBudget(),
+            api_get=lambda path, *_args, **_kwargs: api.get(path))
+    except (DiagnosticError, APIError, OrchestrationError, ValueError):
+        return None
+    result["_verified_deployment_api_match"] = deployment["github_deployment_api_match"]
     return digest, result
 
 
@@ -780,7 +1211,7 @@ def _prove_historical_receipt_failure_before_execute(api, run: dict, candidate: 
 
 def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
                                authorization_id: str, production_baseline_sha: str,
-                               repo_root: Path | None = None) -> None:
+                               repo_root: Path | None = None) -> dict[tuple[str, str], dict | None]:
     marker = dispatch_ref["ref"].rsplit("/", 1)[-1]
     match = re.fullmatch(r"prepare-([1-9][0-9]{0,19})-([1-9][0-9]{0,5})", marker)
     if not match:
@@ -792,51 +1223,96 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
                   and run.get("event") == "workflow_dispatch"]
     if not candidates:
         raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
-    safe_prior_runs = 0
-    for run in candidates:
-        if _prove_historical_receipt_failure_before_execute(api, run, candidate, prepare_run_id,
-                                                           prepare_attempt, authorization_id, repo_root):
-            safe_prior_runs += 1
-            continue
-        if _prove_historical_guard_failure(api, run, candidate, prepare_run_id,
-                                           prepare_attempt, authorization_id, repo_root):
-            safe_prior_runs += 1
-            continue
-        if _prove_safe_predeploy_failure(api, run, candidate, prepare_run_id,
-                                         prepare_attempt, authorization_id):
-            safe_prior_runs += 1
-            continue
-        run_id, attempt = str(run.get("id", "")), str(run.get("run_attempt", ""))
+    safe_prior_attempts = 0
+    expected_prior_attempts = 0
+    proven = {}
+    for listed_run in candidates:
+        run_id = str(listed_run.get("id", ""))
+        latest_attempt = listed_run.get("run_attempt", 1)
         if (not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
-                or not re.fullmatch(r"[1-9][0-9]{0,5}", attempt)):
-            raise OrchestrationError("Prior task-scoped Deploy identity is unknown")
-        try:
-            verified = _verified_deploy_evidence(api, run)
-        except OrchestrationError:
-            raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required") from None
-        if verified is None:
-            raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
-        _digest, result = verified
-        if (result.get("candidate_sha") == candidate
-                and str(result.get("github_run_id", "")) == run_id
-                and str(result.get("github_run_attempt", "")) == attempt
-                and str(result.get("prepare_run_id", "")) == prepare_run_id
-                and str(result.get("prepare_run_attempt", "")) == prepare_attempt
-                and result.get("task_authorization_id") == authorization_id
-                and result.get("mode") == "task-scoped-auto"):
-            if (run.get("status") != "completed" or run.get("conclusion") != "failure"
-                    or result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
-                    or result.get("status") != "FAILED_PRE_SWITCH"
-                    or result.get("release_state") != "FAILED_PRE_SWITCH"
-                    or result.get("production_changed") is not False
-                    or result.get("authorization_consumed") is not False
-                    or result.get("production_baseline_sha") != production_baseline_sha):
-                raise OrchestrationError("Prior task-scoped Deploy was not proven safe to retry")
-            safe_prior_runs += 1
+                or type(latest_attempt) is not int or not 1 <= latest_attempt <= 999999):
+            raise OrchestrationError("Prior task-scoped Deploy attempt inventory is invalid")
+        expected_prior_attempts += latest_attempt
+        if _prove_historical_receipt_failure_before_execute(
+                api, listed_run, candidate, prepare_run_id, prepare_attempt, authorization_id, repo_root):
+            safe_prior_attempts += latest_attempt
+            proven.update(((run_id, str(number)), None) for number in range(1, latest_attempt + 1))
             continue
+        if _prove_historical_guard_failure(
+                api, listed_run, candidate, prepare_run_id, prepare_attempt, authorization_id, repo_root):
+            safe_prior_attempts += latest_attempt
+            proven.update(((run_id, str(number)), None) for number in range(1, latest_attempt + 1))
+            continue
+        for attempt_number in range(1, latest_attempt + 1):
+            if latest_attempt == 1:
+                run = listed_run
+            else:
+                try:
+                    run = api.get(f"actions/runs/{run_id}/attempts/{attempt_number}")
+                except Exception:
+                    raise OrchestrationError(
+                        "Prior task-scoped Deploy attempt could not be read; read-only reconciliation required") from None
+                if (not isinstance(run, dict) or str(run.get("id", "")) != run_id
+                        or str(run.get("run_attempt", "")) != str(attempt_number)
+                        or run.get("head_sha") != candidate
+                        or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+                        or run.get("event") != "workflow_dispatch"):
+                    raise OrchestrationError(
+                        "Prior task-scoped Deploy attempt identity is inconsistent; read-only reconciliation required")
+            if _prove_historical_receipt_failure_before_execute(api, run, candidate, prepare_run_id,
+                                                               prepare_attempt, authorization_id, repo_root):
+                safe_prior_attempts += 1
+                proven[(run_id, str(attempt_number))] = None
+                continue
+            if _prove_historical_guard_failure(api, run, candidate, prepare_run_id,
+                                               prepare_attempt, authorization_id, repo_root):
+                safe_prior_attempts += 1
+                proven[(run_id, str(attempt_number))] = None
+                continue
+            if _prove_me50_nonexecuting_attempt(api, run, repo_root):
+                safe_prior_attempts += 1
+                proven[(run_id, str(attempt_number))] = None
+                continue
+            if _prove_safe_predeploy_failure(api, run, candidate, prepare_run_id,
+                                             prepare_attempt, authorization_id):
+                safe_prior_attempts += 1
+                proven[(run_id, str(attempt_number))] = None
+                continue
+            attempt = str(attempt_number)
+            try:
+                verified = _verified_deploy_evidence(api, run)
+            except OrchestrationError:
+                raise OrchestrationError(
+                    "Prior task-scoped Deploy result is unknown; read-only reconciliation required") from None
+            if verified is None:
+                raise OrchestrationError(
+                    "Prior task-scoped Deploy result is unknown; read-only reconciliation required")
+            _digest, result = verified
+            if (result.get("candidate_sha") == candidate
+                    and str(result.get("github_run_id", "")) == run_id
+                    and str(result.get("github_run_attempt", "")) == attempt
+                    and str(result.get("prepare_run_id", "")) == prepare_run_id
+                    and str(result.get("prepare_run_attempt", "")) == prepare_attempt
+                    and result.get("task_authorization_id") == authorization_id
+                    and result.get("mode") == "task-scoped-auto"):
+                deployment_state = result.get("_verified_deployment_api_match")
+                if (run.get("status") != "completed" or run.get("conclusion") != "failure"
+                        or result.get("schema") != "MAXIBOT_RELEASE_WORKFLOW_RESULT_V1"
+                        or result.get("status") != "FAILED_PRE_SWITCH"
+                        or result.get("release_state") != "FAILED_PRE_SWITCH"
+                        or result.get("production_changed") is not False
+                        or result.get("authorization_consumed") is not False
+                        or result.get("production_baseline_sha") != production_baseline_sha
+                        or deployment_state not in {"NOT_CREATED", "failure", "error"}):
+                    raise OrchestrationError("Prior task-scoped Deploy was not proven safe to retry")
+                safe_prior_attempts += 1
+                proven[(run_id, attempt)] = result
+                continue
+            raise OrchestrationError(
+                "Prior task-scoped Deploy result is unknown; read-only reconciliation required")
+    if safe_prior_attempts != expected_prior_attempts:
         raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
-    if safe_prior_runs != len(candidates):
-        raise OrchestrationError("Prior task-scoped Deploy result is unknown; read-only reconciliation required")
+    return proven
 
 
 def _find_task_authorization(repo_root: Path, candidate_sha: str, api) -> dict[str, str]:
@@ -914,6 +1390,9 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
     runs = _deploy_runs(api)
     if _active_deploy(runs):
         raise OrchestrationError("A Deploy workflow is already active")
+    event_ref = _task_dispatch_ref(authorization_id, run_id, attempt)
+    proven = _task_authorization_dispatch_history(api, repo_root, baseline, authorization_id, event_ref, runs)
+    assert_production_history(api, repo_root, baseline, runs=runs, proven_attempts=proven)
     claim = _task_auto_claim_ref(authorization_id)
     claim_exists = False
     try:
@@ -932,7 +1411,6 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
             raise OrchestrationError("Existing task-scoped authorization claim is invalid") from None
         claim_exists = True
     dispatches = _task_dispatch_refs(api, authorization_id)
-    event_ref = _task_dispatch_ref(authorization_id, run_id, attempt)
     existing_event = next((item for item in dispatches if "refs/tags/" + item["ref"] == event_ref), None)
     if existing_event:
         if existing_event["sha"] != sha:
@@ -967,9 +1445,6 @@ def dispatch_prepare(payload: dict, api, *, repo_root: Path, migration: str | No
                 "authorization_id": authorization_id}
     if claim_exists and not dispatches:
         raise OrchestrationError("Task-scoped claim has no dispatch marker; reconciliation required")
-    for previous in dispatches:
-        _prove_safe_prior_dispatch(api, previous, runs, authorization_id, baseline,
-                                   repo_root=repo_root)
     try:
         api.post("git/refs", {"ref": event_ref, "sha": sha})
     except APIError as error:
