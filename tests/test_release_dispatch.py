@@ -1965,3 +1965,38 @@ def test_me50_publisher_rerun_can_only_alias_original_attempt_two(monkeypatch, b
         def get_job_log_archive(self,job_id):
             return 'GITHUB_RUN_ATTEMPT: 2\n'+('changed' if broken=='log' and str(job_id)=='12' else '')
     assert orchestrator._prove_me50_nonexecuting_attempt(API(),run,ROOT) is (broken is None)
+
+
+@pytest.mark.parametrize('broken',[None,'step','log','deployment','claim','consumed','inventory','sha'])
+def test_me50_native_bootstrap_failure_is_nonexecution_only(monkeypatch, broken):
+    sha='e7661c52d4a0683d9331c3e28e7af19cdf62c86c'
+    run={'id':40088981534,'run_attempt':1,'head_sha':sha,'head_branch':'main',
+        'path':'.github/workflows/maxibot-deploy.yml','event':'workflow_dispatch','status':'completed','conclusion':'failure'}
+    names=[n for n,_ in orchestrator.DEPLOY_VALIDATE_JOB_STEPS+orchestrator.DEPLOY_VALIDATE_POST_STEPS]
+    jobs=[{'id':1,'name':'validate','status':'completed','conclusion':'success',
+          'steps':[{'name':n,'status':'completed','conclusion':'success'} for n in names]},
+          {'id':2,'name':'deploy','status':'completed','conclusion':'failure','runner_id':7,
+           'runner_name':'maxibot-owner-mac','steps':[{'name':'Set up job','status':'completed','conclusion':'failure'}]},
+          {'id':3,'name':'publish','status':'completed','conclusion':'success','steps':[]}]
+    for j in jobs:j.update(run_id=run['id'],run_attempt=1,head_sha=sha)
+    env={'CANDIDATE_SHA':sha,'RELEASE_MODE':'task-scoped-auto','PREPARE_RUN_ID':'40087913989',
+        'PREPARE_RUN_ATTEMPT':'1','TASK_AUTHORIZATION_ID':'maxibot-me50-diagnostics-recovery-20261024',
+        'APPROVE_PRODUCTION':'false','APPROVE_WORKER_BOOTSTRAP':'false'}
+    monkeypatch.setattr(orchestrator,'_validation_log_inputs',lambda _:env)
+    log="2026-10-24T11:13:01Z Current runner version: '2.338.0'\n2026-10-24T11:13:02Z Download action repository 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262'\n2026-10-24T11:17:45Z ##[error]Failed to download archive checkout/11d5960a326750d5838078e36cf38b85af677262 after 3 attempts.\n"
+    if broken=='step':jobs[1]['steps'].append({'name':'Checkout the approved candidate','status':'completed','conclusion':'success'})
+    if broken=='log':log+='2026-10-24T11:17:46Z ##[group]Run scripts/release_prod.sh\n'
+    if broken=='sha':run['head_sha']='0'*40
+    class API:
+        token='test'
+        def get(self,p):
+            if p.endswith('/jobs?per_page=100'):return {'total_count':4 if broken=='inventory' else 3,'jobs':jobs}
+            if p.endswith('/claimed'):return {'object':{'type':'commit','sha':'0'*40 if broken=='claim' else sha}}
+            if p.endswith('/consumed') and broken=='consumed':return {'object':{'type':'commit','sha':sha}}
+            if p.endswith(('/consumed','/revoked')):raise orchestrator.APIError(404)
+            if p.startswith('deployments?'):
+                return [{'id':47,'environment':'maxibot-production','payload':{'workflow_run_id':str(run['id']),'workflow_run_attempt':'1'}}] if broken=='deployment' else []
+            raise AssertionError(p)
+        def get_job_log_archive(self,_id):return log
+    proof=getattr(orchestrator,'_prove_me50_bootstrap_failure',lambda *_a:False)
+    assert proof(API(),run,ROOT,'ae6f5ea623e12fde4d0e2271023f7822a3f9822f') is (broken is None)
