@@ -1979,7 +1979,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         return (f"{title}\n\n🤖 {bot.display_name or bot.username}\n\n{detail}",
                 buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
     if screen.startswith((
-        "promotion_channel:", "promotion_landing:", "promotion_analytics:",
+        "promotion_landing:", "promotion_analytics:",
         "promotion_yandex:", "promotion_settings:", "promotion_target_prompt:",
         "ads:", "ads_",
     )):

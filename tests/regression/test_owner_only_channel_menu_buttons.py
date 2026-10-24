@@ -113,3 +113,27 @@ async def test_missing_maxibot_owner_configuration_hides_owner_buttons_without_r
 
     assert all(callback not in {f"ads:{channel.id}", f"channel:{channel.id}"} for _, callback in _button_pairs(channel_keyboard))
     assert all(callback != "subscription_ai" for _, callback in _button_pairs(subscription_keyboard))
+
+
+@pytest.mark.asyncio
+async def test_new_channel_admin_opens_channel_menu_without_entitlement(db, monkeypatch):
+    monkeypatch.setattr(menu.settings, "maxibot_owner_user_id", "maxibot-owner")
+    ordinary = Admin(external_id="new-test-user")
+    db.add(ordinary)
+    await db.flush()
+    channel = Channel(admin_id=ordinary.id, external_id="test-channel", title="Печенька", public_slug="pechenka")
+    db.add(channel)
+    await db.flush()
+
+    text, keyboard = await _render_channel(db, monkeypatch, ordinary, channel)
+
+    assert "Канал: Печенька" in text
+    assert text.startswith("📣 Продвижение")
+    callbacks = [callback for _, callback in _button_pairs(keyboard)]
+    assert f"promotion_yandex:{channel.id}" in callbacks
+    assert f"promotion_analytics:{channel.id}" in callbacks
+    assert f"delete:{channel.id}" in callbacks
+
+    # Paid promotion sections remain gated for users without channel entitlement.
+    paid_screen, _ = await menu.render_screen(db, ordinary, f"promotion_yandex:{channel.id}")
+    assert paid_screen == menu.subscription_text(channel.title)
