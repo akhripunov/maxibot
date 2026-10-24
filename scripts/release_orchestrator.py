@@ -497,6 +497,96 @@ def _prove_me50_nonexecuting_attempt(api, run: dict, repo_root: Path | None) -> 
         return False
 
 
+def _prove_me50_bootstrap_failure(api, run: dict, repo_root: Path | None, baseline: str) -> bool:
+    """Attest the one observed native checkout-download failure, never a release result."""
+    sha = "e7661c52d4a0683d9331c3e28e7af19cdf62c86c"
+    auth = "maxibot-me50-diagnostics-recovery-20261024"
+    checkout_pin = "11d5960a326750d5838078e36cf38b85af677262"
+    if (repo_root is None or str(run.get("id")) != "40088981534" or str(run.get("run_attempt")) != "1"
+            or run.get("head_sha") != sha or run.get("head_branch") != "main"
+            or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+            or run.get("event") != "workflow_dispatch" or run.get("status") != "completed"
+            or run.get("conclusion") != "failure"):
+        return False
+    try:
+        for path, expected in {
+            ".github/workflows/maxibot-deploy.yml": "6c8d76d24ef5847d3ec0539cc282d1a9e319134a3ecad093cd5709b502da7e9c",
+            "scripts/publish_release_to_linear.py": "90fc7dabd12245bc3d80d9c034fde06496f3ba896fd363b211a070186b32fe6f",
+        }.items():
+            blob = subprocess.check_output(["git", "show", f"{sha}:{path}"], cwd=repo_root,
+                stderr=subprocess.DEVNULL, timeout=10)
+            if hashlib.sha256(blob).hexdigest() != expected:
+                return False
+        response = api.get("actions/runs/40088981534/attempts/1/jobs?per_page=100")
+        jobs = response.get("jobs")
+        if not isinstance(jobs, list) or response.get("total_count") != 3 or len(jobs) != 3:
+            return False
+        by_name = {job.get("name"): job for job in jobs if isinstance(job, dict)}
+        if set(by_name) != {"validate", "deploy", "publish"} or len({j.get("id") for j in jobs}) != 3:
+            return False
+        for job in jobs:
+            if (type(job.get("id")) is not int or job["id"] <= 0
+                    or str(job.get("run_id")) != "40088981534" or str(job.get("run_attempt")) != "1"
+                    or job.get("head_sha") != sha or job.get("status") != "completed"):
+                return False
+        validate_job, deploy_job = by_name["validate"], by_name["deploy"]
+        names = [name for name, _ in DEPLOY_VALIDATE_JOB_STEPS + DEPLOY_VALIDATE_POST_STEPS]
+        if (validate_job.get("conclusion") != "success"
+                or [(s.get("name"), s.get("status"), s.get("conclusion")) for s in validate_job.get("steps", [])]
+                   != [(name, "completed", "success") for name in names]):
+            return False
+        steps = deploy_job.get("steps")
+        bootstrap = [("Set up job", "completed", "failure")]
+        if (deploy_job.get("conclusion") != "failure" or type(deploy_job.get("runner_id")) is not int
+                or deploy_job["runner_id"] <= 0 or deploy_job.get("runner_name") != "maxibot-owner-mac"
+                or not isinstance(steps, list)
+                or [(s.get("name"), s.get("status"), s.get("conclusion")) for s in steps]
+                   not in (bootstrap, bootstrap + [("Complete job", "completed", "success")])
+                or by_name["publish"].get("conclusion") not in {"success", "failure"}):
+            return False
+        env = _validation_log_inputs(api.get_job_log_archive(str(validate_job["id"])))
+        expected_env = {"CANDIDATE_SHA": sha, "RELEASE_MODE": "task-scoped-auto",
+            "PREPARE_RUN_ID": "40087913989", "PREPARE_RUN_ATTEMPT": "1", "TASK_AUTHORIZATION_ID": auth,
+            "APPROVE_PRODUCTION": "false", "APPROVE_WORKER_BOOTSTRAP": "false"}
+        if env is None or any(env.get(k) != v for k, v in expected_env.items()):
+            return False
+        log = api.get_job_log_archive(str(deploy_job["id"]))
+        lines = [line for line in log.splitlines() if line.strip()]
+        if (not lines or not all(_has_runner_timestamp(line) for line in lines)
+                or not _log_content(lines[0]).startswith("Current runner version:")
+                or f"Download action repository 'actions/checkout@{checkout_pin}'" not in log
+                or not any("##[error]Failed to download archive" in line and checkout_pin in line
+                           and line.endswith("after 3 attempts.") for line in lines)
+                or any(_log_content(line).startswith(("##[group]Run ", "RELEASE_STAGE=", "MAXIBOT_RELEASE_RESULT="))
+                       for line in lines)):
+            return False
+        record = json.loads(subprocess.check_output(["git", "show", f"{sha}:{record_path(auth)}"],
+            cwd=repo_root, text=True, stderr=subprocess.DEVNULL, timeout=10))
+        paths = candidate_scope_diff(repo_root, auth, baseline, sha)
+        validate_task_authorization(record=record, project="maxibot", authorization_id=auth,
+            candidate_sha=sha, current_main_sha=sha, production_sha=baseline, changed_paths=paths)
+        claim = api.get(f"git/ref/tags/maxibot-task-auth/{auth}/claimed")
+        if claim.get("object", {}).get("type") != "commit" or claim.get("object", {}).get("sha") != sha:
+            return False
+        for state in ("consumed", "revoked"):
+            try:
+                api.get(f"git/ref/tags/maxibot-task-auth/{auth}/{state}")
+                return False
+            except APIError as error:
+                if error.status != 404:
+                    return False
+        from maxibot_release_diagnostics import _all_deployments, _deployment_payload
+        for deployment in _all_deployments("", api.token, RetryBudget(), lambda p, *_a, **_kw: api.get(p)):
+            payload = _deployment_payload(deployment.get("payload"))
+            if payload is None or (str(payload.get("workflow_run_id")) == "40088981534"
+                    and str(payload.get("workflow_run_attempt")) == "1"):
+                return False
+        return True
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError,
+            APIError, OrchestrationError, AuthorizationError, DiagnosticError):
+        return False
+
+
 def assert_production_history(api, repo_root: Path, baseline: str, *, runs=None,
                               proven_attempts=None, current_run_id="",
                               current_attempt="", current_sha="", current_deployment_id=None) -> None:
@@ -568,6 +658,9 @@ def assert_production_history(api, repo_root: Path, baseline: str, *, runs=None,
                     or run.get("status") != "completed"):
                 raise OrchestrationError("Production operation is unresolved; reconciliation required")
             if _prove_me50_nonexecuting_attempt(api, run, repo_root):
+                verified[key] = None
+                continue
+            if _prove_me50_bootstrap_failure(api, run, repo_root, baseline):
                 verified[key] = None
                 continue
             try:
@@ -1270,6 +1363,10 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
                 proven[(run_id, str(attempt_number))] = None
                 continue
             if _prove_me50_nonexecuting_attempt(api, run, repo_root):
+                safe_prior_attempts += 1
+                proven[(run_id, str(attempt_number))] = None
+                continue
+            if _prove_me50_bootstrap_failure(api, run, repo_root, production_baseline_sha):
                 safe_prior_attempts += 1
                 proven[(run_id, str(attempt_number))] = None
                 continue
