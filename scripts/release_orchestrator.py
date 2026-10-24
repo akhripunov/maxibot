@@ -368,6 +368,135 @@ def _history_time(value):
         raise OrchestrationError("Production history timestamp is unknown; reconciliation required") from None
 
 
+def _prove_me50_nonexecuting_attempt(api, run: dict, repo_root: Path | None) -> bool:
+    """Read-only proof for the original queued cancellation and publisher-only rerun.
+
+    Evidence remains attributed to attempt 2. No result artifact for 1 or 3 is
+    synthesized, and no other run, SHA, attempt or workflow version is admitted.
+    """
+    sha = "d38e3613f50a5659c463572064272e4438763ea4"
+    attempt = str(run.get("run_attempt", ""))
+    if (repo_root is None or str(run.get("id")) != "40077453537" or attempt not in {"1", "3"}
+            or run.get("head_sha") != sha or run.get("head_branch") != "main"
+            or run.get("path") != ".github/workflows/maxibot-deploy.yml"
+            or run.get("event") != "workflow_dispatch" or run.get("status") != "completed"
+            or run.get("conclusion") not in {"cancelled", "failure"}):
+        return False
+    pins = {
+        ".github/workflows/maxibot-deploy.yml": "6c8d76d24ef5847d3ec0539cc282d1a9e319134a3ecad093cd5709b502da7e9c",
+        "scripts/run_release_workflow.py": "95043c6471973dc4ce33a26989028812fd2472c7c0260018f9208a8a65c87c65",
+        "scripts/release_prod.sh": "16d3d60ba59df4603291cb644fd90114e01b51ffa01ccd618ca70a9682c3691d",
+        "scripts/publish_release_to_linear.py": "90fc7dabd12245bc3d80d9c034fde06496f3ba896fd363b211a070186b32fe6f",
+        "scripts/ghcr_release_artifacts.py": "6bd4a7fd22af996f39368c3968cc7de9bd6cfeb320a009be724753fd74e8f356",
+    }
+    def jobs_for(number):
+        response = api.get(f"actions/runs/40077453537/attempts/{number}/jobs?per_page=100")
+        items = response.get("jobs")
+        if not isinstance(items, list) or response.get("total_count") != 3 or len(items) != 3:
+            raise ValueError("Incomplete historical job inventory")
+        by_name = {item.get("name"): item for item in items if isinstance(item, dict)}
+        if (set(by_name) != {"validate", "deploy", "publish"}
+                or len({item.get("id") for item in items}) != 3):
+            raise ValueError("Ambiguous historical job inventory")
+        for item in items:
+            if (str(item.get("run_id")) != "40077453537" or str(item.get("run_attempt")) != str(number)
+                    or item.get("head_sha") != sha or item.get("status") != "completed"
+                    or type(item.get("id")) is not int or item["id"] <= 0):
+                raise ValueError("Historical job identity changed")
+        return by_name
+    try:
+        for path, expected in pins.items():
+            blob = subprocess.check_output(["git", "show", f"{sha}:{path}"], cwd=repo_root,
+                stderr=subprocess.DEVNULL, timeout=10)
+            if hashlib.sha256(blob).hexdigest() != expected:
+                return False
+        auth = "maxibot-me50-v5-release-infra-20261024"
+        claim = api.get(f"git/ref/tags/maxibot-task-auth/{auth}/claimed")
+        if claim.get("object", {}).get("sha") != sha or claim.get("object", {}).get("type") != "commit":
+            return False
+        for state in ("consumed", "revoked"):
+            try:
+                api.get(f"git/ref/tags/maxibot-task-auth/{auth}/{state}")
+                return False
+            except APIError as error:
+                if error.status != 404:
+                    return False
+        from maxibot_release_diagnostics import _all_deployments, _deployment_payload
+        for deployment in _all_deployments(sha, api.token, RetryBudget(), lambda p, *_a, **_kw: api.get(p)):
+            payload = _deployment_payload(deployment.get("payload"))
+            if payload is None or (str(payload.get("workflow_run_id")) == "40077453537"
+                    and str(payload.get("workflow_run_attempt")) == attempt):
+                return False
+        jobs = jobs_for(attempt)
+        env = _validation_log_inputs(api.get_job_log_archive(str(jobs["validate"]["id"])))
+        expected_env = {"CANDIDATE_SHA": sha, "RELEASE_MODE": "task-scoped-auto",
+            "PREPARE_RUN_ID": "40076645136", "PREPARE_RUN_ATTEMPT": "1",
+            "TASK_AUTHORIZATION_ID": auth, "APPROVE_PRODUCTION": "false",
+            "APPROVE_WORKER_BOOTSTRAP": "false"}
+        if env is None or any(env.get(k) != v for k, v in expected_env.items()):
+            return False
+        if attempt == "1":
+            validate = jobs["validate"]
+            names = [name for name, _state in DEPLOY_VALIDATE_JOB_STEPS + DEPLOY_VALIDATE_POST_STEPS]
+            if (validate.get("conclusion") != "success"
+                    or [(s.get("name"), s.get("status"), s.get("conclusion")) for s in validate.get("steps", [])]
+                       != [(name, "completed", "success") for name in names]):
+                return False
+            deploy = jobs["deploy"]
+            return (deploy.get("conclusion") == "cancelled" and type(deploy.get("runner_id")) is int
+                    and deploy["runner_id"] == 0 and "runner_name" in deploy
+                    and deploy.get("runner_name") in {"", None}
+                    and deploy.get("steps") == [] and jobs["publish"].get("conclusion") in {"success", "failure"})
+        original = api.get("actions/runs/40077453537/attempts/2")
+        if (str(original.get("id")) != "40077453537" or str(original.get("run_attempt")) != "2"
+                or original.get("head_sha") != sha or original.get("head_branch") != "main"
+                or original.get("status") != "completed" or original.get("conclusion") != "failure"
+                or original.get("path") != run.get("path") or original.get("event") != "workflow_dispatch"):
+            return False
+        source_jobs = jobs_for("2")
+        rerun_start = _history_time(run.get("run_started_at"))
+        source_end = _history_time(original.get("updated_at"))
+        if source_end >= rerun_start:
+            return False
+        for name in ("validate", "deploy"):
+            previous, snapshot = source_jobs[name], jobs[name]
+            fields = ("name", "status", "conclusion", "head_sha", "head_branch", "labels", "runner_id",
+                      "runner_name", "runner_group_id", "runner_group_name", "started_at", "completed_at", "steps")
+            if any(previous.get(field) != snapshot.get(field) for field in fields):
+                return False
+            if type(snapshot.get("runner_id")) is not int or snapshot["runner_id"] <= 0:
+                return False
+            if not isinstance(snapshot.get("steps"), list) or not snapshot["steps"]:
+                return False
+            for item in [snapshot] + snapshot["steps"]:
+                if (not isinstance(item, dict) or item.get("status") != "completed"
+                        or item.get("conclusion") not in {"success", "failure", "skipped", "cancelled"}
+                        or _history_time(item.get("started_at")) > _history_time(item.get("completed_at"))):
+                    return False
+                for field in ("started_at", "completed_at"):
+                    stamp = _history_time(item.get(field))
+                    if stamp > source_end or stamp >= rerun_start:
+                        return False
+            if api.get_job_log_archive(str(previous["id"])) != api.get_job_log_archive(str(snapshot["id"])):
+                return False
+        source_log = api.get_job_log_archive(str(source_jobs["deploy"]["id"]))
+        if not re.search(r"\bGITHUB_RUN_ATTEMPT: 2\s*$", source_log, re.M):
+            return False
+        proof = _verified_deploy_evidence(api, original)
+        if proof is None or proof[0] != "sha256:c1cb813bc2c0ace2931e226935a2b830119c7c6ac5c5a48ce3a2dfbc1584a121":
+            return False
+        evidence = proof[1]
+        return (evidence.get("task_authorization_id") == auth and evidence.get("mode") == "task-scoped-auto"
+            and str(evidence.get("prepare_run_id")) == "40076645136" and str(evidence.get("prepare_run_attempt")) == "1"
+            and evidence.get("status") == evidence.get("release_state") == "FAILED_PRE_SWITCH"
+            and evidence.get("production_changed") is False and evidence.get("authorization_consumed") is False
+            and evidence.get("production_baseline_sha") == "ae6f5ea623e12fde4d0e2271023f7822a3f9822f"
+            and evidence.get("_verified_deployment_api_match") == "NOT_CREATED")
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError,
+            APIError, OrchestrationError, DiagnosticError, ArtifactError):
+        return False
+
+
 def assert_production_history(api, repo_root: Path, baseline: str, *, runs=None,
                               proven_attempts=None, current_run_id="",
                               current_attempt="", current_sha="", current_deployment_id=None) -> None:
@@ -436,6 +565,9 @@ def assert_production_history(api, repo_root: Path, baseline: str, *, runs=None,
                     or run.get("path") != listed.get("path") or run.get("event") != listed.get("event")
                     or run.get("status") != "completed"):
                 raise OrchestrationError("Production operation is unresolved; reconciliation required")
+            if _prove_me50_nonexecuting_attempt(api, run, repo_root):
+                verified[key] = None
+                continue
             try:
                 evidence = cached.get(key) or _verified_deploy_evidence(api, run)
             except (OrchestrationError, APIError, ArtifactError):
@@ -1132,6 +1264,10 @@ def _prove_safe_prior_dispatch(api, dispatch_ref: dict, runs: list[dict],
                 continue
             if _prove_historical_guard_failure(api, run, candidate, prepare_run_id,
                                                prepare_attempt, authorization_id, repo_root):
+                safe_prior_attempts += 1
+                proven[(run_id, str(attempt_number))] = None
+                continue
+            if _prove_me50_nonexecuting_attempt(api, run, repo_root):
                 safe_prior_attempts += 1
                 proven[(run_id, str(attempt_number))] = None
                 continue

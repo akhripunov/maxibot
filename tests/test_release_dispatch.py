@@ -1883,3 +1883,84 @@ def test_verified_checkpoint_retires_only_completed_older_history(tmp_path, monk
     old['updated_at'] = '2026-10-24T10:01:00Z'  # A later retry is not retired.
     with pytest.raises(orchestrator.OrchestrationError, match='reconciliation'):
         orchestrator.assert_production_history(api, tmp_path, baseline)
+
+
+def test_me50_cancelled_before_runner_has_no_production_execution(tmp_path, monkeypatch):
+    run = {'id':40077453537,'run_attempt':1,'head_sha':'d38e3613f50a5659c463572064272e4438763ea4',
+        'head_branch':'main','path':'.github/workflows/maxibot-deploy.yml','event':'workflow_dispatch',
+        'status':'completed','conclusion':'cancelled'}
+    prefix = '2026-10-24T08:17:31Z '
+    env={'CANDIDATE_SHA':run['head_sha'],'RELEASE_MODE':'task-scoped-auto',
+        'PREPARE_RUN_ID':'40076645136','PREPARE_RUN_ATTEMPT':'1',
+        'TASK_AUTHORIZATION_ID':'maxibot-me50-v5-release-infra-20261024',
+        'APPROVE_PRODUCTION':'false','APPROVE_WORKER_BOOTSTRAP':'false'}
+    log=prefix+'##[group]Run python3 scripts/validate_release_dispatch.py\n'+prefix+'env:\n'
+    log+=''.join(prefix+'  '+k+': '+v+'\n' for k,v in env.items())+prefix+'##[endgroup]\n'
+    names=[n for n,_ in orchestrator.DEPLOY_VALIDATE_JOB_STEPS+orchestrator.DEPLOY_VALIDATE_POST_STEPS]
+    jobs=[{'id':11,'name':'validate','status':'completed','conclusion':'success',
+           'steps':[{'name':n,'status':'completed','conclusion':'success'} for n in names]},
+          {'id':12,'name':'deploy','status':'completed','conclusion':'cancelled','runner_id':0,'runner_name':'','steps':[]},
+          {'id':13,'name':'publish','status':'completed','conclusion':'success','steps':[]}]
+    for j in jobs:j.update(run_id=run['id'],run_attempt=1,head_sha=run['head_sha'])
+    class API:
+        token='test'
+        def get(self,p):
+            if p.endswith('/jobs?per_page=100'):return {'total_count':3,'jobs':jobs}
+            if p.endswith('/claimed'):return {'object':{'type':'commit','sha':run['head_sha']}}
+            if p.endswith(('/consumed','/revoked')):raise orchestrator.APIError(404)
+            if p.startswith('deployments?'):return []
+            raise AssertionError(p)
+        def get_job_log_archive(self,_id):return log
+    proof=getattr(orchestrator,'_prove_me50_nonexecuting_attempt',lambda *_a:False)
+    assert proof(API(),run,ROOT)
+    jobs[1]['runner_id']=77
+    assert not proof(API(),run,ROOT)
+
+
+@pytest.mark.parametrize('broken', [None,'timestamp','runner','log','digest','deployment','extra_job','extra_attempt'])
+def test_me50_publisher_rerun_can_only_alias_original_attempt_two(monkeypatch, broken):
+    import copy
+    sha='d38e3613f50a5659c463572064272e4438763ea4'
+    run={'id':40077453537,'run_attempt':3,'head_sha':sha,'head_branch':'main',
+         'path':'.github/workflows/maxibot-deploy.yml','event':'workflow_dispatch',
+         'status':'completed','conclusion':'failure','run_started_at':'2026-10-24T08:50:37Z'}
+    original={**run,'run_attempt':2,'updated_at':'2026-10-24T08:44:44Z'}
+    env={'CANDIDATE_SHA':sha,'RELEASE_MODE':'task-scoped-auto','PREPARE_RUN_ID':'40076645136',
+         'PREPARE_RUN_ATTEMPT':'1','TASK_AUTHORIZATION_ID':'maxibot-me50-v5-release-infra-20261024',
+         'APPROVE_PRODUCTION':'false','APPROVE_WORKER_BOOTSTRAP':'false'}
+    monkeypatch.setattr(orchestrator,'_validation_log_inputs',lambda _log:env)
+    jobs=[]
+    for n,name in enumerate(('validate','deploy','publish'),1):
+        jobs.append({'id':n,'name':name,'run_id':run['id'],'run_attempt':2,'head_sha':sha,
+          'head_branch':'main','status':'completed','conclusion':'failure' if name!='validate' else 'success',
+          'runner_id':1,'runner_name':'mac','runner_group_id':1,'runner_group_name':'Default',
+          'labels':['self-hosted'],'started_at':'2026-10-24T08:31:01Z','completed_at':'2026-10-24T08:44:12Z',
+          'steps':[{'name':'execute','status':'completed','conclusion':'success',
+                    'started_at':'2026-10-24T08:32:00Z','completed_at':'2026-10-24T08:41:34Z'}]})
+    snapshots=copy.deepcopy(jobs)
+    for j in snapshots:j.update(id=j['id']+10,run_attempt=3)
+    digest='sha256:c1cb813bc2c0ace2931e226935a2b830119c7c6ac5c5a48ce3a2dfbc1584a121'
+    result={'task_authorization_id':env['TASK_AUTHORIZATION_ID'],'mode':'task-scoped-auto',
+        'prepare_run_id':'40076645136','prepare_run_attempt':'1','status':'FAILED_PRE_SWITCH',
+        'release_state':'FAILED_PRE_SWITCH','production_changed':False,'authorization_consumed':False,
+        'production_baseline_sha':'ae6f5ea623e12fde4d0e2271023f7822a3f9822f',
+        '_verified_deployment_api_match':'NOT_CREATED'}
+    monkeypatch.setattr(orchestrator,'_verified_deploy_evidence',lambda *_a:('sha256:'+'0'*64 if broken=='digest' else digest,result))
+    if broken=='timestamp':snapshots[1]['steps'][0]['completed_at']='2026-10-24T08:51:00Z'
+    if broken=='runner':snapshots[1]['runner_id']=0
+    if broken=='extra_job':snapshots.append({**snapshots[1],'id':99,'name':'other'})
+    if broken=='extra_attempt':run['run_attempt']=4
+    class API:
+        token='test'
+        def get(self,p):
+            if p.endswith('/attempts/2'):return original
+            if p.endswith('/2/jobs?per_page=100'):return {'total_count':3,'jobs':jobs}
+            if p.endswith('/3/jobs?per_page=100'):return {'total_count':len(snapshots),'jobs':snapshots}
+            if p.endswith('/claimed'):return {'object':{'type':'commit','sha':sha}}
+            if p.endswith(('/consumed','/revoked')):raise orchestrator.APIError(404)
+            if p.startswith('deployments?'):
+                return [{'id':47,'environment':'maxibot-production','payload':{'workflow_run_id':str(run['id']),'workflow_run_attempt':'3'}}] if broken=='deployment' else []
+            raise AssertionError(p)
+        def get_job_log_archive(self,job_id):
+            return 'GITHUB_RUN_ATTEMPT: 2\n'+('changed' if broken=='log' and str(job_id)=='12' else '')
+    assert orchestrator._prove_me50_nonexecuting_attempt(API(),run,ROOT) is (broken is None)
