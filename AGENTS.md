@@ -5,7 +5,7 @@
 - This repository is `akhripunov/maxibot`. GitHub exact commits are the durable source for code; Linear records project context, task decisions, and release evidence.
 - Read [the role registry](docs/ROLE_REGISTRY.md), [orchestration protocol](docs/ORCHESTRATION_PROTOCOL.md), and the relevant MAXIBOT Linear sections before specialized work. Do not load the whole historical archive by default.
 - Product and operational context: [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28), [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95), and [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1).
-- Release sources are MAXIBOT's [Linear release rules](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588), [release journal](https://linear.app/bestuzhev/document/zhurnal-relizov-maxibot-3e615fe7e879), `docs/RELEASE_AUTHORIZATION.md`, and `docs/RELEASE_AUTOMATION.md`.
+- Release sources are PROSTOR's [canonical Linear release rules](https://linear.app/bestuzhev/document/pravila-relizov-fac48f62832a), [release journal](https://linear.app/bestuzhev/document/zhurnal-relizov-maxibot-3e615fe7e879), `docs/RELEASE_AUTHORIZATION.md`, and `docs/RELEASE_AUTOMATION.md`.
 - GPoint and MAXIBOT are independent projects with separate authorization, workflows, runners, migrations, artifacts, release ledgers, Linear documents, and production environments. Never apply GPoint release procedures or authorization to MAXIBOT, or MAXIBOT release procedures or authorization to GPoint. Resolve each project's rules independently for cross-project work.
 
 ## Critical product and safety invariants
