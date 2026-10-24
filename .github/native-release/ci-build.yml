@@ -11,6 +11,8 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  deployments: read
 concurrency:
   group: MAXIBOT-native-build
   cancel-in-progress: false
@@ -22,6 +24,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
     env:
       MAX_CLIENT_MODE: stub
       MAX_RUN_POLLING: 'false'
@@ -47,6 +53,24 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: pyproject.toml
+      - name: Plan exact candidate against immutable production evidence
+        id: impact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --output "$RUNNER_TEMP/maxibot-v3-impact.json"
+      - name: Check frozen paid-traffic paths against the verified baseline
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          IMPACT_PLAN: ${{ runner.temp }}/maxibot-v3-impact.json
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          RELEASE_TRIGGER_ACTOR: ${{ github.actor }}
+          RELEASE_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          git diff --check "${CANDIDATE_SHA}^" "$CANDIDATE_SHA"
+          python3 -B scripts/prepare_frozen_path_guard.py
+          echo 'FROZEN_PATH_REGRESSION=PASS' >> "$GITHUB_STEP_SUMMARY"
       - name: Install existing test dependencies
         run: |
           python - <<'DEPS' > "$RUNNER_TEMP/test-requirements.txt"
@@ -57,8 +81,10 @@ jobs:
           DEPS
           python -m pip install --no-cache-dir pip==26.2.2
           python -m pip install -r "$RUNNER_TEMP/test-requirements.txt"
-      - name: Run the complete existing MAXIBOT suite
-        run: python -m pytest -q
+      - name: Run the complete exact-candidate MAXIBOT suite
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -B scripts/maxibot_impact_v3.py --candidate "$CANDIDATE_SHA" --run-tests "$RUNNER_TEMP/maxibot-v3-impact.json"
   build:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner
     needs: tests
@@ -111,5 +137,11 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
+          set -euo pipefail
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          IMAGE="ghcr.io/akhripunov/maxibot-vps-api@$IMAGE_DIGEST"
+          docker pull "$IMAGE"
+          identity="$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source-sha"}}|{{index .Config.Labels "org.maxibot.release.sha"}}')"
+          test "$identity" = "linux/amd64|$CANDIDATE_SHA|$CANDIDATE_SHA|$CANDIDATE_SHA"
           printf 'CI_BUILD_ONLY: `%s` → `ghcr.io/akhripunov/maxibot-vps-api@%s`\n' "$CANDIDATE_SHA" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo 'MAXIBOT_IMAGE_DIGEST_READBACK=PASS' >> "$GITHUB_STEP_SUMMARY"

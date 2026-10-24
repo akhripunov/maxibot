@@ -67,7 +67,9 @@ class NativeBuildBoundaryTests(unittest.TestCase):
 
     def test_build_cannot_bypass_existing_safety_suite(self):
         if (ROOT / 'pyproject.toml').exists():
-            self.assertIn('python -m pytest -q', self.source)
+            self.assertIn('scripts/maxibot_impact_v3.py --candidate', self.source)
+            self.assertIn('cmd = [sys.executable, "-m", "pytest", "-q"]',
+                          (ROOT / 'scripts/maxibot_impact_v3.py').read_text())
             self.assertIn('needs: tests', self.source)
             self.assertIn("MAX_RUN_POLLING: 'false'", self.source)
             self.assertIn("ADS_AUTOPILOT_ENABLED: 'false'", self.source)
@@ -76,6 +78,22 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             self.assertIn('pnpm test:release', self.source)
             self.assertIn('needs: [javascript, python]', self.source)
             self.assertIn('pnpm typecheck', self.source)
+
+    def test_maxibot_keeps_frozen_path_gate_in_candidate_ci(self):
+        if not (ROOT / 'pyproject.toml').exists():
+            return
+        self.assertIn('scripts/prepare_frozen_path_guard.py', self.source)
+        self.assertIn('scripts/frozen_path_guard.sh',
+                      (ROOT / 'scripts/prepare_frozen_path_guard.py').read_text())
+        self.assertIn('FROZEN_PATH_REGRESSION=PASS', self.source)
+
+    def test_published_digest_is_pulled_and_candidate_identity_verified(self):
+        if not (ROOT / 'pyproject.toml').exists():
+            return
+        self.assertIn('ghcr.io/akhripunov/maxibot-vps-api@$IMAGE_DIGEST', self.source)
+        self.assertIn('docker pull "$IMAGE"', self.source)
+        self.assertIn('org.maxibot.release.sha', self.source)
+        self.assertIn('linux/amd64', self.source)
 
     def test_patched_pip_bootstrap_precedes_dependency_install(self):
         bootstrap = 'python -m pip install --no-cache-dir pip==26.2.2'
