@@ -49,7 +49,6 @@ def test_first_cutover_preflight_checks_immutable_build_and_fails_closed_before_
     assert "MAXIBOT_PRODUCTION_SSH_KEY" in preflight
     assert "MAXIBOT_PRODUCTION_KNOWN_HOSTS" in preflight
     assert "repos/$GITHUB_REPOSITORY/environments/production" in preflight
-    assert ".prevent_self_review == false" in preflight
     assert "required_reviewers" in preflight
     assert "https://api.maxibot.pro/health/ready" in preflight
     assert "public_ready" in preflight
@@ -100,8 +99,9 @@ def test_preflight_is_read_only_and_only_the_explicit_apply_job_changes_services
     assert "inputs.confirm_apply == 'APPLY_FIRST_COMPOSE_TO_KAMAL'" in workflow["jobs"]["apply"]["if"]
 
 
-def test_environment_readback_uses_a_supported_github_token_permission():
-    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+def test_environment_readback_uses_supported_permission_and_actual_github_response_shape():
+    workflow_text = WORKFLOW_PATH.read_text()
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
 
     for job_name in ("preflight", "apply"):
         permissions = workflow["jobs"][job_name]["permissions"]
@@ -109,9 +109,42 @@ def test_environment_readback_uses_a_supported_github_token_permission():
         assert "administration" not in permissions
         commands = "\n".join(step.get("run", "") for step in workflow["jobs"][job_name]["steps"])
         assert "repos/$GITHUB_REPOSITORY/environments/production" in commands
-        assert ".prevent_self_review == false" in commands
-        assert "required_reviewers" in commands
 
+    filters = re.findall(
+        r"""jq -e --arg owner .*? '
+(.*?)
+\s*' <<< "\$environment" >/dev/null""",
+        workflow_text,
+        re.DOTALL,
+    )
+    assert len(filters) == 2
+
+    environment = {
+        "prevent_self_review": None,
+        "can_admins_bypass": True,
+        "protection_rules": [
+            {
+                "type": "required_reviewers",
+                "prevent_self_review": False,
+                "reviewers": [{"type": "User", "reviewer": {"login": "akhripunov"}}],
+            },
+            {"type": "branch_policy", "reviewers": []},
+        ],
+    }
+    for jq_filter in filters:
+        def passes(response):
+            return subprocess.run(
+                ["jq", "-e", "--arg", "owner", "akhripunov", jq_filter],
+                input=json.dumps(response),
+                text=True,
+                capture_output=True,
+                check=False,
+            ).returncode == 0
+
+        assert passes(environment)
+        environment["protection_rules"][0]["prevent_self_review"] = True
+        assert not passes(environment)
+        environment["protection_rules"][0]["prevent_self_review"] = False
 
 def test_existing_build_sha_must_be_exact_and_ancestor_of_dispatch_main():
     workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)

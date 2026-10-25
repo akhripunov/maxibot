@@ -120,7 +120,7 @@ jobs:
           jq -e '[.jobs[] | select(.name == "deploy" and .conclusion == "skipped")] | length == 1' <<< "$build_jobs" >/dev/null
           environment="$(gh api "repos/$GITHUB_REPOSITORY/environments/production")"
           jq -e --arg owner "$GITHUB_REPOSITORY_OWNER" '
-            .prevent_self_review == false
+            ([.protection_rules[]? | select(.type == "required_reviewers") | .prevent_self_review] == [false])
             and ([.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]? | (.reviewer.login // .login // empty) | ascii_downcase] | unique) == [($owner | ascii_downcase)]
           ' <<< "$environment" >/dev/null
           for state in queued in_progress; do
@@ -383,7 +383,7 @@ jobs:
           test "$CONFIRM_APPLY" = APPLY_FIRST_COMPOSE_TO_KAMAL
           environment="$(gh api "repos/$GITHUB_REPOSITORY/environments/production")"
           jq -e --arg owner "$GITHUB_REPOSITORY_OWNER" '
-            .prevent_self_review == false
+            ([.protection_rules[]? | select(.type == "required_reviewers") | .prevent_self_review] == [false])
             and ([.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]? | (.reviewer.login // .login // empty) | ascii_downcase] | unique) == [($owner | ascii_downcase)]
           ' <<< "$environment" >/dev/null
           for state in queued in_progress; do
