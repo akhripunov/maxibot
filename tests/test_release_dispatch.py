@@ -973,7 +973,8 @@ def test_deploy_workflow_keeps_diagnostic_ready_distinct_from_internal_preflight
     publication = workflow.split("- name: Publish preflight result to MAXIBOT Linear", 1)[1]
     assert "inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PASS' && 'READY_FOR_OWNER'" in publication
     assert "needs.deploy.outputs.preflight == 'PASS' && 'PASS'" in publication
-    assert 'workflows: ["MAXIBOT — Prepare"]' in controller
+    assert "workflow_run:" not in controller.split("on:", 1)[1].split("permissions:", 1)[0]
+    assert "if: ${{ false }}" in controller
     assert '"mode": "task-scoped-auto"' in (ROOT / "scripts/release_orchestrator.py").read_text()
     assert '"preflight", "production", "task-scoped-auto"' in (ROOT / "scripts/run_release_workflow.py").read_text()
 

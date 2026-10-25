@@ -195,9 +195,10 @@ class PrepareCoalescingTests(unittest.TestCase):
         ):
             start = workflow.index(expensive)
             self.assertIn(gate, workflow[start:start + 250], expensive)
-        self.assertIn("github.event.workflow_run.head_sha == github.sha", (
-            ROOT / ".github" / "workflows" / "maxibot-auto-preflight.yml"
-        ).read_text())
+        auto = (ROOT / ".github" / "workflows" / "maxibot-auto-preflight.yml").read_text()
+        auto_events = auto.split("on:", 1)[1].split("permissions:", 1)[0]
+        self.assertNotIn("workflow_run:", auto_events)
+        self.assertIn("if: ${{ false }}", auto)
         publish_if = workflow[workflow.index("needs: prepare"):workflow.index("runs-on: ubuntu-latest", workflow.index("needs: prepare"))]
         self.assertIn("always() && github.ref == 'refs/heads/main'", publish_if)
         self.assertIn("needs.prepare.outputs.coalescing != 'SUPERSEDED'", publish_if)
