@@ -1,4 +1,4 @@
-"""Security boundaries of the dormant Native First CI/build candidate.
+"""Security boundaries of the MAXIBOT Native First workflow.
 
 These tests do not attest to production readiness or hosted cache performance.
 """
@@ -7,7 +7,7 @@ import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = ROOT / ".github/native-release/ci-build.yml"
+TEMPLATE = ROOT / ".github/workflows/maxibot-native-release.yml"
 
 
 class NativeBuildBoundaryTests(unittest.TestCase):
@@ -15,11 +15,25 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertTrue(TEMPLATE.is_file(), "Native CI/build candidate is missing")
         self.source = TEMPLATE.read_text()
 
-    def test_candidate_is_not_an_active_second_pipeline(self):
-        self.assertFalse((ROOT / ".github/workflows/native-release.yml").exists())
+    def test_native_candidate_ci_is_active_and_single_workflow(self):
+        self.assertFalse((ROOT / ".github/native-release/ci-build.yml").exists())
+        self.assertIn("codex/native-release-maxibot", self.source)
+        self.assertIn("- main", self.source)
         self.assertIn("workflow_dispatch:", self.source)
         self.assertNotIn("workflow_run:", self.source)
         self.assertNotIn("workflow_call:", self.source)
+
+    def test_candidate_sha_is_used_for_all_events(self):
+        self.assertIn("CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.candidate }}", self.source)
+        self.assertEqual(self.source.count("ref: ${{ env.CANDIDATE_SHA }}"), 3)
+        self.assertIn("tags: ghcr.io/akhripunov/maxibot-vps-api:${{ env.CANDIDATE_SHA }}", self.source)
+        self.assertNotIn("${{ inputs.candidate }}", self.source)
+
+    def test_main_push_deploy_requires_owner_and_native_production_environment(self):
+        deploy = self.source.split("\n  deploy:\n", 1)[1]
+        self.assertIn("github.ref == 'refs/heads/main' && github.actor == github.repository_owner", deploy)
+        self.assertIn("environment:\n      name: production", deploy)
+        self.assertIn("deployments: write", deploy)
 
     def test_write_job_requires_owner_main_and_exact_candidate(self):
         self.assertIn("github.actor == github.repository_owner", self.source)
@@ -46,6 +60,7 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertNotIn('docker load', self.source)
         self.assertNotIn('upload-artifact', self.source)
         self.assertNotIn('gh release create', self.source)
+        self.assertIn('docker buildx imagetools inspect "$IMAGE"', self.source)
 
     def test_buildkit_attestations_have_no_production_secret_inputs(self):
         if not (ROOT / 'pyproject.toml').exists():
@@ -110,6 +125,9 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("config --quiet", self.source)
         self.assertIn("up -d --no-build --no-deps --wait", self.source)
         self.assertIn("MAX_RUN_POLLING", self.source)
+        self.assertIn("maxibot-vps-db-1 --format '{{.Id}}'", self.source)
+        self.assertIn("maxibot-vps-redis-1 --format '{{.Id}}'", self.source)
+        self.assertIn("health/live", self.source)
         self.assertIn("worker_health_preflight.py", self.source)
         self.assertIn("-- alembic app/db/models.py docker-compose.vps.yml", self.source)
         self.assertIn("-- docs/frozen_paths.yaml scripts/frozen_path_guard.sh", self.source)
@@ -128,8 +146,10 @@ class NativeBuildBoundaryTests(unittest.TestCase):
     def test_published_digest_is_pulled_and_candidate_identity_verified(self):
         if not (ROOT / 'pyproject.toml').exists():
             return
-        self.assertIn('ghcr.io/akhripunov/maxibot-vps-api@$IMAGE_DIGEST', self.source)
-        self.assertIn('docker pull "$IMAGE"', self.source)
+        self.assertIn('docker buildx imagetools inspect "$IMAGE"', self.source)
+        deploy = self.source.split("\n  deploy:\n", 1)[1]
+        self.assertIn('docker pull "$image"', deploy)
+        self.assertIn(".RepoDigests", deploy)
         self.assertIn('org.maxibot.release.sha', self.source)
         self.assertIn('linux/amd64', self.source)
 

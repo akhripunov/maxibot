@@ -23,7 +23,7 @@
 
 ## Scope and authority
 
-Local implementation/test/review/commits are authorized. OWNER selected ROLE=DEVOPS in this chat after the initial DEV selection. GitHub publication, hosted runs, new secrets/access permissions, production cutover, database/ACL mutation and starting GSales are not authorized by the current local-only scope. Existing V5 remains active until a separately authorized verified cutover. Completed local work is LOCAL_PENDING_RELEASE, not COMPLETE/READY_FOR_RELEASE.
+OWNER's MAXIBOT DevOps addendum authorizes the scoped first Native First cycle through GitHub publication, hosted CI/Build, GHCR, and production Deploy/Verify, subject to the stated live-state, backup/recovery, scope, Poller, and Environment gates. This supersedes the earlier local-only scope for MAXIBOT; it does not authorize database/ACL migration, changes to protected product paths, GPoint operations, bypassing repository/environment controls, or premature legacy deletion.
 
 ## Phase A evidence — observed on 24 October 2026
 
@@ -54,9 +54,9 @@ Latest-eight-run API snapshots showed terminal runs. An exhaustive queued/in_pro
 - [ ] Complete full active-run/history reconciliation, migration heads/rollback identity, external backup storage/restore scope and remaining security gate inventory before declaring Phase A complete.
 - [ ] Measure each existing suite/stage separately; use existing run telemetry instead of creating a telemetry service. Do not label combined stages as separately measured.
 
-## Task 2 — dormant native CI/build implementation (current local slice)
+## Task 2 — Native First workflow implementation
 
-**Files:** `.github/native-release/ci-build.yml`, `tests/test_native_build_boundary.py`; GPoint additionally `infra/production/Miniapp.Dockerfile`.
+**MAXIBOT files:** `.github/workflows/maxibot-native-release.yml`, `tests/test_native_build_boundary.py`. This continues the existing candidate history; it is not a new workflow implementation.
 
 **Consumes:** exact source SHA selected by OWNER dispatch, existing dependency files and tests. **Produces:** CI_BUILD_ONLY image digest(s) in native job summaries/step outputs; no deployment approval.
 
@@ -65,7 +65,7 @@ Latest-eight-run API snapshots showed terminal runs. An exhaustive queued/in_pro
 - [x] Remove the new CI/build candidate's calls to `scripts/maxibot_impact_v3.py` and `scripts/prepare_frozen_path_guard.py`; run the complete `python -m pytest -q` suite instead of a controller-managed selective plan.
 - [x] Retain full existing MAXIBOT pytest invocation and GPoint workspace/type/release/root checks. These build templates do not replace all canonical disposable DB/image/Eros/Playwright gates yet.
 - [x] Provide separate Mini App static image containing /dist; include its actual shared contracts, compile no backend, and never run an application process in that image.
-- [x] Verify unit boundaries and actionlint. Keep candidates outside .github/workflows so no second pipeline can execute.
+- [x] Move the existing MAXIBOT candidate into the standard workflow directory and add one owner-gated tests → build → deploy path; no reusable workflow or controller.
 - [ ] Prove each native Docker build, GHCR digest/run provenance and warm-cache behavior in an authorized isolated hosted rehearsal. A local build cannot prove GitHub cache or registry publication.
 
 ## Task 3 — complete mandatory CI/image eligibility before activation
@@ -80,7 +80,7 @@ Latest-eight-run API snapshots showed terminal runs. An exhaustive queued/in_pro
 
 ## Task 4 — native authorization, deploy and Verify
 
-**Files:** final `.github/workflows/release.yml` assembled from the staged candidate; only existing necessary safety helpers or small stateless checks may remain. No new orchestrator/state service.
+**MAXIBOT file:** `.github/workflows/maxibot-native-release.yml`, evolved from the existing candidate commits; only necessary existing application-safety checks remain. No new orchestrator/state service.
 
 - [ ] Express one explicit dispatch-bound project/SHA/scope/baseline/risk contract through native workflow inputs and existing authorization checks. Preserve revoked/consumed/unknown-history handling; agree and review any change in how durable authorization consumption is evidenced before replacing it. Native Deployments track installation, not OWNER authority.
 - [ ] Verify current main, exact digests, successful build/run provenance, platform, baseline/live DB heads and absence of conflicting Apply immediately before mutation. Use native Environment production and concurrency cancel-in-progress:false. Do not silently remove existing Environment protection.
@@ -111,7 +111,7 @@ Latest-eight-run API snapshots showed terminal runs. An exhaustive queued/in_pro
 
 ## Current result
 
-Local Native CI/Build/GHCR plus a gated runtime-only Deploy/Verify candidate. The Deploy protects the exact digest/SHA, freezes the protected-path manifest/guard, validates Compose before pull, and updates only API then the sole Worker with `--no-deps --wait`; it blocks Alembic/model/production-Compose changes until migration backup/recovery gates are implemented. It does not replace or invoke V3/V5 controllers. Full project suite, actionlint, hosted run and production cutover are not verified on the latest candidate. No active workflow, production service, database, secret, runner or network setting was changed; cutover and legacy retirement remain incomplete.
+Current local work retains the existing native candidate lineage and installs its single Native Release workflow in `.github/workflows/`. Push to the candidate branch runs tests and GHCR Build; exact owner-authored main pushes run tests → Build → protected production Deploy/Verify. Deployment verifies digest, Git SHA, Compose config, API live/ready, Worker heartbeat, sole Poller, and unchanged PostgreSQL/Redis containers and PostgreSQL volume; database/model/production-Compose diffs remain fail-closed. Production checks on 25 October found API/Worker/PostgreSQL healthy at `50335ab097ad49e8833120f9f5000c855b1acbc0`, exactly one running MAX Poller, and an exact-baseline dump dated 24 October (70.5 MB, archive catalog 617 entries). No schema-changing path is present in this candidate. Hosted workflow and first cutover remain NOT_RUN; no production service or DB was changed.
 
 ## NATIVE FIRST dependency audit — local CI/build candidate
 

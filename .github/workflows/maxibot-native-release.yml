@@ -1,7 +1,9 @@
-# DORMANT Native First candidate. GitHub does not discover workflows here.
-# Production Deploy stays behind the repository's protected production Environment.
-name: MAXIBOT — Native CI and GHCR build candidate
+name: MAXIBOT — Native Release
 on:
+  push:
+    branches:
+      - codex/native-release-maxibot
+      - main
   workflow_dispatch:
     inputs:
       candidate:
@@ -21,11 +23,14 @@ concurrency:
   group: maxibot-production-release
   cancel-in-progress: false
 env:
-  CANDIDATE_SHA: ${{ inputs.candidate }}
+  CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.candidate }}
   PYTHONDONTWRITEBYTECODE: '1'
 jobs:
   tests:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/codex/native-release-maxibot' && github.actor == github.repository_owner) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -38,18 +43,23 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.candidate }}
+          ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify current main before executing candidate code
+      - name: Verify exact candidate before executing its code
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          test "$CURRENT_MAIN" = "$CANDIDATE_SHA"
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+            test "$CURRENT_MAIN" = "$CANDIDATE_SHA"
+          else
+            test "$GITHUB_REF" = refs/heads/codex/native-release-maxibot
+            test "$GITHUB_SHA" = "$CANDIDATE_SHA"
+          fi
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
@@ -70,7 +80,10 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m pytest -q
   build:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/codex/native-release-maxibot' && github.actor == github.repository_owner) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner)
     needs: tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -84,18 +97,23 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.candidate }}
+          ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify current main before executing candidate code
+      - name: Verify exact candidate before building
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
-          test "$CURRENT_MAIN" = "$CANDIDATE_SHA"
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+            test "$CURRENT_MAIN" = "$CANDIDATE_SHA"
+          else
+            test "$GITHUB_REF" = refs/heads/codex/native-release-maxibot
+            test "$GITHUB_SHA" = "$CANDIDATE_SHA"
+          fi
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
@@ -112,11 +130,11 @@ jobs:
           push: true
           sbom: true
           provenance: mode=min
-          tags: ghcr.io/akhripunov/maxibot-vps-api:${{ inputs.candidate }}
+          tags: ghcr.io/akhripunov/maxibot-vps-api:${{ env.CANDIDATE_SHA }}
           labels: |
-            org.opencontainers.image.revision=${{ inputs.candidate }}
-            org.opencontainers.image.source-sha=${{ inputs.candidate }}
-            org.maxibot.release.sha=${{ inputs.candidate }}
+            org.opencontainers.image.revision=${{ env.CANDIDATE_SHA }}
+            org.opencontainers.image.source-sha=${{ env.CANDIDATE_SHA }}
+            org.maxibot.release.sha=${{ env.CANDIDATE_SHA }}
             org.opencontainers.image.source=https://github.com/akhripunov/maxibot
             org.opencontainers.image.url=https://github.com/akhripunov/maxibot/actions/runs/${{ github.run_id }}
           cache-from: type=gha,scope=maxibot-native
@@ -128,14 +146,16 @@ jobs:
           set -euo pipefail
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           IMAGE="ghcr.io/akhripunov/maxibot-vps-api@$IMAGE_DIGEST"
-          docker pull "$IMAGE"
-          identity="$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "org.opencontainers.image.source-sha"}}|{{index .Config.Labels "org.maxibot.release.sha"}}')"
-          test "$identity" = "linux/amd64|$CANDIDATE_SHA|$CANDIDATE_SHA|$CANDIDATE_SHA"
-          printf 'CI_BUILD_ONLY: `%s` → `ghcr.io/akhripunov/maxibot-vps-api@%s`\n' "$CANDIDATE_SHA" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-          echo 'MAXIBOT_IMAGE_DIGEST_READBACK=PASS' >> "$GITHUB_STEP_SUMMARY"
+          manifest="$(docker buildx imagetools inspect "$IMAGE")"
+          grep -Fxq "Digest: $IMAGE_DIGEST" <<< "$manifest"
+          grep -Fxq 'Platform: linux/amd64' <<< "$manifest"
+          printf 'CI_BUILD_ONLY: `%s` → `%s`\n' "$CANDIDATE_SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          echo 'MAXIBOT_GHCR_DIGEST_PLATFORM=PASS' >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner && inputs.mode == 'deploy'
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner && inputs.mode == 'deploy')
     needs: [tests, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -151,7 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.candidate }}
+          ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
           persist-credentials: false
       - name: Verify exact main and read the current production baseline
@@ -239,6 +259,9 @@ jobs:
             test "$(docker exec maxibot-vps-api-1 python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')" = "$expected_baseline" || return 1
             test "$(docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING)" = false || return 1
             test "$(docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING)" = true || return 1
+            test "$(docker inspect maxibot-vps-db-1 --format '{{.Id}}')" = "$old_db_id" || return 1
+            test "$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')" = "$old_redis_id" || return 1
+            test "$(docker exec maxibot-vps-db-1 psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" = "$expected_db_head" || return 1
             poller_count || return 1
             echo 'NATIVE_RUNTIME_ROLLBACK=PASS' >&2
           }
@@ -272,6 +295,10 @@ jobs:
           test "$(docker inspect maxibot-vps-worker-1 --format '{{.State.Running}}')" = true
           old_api_id="$(docker inspect maxibot-vps-api-1 --format '{{.Image}}')"
           old_worker_id="$(docker inspect maxibot-vps-worker-1 --format '{{.Image}}')"
+          old_db_id="$(docker inspect maxibot-vps-db-1 --format '{{.Id}}')"
+          old_redis_id="$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')"
+          old_db_volume="$(docker inspect maxibot-vps-db-1 --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')"
+          test -n "$old_db_volume"
           base_images="$("${base_compose[@]}" config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]; print(s["api"]["image"]+"|"+s["worker"]["image"])')"
           IFS='|' read -r base_api_image base_worker_image <<< "$base_images"
           test "$(docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}')" = "$base_api_image"
@@ -303,7 +330,7 @@ jobs:
           test "$(docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING)" = true
           apply_started=1
           "${compose[@]}" up -d --no-build --no-deps --wait --wait-timeout 90 api
-          test "$(docker exec maxibot-vps-api-1 python -c 'import json,urllib.request; r=json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5)); print(r["commit_sha"]+"|"+r["release_id"])')" = "$sha|$sha"
+          test "$(docker exec maxibot-vps-api-1 python -c 'import json,urllib.request; live=urllib.request.urlopen("http://127.0.0.1:8000/health/live",timeout=5); ready=json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5)); print(str(live.status)+"|"+ready["commit_sha"]+"|"+ready["release_id"])')" = "200|$sha|$sha"
           "${compose[@]}" up -d --no-build --no-deps --wait --wait-timeout 90 worker
           test "$(docker inspect maxibot-vps-api-1 --format '{{.Image}}')" = "$image_id"
           test "$(docker inspect maxibot-vps-worker-1 --format '{{.Image}}')" = "$image_id"
@@ -315,6 +342,11 @@ jobs:
           done
           test "$(docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING)" = false
           test "$(docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING)" = true
+          test "$(docker inspect maxibot-vps-db-1 --format '{{.Id}}')" = "$old_db_id"
+          test "$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')" = "$old_redis_id"
+          test "$(docker inspect maxibot-vps-db-1 --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" = "$old_db_volume"
+          test "$(docker exec maxibot-vps-db-1 pg_isready -U maxibot -d maxibot)" = '/var/run/postgresql:5432 - accepting connections'
+          test "$(docker exec maxibot-vps-db-1 psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" = "$expected_db_head"
           poller_count
           stage="$(mktemp -d /tmp/maxibot-native-health.XXXXXX)"
           docker create --name "$health_container" "$image" >/dev/null
