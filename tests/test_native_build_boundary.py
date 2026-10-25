@@ -167,6 +167,19 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertLess(remote.index('docker pull "$image"'), remote.index('apply_started=1'))
         apply_targets = re.findall(r'--wait-timeout 90 ([a-z ]+?)(?: \|\| return 1)?$', remote, re.M)
         self.assertCountEqual(apply_targets, ['api worker', 'api', 'worker'])
+        self.assertIn('rollback_compose="$compose_backup"', remote)
+        self.assertIn('NATIVE_BASELINE_COMPOSE_IDENTITY=PASS', remote)
+        self.assertIn('NATIVE_COMPOSE_BASELINE_PERSIST=PASS', remote)
+        self.assertIn('base_compose config --quiet', remote)
+        self.assertIn("MAXIBOT_RELEASE_ID", remote)
+        self.assertIn("MAXIBOT_RELEASE_MARKER", remote)
+        self.assertIn("NATIVE_COMPOSE_BASELINE_RESTORE=FAILED", remote)
+        self.assertIn('config --format json | EXPECTED_BASELINE="$expected_baseline" EXPECTED_BASE_IMAGE="$base_api_image" python3', remote)
+        self.assertIn('config --format json | expected_image="$image" expected_sha="$sha" python3', remote)
+        self.assertIn('for variable in MAXIBOT_RELEASE_ID MAXIBOT_RELEASE_MARKER MAXIBOT_COMMIT_SHA', remote)
+        self.assertLess(remote.index('NATIVE_BASELINE_COMPOSE_IDENTITY=PASS'), remote.index('docker pull "$image"'))
+        self.assertLess(remote.index('rollback_compose="$compose_backup"'), remote.index('apply_started=1'))
+        self.assertLess(remote.index('NATIVE_COMPOSE_BASELINE_PERSIST=PASS'), remote.index('MAXIBOT_NATIVE_DEPLOY_VERIFY=PASS'))
 
     def test_published_digest_is_pulled_and_candidate_identity_verified(self):
         if not (ROOT / 'pyproject.toml').exists():

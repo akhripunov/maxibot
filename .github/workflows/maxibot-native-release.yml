@@ -318,6 +318,9 @@ jobs:
           root=/opt/maxibot
           compose_file="$root/docker-compose.vps.yml"
           overlay="/tmp/maxibot-native-$run_id.yml"
+          rollback_compose="$compose_file"
+          compose_backup=""
+          compose_persisted=0
           auth_dir=""
           stage=""
           health_container="maxibot-native-health-$run_id"
@@ -329,9 +332,16 @@ jobs:
             [[ -z "$auth_dir" ]] || { DOCKER_CONFIG="$auth_dir" docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf -- "$auth_dir"; }
             rm -f -- "$overlay" "$0"
           }
+          restore_baseline_compose() {
+            local restore_tmp
+            restore_tmp="$(mktemp "$root/.docker-compose.vps.restore.$run_id.XXXXXX")"
+            cp -p -- "$compose_backup" "$restore_tmp"
+            mv -f -- "$restore_tmp" "$compose_file"
+            compose_persisted=0
+          }
           rollback_runtime() {
             echo 'NATIVE_RUNTIME_ROLLBACK=START' >&2
-            local compose=(docker compose -p maxibot-vps --env-file "$root/.env" -f "$compose_file")
+            local compose=(docker compose -p maxibot-vps --env-file "$root/.env" -f "$rollback_compose")
             "${compose[@]}" up -d --no-build --no-deps --wait --wait-timeout 90 api worker || return 1
             test "$(docker inspect maxibot-vps-api-1 --format '{{.Image}}')" = "$old_api_id" || return 1
             test "$(docker inspect maxibot-vps-worker-1 --format '{{.Image}}')" = "$old_worker_id" || return 1
@@ -350,6 +360,9 @@ jobs:
             if (( status != 0 && apply_started == 1 && rollback_attempted == 0 )); then
               rollback_attempted=1
               rollback_runtime || { echo 'NATIVE_RUNTIME_ROLLBACK=FAILED; reconcile production read-only before any retry' >&2; status=2; }
+            fi
+            if (( status != 0 && compose_persisted == 1 )); then
+              restore_baseline_compose || { echo 'NATIVE_COMPOSE_BASELINE_RESTORE=FAILED; reconcile production read-only before any retry' >&2; status=2; }
             fi
             cleanup
             exit "$status"
@@ -380,6 +393,9 @@ jobs:
           test -n "$old_db_volume"
           base_images="$("${base_compose[@]}" config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]; print(s["api"]["image"]+"|"+s["worker"]["image"])')"
           IFS='|' read -r base_api_image base_worker_image <<< "$base_images"
+          test "$base_api_image" = "$base_worker_image"
+          "${base_compose[@]}" config --format json | EXPECTED_BASELINE="$expected_baseline" EXPECTED_BASE_IMAGE="$base_api_image" python3 -c 'import json,os,sys; s=json.load(sys.stdin)["services"]; h=os.environ["EXPECTED_BASELINE"]; i=os.environ["EXPECTED_BASE_IMAGE"]; assert all(s[n].get("image")==i for n in ("api","worker")); assert all(all(s[n].get("environment",{}).get(k)==h for k in ("MAXIBOT_RELEASE_ID","MAXIBOT_RELEASE_MARKER","MAXIBOT_COMMIT_SHA")) for n in ("api","worker")); assert s["api"]["environment"]["MAX_RUN_POLLING"]=="false" and s["worker"]["environment"]["MAX_RUN_POLLING"]=="true"'
+          echo NATIVE_BASELINE_COMPOSE_IDENTITY=PASS
           test "$(docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}')" = "$base_api_image"
           test "$(docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}')" = "$base_worker_image"
           test "$(docker image inspect "$base_api_image" --format '{{.Id}}')" = "$old_api_id"
@@ -388,7 +404,7 @@ jobs:
           test "$(docker inspect maxibot-vps-worker-1 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$expected_baseline"
           "${base_compose[@]}" config --quiet
           "${compose[@]}" config --quiet
-          expected_image="$image" expected_sha="$sha" "${compose[@]}" config --format json | python3 -c 'import json,os,sys; s=json.load(sys.stdin)["services"]; i=os.environ["expected_image"]; h=os.environ["expected_sha"]; assert s["api"]["image"]==i and s["worker"]["image"]==i; assert s["api"]["environment"]["MAX_RUN_POLLING"]=="false" and s["worker"]["environment"]["MAX_RUN_POLLING"]=="true"; assert all(s[n]["environment"]["MAXIBOT_COMMIT_SHA"]==h for n in ("api","worker"))'
+          "${compose[@]}" config --format json | expected_image="$image" expected_sha="$sha" python3 -c 'import json,os,sys; s=json.load(sys.stdin)["services"]; i=os.environ["expected_image"]; h=os.environ["expected_sha"]; assert s["api"]["image"]==i and s["worker"]["image"]==i; assert s["api"]["environment"]["MAX_RUN_POLLING"]=="false" and s["worker"]["environment"]["MAX_RUN_POLLING"]=="true"; assert all(s[n]["environment"]["MAXIBOT_COMMIT_SHA"]==h for n in ("api","worker"))'
           docker pull "$image" >/dev/null
           image_id="$(docker image inspect "$image" --format '{{.Id}}')"
           test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
@@ -407,6 +423,21 @@ jobs:
           poller_count
           test "$(docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING)" = false
           test "$(docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING)" = true
+          for container in maxibot-vps-api-1 maxibot-vps-worker-1; do
+            for variable in MAXIBOT_RELEASE_ID MAXIBOT_RELEASE_MARKER MAXIBOT_COMMIT_SHA; do
+              test "$(docker exec "$container" printenv "$variable")" = "$expected_baseline"
+            done
+          done
+          mkdir -p "$root/backups"
+          compose_backup="$root/backups/docker-compose.vps.$expected_baseline.$run_id.yml"
+          if [[ -e "$compose_backup" ]]; then
+            cmp -s -- "$compose_file" "$compose_backup"
+          else
+            cp -p -- "$compose_file" "$compose_backup"
+            chmod 600 "$compose_backup"
+          fi
+          rollback_compose="$compose_backup"
+          test "$(sha256sum "$compose_backup" | cut -d' ' -f1)" = "$(sha256sum "$compose_file" | cut -d' ' -f1)"
           apply_started=1
           "${compose[@]}" up -d --no-build --no-deps --wait --wait-timeout 90 api
           test "$(docker exec maxibot-vps-api-1 python -c 'import json,urllib.request; live=urllib.request.urlopen("http://127.0.0.1:8000/health/live",timeout=5); ready=json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5)); print(str(live.status)+"|"+ready["commit_sha"]+"|"+ready["release_id"])')" = "200|$sha|$sha"
@@ -434,6 +465,76 @@ jobs:
           cat "$stage/worker_health.py" "$stage/worker_health_preflight.py" > "$stage/check.py"
           docker rm "$health_container" >/dev/null
           python3 "$stage/check.py" --expected-release "$sha" --interval 35 --max-age 90
+          test "$(sha256sum "$compose_file" | cut -d' ' -f1)" = "$(sha256sum "$compose_backup" | cut -d' ' -f1)"
+          compose_persisted=1
+          python3 - "$compose_file" "$base_api_image" "$image" "$expected_baseline" "$sha" <<'PY'
+          from pathlib import Path
+          import os, re, sys, tempfile
+          path = Path(sys.argv[1])
+          old_image, image, old_sha, sha = sys.argv[2:]
+          lines = path.read_text().splitlines(keepends=True)
+          headers = []
+          for index, line in enumerate(lines):
+              match = re.match(r'^  ([A-Za-z0-9_-]+):[ \t]*$', line)
+              if match:
+                  headers.append((index, match.group(1)))
+          targets = {}
+          for position, (start, service) in enumerate(headers):
+              if service in ('api', 'worker'):
+                  end = headers[position + 1][0] if position + 1 < len(headers) else len(lines)
+                  targets[service] = (start, end)
+          if set(targets) != {'api', 'worker'}:
+              raise SystemExit('Compose API/Worker sections are missing or ambiguous')
+          replacements = {
+              'image': (old_image, image),
+              'MAXIBOT_RELEASE_ID': (old_sha, sha),
+              'MAXIBOT_RELEASE_MARKER': (old_sha, sha),
+              'MAXIBOT_COMMIT_SHA': (old_sha, sha),
+          }
+          for service in ('api', 'worker'):
+              start, end = targets[service]
+              for key, (old_value, new_value) in replacements.items():
+                  matching = [i for i in range(start, end) if re.match(r'^\s*' + re.escape(key) + r':\s*', lines[i])]
+                  if len(matching) != 1:
+                      raise SystemExit(f'{service}.{key} expected once, found {len(matching)}')
+                  i = matching[0]
+                  pattern = re.compile(rf"""(\s*{re.escape(key)}:\s*)(?:"([^"]*)"|'([^']*)'|([^#\s]+))(\s*(?:#.*)?)\n?""")
+                  match = pattern.fullmatch(lines[i])
+                  if not match:
+                      raise SystemExit(f'{service}.{key} is not a simple Compose scalar')
+                  current = next(value for value in match.groups()[1:4] if value is not None)
+                  if current != old_value:
+                      raise SystemExit(f'{service}.{key} does not match the verified baseline')
+                  newline = '\n' if lines[i].endswith('\n') else ''
+                  lines[i] = match.group(1) + '"' + new_value + '"' + match.group(5) + newline
+          text = ''.join(lines)
+          original = path.stat()
+          fd, temporary = tempfile.mkstemp(prefix='.docker-compose.vps.native.', dir=str(path.parent), text=True)
+          try:
+              with os.fdopen(fd, 'w') as stream:
+                  stream.write(text)
+                  stream.flush()
+                  os.fsync(stream.fileno())
+              os.chmod(temporary, original.st_mode)
+              os.chown(temporary, original.st_uid, original.st_gid)
+              os.replace(temporary, path)
+              directory = os.open(str(path.parent), os.O_RDONLY)
+              try:
+                  os.fsync(directory)
+              finally:
+                  os.close(directory)
+          finally:
+              if os.path.exists(temporary):
+                  os.unlink(temporary)
+          PY
+          compose_persisted=1
+          base_compose config --quiet
+          persisted_images="$(base_compose config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]; print(s["api"]["image"]+"|"+s["worker"]["image"])')"
+          test "$persisted_images" = "$image|$image"
+          test "$(docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}')" = "$image"
+          test "$(docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}')" = "$image"
+          echo NATIVE_COMPOSE_BASELINE_PERSIST=PASS
+          echo "NATIVE_COMPOSE_BASELINE_BACKUP=$compose_backup"
           echo MAXIBOT_NATIVE_DEPLOY_VERIFY=PASS
           REMOTE
           chmod 700 "$remote_script"
