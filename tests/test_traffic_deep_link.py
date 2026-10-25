@@ -58,9 +58,9 @@ def test_landing_routes_to_channel_preview_and_keeps_opaque_token_server_side():
     assert 'return await _traffic_redirect(landing.public_id, token, db, via_bot=True, request=request)' in source
     assert "async def _traffic_redirect" in source
     assert "build_web_miniapp_deep_link" in source
-    assert "build_native_miniapp_deep_link" in source
     redirect = source[source.index("async def _traffic_redirect"):source.index('@app.get("/go/{public_id}"')]
-    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in redirect
+    assert "build_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in redirect
+    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" not in redirect
     assert "window.location.replace" in source
 
 
