@@ -67,9 +67,9 @@ class NativeBuildBoundaryTests(unittest.TestCase):
 
     def test_build_cannot_bypass_existing_safety_suite(self):
         if (ROOT / 'pyproject.toml').exists():
-            self.assertIn('scripts/maxibot_impact_v3.py --candidate', self.source)
-            self.assertIn('cmd = [sys.executable, "-m", "pytest", "-q"]',
-                          (ROOT / 'scripts/maxibot_impact_v3.py').read_text())
+            self.assertIn('python -m pytest -q', self.source)
+            self.assertNotIn('scripts/maxibot_impact_v3.py', self.source)
+            self.assertNotIn('scripts/prepare_frozen_path_guard.py', self.source)
             self.assertIn('needs: tests', self.source)
             self.assertIn("MAX_RUN_POLLING: 'false'", self.source)
             self.assertIn("ADS_AUTOPILOT_ENABLED: 'false'", self.source)
@@ -79,13 +79,12 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             self.assertIn('needs: [javascript, python]', self.source)
             self.assertIn('pnpm typecheck', self.source)
 
-    def test_maxibot_keeps_frozen_path_gate_in_candidate_ci(self):
+    def test_maxibot_native_ci_uses_full_suite_without_release_controller(self):
         if not (ROOT / 'pyproject.toml').exists():
             return
-        self.assertIn('scripts/prepare_frozen_path_guard.py', self.source)
-        self.assertIn('scripts/frozen_path_guard.sh',
-                      (ROOT / 'scripts/prepare_frozen_path_guard.py').read_text())
-        self.assertIn('FROZEN_PATH_REGRESSION=PASS', self.source)
+        self.assertIn('python -m pytest -q', self.source)
+        self.assertNotIn('scripts/maxibot_impact_v3.py', self.source)
+        self.assertNotIn('scripts/prepare_frozen_path_guard.py', self.source)
 
     def test_published_digest_is_pulled_and_candidate_identity_verified(self):
         if not (ROOT / 'pyproject.toml').exists():

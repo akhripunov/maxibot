@@ -61,7 +61,8 @@ Latest-eight-run API snapshots showed terminal runs. An exhaustive queued/in_pro
 **Consumes:** exact source SHA selected by OWNER dispatch, existing dependency files and tests. **Produces:** CI_BUILD_ONLY image digest(s) in native job summaries/step outputs; no deployment approval.
 
 - [x] Write security-boundary tests first; observe missing-candidate failures (8 per project).
-- [x] Implement OWNER/current-main guards, read-only test jobs and isolated hosted package-publish jobs; use official immutable action pins, pip/pnpm caches, BuildKit type=gha and direct GHCR pushes.
+- [x] Implement OWNER/current-main guards, read-only test jobs and isolated hosted package-publish jobs; use official immutable action pins, pip cache, BuildKit type=gha and direct GHCR pushes.
+- [x] Remove the new CI/build candidate's calls to `scripts/maxibot_impact_v3.py` and `scripts/prepare_frozen_path_guard.py`; run the complete `python -m pytest -q` suite instead of a controller-managed selective plan.
 - [x] Retain full existing MAXIBOT pytest invocation and GPoint workspace/type/release/root checks. These build templates do not replace all canonical disposable DB/image/Eros/Playwright gates yet.
 - [x] Provide separate Mini App static image containing /dist; include its actual shared contracts, compile no backend, and never run an application process in that image.
 - [x] Verify unit boundaries and actionlint. Keep candidates outside .github/workflows so no second pipeline can execute.
@@ -111,6 +112,17 @@ Latest-eight-run API snapshots showed terminal runs. An exhaustive queued/in_pro
 ## Current result
 
 CI_BUILD_ONLY local slice; migration/cutover/removal are not complete. No active workflow, production service, database, secret, runner or network setting was changed. Final verification, clean commit/base, independent review and scoped handoff-gate evidence belong in ME-51; no claim that a scoped checker attests to production readiness.
+
+## NATIVE FIRST dependency audit — local CI/build candidate
+
+| Old mechanism | Native replacement | Evidence | Disposition |
+|---|---|---|---|
+| `maxibot_impact_v3.py` test selection and release-plan controller | Run the full Python suite directly with `python -m pytest -q`; keep exact-current-main and SHA checks in GitHub Actions | Full suite 1,651 passed, 1 skipped, 42 subtests; native boundary test rejects V3 references; actionlint v1.7.12 PASS | Removed from new candidate. Retained in active V5 until verified cutover; no selective test savings are claimed. |
+| `prepare_frozen_path_guard.py` authorization/baseline coordinator | No production authorization is needed in CI_BUILD_ONLY; its underlying paid-traffic policy tests remain in full pytest. Production frozen-path/baseline authorization remains with active V5 until native Deploy has a reviewed equivalent | Full pytest PASS; current V5 remains active. Native Deploy / cutover not implemented or executed | Removed from new candidate, retained for V5. This is a release-time application safety gate; deletion/replacement is blocked until the new production authorization contract is proven. |
+| Build/push SHA and image-identity checks | `docker/build-push-action` digest output, `docker pull` by digest, `docker image inspect` for linux/amd64 and SHA labels | Boundary test and actionlint PASS; hosted GHCR readback NOT_RUN under local-only scope | Custom readback not present; native CLI check retained. |
+| Cross-project serialization assumption | GitHub Actions concurrency group `MAXIBOT-native-build` | Candidate config has a repository-specific group; infrastructure audit confirms different VPS | No shared lock or service created. |
+
+The readback audit does not weaken image identity: candidate SHA is checked before the hosted build, BuildKit's immutable digest is consumed, and the exact digest is pulled and inspected. This proves only local workflow structure; no hosted registry result is claimed. The MAX frozen paid-traffic guard remains an explicit native-Deploy acceptance item before cutover.
 
 ## Local review and verification ledger
 
