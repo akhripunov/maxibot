@@ -1,4 +1,7 @@
 from pathlib import Path
+import json
+import re
+import subprocess
 
 import yaml
 
@@ -124,3 +127,54 @@ def test_existing_build_sha_must_be_exact_and_ancestor_of_dispatch_main():
         assert '.status == "ahead" or .status == "identical"' in commands or '.status=="ahead" or .status=="identical"' in commands
     assert 'test "$main_sha" = "$CANDIDATE_SHA"' not in preflight
     assert 'test "$main_sha" = "$CANDIDATE_SHA"' not in apply
+
+
+def test_build_to_dispatch_diff_allows_cutover_docs_and_blocks_runtime_changes():
+    workflow = WORKFLOW_PATH.read_text()
+    filters = re.findall(r"jq -e '\n(.*?)\n\s*' <<< \"\$main_comparison\"", workflow, re.DOTALL)
+    allowed_doc_diff = {
+        "status": "ahead",
+        "files": [{"filename": "docs/KAMAL_FIRST_CUTOVER.md"}],
+    }
+    blocked_runtime_diff = {
+        "status": "ahead",
+        "files": [{"filename": "app/main.py"}],
+    }
+
+    assert len(filters) == 4  # Build selection, read-only checks, Apply, and pre-mutation recheck.
+    for jq_filter in filters:
+        allowed = subprocess.run(
+            ["jq", "-e", jq_filter],
+            input=json.dumps(allowed_doc_diff),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert allowed.returncode == 0, allowed.stderr
+        blocked = subprocess.run(
+            ["jq", "-e", jq_filter],
+            input=json.dumps(blocked_runtime_diff),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert blocked.returncode != 0
+
+
+def test_exact_diff_is_rechecked_immediately_before_first_apply_mutation():
+    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    apply_steps = workflow["jobs"]["apply"]["steps"]
+    mutation_step = next(
+        step for step in apply_steps
+        if step.get("name") == "Attach only DB and Redis to Kamal while retaining internal network"
+    )
+    run = mutation_step["run"]
+
+    compare_check = run.index('gh api "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$main_sha"')
+    jq_check = run.index("jq -e '")
+    production_ssh = run.index('ssh -i "$PRODUCTION_SSH"')
+    network_mutation = run.index("docker network connect --alias")
+
+    assert mutation_step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert mutation_step["env"]["CANDIDATE_SHA"] == "${{ inputs.candidate }}"
+    assert compare_check < jq_check < production_ssh < network_mutation

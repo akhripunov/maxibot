@@ -91,7 +91,20 @@ jobs:
           main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           test "$main_sha" = "$GITHUB_SHA"
           main_comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$main_sha")"
-          jq -e '.status == "ahead" or .status == "identical"' <<< "$main_comparison" >/dev/null
+          jq -e '
+            (.status == "ahead" or .status == "identical")
+            and (.files | type == "array")
+            and (.files | length <= 3)
+            and (
+              [.files[] | .filename, (.previous_filename // .filename)]
+              | map(
+                  . == ".github/workflows/maxibot-first-kamal-cutover.yml"
+                  or . == "docs/KAMAL_FIRST_CUTOVER.md"
+                  or . == "tests/release/test_first_kamal_cutover_workflow.py"
+                )
+              | all
+            )
+          ' <<< "$main_comparison" >/dev/null
           build_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
           jq -e --arg sha "$CANDIDATE_SHA" \
             '.head_sha == $sha
@@ -205,7 +218,20 @@ jobs:
           main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           test "$main_sha" = "$GITHUB_SHA"
           main_comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$main_sha")"
-          jq -e '.status == "ahead" or .status == "identical"' <<< "$main_comparison" >/dev/null
+          jq -e '
+            (.status == "ahead" or .status == "identical")
+            and (.files | type == "array")
+            and (.files | length <= 3)
+            and (
+              [.files[] | .filename, (.previous_filename // .filename)]
+              | map(
+                  . == ".github/workflows/maxibot-first-kamal-cutover.yml"
+                  or . == "docs/KAMAL_FIRST_CUTOVER.md"
+                  or . == "tests/release/test_first_kamal_cutover_workflow.py"
+                )
+              | all
+            )
+          ' <<< "$main_comparison" >/dev/null
           [[ "$IMAGE_REF" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]]
           test "$GITHUB_RUN_ID" -gt 0
           remote="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$GITHUB_RUN_ID" <<'REMOTE'
@@ -429,7 +455,20 @@ jobs:
           main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           test "$main_sha" = "$GITHUB_SHA"
           main_comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$main_sha")"
-          jq -e '.status == "ahead" or .status == "identical"' <<< "$main_comparison" >/dev/null
+          jq -e '
+            (.status == "ahead" or .status == "identical")
+            and (.files | type == "array")
+            and (.files | length <= 3)
+            and (
+              [.files[] | .filename, (.previous_filename // .filename)]
+              | map(
+                  . == ".github/workflows/maxibot-first-kamal-cutover.yml"
+                  or . == "docs/KAMAL_FIRST_CUTOVER.md"
+                  or . == "tests/release/test_first_kamal_cutover_workflow.py"
+                )
+              | all
+            )
+          ' <<< "$main_comparison" >/dev/null
           run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
           jq -e --arg sha "$CANDIDATE_SHA" '.head_sha==$sha and .head_branch=="main" and .event=="push" and .status=="completed" and .conclusion=="success" and .path==".github/workflows/maxibot-native-release.yml@refs/heads/main"' <<< "$run" >/dev/null
           build_jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100")"
@@ -486,8 +525,28 @@ jobs:
           bundle exec kamal config >/dev/null
           bundle exec kamal registry login
       - name: Attach only DB and Redis to Kamal while retaining internal network
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate }}
         run: |
           set -euo pipefail
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          test "$main_sha" = "$GITHUB_SHA"
+          main_comparison="$(gh api "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$main_sha")"
+          jq -e '
+            (.status == "ahead" or .status == "identical")
+            and (.files | type == "array")
+            and (.files | length <= 3)
+            and (
+              [.files[] | .filename, (.previous_filename // .filename)]
+              | map(
+                  . == ".github/workflows/maxibot-first-kamal-cutover.yml"
+                  or . == "docs/KAMAL_FIRST_CUTOVER.md"
+                  or . == "tests/release/test_first_kamal_cutover_workflow.py"
+                )
+              | all
+            )
+          ' <<< "$main_comparison" >/dev/null
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
           docker network inspect kamal >/dev/null 2>&1 || docker network create kamal >/dev/null
