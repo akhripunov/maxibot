@@ -1,0 +1,60 @@
+service: maxibot
+image: akhripunov/maxibot-vps-api
+primary_role: api
+
+servers:
+  api:
+    hosts:
+      - 135.106.166.46
+    cmd: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    proxy: false
+    env:
+      clear:
+        MAX_RUN_POLLING: false
+        MAXIBOT_RELEASE_ID: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
+        MAXIBOT_RELEASE_MARKER: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
+        MAXIBOT_COMMIT_SHA: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
+        ADS_AUTOPILOT_ENABLED: false
+        ADS_WRITE_ACTIONS_ENABLED: false
+    options:
+      network: maxibot-vps-frontend
+      network-alias: api
+      env-file:
+        - /opt/maxibot/.env
+        - /opt/maxibot/secrets/mail_cloud.env
+      volume: maxibot-vps_maxibot_uploads:/app/uploads
+
+  worker:
+    hosts:
+      - 135.106.166.46
+    cmd: python -m app.poller
+    proxy: false
+    env:
+      clear:
+        MAX_RUN_POLLING: true
+        MAXIBOT_RELEASE_ID: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
+        MAXIBOT_RELEASE_MARKER: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
+        MAXIBOT_COMMIT_SHA: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
+        ADS_AUTOPILOT_ENABLED: false
+        ADS_WRITE_ACTIONS_ENABLED: false
+    options:
+      env-file:
+        - /opt/maxibot/.env
+        - /opt/maxibot/secrets/mail_cloud.env
+      memory: 512m
+      memory-swap: 512m
+
+registry:
+  server: ghcr.io
+  username: akhripunov
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+ssh:
+  user: root
+
+builder:
+  arch: amd64
+
+retain_containers: 2
+minimum_version: 2.12.0

@@ -1,0 +1,101 @@
+{
+  "schema_version": 3,
+  "authorization_id": "maxibot-kamal-migration-20261025",
+  "project": "maxibot",
+  "environment": "production",
+  "authorization_mode": "TASK_SCOPED_AUTO",
+  "owner_instruction_scope": "FULL_PRODUCTION_CYCLE",
+  "source_instruction_identifier": "OWNER_TASK_MAXIBOT_KAMAL_MIGRATION_20261025",
+  "owner_task_reference": "Direct OWNER instruction in this Codex task, 2026-10-25, with attached Global Implementation Task NATIVE FIRST V3 + KAMAL 2. Attachment SHA-256: 896b8678621d3109ae11a7d9e338a92674e47a9bd4c7e1829420408121e22d57. Authorizes implementation and the complete migration cycle only inside exact project scope and mandatory project gates.",
+  "production_baseline_sha": "d6ba66416645ffb85f619a2b3e204fca2bb789a5",
+  "candidate_selection_rule": "EXACT_CURRENT_MAIN_WITHIN_AUTHORIZED_SCOPE",
+  "task": "Migrate MAXIBOT API and Worker from the current custom Docker release path to Kamal 2 using GitHub Actions, BuildKit, GHCR and project-specific Verify. Preserve the existing database, Redis, Caddy, volumes, secrets, single polling Worker (512 MiB), security, backup/restore, migration, rollback, and exact SHA/digest gates. Cutover only after fresh production readback and all gates pass; otherwise stop before Apply.",
+  "allowed_paths": [
+    ".release-authorizations/maxibot-kamal-migration-20261025.json",
+    ".github/workflows/maxibot-native-release.yml",
+    "config/deploy.yml",
+    "Gemfile.kamal",
+    "Gemfile.kamal.lock",
+    "tests/release/test_kamal_config.py",
+    "docs/release/kamal-migration.md"
+  ],
+  "allowed_operations": [
+    "integrate",
+    "coalesce",
+    "prepare",
+    "preflight",
+    "deploy",
+    "verify",
+    "rollback",
+    "publish_evidence"
+  ],
+  "preauthorized_commits": [],
+  "preauthorized_paths": [],
+  "acceptance_criteria": [
+    "Authorization is committed separately before implementation and remains immutable.",
+    "Kamal CLI is pinned and configuration validates on the same pinned version.",
+    "GitHub-hosted CI/build publishes exact candidate images to GHCR and records each immutable digest.",
+    "Kamal owns only API and Worker; existing PostgreSQL, Redis, Caddy and volumes remain untouched.",
+    "The Worker replacement cannot overlap the previous poller and retains its 512 MiB limit.",
+    "Production apply requires exact current main, active task authorization, fresh baseline, validated backup/restore, rollback readiness, health and all project gates.",
+    "Post-deploy Verify confirms exact SHA/digest, API/Worker readiness, one poller, 512 MiB Worker memory, PostgreSQL/Redis and Caddy state.",
+    "Legacy release paths are disabled only after successful cutover and independent confirmation."
+  ],
+  "exclusions": [
+    "database",
+    "migrations",
+    "security",
+    "secrets",
+    "payments",
+    "ads",
+    "paid_traffic"
+  ],
+  "risk_contracts": {
+    "release_infrastructure": {
+      "baseline_sha": "d6ba66416645ffb85f619a2b3e204fca2bb789a5",
+      "allowed_paths": [
+        ".release-authorizations/maxibot-kamal-migration-20261025.json",
+        ".github/workflows/maxibot-native-release.yml",
+        "config/deploy.yml",
+        "Gemfile.kamal",
+        "Gemfile.kamal.lock",
+        "tests/release/test_kamal_config.py",
+        "docs/release/kamal-migration.md"
+      ],
+      "allowed_operations": [
+        "integrate",
+        "coalesce",
+        "prepare",
+        "preflight",
+        "deploy",
+        "verify",
+        "rollback",
+        "publish_evidence"
+      ],
+      "required_gates": [
+        "exact_candidate",
+        "complete_scope",
+        "prepare_provenance",
+        "immutable_artifact",
+        "security_review",
+        "preflight",
+        "rollback_readiness",
+        "worker_compatibility",
+        "postdeploy_health",
+        "reconciliation"
+      ],
+      "risk_description": "This task changes the production release mechanism and container lifecycle ownership. Misconfiguration could disconnect Caddy, start a second polling Worker, replace an out-of-scope service, or create an unrecoverable production state. Restrict Kamal to API and Worker, keep external data services untouched, verify all runtime identities, and fail closed on mismatches.",
+      "backup_plan": "Before any production Apply, obtain a fresh PostgreSQL backup using the existing production backup procedure and prove restore in an isolated PostgreSQL environment. Do not run database migrations unless separately authorized with exact migration contract and backup/restore evidence. Preserve current service image digests and Compose baseline.",
+      "rollback_plan": "Use the prior verified container image identity with Kamal rollback only after a read-only baseline confirms the previous version and dependencies remain healthy. Keep PostgreSQL, Redis, Caddy and volumes unchanged. If runtime state or digest is ambiguous, stop for read-only reconciliation rather than retrying Apply.",
+      "stop_conditions": [
+        "Stop if current production SHA or Docker digests differ from the authorization baseline without a reviewed continuation.",
+        "Stop before Apply if backup restore, Caddy routing, exact digest, Worker single-poller transition, health, lock, or rollback readiness is not proven.",
+        "Stop immediately if the prior poller may still be running, a non-target service would be recreated, or Apply has an uncertain result."
+      ]
+    }
+  },
+  "owner_task_commitment_sha256": "0ab9d6ac62f925b96fc3f13b07d9f547154374c6cd7b24c923f306057a78d701",
+  "state": "ACTIVE",
+  "revoked": false,
+  "consumed": false
+}

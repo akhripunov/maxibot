@@ -1,21 +1,26 @@
-name: MAXIBOT — Native Release
+name: MAXIBOT — Native First V3 + Kamal 2
 on:
   push:
     branches:
       - codex/native-release-maxibot
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       candidate:
-        description: Exact 40-character current main SHA; requires OWNER CI/publication authorization
+        description: Exact current main SHA from the successful main CI/Build
         required: true
         type: string
-      mode:
-        description: Build only or deploy to the protected production environment
+      build_run_id:
+        description: Run ID of the successful main CI/Build to deploy
         required: true
-        default: build
-        type: choice
-        options: [build, deploy]
+        type: string
+      image_digest:
+        description: Exact sha256 digest reported by that successful Build
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -23,14 +28,14 @@ concurrency:
   group: maxibot-production-release
   cancel-in-progress: false
 env:
-  CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.candidate }}
+  CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.candidate }}
   PYTHONDONTWRITEBYTECODE: '1'
 jobs:
   tests:
     if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main') ||
       (github.event_name == 'push' && github.ref == 'refs/heads/codex/native-release-maxibot' && github.actor == github.repository_owner) ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner) ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner)
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -49,11 +54,17 @@ jobs:
       - name: Verify exact candidate before executing its code
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_HEAD_REF_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            test "$GITHUB_BASE_REF" = main
+            test "$CANDIDATE_SHA" = "$GITHUB_HEAD_REF_SHA"
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
             CURRENT_MAIN="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
             test "$CURRENT_MAIN" = "$CANDIDATE_SHA"
           else
@@ -82,13 +93,10 @@ jobs:
   build:
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/codex/native-release-maxibot' && github.actor == github.repository_owner) ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner) ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner)
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    outputs:
-      image_digest: ${{ steps.image.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -120,6 +128,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Set the immutable run-scoped image version
+        id: version
+        run: echo "value=$CANDIDATE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Build once and push directly to GHCR
         id: image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
@@ -130,7 +141,7 @@ jobs:
           push: true
           sbom: true
           provenance: mode=min
-          tags: ghcr.io/akhripunov/maxibot-vps-api:${{ env.CANDIDATE_SHA }}
+          tags: ghcr.io/akhripunov/maxibot-vps-api:${{ steps.version.outputs.value }}
           labels: |
             org.opencontainers.image.revision=${{ env.CANDIDATE_SHA }}
             org.opencontainers.image.source-sha=${{ env.CANDIDATE_SHA }}
@@ -149,31 +160,94 @@ jobs:
           manifest="$(docker buildx imagetools inspect "$IMAGE")"
           grep -Eq "^Digest:[[:space:]]+$IMAGE_DIGEST$" <<< "$manifest"
           grep -Eq '^[[:space:]]+Platform:[[:space:]]+linux/amd64$' <<< "$manifest"
+          echo "MAXIBOT_BUILD_RUN_ID=$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+          echo "MAXIBOT_BUILD_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
+          echo "MAXIBOT_BUILD_SHA=$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
           printf 'CI_BUILD_ONLY: `%s` → `%s`\n' "$CANDIDATE_SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
           echo 'MAXIBOT_GHCR_DIGEST_PLATFORM=PASS' >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner && inputs.mode == 'deploy')
-    needs: [tests, build]
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
       name: production
     permissions:
+      actions: read
       contents: read
       packages: read
       deployments: write
     env:
-      IMAGE_REF: ghcr.io/akhripunov/maxibot-vps-api@${{ needs.build.outputs.image_digest }}
       PRODUCTION_HOST: 135.106.166.46
       MAXIBOT_BACKUP_MAX_AGE_SECONDS: '86400'
+      BUNDLE_GEMFILE: Gemfile.kamal
+      KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
     steps:
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Select and verify the prior successful exact-SHA build image
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          APPROVED_DIGEST: ${{ inputs.image_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$APPROVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          build_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
+          jq -e --arg sha "$CANDIDATE_SHA" \
+            '.head_sha == $sha
+              and .head_branch == "main"
+              and .event == "push"
+              and .status == "completed"
+              and .conclusion == "success"
+              and .path == ".github/workflows/maxibot-native-release.yml@refs/heads/main"' \
+            <<< "$build_run" >/dev/null
+          build_attempt="$(jq -r .run_attempt <<< "$build_run")"
+          [[ "$build_attempt" =~ ^[0-9]+$ ]]
+          image_version="$CANDIDATE_SHA-$BUILD_RUN_ID-$build_attempt"
+          image_tag="ghcr.io/akhripunov/maxibot-vps-api:$image_version"
+          manifest="$(docker buildx imagetools inspect "$image_tag")"
+          image_digest="$(awk '/^Digest:/ {print $2; exit}' <<< "$manifest")"
+          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$image_digest" = "$APPROVED_DIGEST"
+          grep -Eq '^[[:space:]]+Platform:[[:space:]]+linux/amd64$' <<< "$manifest"
+          image_ref="ghcr.io/akhripunov/maxibot-vps-api@$image_digest"
+          docker pull "$image_ref" >/dev/null
+          test "$(docker image inspect "$image_ref" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          for label in org.opencontainers.image.revision org.opencontainers.image.source-sha org.maxibot.release.sha; do
+            test "$(docker image inspect "$image_ref" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
+          done
+          {
+            echo "image_version=$image_version"
+            echo "image_tag=$image_tag"
+            echo "image_ref=$image_ref"
+            echo "image_digest=$image_digest"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "IMAGE_VERSION=$image_version"
+            echo "IMAGE_TAG=$image_tag"
+            echo "IMAGE_REF=$image_ref"
+          } >> "$GITHUB_ENV"
+          printf 'PRIOR_BUILD_RUN=%s (attempt %s)\nIMAGE_TAG=`%s`\nIMMUTABLE_IMAGE=`%s`\n' \
+            "$BUILD_RUN_ID" "$build_attempt" "$image_tag" "$image_ref" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.CANDIDATE_SHA }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
+        with:
+          ruby-version: '3.3.6'
+          bundler-cache: true
       - name: Verify exact main and read the current production baseline
         id: baseline
         env:
@@ -196,10 +270,44 @@ jobs:
           chmod 600 "$RUNNER_TEMP/ssh/known_hosts"
           echo "PRODUCTION_SSH=$RUNNER_TEMP/ssh/id_ed25519" >> "$GITHUB_ENV"
           echo "PRODUCTION_KNOWN_HOSTS_FILE=$RUNNER_TEMP/ssh/known_hosts" >> "$GITHUB_ENV"
-          remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" 'set -eu; api=maxibot-vps-api-1; db=maxibot-vps-db-1; test "$(docker inspect "$api" --format "{{.State.Running}}")" = true; test "$(docker inspect maxibot-vps-worker-1 --format "{{.State.Running}}")" = true; sha=$(docker exec "$api" python -c '\''import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])'\''); head=$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select version_num from alembic_version"); printf "%s|%s\n" "$sha" "$head"')"
-          IFS='|' read -r baseline_sha database_head <<< "$remote"
+          remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          api_compose=maxibot-vps-api-1; worker_compose=maxibot-vps-worker-1
+          db=maxibot-vps-db-1
+          running() { [[ "$(docker inspect "$1" --format '{{.State.Running}}' 2>/dev/null || true)" == true ]]; }
+          if running "$api_compose" && running "$worker_compose"; then
+            mode=compose; api="$api_compose"; worker="$worker_compose"
+          elif ! running "$api_compose" && ! running "$worker_compose"; then
+            mapfile -t apis < <(docker ps -q --filter label=service=maxibot --filter label=role=api)
+            mapfile -t workers < <(docker ps -q --filter label=service=maxibot --filter label=role=worker)
+            [[ ${#apis[@]} == 1 && ${#workers[@]} == 1 ]]
+            mode=kamal; api="${apis[0]}"; worker="${workers[0]}"
+          else
+            echo 'Mixed Compose/Kamal production topology; read-only reconciliation required.' >&2
+            exit 1
+          fi
+          test "$(docker inspect maxibot-vps-db-1 --format '{{.State.Running}}')" = true
+          test "$(docker inspect maxibot-vps-redis-1 --format '{{.State.Running}}')" = true
+          test "$(docker inspect maxibot-vps-https-1 --format '{{.State.Running}}')" = true
+          sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')"
+          worker_sha="$(docker inspect "$worker" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p')"
+          test "$sha" = "$worker_sha"
+          head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
+          db_id="$(docker inspect "$db" --format '{{.Id}}')"
+          redis_id="$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')"
+          caddy_id="$(docker inspect maxibot-vps-https-1 --format '{{.Id}}')"
+          db_volume="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')"
+          redis_volume="$(docker inspect maxibot-vps-redis-1 --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
+          uploads_volume="$(docker inspect "$api" --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Name}}{{end}}{{end}}')"
+          printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$sha" "$head" "$mode" "$db_id" "$redis_id" "$caddy_id" "$db_volume" "$redis_volume" "$uploads_volume"
+          REMOTE
+          )"
+          IFS='|' read -r baseline_sha database_head baseline_mode old_db_id old_redis_id old_caddy_id old_db_volume old_redis_volume old_uploads_volume <<< "$remote"
           [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]]
+          [[ "$baseline_mode" == compose || "$baseline_mode" == kamal ]]
+          [[ "$old_db_id" =~ ^[0-9a-f]{64}$ && "$old_redis_id" =~ ^[0-9a-f]{64}$ && "$old_caddy_id" =~ ^[0-9a-f]{64}$ ]]
+          [[ -n "$old_db_volume" && -n "$old_redis_volume" && -n "$old_uploads_volume" ]]
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]]
           test "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" = 86400
@@ -292,257 +400,160 @@ jobs:
           echo 'FROZEN_PATH_REGRESSION=PASS' >> "$GITHUB_STEP_SUMMARY"
           echo "baseline_sha=$baseline_sha" >> "$GITHUB_OUTPUT"
           echo "database_head=$database_head" >> "$GITHUB_OUTPUT"
-      - name: Apply exact image with Compose and verify production
+          echo "baseline_mode=$baseline_mode" >> "$GITHUB_OUTPUT"
+          echo "old_db_id=$old_db_id" >> "$GITHUB_OUTPUT"
+          echo "old_redis_id=$old_redis_id" >> "$GITHUB_OUTPUT"
+          echo "old_caddy_id=$old_caddy_id" >> "$GITHUB_OUTPUT"
+          echo "old_db_volume=$old_db_volume" >> "$GITHUB_OUTPUT"
+          echo "old_redis_volume=$old_redis_volume" >> "$GITHUB_OUTPUT"
+          echo "old_uploads_volume=$old_uploads_volume" >> "$GITHUB_OUTPUT"
+      - name: Verify exact GHCR image and Kamal configuration
         env:
           GH_TOKEN: ${{ github.token }}
-          GHCR_PULL_TOKEN: ${{ github.token }}
-          GHCR_PULL_USER: ${{ github.actor }}
-          EXPECTED_BASELINE_SHA: ${{ steps.baseline.outputs.baseline_sha }}
-          EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.database_head }}
-        shell: bash
+          BASELINE_MODE: ${{ steps.baseline.outputs.baseline_mode }}
         run: |
           set -euo pipefail
-          [[ "$GHCR_PULL_USER" =~ ^[A-Za-z0-9-]{1,39}$ ]]
-          [[ "$EXPECTED_BASELINE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$EXPECTED_DATABASE_HEAD" =~ ^[A-Za-z0-9_]+$ ]]
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
-          run_id="$GITHUB_RUN_ID"
-          [[ "$run_id" =~ ^[0-9]+$ ]]
-          remote_script="$RUNNER_TEMP/maxibot-native-deploy.sh"
-          cat > "$remote_script" <<'REMOTE'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-          sha="$1"; image="$2"; expected_baseline="$3"; expected_db_head="$4"; pull_user="$5"; run_id="$6"
-          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$image" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]]
-          [[ "$expected_baseline" =~ ^[0-9a-f]{40}$ && "$expected_db_head" =~ ^[A-Za-z0-9_]+$ && "$run_id" =~ ^[0-9]+$ ]]
-          root=/opt/maxibot
-          compose_file="$root/docker-compose.vps.yml"
-          overlay="/tmp/maxibot-native-$run_id.yml"
-          rollback_compose="$compose_file"
-          compose_backup=""
-          compose_persisted=0
-          auth_dir=""
-          stage=""
-          health_container="maxibot-native-health-$run_id"
-          apply_started=0
-          rollback_attempted=0
-          cleanup() {
-            docker rm -f "$health_container" >/dev/null 2>&1 || true
-            [[ -z "$stage" ]] || rm -rf -- "$stage"
-            [[ -z "$auth_dir" ]] || { DOCKER_CONFIG="$auth_dir" docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf -- "$auth_dir"; }
-            rm -f -- "$overlay" "$0"
-          }
-          restore_baseline_compose() {
-            local restore_tmp
-            restore_tmp="$(mktemp "$root/.docker-compose.vps.restore.$run_id.XXXXXX")"
-            cp -p -- "$compose_backup" "$restore_tmp"
-            mv -f -- "$restore_tmp" "$compose_file"
-            compose_persisted=0
-          }
-          rollback_runtime() {
-            echo 'NATIVE_RUNTIME_ROLLBACK=START' >&2
-            local compose=(docker compose -p maxibot-vps --env-file "$root/.env" -f "$rollback_compose")
-            "${compose[@]}" up -d --no-build --no-deps --wait --wait-timeout 90 api worker || return 1
-            test "$(docker inspect maxibot-vps-api-1 --format '{{.Image}}')" = "$old_api_id" || return 1
-            test "$(docker inspect maxibot-vps-worker-1 --format '{{.Image}}')" = "$old_worker_id" || return 1
-            test "$(docker exec maxibot-vps-api-1 python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')" = "$expected_baseline" || return 1
-            test "$(docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING)" = false || return 1
-            test "$(docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING)" = true || return 1
-            test "$(docker inspect maxibot-vps-db-1 --format '{{.Id}}')" = "$old_db_id" || return 1
-            test "$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')" = "$old_redis_id" || return 1
-            test "$(docker exec maxibot-vps-db-1 psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" = "$expected_db_head" || return 1
-            poller_count || return 1
-            echo 'NATIVE_RUNTIME_ROLLBACK=PASS' >&2
-          }
-          on_exit() {
-            status=$?
-            trap - EXIT
-            if (( status != 0 && apply_started == 1 && rollback_attempted == 0 )); then
-              rollback_attempted=1
-              rollback_runtime || { echo 'NATIVE_RUNTIME_ROLLBACK=FAILED; reconcile production read-only before any retry' >&2; status=2; }
-            fi
-            if (( status != 0 && compose_persisted == 1 )); then
-              restore_baseline_compose || { echo 'NATIVE_COMPOSE_BASELINE_RESTORE=FAILED; reconcile production read-only before any retry' >&2; status=2; }
-            fi
-            cleanup
-            exit "$status"
-          }
-          trap on_exit EXIT
-          IFS= read -r pull_token
-          test -n "$pull_token"
-          auth_dir="$(mktemp -d /tmp/maxibot-ghcr-auth.XXXXXX)"
-          chmod 700 "$auth_dir"
-          export DOCKER_CONFIG="$auth_dir"
-          printf '%s' "$pull_token" | docker login ghcr.io -u "$pull_user" --password-stdin >/dev/null
-          unset pull_token
-          printf 'services:\n  api:\n    image: %s\n    environment:\n      MAXIBOT_RELEASE_ID: %s\n      MAXIBOT_RELEASE_MARKER: %s\n      MAXIBOT_COMMIT_SHA: %s\n      MAX_RUN_POLLING: "false"\n  worker:\n    image: %s\n    environment:\n      MAXIBOT_RELEASE_ID: %s\n      MAXIBOT_RELEASE_MARKER: %s\n      MAXIBOT_COMMIT_SHA: %s\n      MAX_RUN_POLLING: "true"\n' "$image" "$sha" "$sha" "$sha" "$image" "$sha" "$sha" "$sha" > "$overlay"
-          chmod 600 "$overlay"
-          compose=(docker compose -p maxibot-vps --env-file "$root/.env" -f "$compose_file" -f "$overlay")
-          base_compose=(docker compose -p maxibot-vps --env-file "$root/.env" -f "$compose_file")
-          test -r "$compose_file" && test -r "$root/.env" && test -r "$root/secrets/mail_cloud.env"
-          actual_baseline="$(docker exec maxibot-vps-api-1 python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')"
-          actual_db_head="$(docker exec maxibot-vps-db-1 psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
-          test "$actual_baseline" = "$expected_baseline" && test "$actual_db_head" = "$expected_db_head"
-          test "$(docker inspect maxibot-vps-api-1 --format '{{.State.Running}}')" = true
-          test "$(docker inspect maxibot-vps-worker-1 --format '{{.State.Running}}')" = true
-          old_api_id="$(docker inspect maxibot-vps-api-1 --format '{{.Image}}')"
-          old_worker_id="$(docker inspect maxibot-vps-worker-1 --format '{{.Image}}')"
-          old_db_id="$(docker inspect maxibot-vps-db-1 --format '{{.Id}}')"
-          old_redis_id="$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')"
-          old_db_volume="$(docker inspect maxibot-vps-db-1 --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')"
-          test -n "$old_db_volume"
-          base_images="$("${base_compose[@]}" config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]; print(s["api"]["image"]+"|"+s["worker"]["image"])')"
-          IFS='|' read -r base_api_image base_worker_image <<< "$base_images"
-          test "$base_api_image" = "$base_worker_image"
-          "${base_compose[@]}" config --format json | EXPECTED_BASELINE="$expected_baseline" EXPECTED_BASE_IMAGE="$base_api_image" python3 -c 'import json,os,sys; s=json.load(sys.stdin)["services"]; h=os.environ["EXPECTED_BASELINE"]; i=os.environ["EXPECTED_BASE_IMAGE"]; assert all(s[n].get("image")==i for n in ("api","worker")); assert all(all(s[n].get("environment",{}).get(k)==h for k in ("MAXIBOT_RELEASE_ID","MAXIBOT_RELEASE_MARKER","MAXIBOT_COMMIT_SHA")) for n in ("api","worker")); assert s["api"]["environment"]["MAX_RUN_POLLING"]=="false" and s["worker"]["environment"]["MAX_RUN_POLLING"]=="true"'
-          echo NATIVE_BASELINE_COMPOSE_IDENTITY=PASS
-          test "$(docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}')" = "$base_api_image"
-          test "$(docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}')" = "$base_worker_image"
-          test "$(docker image inspect "$base_api_image" --format '{{.Id}}')" = "$old_api_id"
-          test "$(docker image inspect "$base_worker_image" --format '{{.Id}}')" = "$old_worker_id"
-          test "$(docker inspect maxibot-vps-api-1 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$expected_baseline"
-          test "$(docker inspect maxibot-vps-worker-1 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$expected_baseline"
-          "${base_compose[@]}" config --quiet
-          "${compose[@]}" config --quiet
-          "${compose[@]}" config --format json | expected_image="$image" expected_sha="$sha" python3 -c 'import json,os,sys; s=json.load(sys.stdin)["services"]; i=os.environ["expected_image"]; h=os.environ["expected_sha"]; assert s["api"]["image"]==i and s["worker"]["image"]==i; assert s["api"]["environment"]["MAX_RUN_POLLING"]=="false" and s["worker"]["environment"]["MAX_RUN_POLLING"]=="true"; assert all(s[n]["environment"]["MAXIBOT_COMMIT_SHA"]==h for n in ("api","worker"))'
-          docker pull "$image" >/dev/null
-          image_id="$(docker image inspect "$image" --format '{{.Id}}')"
-          test "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
-          docker image inspect "$image" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fxq "$image"
-          for label in org.opencontainers.image.revision org.opencontainers.image.source-sha org.maxibot.release.sha; do
-            test "$(docker image inspect "$image" --format "{{index .Config.Labels \"$label\"}}")" = "$sha"
-          done
-          mapfile -t image_heads < <(docker run --rm --network maxibot-vps-internal --env-file "$root/.env" --entrypoint alembic "$image" heads | awk '$2 == "(head)" { print $1 }')
-          test "${#image_heads[@]}" -eq 1 && test "${image_heads[0]}" = "$expected_db_head"
-          poller_count() {
-            local ids
-            ids="$(docker ps -q)"
-            if [[ -z "$ids" ]]; then return 1; fi
-            docker inspect $ids | python3 -c 'import json,sys; xs=json.load(sys.stdin); ps=[x for x in xs if "MAX_RUN_POLLING=true" in x["Config"]["Env"] and any(e.startswith("MAXIBOT_COMMIT_SHA=") for e in x["Config"]["Env"])]; assert len(ps)==1 and ps[0]["Name"]=="/maxibot-vps-worker-1" and ps[0]["State"]["Running"]'
-          }
-          poller_count
-          test "$(docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING)" = false
-          test "$(docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING)" = true
-          for container in maxibot-vps-api-1 maxibot-vps-worker-1; do
-            for variable in MAXIBOT_RELEASE_ID MAXIBOT_RELEASE_MARKER MAXIBOT_COMMIT_SHA; do
-              test "$(docker exec "$container" printenv "$variable")" = "$expected_baseline"
-            done
-          done
-          mkdir -p "$root/backups"
-          compose_backup="$root/backups/docker-compose.vps.$expected_baseline.$run_id.yml"
-          if [[ -e "$compose_backup" ]]; then
-            cmp -s -- "$compose_file" "$compose_backup"
-          else
-            cp -p -- "$compose_file" "$compose_backup"
-            chmod 600 "$compose_backup"
-          fi
-          rollback_compose="$compose_backup"
-          test "$(sha256sum "$compose_backup" | cut -d' ' -f1)" = "$(sha256sum "$compose_file" | cut -d' ' -f1)"
-          apply_started=1
-          "${compose[@]}" up -d --no-build --no-deps --wait --wait-timeout 90 api
-          test "$(docker exec maxibot-vps-api-1 python -c 'import json,urllib.request; live=urllib.request.urlopen("http://127.0.0.1:8000/health/live",timeout=5); ready=json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5)); print(str(live.status)+"|"+ready["commit_sha"]+"|"+ready["release_id"])')" = "200|$sha|$sha"
-          "${compose[@]}" up -d --no-build --no-deps --wait --wait-timeout 90 worker
-          test "$(docker inspect maxibot-vps-api-1 --format '{{.Image}}')" = "$image_id"
-          test "$(docker inspect maxibot-vps-worker-1 --format '{{.Image}}')" = "$image_id"
-          for service in maxibot-vps-api-1 maxibot-vps-worker-1; do
-            test "$(docker inspect "$service" --format '{{.Config.Image}}')" = "$image"
-            test "$(docker inspect "$service" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$sha"
-            test "$(docker inspect "$service" --format '{{index .Config.Labels "org.opencontainers.image.source-sha"}}')" = "$sha"
-            test "$(docker inspect "$service" --format '{{index .Config.Labels "org.maxibot.release.sha"}}')" = "$sha"
-          done
-          test "$(docker exec maxibot-vps-api-1 printenv MAX_RUN_POLLING)" = false
-          test "$(docker exec maxibot-vps-worker-1 printenv MAX_RUN_POLLING)" = true
-          test "$(docker inspect maxibot-vps-db-1 --format '{{.Id}}')" = "$old_db_id"
-          test "$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')" = "$old_redis_id"
-          test "$(docker inspect maxibot-vps-db-1 --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" = "$old_db_volume"
-          test "$(docker exec maxibot-vps-db-1 pg_isready -U maxibot -d maxibot)" = '/var/run/postgresql:5432 - accepting connections'
-          test "$(docker exec maxibot-vps-db-1 psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" = "$expected_db_head"
-          poller_count
-          stage="$(mktemp -d /tmp/maxibot-native-health.XXXXXX)"
-          docker create --name "$health_container" "$image" >/dev/null
-          docker cp "$health_container:/app/app/worker_health.py" "$stage/worker_health.py" >/dev/null
-          docker cp "$health_container:/app/scripts/worker_health_preflight.py" "$stage/worker_health_preflight.py" >/dev/null
-          cat "$stage/worker_health.py" "$stage/worker_health_preflight.py" > "$stage/check.py"
-          docker rm "$health_container" >/dev/null
-          python3 "$stage/check.py" --expected-release "$sha" --interval 35 --max-age 90
-          test "$(sha256sum "$compose_file" | cut -d' ' -f1)" = "$(sha256sum "$compose_backup" | cut -d' ' -f1)"
-          compose_persisted=1
-          python3 - "$compose_file" "$base_api_image" "$image" "$expected_baseline" "$sha" <<'PY'
-          from pathlib import Path
-          import os, re, sys, tempfile
-          path = Path(sys.argv[1])
-          old_image, image, old_sha, sha = sys.argv[2:]
-          lines = path.read_text().splitlines(keepends=True)
-          headers = []
-          for index, line in enumerate(lines):
-              match = re.match(r'^  ([A-Za-z0-9_-]+):[ \t]*$', line)
-              if match:
-                  headers.append((index, match.group(1)))
-          targets = {}
-          for position, (start, service) in enumerate(headers):
-              if service in ('api', 'worker'):
-                  end = headers[position + 1][0] if position + 1 < len(headers) else len(lines)
-                  targets[service] = (start, end)
-          if set(targets) != {'api', 'worker'}:
-              raise SystemExit('Compose API/Worker sections are missing or ambiguous')
-          replacements = {
-              'image': (old_image, image),
-              'MAXIBOT_RELEASE_ID': (old_sha, sha),
-              'MAXIBOT_RELEASE_MARKER': (old_sha, sha),
-              'MAXIBOT_COMMIT_SHA': (old_sha, sha),
-          }
-          for service in ('api', 'worker'):
-              start, end = targets[service]
-              for key, (old_value, new_value) in replacements.items():
-                  matching = [i for i in range(start, end) if re.match(r'^\s*' + re.escape(key) + r':\s*', lines[i])]
-                  if len(matching) != 1:
-                      raise SystemExit(f'{service}.{key} expected once, found {len(matching)}')
-                  i = matching[0]
-                  pattern = re.compile(rf"""(\s*{re.escape(key)}:\s*)(?:"([^"]*)"|'([^']*)'|([^#\s]+))(\s*(?:#.*)?)\n?""")
-                  match = pattern.fullmatch(lines[i])
-                  if not match:
-                      raise SystemExit(f'{service}.{key} is not a simple Compose scalar')
-                  current = next(value for value in match.groups()[1:4] if value is not None)
-                  if current != old_value:
-                      raise SystemExit(f'{service}.{key} does not match the verified baseline')
-                  newline = '\n' if lines[i].endswith('\n') else ''
-                  lines[i] = match.group(1) + '"' + new_value + '"' + match.group(5) + newline
-          text = ''.join(lines)
-          original = path.stat()
-          fd, temporary = tempfile.mkstemp(prefix='.docker-compose.vps.native.', dir=str(path.parent), text=True)
-          try:
-              with os.fdopen(fd, 'w') as stream:
-                  stream.write(text)
-                  stream.flush()
-                  os.fsync(stream.fileno())
-              os.chmod(temporary, original.st_mode)
-              os.chown(temporary, original.st_uid, original.st_gid)
-              os.replace(temporary, path)
-              directory = os.open(str(path.parent), os.O_RDONLY)
-              try:
-                  os.fsync(directory)
-              finally:
-                  os.close(directory)
-          finally:
-              if os.path.exists(temporary):
-                  os.unlink(temporary)
+          test "$BASELINE_MODE" = kamal || { echo 'FIRST_COMPOSE_TO_KAMAL_CUTOVER_REQUIRED=BLOCKED' >&2; exit 1; }
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          mapfile -t apis < <(docker ps -q --filter label=service=maxibot --filter label=role=api)
+          mapfile -t workers < <(docker ps -q --filter label=service=maxibot --filter label=role=worker)
+          [[ ${#apis[@]} == 1 && ${#workers[@]} == 1 ]]
+          api="${apis[0]}"; worker="${workers[0]}"
+          python3 - "$api" "$worker" <<'PY'
+          import json, subprocess, sys
+          api, worker = sys.argv[1:]
+          items = json.loads(subprocess.check_output(["docker", "inspect", api, worker], text=True))
+          by_id = {item["Id"]: item for item in items}
+          assert "kamal" in by_id[api]["NetworkSettings"]["Networks"]
+          assert "maxibot-vps-frontend" in by_id[api]["NetworkSettings"]["Networks"]
+          assert "kamal" in by_id[worker]["NetworkSettings"]["Networks"]
+          for name, alias in (("maxibot-vps-db-1", "db"), ("maxibot-vps-redis-1", "redis")):
+              c = json.loads(subprocess.check_output(["docker", "inspect", name], text=True))[0]
+              assert {"maxibot-vps-internal", "kamal"} <= set(c["NetworkSettings"]["Networks"])
+              assert alias in c["NetworkSettings"]["Networks"]["kamal"]["Aliases"]
+          caddy = json.loads(subprocess.check_output(["docker", "inspect", "maxibot-vps-https-1"], text=True))[0]
+          assert "maxibot-vps-frontend" in caddy["NetworkSettings"]["Networks"]
+          subprocess.run(["docker", "exec", api, "python", "-c", "import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379),('https',80)]"], check=True)
+          env = dict(x.split("=",1) for x in by_id[api]["Config"]["Env"] if "=" in x)
+          worker_env = dict(x.split("=",1) for x in by_id[worker]["Config"]["Env"] if "=" in x)
+          assert env.get("MAX_RUN_POLLING") == "false"
+          assert worker_env.get("MAX_RUN_POLLING") == "true"
+          assert by_id[worker]["HostConfig"]["Memory"] == 536870912
+          assert not by_id[worker]["State"]["OOMKilled"]
+          ids = subprocess.check_output(["docker", "ps", "-q"], text=True).split()
+          running = json.loads(subprocess.check_output(["docker", "inspect", *ids], text=True)) if ids else []
+          pollers = [item["Id"] for item in running if "MAX_RUN_POLLING=true" in item["Config"].get("Env", [])]
+          assert pollers == [worker], pollers
           PY
-          compose_persisted=1
-          base_compose config --quiet
-          persisted_images="$(base_compose config --format json | python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]; print(s["api"]["image"]+"|"+s["worker"]["image"])')"
-          test "$persisted_images" = "$image|$image"
-          test "$(docker inspect maxibot-vps-api-1 --format '{{.Config.Image}}')" = "$image"
-          test "$(docker inspect maxibot-vps-worker-1 --format '{{.Config.Image}}')" = "$image"
-          echo NATIVE_COMPOSE_BASELINE_PERSIST=PASS
-          echo "NATIVE_COMPOSE_BASELINE_BACKUP=$compose_backup"
-          echo MAXIBOT_NATIVE_DEPLOY_VERIFY=PASS
           REMOTE
-          chmod 700 "$remote_script"
-          ssh_args=(-i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE")
-          scp "${ssh_args[@]}" "$remote_script" "root@$PRODUCTION_HOST:/tmp/maxibot-native-$run_id.sh"
-          pull_token="$GHCR_PULL_TOKEN"
-          unset GHCR_PULL_TOKEN
-          printf '%s\n' "$pull_token" | ssh "${ssh_args[@]}" "root@$PRODUCTION_HOST" "bash /tmp/maxibot-native-$run_id.sh '$CANDIDATE_SHA' '$IMAGE_REF' '$EXPECTED_BASELINE_SHA' '$EXPECTED_DATABASE_HEAD' '$GHCR_PULL_USER' '$run_id'"
-          unset pull_token
-          rm -f "$remote_script" "$PRODUCTION_SSH" "$PRODUCTION_KNOWN_HOSTS_FILE"
-          echo "Verified production SHA $CANDIDATE_SHA with $IMAGE_REF; API and the sole Poller updated, production PostgreSQL schema unchanged." >> "$GITHUB_STEP_SUMMARY"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          [[ "$IMAGE_VERSION" =~ ^$CANDIDATE_SHA-[0-9]+-[0-9]+$ ]]
+          approved_digest="$(printf '%s\n' "$IMAGE_REF" | cut -d@ -f2)"
+          [[ "$approved_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          digest_readback="$(docker buildx imagetools inspect "$IMAGE_TAG" | awk '/^Digest:/ {print $2; exit}')"
+          test "$digest_readback" = "$approved_digest"
+          docker pull "$IMAGE_REF" >/dev/null
+          test "$(docker image inspect "$IMAGE_REF" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          for label in org.opencontainers.image.revision org.opencontainers.image.source-sha org.maxibot.release.sha; do
+            test "$(docker image inspect "$IMAGE_REF" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
+          done
+          export MAXIBOT_COMMIT_SHA="$CANDIDATE_SHA"
+          bundle exec kamal config >/dev/null
+          bundle exec kamal registry login
+      - name: Deploy application with Kamal
+        run: |
+          set -euo pipefail
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" 'docker network inspect kamal >/dev/null'
+          bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api
+          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
+          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
+      - name: Stop the existing Kamal Worker before starting its replacement
+        run: |
+          set -euo pipefail
+          bundle exec kamal app stop --roles worker
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          ids="$(docker ps -q)"
+          if [[ -n "$ids" ]]; then
+            docker inspect $ids | python3 -c 'import json,sys; xs=json.load(sys.stdin); ps=[x["Id"] for x in xs if "MAX_RUN_POLLING=true" in x["Config"].get("Env",[])]; assert not ps, ps'
+          fi
+          REMOTE
+      - name: Deploy the sole Worker with Kamal
+        run: bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker
+      - name: Verify runtime, network connectivity, and Worker heartbeat
+        env:
+          EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.database_head }}
+          EXPECTED_DB_ID: ${{ steps.baseline.outputs.old_db_id }}
+          EXPECTED_REDIS_ID: ${{ steps.baseline.outputs.old_redis_id }}
+          EXPECTED_CADDY_ID: ${{ steps.baseline.outputs.old_caddy_id }}
+          EXPECTED_DB_VOLUME: ${{ steps.baseline.outputs.old_db_volume }}
+          EXPECTED_REDIS_VOLUME: ${{ steps.baseline.outputs.old_redis_volume }}
+          EXPECTED_UPLOADS_VOLUME: ${{ steps.baseline.outputs.old_uploads_volume }}
+        run: |
+          set -euo pipefail
+          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$IMAGE_REF" "$EXPECTED_DATABASE_HEAD" "$EXPECTED_DB_ID" "$EXPECTED_REDIS_ID" "$EXPECTED_CADDY_ID" "$EXPECTED_DB_VOLUME" "$EXPECTED_REDIS_VOLUME" "$EXPECTED_UPLOADS_VOLUME" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"; version="$2"; image_ref="$3"; expected_db_head="$4"
+          expected_db_id="$5"; expected_redis_id="$6"; expected_caddy_id="$7"
+          expected_db_volume="$8"; expected_redis_volume="$9"; expected_uploads_volume="${10}"
+          mapfile -t apis < <(docker ps -q --filter label=service=maxibot --filter label=role=api)
+          mapfile -t workers < <(docker ps -q --filter label=service=maxibot --filter label=role=worker)
+          [[ ${#apis[@]} == 1 && ${#workers[@]} == 1 ]]
+          api="${apis[0]}"; worker="${workers[0]}"
+          python3 - "$api" "$worker" "$sha" "$version" "$image_ref" "$expected_db_head" "$expected_db_id" "$expected_redis_id" "$expected_caddy_id" "$expected_db_volume" "$expected_redis_volume" "$expected_uploads_volume" <<'PY'
+          import json, subprocess, sys
+          api, worker, sha, version, image_ref, expected_db_head, expected_db_id, expected_redis_id, expected_caddy_id, expected_db_volume, expected_redis_volume, expected_uploads_volume = sys.argv[1:]
+          items = json.loads(subprocess.check_output(["docker", "inspect", api, worker], text=True))
+          by_id = {item["Id"]: item for item in items}
+          for cid, required_networks, polling in ((api, {"kamal", "maxibot-vps-frontend"}, "false"), (worker, {"kamal"}, "true")):
+              c = by_id[cid]
+              assert c["State"]["Running"]
+              assert c["Config"]["Image"] == f"ghcr.io/akhripunov/maxibot-vps-api:{version}"
+              assert c["Config"]["Labels"]["org.opencontainers.image.revision"] == sha
+              assert required_networks <= set(c["NetworkSettings"]["Networks"])
+              env = dict(x.split("=",1) for x in c["Config"]["Env"] if "=" in x)
+              assert env.get("MAX_RUN_POLLING") == polling
+              image = json.loads(subprocess.check_output(["docker","image","inspect",c["Image"]],text=True))[0]
+              assert image_ref in image.get("RepoDigests",[])
+          for name in ("maxibot-vps-db-1","maxibot-vps-redis-1"):
+              c=json.loads(subprocess.check_output(["docker","inspect",name],text=True))[0]
+              assert {"maxibot-vps-internal","kamal"} <= set(c["NetworkSettings"]["Networks"])
+              alias = "db" if name.endswith("db-1") else "redis"
+              assert alias in c["NetworkSettings"]["Networks"]["kamal"]["Aliases"]
+              assert c["Id"] == (expected_db_id if alias == "db" else expected_redis_id)
+              destination = "/var/lib/postgresql/data" if alias == "db" else "/data"
+              volume = next(m["Name"] for m in c["Mounts"] if m["Destination"] == destination)
+              assert volume == (expected_db_volume if alias == "db" else expected_redis_volume)
+          caddy=json.loads(subprocess.check_output(["docker","inspect","maxibot-vps-https-1"],text=True))[0]
+          assert caddy["Id"] == expected_caddy_id
+          assert "maxibot-vps-frontend" in caddy["NetworkSettings"]["Networks"]
+          for name in ("maxibot-vps-api-1", "maxibot-vps-worker-1"):
+              old=json.loads(subprocess.check_output(["docker","inspect",name],text=True))[0]
+              assert not old["State"]["Running"], (name, old["State"])
+          uploads=next(m["Name"] for m in by_id[api]["Mounts"] if m["Destination"] == "/app/uploads")
+          assert uploads == expected_uploads_volume
+          assert "api" in by_id[api]["NetworkSettings"]["Networks"]["maxibot-vps-frontend"]["Aliases"]
+          assert "https" in caddy["NetworkSettings"]["Networks"]["maxibot-vps-frontend"]["Aliases"]
+          subprocess.run(["docker","exec",api,"python","-c","import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379),('https',80)]"],check=True)
+          ids=subprocess.check_output(["docker","ps","-q"],text=True).split()
+          allc=json.loads(subprocess.check_output(["docker","inspect",*ids],text=True)) if ids else []
+          pollers=[c["Id"] for c in allc if "MAX_RUN_POLLING=true" in c["Config"].get("Env",[])]
+          assert pollers == [worker], pollers
+          assert by_id[worker]["HostConfig"]["Memory"] == 536870912
+          assert subprocess.check_output(["docker","exec",worker,"cat","/sys/fs/cgroup/memory.max"],text=True).strip() == "536870912"
+          db_head=subprocess.check_output(["docker","exec","maxibot-vps-db-1","psql","-X","-U","maxibot","-d","maxibot","-At","-v","ON_ERROR_STOP=1","-c","select version_num from alembic_version"],text=True).strip()
+          assert db_head == expected_db_head
+          for name, cmd in (("maxibot-vps-db-1",["pg_isready","-U","maxibot","-d","maxibot"]),("maxibot-vps-redis-1",["redis-cli","ping"]),("maxibot-vps-https-1",["caddy","validate","--config","/etc/caddy/Caddyfile"])):
+              subprocess.run(["docker","exec",name,*cmd],check=True,stdout=subprocess.DEVNULL)
+          subprocess.run(["docker","exec",api,"python","-c","import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379),('https',80)]"],check=True)
+          PY
+          REMOTE
+          cat app/worker_health.py scripts/worker_health_preflight.py > "$RUNNER_TEMP/maxibot-worker-health.py"
+          scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$RUNNER_TEMP/maxibot-worker-health.py" "root@$PRODUCTION_HOST:/tmp/maxibot-worker-health-$GITHUB_RUN_ID.py"
+          worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "docker ps -q --filter label=service=maxibot --filter label=role=worker")"
+          [[ "$worker_id" =~ ^[0-9a-f]{64}$ ]]
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 35 --max-age 90 --expected-release '$CANDIDATE_SHA'"
+          echo 'MAXIBOT_KAMAL_DEPLOY_VERIFY=PASS' >> "$GITHUB_STEP_SUMMARY"

@@ -24,23 +24,23 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertNotIn("workflow_call:", self.source)
 
     def test_candidate_sha_is_used_for_all_events(self):
-        self.assertIn("CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || inputs.candidate }}", self.source)
+        self.assertIn("github.event_name == 'pull_request' && github.event.pull_request.head.sha", self.source)
         self.assertEqual(self.source.count("ref: ${{ env.CANDIDATE_SHA }}"), 3)
-        self.assertIn("tags: ghcr.io/akhripunov/maxibot-vps-api:${{ env.CANDIDATE_SHA }}", self.source)
+        self.assertIn("tags: ghcr.io/akhripunov/maxibot-vps-api:${{ steps.version.outputs.value }}", self.source)
         self.assertNotIn("${{ inputs.candidate }}", self.source)
 
     def test_production_deploy_requires_explicit_dispatch_not_main_push(self):
         deploy = self.source.split("\n  deploy:\n", 1)[1]
         self.assertNotIn("github.event_name == 'push'", deploy)
         self.assertIn("github.event_name == 'workflow_dispatch'", deploy)
-        self.assertIn("inputs.mode == 'deploy'", deploy)
         self.assertIn("github.ref == 'refs/heads/main' && github.actor == github.repository_owner", deploy)
         self.assertIn("environment:\n      name: production", deploy)
         self.assertIn("deployments: write", deploy)
 
     def test_deploy_requires_fresh_backup_and_isolated_restore_before_apply(self):
         deploy = self.source.split("\n  deploy:\n", 1)[1]
-        backup_gate = deploy.split("- name: Apply exact image with Compose and verify production", 1)[0]
+        backup_gate = deploy.split("- name: Verify exact main and read the current production baseline", 1)[1]
+        backup_gate = backup_gate.split("- name: Verify exact GHCR image and Kamal configuration", 1)[0]
         self.assertIn("MAXIBOT_BACKUP_MAX_AGE_SECONDS", backup_gate)
         self.assertIn("pg_restore --list", backup_gate)
         self.assertIn("--network none", backup_gate)
@@ -142,16 +142,24 @@ class NativeBuildBoundaryTests(unittest.TestCase):
     def test_maxibot_native_deploy_is_digest_bound_and_keeps_single_poller(self):
         if not (ROOT / 'pyproject.toml').exists():
             return
-        self.assertIn("mode:\n        description: Build only or deploy to the protected production environment", self.source)
         self.assertIn("environment:\n      name: production", self.source)
         self.assertIn("group: maxibot-production-release", self.source)
-        self.assertIn("image_digest: ${{ steps.image.outputs.digest }}", self.source)
-        self.assertIn("ghcr.io/akhripunov/maxibot-vps-api@${{ needs.build.outputs.image_digest }}", self.source)
-        self.assertIn("config --quiet", self.source)
-        self.assertIn("up -d --no-build --no-deps --wait", self.source)
+        self.assertIn("APPROVED_DIGEST: ${{ inputs.image_digest }}", self.source)
+        self.assertIn('actions/runs/$BUILD_RUN_ID', self.source)
+        self.assertIn('.head_sha == $sha', self.source)
+        self.assertIn('image_version="$CANDIDATE_SHA-$BUILD_RUN_ID-$build_attempt"', self.source)
+        self.assertIn("bundle exec kamal config", self.source)
+        self.assertIn('bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api', self.source)
+        self.assertIn('bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker', self.source)
+        self.assertIn('bundle exec kamal app stop --roles worker', self.source)
         self.assertIn("MAX_RUN_POLLING", self.source)
-        self.assertIn("maxibot-vps-db-1 --format '{{.Id}}'", self.source)
-        self.assertIn("maxibot-vps-redis-1 --format '{{.Id}}'", self.source)
+        self.assertIn('old_db_id', self.source)
+        self.assertIn('old_redis_id', self.source)
+        self.assertIn('old_caddy_id', self.source)
+        self.assertIn('old_uploads_volume', self.source)
+        self.assertIn('EXPECTED_DB_ID', self.source)
+        self.assertIn('EXPECTED_REDIS_ID', self.source)
+        self.assertIn('assert not old["State"]["Running"]', self.source)
         self.assertIn("health/live", self.source)
         self.assertIn("worker_health_preflight.py", self.source)
         self.assertIn("-- alembic app/db/models.py docker-compose.vps.yml", self.source)
@@ -162,32 +170,25 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("scripts/frozen_path_guard.sh --base", deploy)
         self.assertIn("FROZEN_PATH_REGRESSION=PASS", deploy)
         self.assertIn('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha', deploy)
-        remote = deploy.split('cat > "$remote_script" <<\'REMOTE\'\n', 1)[1].split('\n          REMOTE\n', 1)[0]
-        self.assertLess(remote.index('config --quiet'), remote.index('docker pull "$image"'))
-        self.assertLess(remote.index('docker pull "$image"'), remote.index('apply_started=1'))
-        apply_targets = re.findall(r'--wait-timeout 90 ([a-z ]+?)(?: \|\| return 1)?$', remote, re.M)
-        self.assertCountEqual(apply_targets, ['api worker', 'api', 'worker'])
-        self.assertIn('rollback_compose="$compose_backup"', remote)
-        self.assertIn('NATIVE_BASELINE_COMPOSE_IDENTITY=PASS', remote)
-        self.assertIn('NATIVE_COMPOSE_BASELINE_PERSIST=PASS', remote)
-        self.assertIn('base_compose config --quiet', remote)
-        self.assertIn("MAXIBOT_RELEASE_ID", remote)
-        self.assertIn("MAXIBOT_RELEASE_MARKER", remote)
-        self.assertIn("NATIVE_COMPOSE_BASELINE_RESTORE=FAILED", remote)
-        self.assertIn('config --format json | EXPECTED_BASELINE="$expected_baseline" EXPECTED_BASE_IMAGE="$base_api_image" python3', remote)
-        self.assertIn('config --format json | expected_image="$image" expected_sha="$sha" python3', remote)
-        self.assertIn('for variable in MAXIBOT_RELEASE_ID MAXIBOT_RELEASE_MARKER MAXIBOT_COMMIT_SHA', remote)
-        self.assertLess(remote.index('NATIVE_BASELINE_COMPOSE_IDENTITY=PASS'), remote.index('docker pull "$image"'))
-        self.assertLess(remote.index('rollback_compose="$compose_backup"'), remote.index('apply_started=1'))
-        self.assertLess(remote.index('NATIVE_COMPOSE_BASELINE_PERSIST=PASS'), remote.index('MAXIBOT_NATIVE_DEPLOY_VERIFY=PASS'))
+        self.assertIn('docker buildx imagetools inspect "$IMAGE_TAG"', deploy)
+        self.assertIn('test "$digest_readback" = "$approved_digest"', deploy)
+        self.assertIn('bundle exec kamal config', deploy)
+        self.assertIn('docker network inspect kamal', deploy)
+        self.assertIn('maxibot-vps-frontend', deploy)
+        self.assertIn('docker exec "$api" python', deploy)
+        self.assertIn('MAXIBOT_KAMAL_DEPLOY_VERIFY=PASS', deploy)
+        self.assertNotIn('docker compose', deploy)
+        self.assertNotIn('TASK_SCOPED_AUTO', deploy)
+        self.assertNotIn('claimed', deploy)
+        self.assertNotIn('consumed', deploy)
 
     def test_published_digest_is_pulled_and_candidate_identity_verified(self):
         if not (ROOT / 'pyproject.toml').exists():
             return
         self.assertIn('docker buildx imagetools inspect "$IMAGE"', self.source)
         deploy = self.source.split("\n  deploy:\n", 1)[1]
-        self.assertIn('docker pull "$image"', deploy)
-        self.assertIn(".RepoDigests", deploy)
+        self.assertIn('docker pull "$IMAGE_REF"', deploy)
+        self.assertIn("RepoDigests", deploy)
         self.assertIn('org.maxibot.release.sha', self.source)
         self.assertIn('linux/amd64', self.source)
 
