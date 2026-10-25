@@ -47,6 +47,9 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("pg_restore --exit-on-error", backup_gate)
         self.assertIn("NATIVE_BACKUP_RESTORE=PASS", backup_gate)
         self.assertIn("trap cleanup_restore EXIT", backup_gate)
+        self.assertEqual(sum(line.endswith("\\") for line in backup_gate.splitlines()), 3)
+        for line in backup_gate.splitlines():
+            self.assertFalse(line.endswith("\\\\"), line)
 
     def test_legacy_release_workflows_have_no_automatic_triggers(self):
         prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()

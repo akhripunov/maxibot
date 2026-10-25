@@ -247,9 +247,9 @@ jobs:
             exit "$status"
           }
           trap cleanup_restore EXIT
-          docker run --detach --rm --name "$restore_name" --network none \\
-            --mount "type=bind,src=$backup_path,dst=/tmp/maxibot-backup.dump,readonly" \\
-            -e POSTGRES_USER=maxibot -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \\
+          docker run --detach --rm --name "$restore_name" --network none \
+            --mount "type=bind,src=$backup_path,dst=/tmp/maxibot-backup.dump,readonly" \
+            -e POSTGRES_USER=maxibot -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
             "$db_image" >/dev/null
           restore_started=1
           ready=0
