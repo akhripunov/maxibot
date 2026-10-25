@@ -39,12 +39,24 @@ class NativeBuildBoundaryTests(unittest.TestCase):
 
     def test_build_has_native_cache_sha_and_digest_outputs(self):
         for value in ('type=gha', 'linux/amd64', 'org.opencontainers.image.revision',
-                      'steps.image.outputs.digest', 'packages: write', 'push: true'):
+                      'steps.image.outputs.digest', 'packages: write', 'push: true',
+                      'sbom: true', 'provenance: mode=min'):
             self.assertIn(value, self.source)
         self.assertNotIn('docker save', self.source)
         self.assertNotIn('docker load', self.source)
         self.assertNotIn('upload-artifact', self.source)
         self.assertNotIn('gh release create', self.source)
+
+    def test_buildkit_attestations_have_no_production_secret_inputs(self):
+        if not (ROOT / 'pyproject.toml').exists():
+            return
+        start = self.source.index('id: image')
+        end = self.source.index('Record the immutable build output', start)
+        build_step = self.source[start:end]
+        self.assertIn('sbom: true', build_step)
+        self.assertIn('provenance: mode=min', build_step)
+        self.assertNotIn('secrets.', build_step)
+        self.assertNotIn('password:', build_step)
 
     def test_no_dispatch_inputs_are_interpolated_into_shell(self):
         lines = self.source.splitlines()
@@ -58,12 +70,13 @@ class NativeBuildBoundaryTests(unittest.TestCase):
                 self.assertNotIn('${{ inputs.', line)
 
     def test_ci_build_cannot_reach_production(self):
+        build_only = self.source.split('\n  deploy:\n', 1)[0]
         for forbidden in ('self-hosted', 'environment: production', 'PRODUCTION_SSH',
                           'docker compose up', 'release_prod.sh', 'release-gpoint.mjs --apply',
                           'secrets.SSH', 'secrets.LINEAR', 'cancel-in-progress: true'):
-            self.assertNotIn(forbidden, self.source)
-        self.assertIn('contents: read', self.source)
-        self.assertIn('persist-credentials: false', self.source)
+            self.assertNotIn(forbidden, build_only)
+        self.assertIn('contents: read', build_only)
+        self.assertIn('persist-credentials: false', build_only)
 
     def test_build_cannot_bypass_existing_safety_suite(self):
         if (ROOT / 'pyproject.toml').exists():
@@ -85,6 +98,32 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn('python -m pytest -q', self.source)
         self.assertNotIn('scripts/maxibot_impact_v3.py', self.source)
         self.assertNotIn('scripts/prepare_frozen_path_guard.py', self.source)
+
+    def test_maxibot_native_deploy_is_digest_bound_and_keeps_single_poller(self):
+        if not (ROOT / 'pyproject.toml').exists():
+            return
+        self.assertIn("mode:\n        description: Build only or deploy to the protected production environment", self.source)
+        self.assertIn("environment:\n      name: production", self.source)
+        self.assertIn("group: maxibot-production-release", self.source)
+        self.assertIn("image_digest: ${{ steps.image.outputs.digest }}", self.source)
+        self.assertIn("ghcr.io/akhripunov/maxibot-vps-api@${{ needs.build.outputs.image_digest }}", self.source)
+        self.assertIn("config --quiet", self.source)
+        self.assertIn("up -d --no-build --no-deps --wait", self.source)
+        self.assertIn("MAX_RUN_POLLING", self.source)
+        self.assertIn("worker_health_preflight.py", self.source)
+        self.assertIn("-- alembic app/db/models.py docker-compose.vps.yml", self.source)
+        self.assertIn("-- docs/frozen_paths.yaml scripts/frozen_path_guard.sh", self.source)
+        self.assertNotIn("scripts/release_prod.sh", self.source)
+        self.assertNotIn("scripts/run_release_workflow.py", self.source)
+        deploy = self.source.split("\n  deploy:\n", 1)[1]
+        self.assertIn("scripts/frozen_path_guard.sh --base", deploy)
+        self.assertIn("FROZEN_PATH_REGRESSION=PASS", deploy)
+        self.assertIn('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha', deploy)
+        remote = deploy.split('cat > "$remote_script" <<\'REMOTE\'\n', 1)[1].split('\n          REMOTE\n', 1)[0]
+        self.assertLess(remote.index('config --quiet'), remote.index('docker pull "$image"'))
+        self.assertLess(remote.index('docker pull "$image"'), remote.index('apply_started=1'))
+        apply_targets = re.findall(r'--wait-timeout 90 ([a-z ]+?)(?: \|\| return 1)?$', remote, re.M)
+        self.assertCountEqual(apply_targets, ['api worker', 'api', 'worker'])
 
     def test_published_digest_is_pulled_and_candidate_identity_verified(self):
         if not (ROOT / 'pyproject.toml').exists():

@@ -111,18 +111,18 @@ Latest-eight-run API snapshots showed terminal runs. An exhaustive queued/in_pro
 
 ## Current result
 
-CI_BUILD_ONLY local slice; migration/cutover/removal are not complete. No active workflow, production service, database, secret, runner or network setting was changed. Final verification, clean commit/base, independent review and scoped handoff-gate evidence belong in ME-51; no claim that a scoped checker attests to production readiness.
+Local Native CI/Build/GHCR plus a gated runtime-only Deploy/Verify candidate. The Deploy protects the exact digest/SHA, freezes the protected-path manifest/guard, validates Compose before pull, and updates only API then the sole Worker with `--no-deps --wait`; it blocks Alembic/model/production-Compose changes until migration backup/recovery gates are implemented. It does not replace or invoke V3/V5 controllers. Full project suite, actionlint, hosted run and production cutover are not verified on the latest candidate. No active workflow, production service, database, secret, runner or network setting was changed; cutover and legacy retirement remain incomplete.
 
 ## NATIVE FIRST dependency audit — local CI/build candidate
 
 | Old mechanism | Native replacement | Evidence | Disposition |
 |---|---|---|---|
 | `maxibot_impact_v3.py` test selection and release-plan controller | Run the full Python suite directly with `python -m pytest -q`; keep exact-current-main and SHA checks in GitHub Actions | Full suite 1,651 passed, 1 skipped, 42 subtests; native boundary test rejects V3 references; actionlint v1.7.12 PASS | Removed from new candidate. Retained in active V5 until verified cutover; no selective test savings are claimed. |
-| `prepare_frozen_path_guard.py` authorization/baseline coordinator | No production authorization is needed in CI_BUILD_ONLY; its underlying paid-traffic policy tests remain in full pytest. Production frozen-path/baseline authorization remains with active V5 until native Deploy has a reviewed equivalent | Full pytest PASS; current V5 remains active. Native Deploy / cutover not implemented or executed | Removed from new candidate, retained for V5. This is a release-time application safety gate; deletion/replacement is blocked until the new production authorization contract is proven. |
+| `prepare_frozen_path_guard.py` authorization/baseline coordinator | CI/Build uses full pytest; native Deploy directly invokes `scripts/frozen_path_guard.sh` against live SHA and refuses changes to the policy/guard files | Native boundary tests cover the job gate; frozen guard is run separately on the exact commit | Removed from the new CI/Build path; active V5 remains until cutover. The direct domain guard is retained because GitHub/Docker do not understand MAXIBOT's frozen paid-traffic contracts. |
 | Build/push SHA and image-identity checks | `docker/build-push-action` digest output, `docker pull` by digest, `docker image inspect` for linux/amd64 and SHA labels | Boundary test and actionlint PASS; hosted GHCR readback NOT_RUN under local-only scope | Custom readback not present; native CLI check retained. |
-| Cross-project serialization assumption | GitHub Actions concurrency group `MAXIBOT-native-build` | Candidate config has a repository-specific group; infrastructure audit confirms different VPS | No shared lock or service created. |
+| Cross-project serialization assumption | GitHub Actions concurrency group `maxibot-production-release` | Candidate uses the same MAXIBOT-only group as the active Deploy workflow; VPS audit confirms separate project hosts | No shared lock or service created. |
 
-The readback audit does not weaken image identity: candidate SHA is checked before the hosted build, BuildKit's immutable digest is consumed, and the exact digest is pulled and inspected. This proves only local workflow structure; no hosted registry result is claimed. The MAX frozen paid-traffic guard remains an explicit native-Deploy acceptance item before cutover.
+The readback audit does not weaken image identity: candidate SHA is checked before the hosted build, BuildKit's immutable digest is consumed, and the exact digest is pulled and inspected on production before Apply. The BuildKit step uses public SHA labels only, SBOM and minimal provenance; no production secrets are build inputs. This proves local workflow structure only; no hosted registry result is claimed. The native frozen-path check blocks frozen-scope changes; exact owner authorization for changes remains outside this runtime-only candidate.
 
 ## Local review and verification ledger
 
