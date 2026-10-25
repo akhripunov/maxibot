@@ -167,6 +167,7 @@ jobs:
     env:
       IMAGE_REF: ghcr.io/akhripunov/maxibot-vps-api@${{ needs.build.outputs.image_digest }}
       PRODUCTION_HOST: 135.106.166.46
+      MAXIBOT_BACKUP_MAX_AGE_SECONDS: '86400'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -199,9 +200,88 @@ jobs:
           IFS='|' read -r baseline_sha database_head <<< "$remote"
           [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]]
+          test "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" = 86400
+          backup_remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s -- "$GITHUB_RUN_ID" "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" <<'REMOTE'
+          set -Eeuo pipefail
+          run_id="$1"
+          max_age="$2"
+          [[ "$run_id" =~ ^[0-9]+$ && "$max_age" =~ ^[0-9]+$ ]]
+          root=/opt/maxibot
+          backup_dir="$root/backups"
+          db=maxibot-vps-db-1
+          test -d "$backup_dir"
+          backup_path="$(find "$backup_dir" -maxdepth 1 -type f -name 'maxibot-db-*.dump' -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
+          [[ "$backup_path" == "$backup_dir"/maxibot-db-*.dump ]]
+          backup_epoch="$(stat -c %Y "$backup_path")"
+          backup_bytes="$(stat -c %s "$backup_path")"
+          backup_age=$(($(date +%s) - backup_epoch))
+          [[ "$backup_epoch" =~ ^[0-9]+$ && "$backup_bytes" =~ ^[0-9]+$ ]]
+          (( backup_bytes > 0 && backup_age >= 0 && backup_age <= max_age ))
+          docker exec -i "$db" pg_restore --list < "$backup_path" >/dev/null
+          database_head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
+          source_extensions="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")"
+          source_tables="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
+          source_db_bytes="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select pg_database_size('maxibot')")"
+          [[ "$source_db_bytes" =~ ^[0-9]+$ ]]
+          docker_root="$(docker info --format '{{.DockerRootDir}}')"
+          free_kb="$(df -Pk "$docker_root" | awk 'NR == 2 {print $4}')"
+          required_kb=$(((source_db_bytes * 3 / 2 + backup_bytes * 2 + 134217728) / 1024))
+          [[ "$free_kb" =~ ^[0-9]+$ ]]
+          (( free_kb >= required_kb ))
+          db_image="$(docker inspect "$db" --format '{{.Image}}')"
+          [[ "$db_image" =~ ^sha256:[0-9a-f]{64}$ ]]
+          restore_name="maxibot-native-restore-$run_id"
+          if docker container inspect "$restore_name" >/dev/null 2>&1; then
+            echo 'A restore-probe container with this run id already exists; refusing to touch it.' >&2
+            exit 1
+          fi
+          restore_started=0
+          cleanup_restore() {
+            status=$?
+            trap - EXIT
+            if (( restore_started )) && docker container inspect "$restore_name" >/dev/null 2>&1; then
+              docker rm -f "$restore_name" >/dev/null || status=1
+            fi
+            exit "$status"
+          }
+          trap cleanup_restore EXIT
+          docker run --detach --rm --name "$restore_name" --network none \\
+            --mount "type=bind,src=$backup_path,dst=/tmp/maxibot-backup.dump,readonly" \\
+            -e POSTGRES_USER=maxibot -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \\
+            "$db_image" >/dev/null
+          restore_started=1
+          ready=0
+          for _ in $(seq 1 60); do
+            if docker exec "$restore_name" pg_isready -U maxibot -d postgres >/dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+          docker exec "$restore_name" createdb -U maxibot native_restore_probe
+          docker exec "$restore_name" pg_restore --exit-on-error --no-owner --no-privileges -U maxibot -d native_restore_probe /tmp/maxibot-backup.dump >/dev/null
+          restored_head="$(docker exec "$restore_name" psql -X -U maxibot -d native_restore_probe -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
+          restored_extensions="$(docker exec "$restore_name" psql -X -U maxibot -d native_restore_probe -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")"
+          restored_tables="$(docker exec "$restore_name" psql -X -U maxibot -d native_restore_probe -At -v ON_ERROR_STOP=1 -c "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
+          test "$restored_head" = "$database_head"
+          test "$restored_extensions" = "$source_extensions"
+          test "$restored_tables" = "$source_tables"
+          backup_sha256="$(sha256sum "$backup_path" | awk '{print $1}')"
+          [[ "$backup_sha256" =~ ^[0-9a-f]{64}$ ]]
+          docker rm -f "$restore_name" >/dev/null
+          trap - EXIT
+          printf '%s|%s|%s|%s|%s|%s\n' "$backup_epoch" "$backup_bytes" "$backup_sha256" "$database_head" "$restored_head" "$restored_tables"
+          REMOTE
+          )"
+          IFS='|' read -r backup_epoch backup_bytes backup_sha256 backup_db_head restored_db_head restored_tables <<< "$backup_remote"
+          [[ "$backup_epoch" =~ ^[0-9]+$ && "$backup_bytes" =~ ^[0-9]+$ && "$backup_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$restored_tables" =~ ^[0-9]+$ ]]
+          test "$backup_db_head" = "$database_head" && test "$restored_db_head" = "$database_head"
+          backup_time_utc="$(date -u -d "@$backup_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
+          printf 'NATIVE_BACKUP_FRESHNESS=PASS: `%s`, %s bytes, SHA-256 `%s`\nNATIVE_BACKUP_RESTORE=PASS: isolated offline Docker restore; database head `%s`, restored tables `%s`.\n' "$backup_time_utc" "$backup_bytes" "$backup_sha256" "$database_head" "$restored_tables" >> "$GITHUB_STEP_SUMMARY"
           git cat-file -e "$baseline_sha^{commit}"
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- alembic app/db/models.py docker-compose.vps.yml; then
-            echo 'Native runtime Apply refuses database/model or production Compose changes; migration and restore gates are not implemented in this candidate.' >&2
+            echo 'Native runtime Apply refuses database/model or production Compose changes; migration gates are not implemented in this candidate.' >&2
             exit 1
           fi
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- docs/frozen_paths.yaml scripts/frozen_path_guard.sh; then

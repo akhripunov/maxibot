@@ -38,6 +38,16 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("environment:\n      name: production", deploy)
         self.assertIn("deployments: write", deploy)
 
+    def test_deploy_requires_fresh_backup_and_isolated_restore_before_apply(self):
+        deploy = self.source.split("\n  deploy:\n", 1)[1]
+        backup_gate = deploy.split("- name: Apply exact image with Compose and verify production", 1)[0]
+        self.assertIn("MAXIBOT_BACKUP_MAX_AGE_SECONDS", backup_gate)
+        self.assertIn("pg_restore --list", backup_gate)
+        self.assertIn("--network none", backup_gate)
+        self.assertIn("pg_restore --exit-on-error", backup_gate)
+        self.assertIn("NATIVE_BACKUP_RESTORE=PASS", backup_gate)
+        self.assertIn("trap cleanup_restore EXIT", backup_gate)
+
     def test_legacy_release_workflows_have_no_automatic_triggers(self):
         prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
         auto = (ROOT / ".github/workflows/maxibot-auto-preflight.yml").read_text()
