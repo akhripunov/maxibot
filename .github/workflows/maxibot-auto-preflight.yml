@@ -2,9 +2,7 @@ name: MAXIBOT — Automatic release controller
 run-name: Auto release MAXIBOT ${{ github.event.workflow_run.head_sha }}
 
 on:
-  workflow_run:
-    workflows: ["MAXIBOT — Prepare"]
-    types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,11 +14,8 @@ concurrency:
 
 jobs:
   dispatch-authorized-deploy:
-    if: >-
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_sha == github.sha &&
-      github.event.workflow_run.path == '.github/workflows/maxibot-prepare.yml'
+    # Retained for audit/recovery history only; Native Release is the sole deploy path.
+    if: ${{ false }}
     runs-on: [self-hosted, macOS, maxibot-production]
     # Native action download/setup happens before project retries are loaded.
     # Reserve ten minutes for bootstrap in addition to the shared read budget.

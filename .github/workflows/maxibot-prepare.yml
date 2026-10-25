@@ -2,8 +2,6 @@ name: MAXIBOT — Prepare
 run-name: Prepare MAXIBOT ${{ inputs.candidate || github.sha }}
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       candidate:

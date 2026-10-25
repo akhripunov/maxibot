@@ -147,14 +147,13 @@ jobs:
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           IMAGE="ghcr.io/akhripunov/maxibot-vps-api@$IMAGE_DIGEST"
           manifest="$(docker buildx imagetools inspect "$IMAGE")"
-          grep -Fxq "Digest: $IMAGE_DIGEST" <<< "$manifest"
-          grep -Fxq 'Platform: linux/amd64' <<< "$manifest"
+          grep -Eq "^Digest:[[:space:]]+$IMAGE_DIGEST$" <<< "$manifest"
+          grep -Eq '^[[:space:]]+Platform:[[:space:]]+linux/amd64$' <<< "$manifest"
           printf 'CI_BUILD_ONLY: `%s` → `%s`\n' "$CANDIDATE_SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
           echo 'MAXIBOT_GHCR_DIGEST_PLATFORM=PASS' >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner) ||
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner && inputs.mode == 'deploy')
     needs: [tests, build]
     runs-on: ubuntu-latest

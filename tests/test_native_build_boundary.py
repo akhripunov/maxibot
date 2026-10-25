@@ -29,11 +29,23 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("tags: ghcr.io/akhripunov/maxibot-vps-api:${{ env.CANDIDATE_SHA }}", self.source)
         self.assertNotIn("${{ inputs.candidate }}", self.source)
 
-    def test_main_push_deploy_requires_owner_and_native_production_environment(self):
+    def test_production_deploy_requires_explicit_dispatch_not_main_push(self):
         deploy = self.source.split("\n  deploy:\n", 1)[1]
+        self.assertNotIn("github.event_name == 'push'", deploy)
+        self.assertIn("github.event_name == 'workflow_dispatch'", deploy)
+        self.assertIn("inputs.mode == 'deploy'", deploy)
         self.assertIn("github.ref == 'refs/heads/main' && github.actor == github.repository_owner", deploy)
         self.assertIn("environment:\n      name: production", deploy)
         self.assertIn("deployments: write", deploy)
+
+    def test_legacy_release_workflows_have_no_automatic_triggers(self):
+        prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
+        auto = (ROOT / ".github/workflows/maxibot-auto-preflight.yml").read_text()
+        prepare_events = prepare.split("on:", 1)[1].split("permissions:", 1)[0]
+        auto_events = auto.split("on:", 1)[1].split("permissions:", 1)[0]
+        self.assertNotIn("push:", prepare_events)
+        self.assertNotIn("workflow_run:", auto_events)
+        self.assertIn("if: ${{ false }}", auto)
 
     def test_write_job_requires_owner_main_and_exact_candidate(self):
         self.assertIn("github.actor == github.repository_owner", self.source)
