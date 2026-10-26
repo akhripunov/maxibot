@@ -393,3 +393,24 @@ def test_exact_diff_is_rechecked_immediately_before_first_apply_mutation():
     assert mutation_step["env"]["GH_TOKEN"] == "${{ github.token }}"
     assert mutation_step["env"]["CANDIDATE_SHA"] == "${{ inputs.candidate }}"
     assert compare_check < jq_check < production_ssh < network_mutation
+
+
+def test_kamal_registry_password_is_loaded_from_ephemeral_secrets_file_for_each_kamal_step():
+    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    steps = {
+        step.get("name"): step
+        for step in workflow["jobs"]["apply"]["steps"]
+    }
+    kamal_steps = (
+        "Set up Kamal and confirm resolved configuration",
+        "Stop Compose Worker and prove zero pollers before API replacement",
+        "Start the sole Kamal Worker and verify runtime invariants",
+    )
+
+    for name in kamal_steps:
+        run = steps[name]["run"]
+        assert 'install -d -m 700 .kamal' in run
+        assert 'umask 077' in run
+        assert "KAMAL_REGISTRY_PASSWORD=%s" in run
+        assert '"$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets' in run
+        assert 'trap \'rm -f .kamal/secrets\' EXIT' in run
