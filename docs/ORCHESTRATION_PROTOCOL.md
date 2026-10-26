@@ -67,6 +67,18 @@ Every future code MASTER TASK must record the pre-task `git status --short`,
 branch, HEAD (or unborn HEAD), and the pre-existing diff/state before assigning
 implementation work. Task changes must be reviewed against that baseline.
 
+## Mandatory GitHub/GHCR access preflight
+
+Before touching GitHub/GHCR or asserting that access is blocked, load the current [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80) through the available Linear integration, then apply only the steps compatible with the current MAXIBOT repository, existing credential scope, and granted permissions. Also load it again after context compaction if its actual contents are no longer present, or immediately after a new GitHub authentication/transport failure.
+
+Maintain these distinct evidence states:
+
+- `GITHUB_ACCESS_RUNBOOK_READ`: current document content successfully retrieved and applicable steps identified.
+- `GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED`: content could not be retrieved; record the exact source/tool error and do not pretend a URL or remembered excerpt is a read.
+- `GITHUB_ACCESS_BLOCKED`: only after applicable safe diagnostics and bounded attempts from the live runbook were executed (or were impossible for a stated reason), and remote exact-SHA / Actions readback has ruled out a successful ambiguous write.
+
+First classify the error: DNS, host/VPN/proxy routing, TLS/timeout, GitHub API permissions, or proven credential rejection. `gh auth status` failing while the network is unhealthy is **not** proof that the credential was revoked. Preserve valid existing Mac Keychain/CLI credentials; use the documented authorized route and retries. Before repeating a possibly successful push or workflow dispatch, read remote SHA and existing runs. No forced pushes, replacement tokens, relaxed SSH/TLS checking, or VPN/DNS configuration changes without separately authorized scope. Record which live-runbook checks passed, failed, or could not be run. Never reuse another project's credentials or approvals.
+
 ## Reuse before create
 
 Before creating a service, model, table, worker, handler, pipeline, tracking

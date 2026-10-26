@@ -28,6 +28,10 @@ Load only the relevant canonical project context for the current task. A documen
 | QA | [MAXIBOT Project Context / AGENTS](https://linear.app/bestuzhev/document/maxibot-project-context-agents-1a98f6000c28); [QA](https://linear.app/bestuzhev/document/qa-7a34fcf9286c) |
 | SYSADMIN | [MAXIBOT Workers](https://linear.app/bestuzhev/document/maxibot-workers-97f568bf84b1); [Architect Handoff](https://linear.app/bestuzhev/document/arhitektor-handoff-bb75d67e4a95); [MAXIBOT release rules](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588) when deployment scope applies |
 
+### Mandatory GitHub/GHCR context for every MAXIBOT role
+
+Any role performing GitHub, GHCR, Git CLI, GitHub Actions, or authentication work must read the **current** [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80) before relevant access and reread it after a context compaction or a new access failure. This requirement applies to DEV and SYSADMIN and to any other role actually performing those operations. A link alone, a previous-chat memory, or an old summary does not prove the document was read. Follow `AGENTS.md` and the access recovery preflight in `docs/ORCHESTRATION_PROTOCOL.md`; preserve MAXIBOT-specific credentials and approval boundaries.
+
 ## Separate runtime subsystem
 
 `Ads Codex Worker` is an active runtime specialist, not a sixth working role and
