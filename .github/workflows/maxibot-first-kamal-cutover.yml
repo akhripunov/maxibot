@@ -16,14 +16,15 @@ on:
         required: true
         type: string
       credential_rotation_attestation:
-        description: OWNER confirmation that exposed production credentials were rotated
+        description: OWNER decision for the exposed production credentials
         required: true
         type: choice
         options:
           - NOT_CONFIRMED
           - ROTATED
+          - OWNER_ACCEPTED_UNROTATED
       credential_rotation_evidence:
-        description: Non-secret ME-51 evidence reference for the completed rotation
+        description: Non-secret ME-51 reference for the completed rotation or explicit OWNER risk acceptance
         required: true
         type: string
       confirm_apply:
@@ -83,8 +84,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$CREDENTIAL_ROTATION_ATTESTATION" == ROTATED ]]
-          [[ "$CREDENTIAL_ROTATION_EVIDENCE" =~ ^ME-51:[A-Za-z0-9._/-]+$ ]]
+          case "$CREDENTIAL_ROTATION_ATTESTATION" in
+            ROTATED)
+              [[ "$CREDENTIAL_ROTATION_EVIDENCE" =~ ^ME-51:[A-Za-z0-9._/-]+$ ]]
+              echo 'OWNER attested credential rotation; secret values were not read.' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            OWNER_ACCEPTED_UNROTATED)
+              [[ "$CREDENTIAL_ROTATION_EVIDENCE" == ME-51:OWNER_ACCEPTED_UNROTATED ]]
+              echo 'Owner explicitly accepted the unrotated-credentials risk. Credentials remain unrotated; this is not rotation evidence.' >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo 'Credential rotation status is not confirmed and the unrotated risk was not accepted.' >&2
+              exit 1
+              ;;
+          esac
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$APPROVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -133,7 +146,6 @@ jobs:
           image_tag="$IMAGE_NAME:$image_version"
           echo "image_version=$image_version" >> "$GITHUB_OUTPUT"
           echo "image_tag=$image_tag" >> "$GITHUB_ENV"
-          echo 'Credential rotation evidence accepted as OWNER attestation; workflow has no access to secret values.' >> "$GITHUB_STEP_SUMMARY"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
@@ -163,12 +175,36 @@ jobs:
             test "$(docker image inspect "$image_ref" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
           done
           raw_index="$(docker buildx imagetools inspect "$image_ref" --raw)"
-          descriptor_count="$(jq '[.manifests[]? | select(.platform.os == "unknown" and .platform.architecture == "unknown")] | length' <<< "$raw_index")"
-          [[ "$descriptor_count" =~ ^[0-9]+$ ]]
-          (( descriptor_count >= 2 ))
+          platform_manifest_digest="$(jq -er '
+            [.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest]
+            | if length == 1 then .[0] else error("expected one linux/amd64 image manifest") end
+          ' <<< "$raw_index")"
+          [[ "$platform_manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mapfile -t attestation_digests < <(jq -r --arg subject "$platform_manifest_digest" '
+            .manifests[]?
+            | select(.platform.os == "unknown" and .platform.architecture == "unknown")
+            | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")
+            | select(.annotations["vnd.docker.reference.digest"] == $subject)
+            | .digest // empty
+          ' <<< "$raw_index")
+          ((${#attestation_digests[@]} > 0))
+          has_spdx=0
+          has_slsa=0
+          for attestation_digest in "${attestation_digests[@]}"; do
+            [[ "$attestation_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            attestation_manifest="$(docker buildx imagetools inspect "$IMAGE_NAME@$attestation_digest" --raw)"
+            jq -e '.schemaVersion == 2 and (.layers | type == "array" and length > 0)' <<< "$attestation_manifest" >/dev/null
+            if jq -e 'any(.layers[]?; .annotations["in-toto.io/predicate-type"] == "https://spdx.dev/Document")' <<< "$attestation_manifest" >/dev/null; then
+              has_spdx=1
+            fi
+            if jq -e 'any(.layers[]?; .annotations["in-toto.io/predicate-type"] == "https://slsa.dev/provenance/v1")' <<< "$attestation_manifest" >/dev/null; then
+              has_slsa=1
+            fi
+          done
+          test "$has_spdx" = 1 && test "$has_slsa" = 1
           echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
           echo "image_ref=$image_ref" >> "$GITHUB_ENV"
-          printf 'GHCR exact digest/platform/source labels: PASS\nBuildKit SBOM/provenance descriptors: %s\n' "$descriptor_count" >> "$GITHUB_STEP_SUMMARY"
+          printf 'GHCR exact digest/platform/source labels: PASS\nOCI SPDX SBOM and SLSA provenance attestations for immutable digest: PASS\n' >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -287,9 +323,43 @@ jobs:
           db_image="$(docker inspect "$db" --format '{{.Image}}')"
           restore_name="maxibot-first-cutover-restore-$run_id"
           if docker container inspect "$restore_name" >/dev/null 2>&1; then exit 1; fi
-          cleanup() { docker rm -f "$restore_name" >/dev/null 2>&1 || true; }
+          db_data_dir="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}')"
+          test -n "$db_data_dir" && test -d "$db_data_dir"
+          db_data_bytes="$(du -sb "$db_data_dir" | awk '{print $1}')"
+          required_restore_bytes=$((db_data_bytes + backup_bytes + 1073741824))
+          free_bytes="$(df -PB1 "$backup_dir" | awk 'NR == 2 {print $4}')"
+          [[ "$db_data_bytes" =~ ^[0-9]+$ && "$free_bytes" =~ ^[0-9]+$ ]]
+          (( free_bytes >= required_restore_bytes ))
+          restore_data_dir=""
+          cleanup() {
+            result=$?
+            trap - EXIT HUP INT TERM
+            cleanup_failed=0
+            if docker container inspect "$restore_name" >/dev/null 2>&1; then
+              docker rm -f "$restore_name" >/dev/null || cleanup_failed=1
+            fi
+            if ! docker info >/dev/null 2>&1; then
+              cleanup_failed=1
+            elif docker container inspect "$restore_name" >/dev/null 2>&1; then
+              cleanup_failed=1
+            fi
+            if [[ -n "${restore_data_dir:-}" && -d "$restore_data_dir" ]]; then
+              rm -rf -- "$restore_data_dir" || cleanup_failed=1
+            fi
+            if (( cleanup_failed )); then
+              echo 'Failed to remove isolated PostgreSQL restore resources.' >&2
+              result=1
+            fi
+            exit "$result"
+          }
           trap cleanup EXIT
-          docker run -d --rm --name "$restore_name" --network none --memory=1g --memory-swap=1g --tmpfs /var/lib/postgresql/data:rw,size=2g \
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          restore_data_dir="$(mktemp -d "$backup_dir/.kamal-restore-${run_id}.XXXXXX")"
+          chmod 700 "$restore_data_dir"
+          docker run -d --name "$restore_name" --network none --memory=1g --memory-swap=1g \
+            --mount "type=bind,src=$restore_data_dir,dst=/var/lib/postgresql/data" \
             --mount "type=bind,src=$backup_path,dst=/tmp/backup.dump,readonly" \
             -e POSTGRES_USER=maxibot -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust "$db_image" >/dev/null
           ready=0
@@ -313,8 +383,6 @@ jobs:
             "$(docker inspect "$db" --format '{{.Id}}')" "$(docker inspect "$redis" --format '{{.Id}}')" \
             "$(docker inspect "$caddy" --format '{{.Id}}')" "$head" "$backup_sha" \
             "$api_uploads" "$db_volume" "$redis_volume"
-          docker stop "$restore_name" >/dev/null
-          trap - EXIT
           REMOTE
           )"
           IFS='|' read -r baseline_sha api_id worker_id db_id redis_id caddy_id database_head backup_sha256 api_uploads db_volume redis_volume <<< "$remote"

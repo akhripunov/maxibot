@@ -39,7 +39,9 @@ def test_first_cutover_preflight_checks_immutable_build_and_fails_closed_before_
     assert 'docker pull "$image_ref"' in preflight
     assert "linux/amd64" in preflight
     assert "SBOM" in preflight and "provenance" in preflight.lower()
-    assert "CREDENTIAL_ROTATION_ATTESTATION" in preflight and "== ROTATED" in preflight
+    assert 'case "$CREDENTIAL_ROTATION_ATTESTATION" in' in preflight
+    assert "ROTATED)" in preflight
+    assert "OWNER_ACCEPTED_UNROTATED)" in preflight
     assert '.name == "tests" and .conclusion == "success"' in preflight
     assert '.name == "build" and .conclusion == "success"' in preflight
     assert "StrictHostKeyChecking=yes" in preflight
@@ -54,9 +56,45 @@ def test_first_cutover_preflight_checks_immutable_build_and_fails_closed_before_
     assert "public_ready" in preflight
     assert "pg_restore --list" in preflight
     assert "cutover_restore_probe" in preflight
+    assert '"$IMAGE_NAME@$attestation_digest" --raw' in preflight
+    assert 'platform_manifest_digest="$(jq -er' in preflight
+    assert '"vnd.docker.reference.digest"] == $subject' in preflight
+    assert 'in-toto.io/predicate-type' in preflight
+    assert 'https://spdx.dev/Document' in preflight
+    assert 'https://slsa.dev/provenance/v1' in preflight
+    assert "descriptor_count >= 2" not in preflight
+    assert 'select(.platform.os == "unknown" and .platform.architecture == "unknown")' in preflight
+    assert "free_bytes" in preflight
+    assert "restore_data_dir" in preflight
+    assert "--network none" in preflight
+    assert "--tmpfs /var/lib/postgresql/data" not in preflight
+    assert "rm -rf -- \"$restore_data_dir\"" in preflight
+    assert "trap cleanup EXIT" in preflight
+    assert 'docker rm -f "$restore_name"' in preflight
+    assert "docker info" in preflight
+    assert '--mount "type=bind,src=$restore_data_dir,dst=/var/lib/postgresql/data"' in preflight
+    assert '"$restored_head" = "$head"' in preflight
+    assert '"$restored_tables" = "$source_tables"' in preflight
+    assert '"$restored_extensions" = "$source_extensions"' in preflight
     assert "docker build-push-action@" not in workflow
     assert "docker compose up" not in workflow
     assert "kamal deploy" not in preflight
+
+
+def test_owner_can_explicitly_accept_unrotated_credentials_without_rotation_claim():
+    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    rotation_input = workflow["on"]["workflow_dispatch"]["inputs"]["credential_rotation_attestation"]
+    assert "ROTATED" in rotation_input["options"]
+    assert "OWNER_ACCEPTED_UNROTATED" in rotation_input["options"]
+    assert "NOT_CONFIRMED" in rotation_input["options"]
+
+    preflight = "\n".join(
+        step.get("run", "")
+        for step in workflow["jobs"]["preflight"]["steps"]
+    )
+    assert "OWNER_ACCEPTED_UNROTATED" in preflight
+    assert "Owner explicitly accepted the unrotated-credentials risk" in preflight
+    assert "credentials were rotated" not in preflight
 
 
 def test_first_cutover_apply_preserves_two_networks_single_poller_and_has_recovery_gates():
@@ -79,6 +117,92 @@ def test_first_cutover_apply_preserves_two_networks_single_poller_and_has_recove
     assert "EXPECTED_DATABASE_HEAD" in apply
     assert "EXPECTED_CADDY_ID" in apply
     assert "StrictHostKeyChecking=yes" in apply
+
+
+def test_oci_attestation_predicates_accept_one_or_multiple_descriptors_but_require_both_types():
+    workflow = WORKFLOW_PATH.read_text()
+    preflight = workflow.split("\n  preflight:\n", 1)[1].split("\n  apply:\n", 1)[0]
+    descriptor_filter = re.search(
+        r'mapfile -t attestation_digests < <\(jq -r --arg subject "\$platform_manifest_digest" \'\n(.*?)\n\s*\' <<< "\$raw_index"\)',
+        preflight,
+        re.DOTALL,
+    )
+    assert descriptor_filter
+
+    def selected_digests(index, subject):
+        result = subprocess.run(
+            ["jq", "-r", "--arg", "subject", subject, descriptor_filter.group(1)],
+            input=json.dumps(index),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.splitlines()
+
+    platform_digest = "sha256:" + "1" * 64
+    attestation_digest = "sha256:" + "2" * 64
+    unrelated_digest = "sha256:" + "3" * 64
+    index = {
+        "manifests": [
+            {"platform": {"os": "linux", "architecture": "amd64"}, "digest": platform_digest},
+            {
+                "platform": {"os": "unknown", "architecture": "unknown"},
+                "digest": attestation_digest,
+                "annotations": {
+                    "vnd.docker.reference.type": "attestation-manifest",
+                    "vnd.docker.reference.digest": platform_digest,
+                },
+            },
+            {
+                "platform": {"os": "unknown", "architecture": "unknown"},
+                "digest": unrelated_digest,
+                "annotations": {
+                    "vnd.docker.reference.type": "attestation-manifest",
+                    "vnd.docker.reference.digest": unrelated_digest,
+                },
+            },
+        ]
+    }
+    assert selected_digests(index, platform_digest) == [attestation_digest]
+
+    predicate_filters = re.findall(
+        r"jq -e '(any\(\.layers\[\]\?; \.annotations\[\"in-toto\.io/predicate-type\"\] == \"https://(?:spdx\.dev/Document|slsa\.dev/provenance/v1)\"\))'",
+        preflight,
+    )
+    assert len(predicate_filters) == 2
+
+    def predicate_present(jq_filter, layers):
+        return subprocess.run(
+            ["jq", "-e", jq_filter],
+            input=json.dumps({"layers": layers}),
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+
+    required_types = (
+        "https://spdx.dev/Document",
+        "https://slsa.dev/provenance/v1",
+    )
+    filters_by_type = {
+        next(value for value in required_types if value in expression): expression
+        for expression in predicate_filters
+    }
+    single_descriptor_layers = [
+        {"annotations": {"in-toto.io/predicate-type": value}}
+        for value in required_types
+    ]
+    for predicate_type in required_types:
+        assert predicate_present(filters_by_type[predicate_type], single_descriptor_layers)
+
+    split_descriptor_layers = [
+        [{"annotations": {"in-toto.io/predicate-type": predicate_type}}]
+        for predicate_type in required_types
+    ]
+    for index, predicate_type in enumerate(required_types):
+        assert predicate_present(filters_by_type[predicate_type], split_descriptor_layers[index])
+        assert not predicate_present(filters_by_type[predicate_type], split_descriptor_layers[1 - index])
 
 
 def test_preflight_is_read_only_and_only_the_explicit_apply_job_changes_services():
