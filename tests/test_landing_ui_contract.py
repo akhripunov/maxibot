@@ -41,7 +41,8 @@ def test_traffic_redirect_automatically_opens_miniapp_for_device():
     assert '<title>Переход в MAX</title>' in redirect
     assert '<h1>Переход в MAX</h1>' in redirect
     assert "build_web_miniapp_deep_link" in redirect
-    assert "build_native_miniapp_deep_link" in redirect
+    assert "build_miniapp_deep_link" in redirect
+    assert "build_native_miniapp_deep_link" not in redirect
     assert "settings.max_bot_username" in redirect
     assert "link_builder(settings.max_bot_username, visit.startapp_token)" in redirect
     assert "setTimeout" not in redirect
@@ -52,7 +53,8 @@ def test_traffic_redirect_automatically_opens_miniapp_for_device():
 def test_traffic_redirect_is_device_aware():
     redirect = MAIN_SOURCE[MAIN_SOURCE.index("async def _traffic_redirect"):MAIN_SOURCE.index('@app.get("/go/{public_id}"')]
     assert "_is_mobile_request(request)" in redirect
-    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in redirect
+    assert "build_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in redirect
+    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" not in redirect
     assert "setTimeout" not in redirect
     assert "window.location.replace" in redirect
     assert 'class=\"primary\"' in redirect
@@ -92,7 +94,8 @@ def test_preview_cta_uses_verified_miniapp_path_and_legacy_redirect_stays_scoped
     redirect = MAIN_SOURCE[MAIN_SOURCE.index("async def _traffic_redirect"):MAIN_SOURCE.index("@app.get(\"/go/{public_id}\"")]
     assert "via_bot: bool = False" in redirect
     assert "build_web_miniapp_deep_link" in redirect
-    assert "build_native_miniapp_deep_link" in redirect
+    assert "build_miniapp_deep_link" in redirect
+    assert "build_native_miniapp_deep_link" not in redirect
     assert "settings.max_bot_username" in redirect
     assert "link_builder(settings.max_bot_username, visit.startapp_token)" in redirect
     assert "setTimeout" not in redirect

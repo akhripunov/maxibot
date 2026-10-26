@@ -17,15 +17,33 @@ def _section(source: str, start: str, end: str) -> str:
     return source[source.index(start) : source.index(end, source.index(start))]
 
 
-def test_mobile_landing_keeps_same_token_and_immediate_native_startapp():
+def test_mobile_landing_keeps_same_token_and_immediate_https_startapp():
     redirect = _section(MAIN_SOURCE, "async def _traffic_redirect", '@app.get("/go/{public_id}"')
 
-    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in redirect
+    assert "build_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in redirect
+    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" not in redirect
     assert "handoff_destination = link_builder(settings.max_bot_username, visit.startapp_token)" in redirect
     assert "window.location.replace" in redirect
     assert "setTimeout" not in redirect
     assert "<iframe" not in redirect
     assert "fetch(" not in redirect
+
+
+def test_channel_landing_uses_documented_https_startapp_link_on_mobile():
+    redirect = _section(MAIN_SOURCE, "async def _traffic_redirect", '@app.get("/go/{public_id}"')
+
+    # MAX documents the HTTPS max.ru/<bot>?startapp=... link for opening a
+    # Mini App. A custom max:// navigation from a MAX-owned webview can leave
+    # that same app's browser on a blank page.
+    assert "build_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" in redirect
+    assert "build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link" not in redirect
+
+
+def test_channel_mobile_handoff_telemetry_names_https_startapp_route():
+    redirect = _section(MAIN_SOURCE, "async def _traffic_redirect", '@app.get("/go/{public_id}"')
+
+    assert redirect.count('"handoff_kind": "max_https_startapp" if via_bot and _is_mobile_request(request)') == 3
+    assert '"handoff_kind": "native_max_scheme" if via_bot and _is_mobile_request(request)' not in redirect
 
 
 def test_ios_channel_handoff_never_uses_bridge_path():

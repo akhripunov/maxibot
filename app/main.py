@@ -2585,7 +2585,7 @@ async def _traffic_redirect(public_id: str, token: str, db: AsyncSession, *, via
                                 "destination": "max_bot" if via_bot else "native_channel",
                                 "device_family": _diagnostic_device_family(request),
                                 "referrer_host": _diagnostic_referrer_host(request),
-                                "handoff_kind": "native_max_scheme" if via_bot and _is_mobile_request(request) else "max_web_https" if via_bot else "channel_https",
+                                "handoff_kind": "max_https_startapp" if via_bot and _is_mobile_request(request) else "max_web_https" if via_bot else "channel_https",
                             }, ensure_ascii=False)))
     await _traffic_diagnostic_event(
         db,
@@ -2593,7 +2593,7 @@ async def _traffic_redirect(public_id: str, token: str, db: AsyncSession, *, via
         "REDIRECT_STARTED",
         {
             "device_family": _diagnostic_device_family(request),
-            "handoff_kind": "native_max_scheme" if via_bot and _is_mobile_request(request) else "max_web_https" if via_bot else "channel_https",
+            "handoff_kind": "max_https_startapp" if via_bot and _is_mobile_request(request) else "max_web_https" if via_bot else "channel_https",
         },
     )
     await _traffic_diagnostic_event(
@@ -2602,7 +2602,7 @@ async def _traffic_redirect(public_id: str, token: str, db: AsyncSession, *, via
         "HANDOFF_ATTEMPTED",
         {
             "device_family": _diagnostic_device_family(request),
-            "handoff_kind": "native_max_scheme" if via_bot and _is_mobile_request(request) else "max_web_https" if via_bot else "channel_https",
+            "handoff_kind": "max_https_startapp" if via_bot and _is_mobile_request(request) else "max_web_https" if via_bot else "channel_https",
         },
     )
     await db.commit()
@@ -2611,11 +2611,12 @@ async def _traffic_redirect(public_id: str, token: str, db: AsyncSession, *, via
         if not visit.startapp_token:
             visit.startapp_token = new_attribution_token()
             await db.commit()
-        # Automatic iOS navigation to the HTTPS MAX profile stays in Safari
-        # and renders the public bot card. Use the native MAX protocol for the
-        # mobile zero-click handoff, matching the observed competitor runtime.
-        # Desktop remains on MAX Web. Both carry the same one-time token.
-        link_builder = build_native_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link
+        # MAX documents the HTTPS startapp deep link for opening its Mini App.
+        # Keep this universal link on mobile: attempting to navigate to the
+        # max:// scheme from MAX's own in-app browser can leave that browser on
+        # a blank page. Desktop continues to use MAX Web. Both links carry the
+        # same one-time attribution token.
+        link_builder = build_miniapp_deep_link if _is_mobile_request(request) else build_web_miniapp_deep_link
         handoff_destination = link_builder(settings.max_bot_username, visit.startapp_token)
         handoff_shape = _safe_target_metadata(handoff_destination)
         channel_title = html.escape(channel.title or "Канал MAX")
