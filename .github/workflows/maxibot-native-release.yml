@@ -119,7 +119,7 @@ jobs:
           test "$(stat -c '%a' .kamal/secrets)" = 600
           bundle exec ruby -e 'abort unless Gem.loaded_specs.fetch("kamal").version.to_s == "2.12.0"'
           bundle exec kamal config >/dev/null
-          bundle exec kamal rollback --help | grep -q -- '--roles'
+          bundle exec ruby -rkamal -e 'abort unless Kamal::Cli::Main.class_options.keys.map(&:to_s).include?("roles"); abort unless Kamal::Cli::Main.all_commands.key?("rollback")'
           python - <<'PY'
           import yaml
           with open('config/deploy.yml', encoding='utf-8') as stream:

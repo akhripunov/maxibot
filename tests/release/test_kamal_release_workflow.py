@@ -288,3 +288,11 @@ def test_worker_observation_covers_one_primary_poll_timeout_and_recovery_cycle()
     doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
     verify=next(s for s in doc['jobs']['deploy']['steps'] if s.get('name')=='Verify runtime, network connectivity, and Worker heartbeat')
     assert '--interval 60 --max-age 90' in verify['run']
+
+
+def test_pinned_rollback_interface_uses_loaded_cli_metadata_not_help_text():
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    verify=next(s for s in doc['jobs']['tests']['steps'] if s.get('name')=='Load Kamal config with synthetic registry secret')
+    assert 'Main.class_options.keys.map(&:to_s).include?("roles")' in verify['run']
+    assert 'Main.all_commands.key?("rollback")' in verify['run']
+    assert 'kamal rollback --help | grep' not in verify['run']
