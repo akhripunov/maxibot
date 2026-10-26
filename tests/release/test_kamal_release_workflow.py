@@ -156,7 +156,8 @@ def test_kamal_deploy_verifies_only_api_worker_and_preserves_safety_invariants()
     assert "cache-control: no-store" in deploy
     assert 'assert not old["State"]["Running"]' in deploy
     assert 'assert not any("caddy" in (c["Name"]+c["Config"].get("Image","")).lower()' in deploy
-    assert "kamal rollback" not in deploy
+    assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles api' in deploy
+    assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles worker' in deploy
 
 
 def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
@@ -228,3 +229,62 @@ def test_nested_docker_python_commands_compile_before_any_release():
                         compile(args[i+1].value,'nested docker python -c','exec')
                         checked+=1
     assert checked>=3
+
+
+def test_rollback_is_explicit_and_executes_trusted_current_main_workflow():
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    operation=doc['on']['workflow_dispatch']['inputs']['operation']
+    assert operation['options']==['deploy','rollback']
+    assert operation['default']=='deploy'
+    checkout=next(s for s in doc['jobs']['deploy']['steps'] if s.get('uses','').startswith('actions/checkout@'))
+    assert checkout['with']['ref']=='${{ github.sha }}'
+    source=WORKFLOW.read_text()
+    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in source
+    assert 'git merge-base --is-ancestor "$CANDIDATE_SHA" "$baseline_sha"' in source
+    assert 'git diff --quiet "$CANDIDATE_SHA" "$baseline_sha" -- app alembic config .kamal Dockerfile Gemfile.kamal Gemfile.kamal.lock pyproject.toml' in source
+    assert 'ROLLBACK_PREVIOUS_SUCCESS=PASS' in source
+    assert 'ROLLBACK_RETAINED_IMAGE=PASS' in source
+
+
+def test_rollback_target_must_be_latest_successful_other_production_version(tmp_path):
+    import json
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    source=next(s['run'] for s in doc['jobs']['deploy']['steps'] if s.get('id')=='baseline')
+    gate=source.split('# ROLLBACK_DEPLOYMENT_GATE_BEGIN\n',1)[1].split('# ROLLBACK_DEPLOYMENT_GATE_END',1)[0]
+    gh=tmp_path/'gh'
+    gh.write_text('#!/usr/bin/env python3\nimport os,json,sys\nroute=sys.argv[2]\nprint(json.dumps(json.loads(os.environ["DEPLOYMENTS"]) if "statuses" not in route else json.loads(os.environ["STATUSES"])[route.split("/")[-2]]))\n')
+    gh.chmod(0o700)
+    a='a'*40; b='b'*40; c='c'*40
+    base={**os.environ,'PATH':str(tmp_path)+os.pathsep+os.environ['PATH'],'GITHUB_REPOSITORY':'akhripunov/maxibot','RELEASE_OPERATION':'rollback','baseline_sha':a,'CANDIDATE_SHA':b}
+    def run(deployments,statuses):
+        return subprocess.run(['bash','-euo','pipefail','-c',gate],env={**base,'DEPLOYMENTS':json.dumps(deployments),'STATUSES':json.dumps(statuses)},capture_output=True,text=True)
+    assert run([{'id':1,'sha':b}],{'1':[{'state':'success'}]}).returncode==0
+    assert run([{'id':1,'sha':b}],{'1':[{'state':'failure'}]}).returncode!=0
+    assert run([{'id':2,'sha':c},{'id':1,'sha':b}],{'2':[{'state':'success'}],'1':[{'state':'success'}]}).returncode!=0
+    assert run([{'id':3,'sha':a},{'id':1,'sha':b}],{'3':[{'state':'success'}],'1':[{'state':'inactive'},{'state':'success'}]}).returncode==0
+    assert run([],{}).returncode!=0
+
+
+def test_deployment_identity_and_status_are_exact_and_fail_closed(tmp_path):
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    deploy=doc['jobs']['deploy']
+    assert deploy['environment']['deployment']=='false'
+    create=next(s for s in deploy['steps'] if s.get('id')=='deployment')
+    assert 'ref:$ref' in create['run'] and '"$CANDIDATE_SHA"' in create['run']
+    assert 'image:$digest' in create['run'] and '"$IMAGE_REF"' in create['run']
+    result=deploy['steps'][-1]
+    assert result['if']=="always() && steps.deployment.outputs.id != ''"
+    gh=tmp_path/'gh'; output=tmp_path/'arguments'
+    gh.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n')
+    gh.chmod(0o700)
+    env={**os.environ,'PATH':str(tmp_path)+os.pathsep+os.environ['PATH'],'CAPTURE':str(output),'DEPLOYMENT_ID':'123','RELEASE_OPERATION':'rollback','CANDIDATE_SHA':'a'*40,'GITHUB_REPOSITORY':'akhripunov/maxibot','GITHUB_SERVER_URL':'https://github.com','GITHUB_RUN_ID':'456'}
+    for status in ['success','failure','cancelled','skipped']:
+        subprocess.run(['bash','-euo','pipefail','-c',result['run']],env={**env,'JOB_RESULT':status},check=True)
+        args=output.read_text().splitlines()
+        assert ('state=success' if status=='success' else 'state=failure') in args
+
+
+def test_worker_observation_covers_one_primary_poll_timeout_and_recovery_cycle():
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    verify=next(s for s in doc['jobs']['deploy']['steps'] if s.get('name')=='Verify runtime, network connectivity, and Worker heartbeat')
+    assert '--interval 60 --max-age 90' in verify['run']

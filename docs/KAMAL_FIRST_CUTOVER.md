@@ -62,3 +62,15 @@ If any step is uncertain, leave Worker stopped, preserve DB/Redis and all artifa
 | Proxy ports / no Caddy | Static workflow assertions | Kamal Proxy owns 80/443; no running Caddy | Same |
 
 This document does not authorize production Apply. No production action is reported by a local test result.
+
+## Protected ordinary rollback after the first Kamal baseline
+
+The existing native workflow accepts an explicit `operation=deploy|rollback` (default deploy). Both use the same owner-only main dispatch, protected production Environment, strict SSH, non-canceling project concurrency, backup/isolated restore and complete runtime verification. Failure never automatically invokes rollback.
+
+For rollback, select the immediately previous successful production SHA, its successful main Build run and immutable digest. The trusted current-main workflow executes; it does not execute the target's old workflow. It verifies the target is an ancestor of the running release, was the latest other successful production version, and both stopped role containers plus their exact images remain available. This conservative initial path permits identical application/schema/Kamal configuration and dependency content only; a product-code or schema downgrade needs separately reviewed compatibility evidence. It never downgrades PostgreSQL.
+
+Kamal 2.12.0 performs `kamal rollback "$IMAGE_VERSION" --roles api`, followed by existing HTTPS/security checks. Before Worker rollback, `kamal app stop --roles worker` and the zero-Poller assertion run; only then does stock Kamal roll back Worker. Missing target containers fail before mutation, and full post-verification catches a stock rollback that did not switch versions. The existing source/digest, DB/Redis/volumes, single-Poller, Worker512MiB and heartbeat gates remain mandatory.
+
+The Environment uses `deployment: false` so rollback is not falsely recorded against the workflow's newer SHA. A small GitHub Deployments API call records the actual application target SHA, approved image digest, Build and operation after all preflight gates; success is appended only after full runtime verification. Failed workflow and Deployment histories remain visible. This is release metadata, not a controller or a second deployment mechanism.
+
+Ordinary Verify observes Worker for60seconds (within the existing30–60second collector bounds), covering the existing30second MAX request timeout,3second retry delay and25second next long poll. Heartbeat must still advance, remain younger than90seconds, use the exact release/PID, and show no restart/OOM or memory violation. Repeated provider failure remains FAIL. No heartbeat is synthesized or ignored.

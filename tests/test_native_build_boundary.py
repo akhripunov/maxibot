@@ -25,7 +25,7 @@ class NativeBuildBoundaryTests(unittest.TestCase):
 
     def test_candidate_sha_is_used_for_all_events(self):
         self.assertIn("github.event_name == 'pull_request' && github.event.pull_request.head.sha", self.source)
-        self.assertEqual(self.source.count("ref: ${{ env.CANDIDATE_SHA }}"), 3)
+        self.assertEqual(self.source.count("ref: ${{ env.CANDIDATE_SHA }}"), 2)
         self.assertIn("tags: ghcr.io/akhripunov/maxibot-vps-api:${{ steps.version.outputs.value }}", self.source)
         self.assertNotIn("${{ inputs.candidate }}", self.source)
 

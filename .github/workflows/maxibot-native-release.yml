@@ -9,8 +9,16 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      operation:
+        description: Explicit protected application operation; never automatic recovery
+        required: true
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - rollback
       candidate:
-        description: Exact current main SHA from the successful main CI/Build
+        description: Exact current-main deploy SHA or previous successful production rollback SHA
         required: true
         type: string
       build_run_id:
@@ -111,6 +119,7 @@ jobs:
           test "$(stat -c '%a' .kamal/secrets)" = 600
           bundle exec ruby -e 'abort unless Gem.loaded_specs.fetch("kamal").version.to_s == "2.12.0"'
           bundle exec kamal config >/dev/null
+          bundle exec kamal rollback --help | grep -q -- '--roles'
           python - <<'PY'
           import yaml
           with open('config/deploy.yml', encoding='utf-8') as stream:
@@ -212,12 +221,14 @@ jobs:
     timeout-minutes: 30
     environment:
       name: production
+      deployment: false
     permissions:
       actions: read
       contents: read
       packages: read
       deployments: write
     env:
+      RELEASE_OPERATION: ${{ inputs.operation || 'deploy' }}
       PRODUCTION_HOST: 135.106.166.46
       MAXIBOT_BACKUP_MAX_AGE_SECONDS: '86400'
       BUNDLE_GEMFILE: Gemfile.kamal
@@ -237,10 +248,12 @@ jobs:
           APPROVED_DIGEST: ${{ inputs.image_digest }}
         run: |
           set -euo pipefail
+          [[ "$RELEASE_OPERATION" == deploy || "$RELEASE_OPERATION" == rollback ]]
+          if [[ "$RELEASE_OPERATION" == deploy ]]; then test "$CANDIDATE_SHA" = "$GITHUB_SHA"; fi
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$APPROVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           build_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
           jq -e --arg sha "$CANDIDATE_SHA" \
             '.head_sha == $sha
@@ -282,7 +295,7 @@ jobs:
             "$BUILD_RUN_ID" "$build_attempt" "$image_tag" "$image_ref" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ env.CANDIDATE_SHA }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
@@ -300,8 +313,8 @@ jobs:
           set -euo pipefail
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$IMAGE_REF" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]]
-          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           test "$PRODUCTION_HOST" = 135.106.166.46
           test -n "$PRODUCTION_SSH_KEY" && test -n "$PRODUCTION_KNOWN_HOSTS"
           install -d -m 700 "$RUNNER_TEMP/ssh" "$HOME/.ssh"
@@ -448,6 +461,31 @@ jobs:
           backup_time_utc="$(date -u -d "@$backup_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
           printf 'NATIVE_BACKUP_FRESHNESS=PASS: `%s`, %s bytes, SHA-256 `%s`\nNATIVE_BACKUP_RESTORE=PASS: isolated offline Docker restore; database head `%s`, restored tables `%s`.\n' "$backup_time_utc" "$backup_bytes" "$backup_sha256" "$database_head" "$restored_tables" >> "$GITHUB_STEP_SUMMARY"
           git cat-file -e "$baseline_sha^{commit}"
+          # ROLLBACK_DEPLOYMENT_GATE_BEGIN
+          if [[ "$RELEASE_OPERATION" == rollback ]]; then
+            previous_success=
+            deployments="$(gh api "repos/$GITHUB_REPOSITORY/deployments?environment=production&per_page=100")"
+            while IFS='|' read -r deployment_id deployed_sha; do
+              [[ "$deployment_id" =~ ^[0-9]+$ && "$deployed_sha" =~ ^[0-9a-f]{40}$ ]]
+              [[ "$deployed_sha" == "$baseline_sha" ]] && continue
+              statuses="$(gh api "repos/$GITHUB_REPOSITORY/deployments/$deployment_id/statuses?per_page=100")"
+              if jq -e 'any(.[]; .state == "success")' <<< "$statuses" >/dev/null; then
+                test "$deployed_sha" = "$CANDIDATE_SHA"
+                previous_success="$deployment_id"
+                break
+              fi
+            done < <(jq -r '.[] | [.id,.sha] | join("|")' <<< "$deployments")
+            test -n "$previous_success"
+            echo 'ROLLBACK_PREVIOUS_SUCCESS=PASS'
+          fi
+          # ROLLBACK_DEPLOYMENT_GATE_END
+          if [[ "$RELEASE_OPERATION" == rollback ]]; then
+            test "$baseline_mode" = kamal
+            test "$baseline_sha" != "$CANDIDATE_SHA"
+            git merge-base --is-ancestor "$CANDIDATE_SHA" "$baseline_sha"
+            git diff --quiet "$CANDIDATE_SHA" "$baseline_sha" -- app alembic config .kamal Dockerfile Gemfile.kamal Gemfile.kamal.lock pyproject.toml
+            git diff --quiet "$CANDIDATE_SHA" "$GITHUB_SHA" -- app alembic config .kamal Dockerfile Gemfile.kamal Gemfile.kamal.lock pyproject.toml
+          fi
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- alembic app/db/models.py docker-compose.vps.yml; then
             echo 'Native runtime Apply refuses database/model or production Compose changes; migration gates are not implemented in this candidate.' >&2
             exit 1
@@ -513,8 +551,8 @@ jobs:
           assert pollers == [worker], pollers
           PY
           REMOTE
-          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           [[ "$IMAGE_VERSION" =~ ^$CANDIDATE_SHA-[0-9]+-[0-9]+$ ]]
           approved_digest="$(printf '%s\n' "$IMAGE_REF" | cut -d@ -f2)"
           [[ "$approved_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -533,6 +571,35 @@ jobs:
           git check-ignore -q .kamal/secrets
           bundle exec kamal config >/dev/null
           bundle exec kamal registry login
+          if [[ "$RELEASE_OPERATION" == rollback ]]; then
+            ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" python3 - "$IMAGE_VERSION" "$IMAGE_REF" "$CANDIDATE_SHA" <<'PY'
+          import json, subprocess, sys
+          version, image_ref, sha = sys.argv[1:]
+          for role in ("api", "worker"):
+              name = f"maxibot-{role}-{version}"
+              c = json.loads(subprocess.check_output(["docker", "inspect", name], text=True))[0]
+              assert c["State"]["Running"] is False
+              assert c["Config"]["Labels"]["service"] == "maxibot"
+              assert c["Config"]["Labels"]["role"] == role
+              assert c["Config"]["Labels"]["org.opencontainers.image.revision"] == sha
+              image = json.loads(subprocess.check_output(["docker", "image", "inspect", c["Image"]], text=True))[0]
+              assert image_ref in image.get("RepoDigests", [])
+          print("ROLLBACK_RETAINED_IMAGE=PASS")
+          PY
+          fi
+      - name: Record exact application Deployment after all preflight gates
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        run: |
+          set -euo pipefail
+          jq -n --arg ref "$CANDIDATE_SHA" --arg digest "$IMAGE_REF" --arg operation "$RELEASE_OPERATION" --arg workflow_sha "$GITHUB_SHA" --arg build "$BUILD_RUN_ID" \
+            '{ref:$ref,environment:"production",auto_merge:false,required_contexts:[],payload:{image:$digest,operation:$operation,workflow_sha:$workflow_sha,build_run_id:$build}}' > "$RUNNER_TEMP/deployment.json"
+          deployment_id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input "$RUNNER_TEMP/deployment.json" --jq .id)"
+          [[ "$deployment_id" =~ ^[0-9]+$ ]]
+          echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$deployment_id/statuses" -f state=in_progress -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
       - name: Deploy application with Kamal
         env:
           MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
@@ -545,7 +612,11 @@ jobs:
           printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets
           chmod 600 .kamal/secrets
           git check-ignore -q .kamal/secrets
-          bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api
+          if [[ "$RELEASE_OPERATION" == rollback ]]; then
+            bundle exec kamal rollback "$IMAGE_VERSION" --roles api
+          else
+            bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api
+          fi
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
           for host in maxibot.pro www.maxibot.pro api.maxibot.pro go.maxibot.pro admin.maxibot.pro; do
@@ -593,7 +664,11 @@ jobs:
           printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets
           chmod 600 .kamal/secrets
           git check-ignore -q .kamal/secrets
-          bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker
+          if [[ "$RELEASE_OPERATION" == rollback ]]; then
+            bundle exec kamal rollback "$IMAGE_VERSION" --roles worker
+          else
+            bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker
+          fi
       - name: Verify runtime, network connectivity, and Worker heartbeat
         env:
           EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.database_head }}
@@ -669,5 +744,20 @@ jobs:
           scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$RUNNER_TEMP/maxibot-worker-health.py" "root@$PRODUCTION_HOST:/tmp/maxibot-worker-health-$GITHUB_RUN_ID.py"
           worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker")"
           [[ "$worker_id" =~ ^[0-9a-f]{64}$ ]]
-          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 35 --max-age 90 --expected-release '$CANDIDATE_SHA'"
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 60 --max-age 90 --expected-release '$CANDIDATE_SHA'"
           echo 'MAXIBOT_KAMAL_DEPLOY_VERIFY=PASS' >> "$GITHUB_STEP_SUMMARY"
+      - name: Record the actual verified application result
+        if: always() && steps.deployment.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          JOB_RESULT: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOYMENT_ID" =~ ^[0-9]+$ ]]
+          state=failure
+          if [[ "$JOB_RESULT" == success ]]; then state=success; fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state="$state" -f environment=production -f environment_url=https://api.maxibot.pro \
+            -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            -f description="$RELEASE_OPERATION $CANDIDATE_SHA runtime Verify: $JOB_RESULT" >/dev/null
