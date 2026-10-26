@@ -222,7 +222,6 @@ jobs:
       MAXIBOT_BACKUP_MAX_AGE_SECONDS: '86400'
       BUNDLE_GEMFILE: Gemfile.kamal
       KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
-      MAXIBOT_COMMIT_SHA: ${{ inputs.candidate }}
     steps:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
@@ -470,6 +469,7 @@ jobs:
           echo "old_uploads_volume=$old_uploads_volume" >> "$GITHUB_OUTPUT"
       - name: Verify exact GHCR image and Kamal configuration
         env:
+          MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
           GH_TOKEN: ${{ github.token }}
           BASELINE_MODE: ${{ steps.baseline.outputs.baseline_mode }}
         run: |
@@ -534,6 +534,8 @@ jobs:
           bundle exec kamal config >/dev/null
           bundle exec kamal registry login
       - name: Deploy application with Kamal
+        env:
+          MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
         run: |
           set -euo pipefail
           install -d -m 700 .kamal
@@ -562,6 +564,8 @@ jobs:
           grep -qi '^cache-control: no-store' "$admin_headers"
           grep -q 'OWNER CONSOLE' "$RUNNER_TEMP/maxibot-admin.html"
       - name: Stop the existing Kamal Worker before starting its replacement
+        env:
+          MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
         run: |
           set -euo pipefail
           install -d -m 700 .kamal
@@ -579,6 +583,8 @@ jobs:
           fi
           REMOTE
       - name: Deploy the sole Worker with Kamal
+        env:
+          MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
         run: |
           set -euo pipefail
           install -d -m 700 .kamal
