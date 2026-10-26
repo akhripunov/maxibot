@@ -281,25 +281,33 @@ jobs:
           test "$GITHUB_RUN_ID" -gt 0
           remote="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$GITHUB_RUN_ID" <<'REMOTE'
           set -euo pipefail
+          gate=remote_preflight_start
+          trap 'status=$?; trap - ERR; printf "PREFLIGHT_REMOTE_GATE_FAILED=%s status=%s\n" "${gate:-remote_preflight_start}" "$status" >&2; exit "$status"' ERR
           run_id="$1"
           api=maxibot-vps-api-1; worker=maxibot-vps-worker-1
           db=maxibot-vps-db-1; redis=maxibot-vps-redis-1; caddy=maxibot-vps-https-1
+          gate=compose_containers_running
           for container in "$api" "$worker" "$db" "$redis" "$caddy"; do
             test "$(docker inspect "$container" --format '{{.State.Running}}')" = true
           done
+          gate=caddy_owns_public_ports
           caddy_id="$(docker inspect "$caddy" --format '{{.Id}}')"
           for port in 80 443; do
             mapfile -t owners < <(docker ps -q --filter "publish=$port")
             [[ ${#owners[@]} == 1 && "${owners[0]}" == "$caddy_id" ]]
           done
+          gate=kamal_proxy_absent
           ! docker inspect kamal-proxy >/dev/null 2>&1
+          gate=no_kamal_app_containers
           mapfile -t kamal_apps < <(docker ps -q --filter label=service=maxibot)
           test "${#kamal_apps[@]}" = 0
+          gate=compose_polling_and_worker_memory
           docker inspect "$api" "$worker" >/dev/null
           api_polling="$(docker inspect "$api" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAX_RUN_POLLING=//p')"
           worker_polling="$(docker inspect "$worker" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAX_RUN_POLLING=//p')"
           test "$api_polling" = false && test "$worker_polling" = true
           docker inspect "$worker" --format '{{.HostConfig.Memory}}' | grep -qx 536870912
+          gate=single_poller_and_network_topology
           python3 - "$api" "$worker" <<'PY'
           import json, subprocess, sys
           api, worker = sys.argv[1:]
@@ -322,17 +330,24 @@ jobs:
               all_items=json.loads(subprocess.check_output(['docker','inspect',*others],text=True))
               assert all('api' not in x['NetworkSettings']['Networks'].get('maxibot-vps-frontend',{}).get('Aliases',[]) for x in all_items)
           PY
+          gate=caddy_config_valid
           docker exec "$caddy" caddy validate --config /etc/caddy/Caddyfile >/dev/null
+          gate=api_readiness
           baseline_sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')"
           [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]
+          gate=api_database_and_redis_connectivity
           docker exec "$api" python -c 'import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in (("db",5432),("redis",6379))]'
+          gate=postgres_alembic_head
           head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
+          gate=recovery_runtime_files
           for path in /opt/maxibot/.env /opt/maxibot/secrets/mail_cloud.env; do test -s "$path"; done
+          gate=compose_image_integrity
           for container in "$api" "$worker"; do
             configured_image="$(docker inspect "$container" --format '{{.Config.Image}}')"
             running_image="$(docker inspect "$container" --format '{{.Image}}')"
             test "$(docker image inspect "$configured_image" --format '{{.Id}}')" = "$running_image"
           done
+          gate=fresh_backup_and_archive_integrity
           backup_dir=/opt/maxibot/backups
           backup_path="$(find "$backup_dir" -maxdepth 1 -type f -name 'maxibot-db-*.dump' -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
           [[ "$backup_path" == "$backup_dir"/maxibot-db-*.dump ]]
@@ -342,7 +357,9 @@ jobs:
           docker exec -i "$db" pg_restore --list < "$backup_path" >/dev/null
           db_image="$(docker inspect "$db" --format '{{.Image}}')"
           restore_name="maxibot-first-cutover-restore-$run_id"
+          gate=isolated_restore_name_available
           if docker container inspect "$restore_name" >/dev/null 2>&1; then exit 1; fi
+          gate=isolated_restore_capacity
           db_data_dir="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}')"
           test -n "$db_data_dir" && test -d "$db_data_dir"
           db_data_bytes="$(du -sb "$db_data_dir" | awk '{print $1}')"
@@ -376,23 +393,28 @@ jobs:
           trap 'exit 129' HUP
           trap 'exit 130' INT
           trap 'exit 143' TERM
+          gate=isolated_restore_create_resources
           restore_data_dir="$(mktemp -d "$backup_dir/.kamal-restore-${run_id}.XXXXXX")"
           chmod 700 "$restore_data_dir"
           docker run -d --name "$restore_name" --network none --memory=1g --memory-swap=1g \
             --mount "type=bind,src=$restore_data_dir,dst=/var/lib/postgresql/data" \
             --mount "type=bind,src=$backup_path,dst=/tmp/backup.dump,readonly" \
             -e POSTGRES_USER=maxibot -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust "$db_image" >/dev/null
+          gate=isolated_restore_startup
           ready=0
           for _ in $(seq 1 60); do if docker exec "$restore_name" pg_isready -U maxibot -d postgres >/dev/null 2>&1; then ready=1; break; fi; sleep 1; done
           test "$ready" = 1
+          gate=isolated_restore_content
           docker exec "$restore_name" createdb -U maxibot cutover_restore_probe
           docker exec "$restore_name" pg_restore --exit-on-error --no-owner --no-privileges -U maxibot -d cutover_restore_probe /tmp/backup.dump >/dev/null
+          gate=isolated_restore_consistency
           restored_head="$(docker exec "$restore_name" psql -X -U maxibot -d cutover_restore_probe -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
           source_tables="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
           restored_tables="$(docker exec "$restore_name" psql -X -U maxibot -d cutover_restore_probe -At -v ON_ERROR_STOP=1 -c "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
           source_extensions="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")"
           restored_extensions="$(docker exec "$restore_name" psql -X -U maxibot -d cutover_restore_probe -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")"
           test "$restored_head" = "$head" && test "$restored_tables" = "$source_tables" && test "$restored_extensions" = "$source_extensions"
+          gate=persistent_volume_identity
           backup_sha="$(sha256sum "$backup_path" | awk '{print $1}')"
           api_uploads="$(docker inspect "$api" --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Name}}{{end}}{{end}}')"
           db_volume="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')"
