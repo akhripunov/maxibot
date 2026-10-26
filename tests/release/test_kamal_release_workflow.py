@@ -1,5 +1,9 @@
 from pathlib import Path
 import subprocess
+import os
+import re
+
+import pytest
 
 import yaml
 
@@ -169,3 +173,25 @@ def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
     assert config["servers"]["api"]["options"]["volume"] == "maxibot-vps_maxibot_uploads:/app/uploads"
     assert config["servers"]["worker"]["options"]["memory"] == "512m"
     assert config["servers"]["worker"]["proxy"] is False
+
+
+@pytest.mark.parametrize('ids,status,ok', [('a'*64,0,True),('',0,False),('a'*64+'\n'+'b'*64,0,False),('',42,False)])
+def test_normal_kamal_selection_provides_exact_inspect_ids_and_rejects_docker_failures(ids,status,ok):
+    workflow=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    steps=workflow['jobs']['deploy']['steps']
+    runs=[s['run'] for s in steps if 'run' in s and 'mapfile -t apis' in s['run'] or 'run' in s and 'api="$(docker ps ' in s['run']]
+    assert len(runs)==3
+    for run in runs:
+        blocks=re.findall(r'api="\$\(docker ps [^\n]+\n\s*worker="\$\(docker ps [^\n]+\n\s*\[\[ [^\n]+',run)
+        assert len(blocks)==1, 'Selections must propagate Docker errors and require one full ID'
+        fake='docker() { [[ "$*" == *--no-trunc* ]] || { printf "%s" "${IDS:0:12}"; return 0; }; printf "%s" "$IDS"; return "$STATUS"; }'
+        r=subprocess.run(['bash','-c','set -euo pipefail\n'+fake+'\n'+blocks[0]],env={**os.environ,'IDS':ids,'STATUS':str(status)},capture_output=True)
+        assert (r.returncode==0) is ok
+
+
+def test_normal_kamal_ssh_uses_the_same_strict_identity_as_read_only_preflight():
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    run=next(s['run'] for s in doc['jobs']['deploy']['steps'] if s.get('name')=='Verify exact main and read the current production baseline')
+    assert 'install -m 600 "$RUNNER_TEMP/ssh/id_ed25519" "$HOME/.ssh/id_ed25519"' in run
+    assert 'IdentityFile $HOME/.ssh/id_ed25519' in run
+    assert 'IdentitiesOnly yes' in run and 'BatchMode yes' in run and 'StrictHostKeyChecking yes' in run

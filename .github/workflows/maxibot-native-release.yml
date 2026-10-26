@@ -301,11 +301,25 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE_SHA"
           test "$PRODUCTION_HOST" = 135.106.166.46
           test -n "$PRODUCTION_SSH_KEY" && test -n "$PRODUCTION_KNOWN_HOSTS"
-          install -d -m 700 "$RUNNER_TEMP/ssh"
+          install -d -m 700 "$RUNNER_TEMP/ssh" "$HOME/.ssh"
           printf '%s\n' "$PRODUCTION_SSH_KEY" > "$RUNNER_TEMP/ssh/id_ed25519"
           chmod 600 "$RUNNER_TEMP/ssh/id_ed25519"
           printf '%s\n' "$PRODUCTION_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
           chmod 600 "$RUNNER_TEMP/ssh/known_hosts"
+          install -m 600 "$RUNNER_TEMP/ssh/id_ed25519" "$HOME/.ssh/id_ed25519"
+          cat "$RUNNER_TEMP/ssh/known_hosts" >> "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          cat >> "$HOME/.ssh/config" <<EOF
+          Host $PRODUCTION_HOST
+            HostName $PRODUCTION_HOST
+            User root
+            IdentityFile $HOME/.ssh/id_ed25519
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            UserKnownHostsFile $HOME/.ssh/known_hosts
+          EOF
+          chmod 600 "$HOME/.ssh/config"
           echo "PRODUCTION_SSH=$RUNNER_TEMP/ssh/id_ed25519" >> "$GITHUB_ENV"
           echo "PRODUCTION_KNOWN_HOSTS_FILE=$RUNNER_TEMP/ssh/known_hosts" >> "$GITHUB_ENV"
           remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
@@ -316,10 +330,10 @@ jobs:
           if running "$api_compose" && running "$worker_compose"; then
             mode=compose; api="$api_compose"; worker="$worker_compose"
           elif ! running "$api_compose" && ! running "$worker_compose"; then
-            mapfile -t apis < <(docker ps -q --filter label=service=maxibot --filter label=role=api)
-            mapfile -t workers < <(docker ps -q --filter label=service=maxibot --filter label=role=worker)
-            [[ ${#apis[@]} == 1 && ${#workers[@]} == 1 ]]
-            mode=kamal; api="${apis[0]}"; worker="${workers[0]}"
+            api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
+            worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
+            [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]]
+            mode=kamal
           else
             echo 'Mixed Compose/Kamal production topology; read-only reconciliation required.' >&2
             exit 1
@@ -462,10 +476,9 @@ jobs:
           test "$BASELINE_MODE" = kamal || { echo 'FIRST_COMPOSE_TO_KAMAL_CUTOVER_REQUIRED=BLOCKED' >&2; exit 1; }
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
-          mapfile -t apis < <(docker ps -q --filter label=service=maxibot --filter label=role=api)
-          mapfile -t workers < <(docker ps -q --filter label=service=maxibot --filter label=role=worker)
-          [[ ${#apis[@]} == 1 && ${#workers[@]} == 1 ]]
-          api="${apis[0]}"; worker="${workers[0]}"
+          api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
+          worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
+          [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]]
           python3 - "$api" "$worker" <<'PY'
           import json, subprocess, sys
           api, worker = sys.argv[1:]
@@ -586,10 +599,9 @@ jobs:
           sha="$1"; version="$2"; image_ref="$3"; expected_db_head="$4"
           expected_db_id="$5"; expected_redis_id="$6"; expected_caddy_id="$7"
           expected_db_volume="$8"; expected_redis_volume="$9"; expected_uploads_volume="${10}"
-          mapfile -t apis < <(docker ps -q --filter label=service=maxibot --filter label=role=api)
-          mapfile -t workers < <(docker ps -q --filter label=service=maxibot --filter label=role=worker)
-          [[ ${#apis[@]} == 1 && ${#workers[@]} == 1 ]]
-          api="${apis[0]}"; worker="${workers[0]}"
+          api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
+          worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
+          [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]]
           python3 - "$api" "$worker" "$sha" "$version" "$image_ref" "$expected_db_head" "$expected_db_id" "$expected_redis_id" "$expected_caddy_id" "$expected_db_volume" "$expected_redis_volume" "$expected_uploads_volume" <<'PY'
           import json, subprocess, sys
           api, worker, sha, version, image_ref, expected_db_head, expected_db_id, expected_redis_id, expected_caddy_id, expected_db_volume, expected_redis_volume, expected_uploads_volume = sys.argv[1:]
@@ -643,7 +655,7 @@ jobs:
           REMOTE
           cat app/worker_health.py scripts/worker_health_preflight.py > "$RUNNER_TEMP/maxibot-worker-health.py"
           scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$RUNNER_TEMP/maxibot-worker-health.py" "root@$PRODUCTION_HOST:/tmp/maxibot-worker-health-$GITHUB_RUN_ID.py"
-          worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "docker ps -q --filter label=service=maxibot --filter label=role=worker")"
+          worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker")"
           [[ "$worker_id" =~ ^[0-9a-f]{64}$ ]]
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 35 --max-age 90 --expected-release '$CANDIDATE_SHA'"
           echo 'MAXIBOT_KAMAL_DEPLOY_VERIFY=PASS' >> "$GITHUB_STEP_SUMMARY"
