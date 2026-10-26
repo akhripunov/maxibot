@@ -296,3 +296,11 @@ def test_pinned_rollback_interface_uses_loaded_cli_metadata_not_help_text():
     assert 'Main.class_options.keys.map(&:to_s).include?("roles")' in verify['run']
     assert 'Main.all_commands.key?("rollback")' in verify['run']
     assert 'kamal rollback --help | grep' not in verify['run']
+
+
+def test_isolated_restore_cleanup_removes_its_anonymous_data_volume():
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    baseline=next(s['run'] for s in doc['jobs']['deploy']['steps'] if s.get('id')=='baseline')
+    assert baseline.count('docker rm -f -v "$restore_name"')==2
+    assert 'docker volume prune' not in baseline
+    assert 'NATIVE_RESTORE_DISK=FAIL' in baseline

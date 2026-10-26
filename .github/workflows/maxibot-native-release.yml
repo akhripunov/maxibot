@@ -410,7 +410,10 @@ jobs:
           free_kb="$(df -Pk "$docker_root" | awk 'NR == 2 {print $4}')"
           required_kb=$(((source_db_bytes * 3 / 2 + backup_bytes * 2 + 134217728) / 1024))
           [[ "$free_kb" =~ ^[0-9]+$ ]]
-          (( free_kb >= required_kb ))
+          if (( free_kb < required_kb )); then
+            printf 'NATIVE_RESTORE_DISK=FAIL free_kb=%s required_kb=%s\n' "$free_kb" "$required_kb" >&2
+            exit 1
+          fi
           db_image="$(docker inspect "$db" --format '{{.Image}}')"
           [[ "$db_image" =~ ^sha256:[0-9a-f]{64}$ ]]
           restore_name="maxibot-native-restore-$run_id"
@@ -423,7 +426,7 @@ jobs:
             status=$?
             trap - EXIT
             if (( restore_started )) && docker container inspect "$restore_name" >/dev/null 2>&1; then
-              docker rm -f "$restore_name" >/dev/null || status=1
+              docker rm -f -v "$restore_name" >/dev/null || status=1
             fi
             exit "$status"
           }
@@ -449,7 +452,7 @@ jobs:
           test "$restored_tables" = "$source_tables"
           backup_sha256="$(sha256sum "$backup_path" | awk '{print $1}')"
           [[ "$backup_sha256" =~ ^[0-9a-f]{64}$ ]]
-          docker rm -f "$restore_name" >/dev/null
+          docker rm -f -v "$restore_name" >/dev/null
           trap - EXIT
           printf '%s|%s|%s|%s|%s|%s\n' "$backup_epoch" "$backup_bytes" "$backup_sha256" "$database_head" "$restored_head" "$restored_tables"
           REMOTE
