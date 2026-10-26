@@ -195,3 +195,11 @@ def test_normal_kamal_ssh_uses_the_same_strict_identity_as_read_only_preflight()
     assert 'install -m 600 "$RUNNER_TEMP/ssh/id_ed25519" "$HOME/.ssh/id_ed25519"' in run
     assert 'IdentityFile $HOME/.ssh/id_ed25519' in run
     assert 'IdentitiesOnly yes' in run and 'BatchMode yes' in run and 'StrictHostKeyChecking yes' in run
+
+
+def test_external_build_sets_kamal_service_label_and_deploy_verifies_it():
+    workflow=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    build=next(s for s in workflow['jobs']['build']['steps'] if s.get('uses','').startswith('docker/build-push-action@'))
+    assert 'service=maxibot' in build['with']['labels'].splitlines()
+    deploy='\n'.join(s.get('run','') for s in workflow['jobs']['deploy']['steps'])
+    assert deploy.count('test "$service_label" = maxibot')==2

@@ -184,6 +184,8 @@ jobs:
           for label in org.opencontainers.image.revision org.opencontainers.image.source-sha org.maxibot.release.sha; do
             test "$(docker image inspect "$image_ref" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
           done
+          service_label="$(docker image inspect "$image_ref" --format '{{index .Config.Labels "service"}}')"
+          test "$service_label" = maxibot
           raw_index="$(docker buildx imagetools inspect "$image_ref" --raw)"
           platform_manifest_digest="$(jq -er '
             [.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest]
@@ -608,6 +610,8 @@ jobs:
           for label in org.opencontainers.image.revision org.opencontainers.image.source-sha org.maxibot.release.sha; do
             test "$(docker image inspect "$IMAGE_REF" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
           done
+          service_label="$(docker image inspect "$IMAGE_REF" --format '{{index .Config.Labels "service"}}')"
+          test "$service_label" = maxibot
           current="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$EXPECTED_BACKUP_SHA" "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" <<'REMOTE'
           set -euo pipefail
           expected_backup_sha="$1"; max_backup_age="$2"

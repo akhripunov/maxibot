@@ -181,6 +181,7 @@ jobs:
           provenance: mode=min
           tags: ghcr.io/akhripunov/maxibot-vps-api:${{ steps.version.outputs.value }}
           labels: |
+            service=maxibot
             org.opencontainers.image.revision=${{ env.CANDIDATE_SHA }}
             org.opencontainers.image.source-sha=${{ env.CANDIDATE_SHA }}
             org.maxibot.release.sha=${{ env.CANDIDATE_SHA }}
@@ -264,6 +265,8 @@ jobs:
           for label in org.opencontainers.image.revision org.opencontainers.image.source-sha org.maxibot.release.sha; do
             test "$(docker image inspect "$image_ref" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
           done
+          service_label="$(docker image inspect "$image_ref" --format '{{index .Config.Labels "service"}}')"
+          test "$service_label" = maxibot
           {
             echo "image_version=$image_version"
             echo "image_tag=$image_tag"
@@ -521,6 +524,8 @@ jobs:
           for label in org.opencontainers.image.revision org.opencontainers.image.source-sha org.maxibot.release.sha; do
             test "$(docker image inspect "$IMAGE_REF" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
           done
+          service_label="$(docker image inspect "$IMAGE_REF" --format '{{index .Config.Labels "service"}}')"
+          test "$service_label" = maxibot
           export MAXIBOT_COMMIT_SHA="$CANDIDATE_SHA"
           printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets
           chmod 600 .kamal/secrets

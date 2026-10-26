@@ -622,6 +622,18 @@ def test_read_only_preflight_retains_production_approval_without_recording_a_dep
     assert workflow['jobs']['apply']['environment'].get('deployment', 'true') == 'true'
 
 
+@pytest.mark.parametrize('label,status,ok', [('maxibot',0,True),('',0,False),('other',0,False),('',42,False)])
+def test_stock_kamal_service_label_is_verified_before_any_compose_stop(label,status,ok):
+    doc=yaml.load(WORKFLOW_PATH.read_text(),Loader=yaml.BaseLoader)
+    for job,name in [('preflight','Read back the immutable GHCR image, platform, labels, SBOM and provenance descriptors'),('apply','Reconcile exact Compose baseline and current main before any Apply')]:
+        run=next(s['run'] for s in doc['jobs'][job]['steps'] if s.get('name')==name)
+        check=re.search(r'service_label="\$\([^\n]+\n\s*test "\$service_label" = maxibot',run)
+        assert check, 'Stock Kamal rejects unlabelled external builds; reject before stopping Compose'
+        fake='docker() { printf "%s" "$LABEL"; return "$STATUS"; }'
+        r=subprocess.run(['bash','-c','set -euo pipefail\n'+fake+'\n'+check.group()],env={**os.environ,'LABEL':label,'STATUS':str(status),'image_ref':'fixture','IMAGE_REF':'fixture'},capture_output=True)
+        assert (r.returncode==0) is ok
+
+
 @pytest.mark.parametrize('failure,expected', [('',True),('ports',False),('docker',False),('api_deploy',False),('https',False)])
 def test_actual_stop_and_api_step_orders_consumer_handoff_and_stops_on_failure(tmp_path, failure, expected):
     """Execute the workflow shell; only SSH, Docker, Kamal and HTTP are external doubles."""
