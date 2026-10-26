@@ -45,6 +45,7 @@ jobs:
       MAX_RUN_POLLING: 'false'
       ADS_AUTOPILOT_ENABLED: 'false'
       ADS_WRITE_ACTIONS_ENABLED: 'false'
+      BUNDLE_GEMFILE: Gemfile.kamal
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -90,6 +91,43 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m pytest -q
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
+        with:
+          ruby-version: '3.3.6'
+          bundler-cache: true
+      - name: Load Kamal config with synthetic registry secret
+        env:
+          MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 .kamal
+          umask 077
+          trap 'rm -f .kamal/secrets' EXIT
+          synthetic_registry_secret="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+          printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$synthetic_registry_secret" > .kamal/secrets
+          unset synthetic_registry_secret
+          chmod 600 .kamal/secrets
+          git check-ignore -q .kamal/secrets
+          test "$(stat -c '%a' .kamal/secrets)" = 600
+          bundle exec ruby -e 'abort unless Gem.loaded_specs.fetch("kamal").version.to_s == "2.12.0"'
+          bundle exec kamal config >/dev/null
+          python - <<'PY'
+          import yaml
+          with open('config/deploy.yml', encoding='utf-8') as stream:
+              config = yaml.safe_load(stream)
+          assert set(config['proxy']['hosts']) == {
+              'maxibot.pro', 'www.maxibot.pro', 'api.maxibot.pro',
+              'go.maxibot.pro', 'admin.maxibot.pro',
+          }
+          assert config['proxy']['ssl'] is True
+          assert config['proxy']['app_port'] == 8000
+          assert config['proxy']['healthcheck']['path'] == '/health/ready'
+          assert set(config['servers']) == {'api', 'worker'}
+          assert config['servers']['api']['proxy'] is not False
+          assert config['servers']['worker']['proxy'] is False
+          PY
+          rm -f .kamal/secrets
+          test ! -e .kamal/secrets
   build:
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/codex/native-release-maxibot' && github.actor == github.repository_owner) ||
@@ -418,6 +456,9 @@ jobs:
           BASELINE_MODE: ${{ steps.baseline.outputs.baseline_mode }}
         run: |
           set -euo pipefail
+          install -d -m 700 .kamal
+          umask 077
+          trap 'rm -f .kamal/secrets' EXIT
           test "$BASELINE_MODE" = kamal || { echo 'FIRST_COMPOSE_TO_KAMAL_CUTOVER_REQUIRED=BLOCKED' >&2; exit 1; }
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
@@ -468,12 +509,21 @@ jobs:
             test "$(docker image inspect "$IMAGE_REF" --format "{{index .Config.Labels \"$label\"}}")" = "$CANDIDATE_SHA"
           done
           export MAXIBOT_COMMIT_SHA="$CANDIDATE_SHA"
+          printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets
+          chmod 600 .kamal/secrets
+          git check-ignore -q .kamal/secrets
           bundle exec kamal config >/dev/null
           bundle exec kamal registry login
       - name: Deploy application with Kamal
         run: |
           set -euo pipefail
+          install -d -m 700 .kamal
+          umask 077
+          trap 'rm -f .kamal/secrets' EXIT
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" 'docker network inspect kamal >/dev/null'
+          printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets
+          chmod 600 .kamal/secrets
+          git check-ignore -q .kamal/secrets
           bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
@@ -495,6 +545,12 @@ jobs:
       - name: Stop the existing Kamal Worker before starting its replacement
         run: |
           set -euo pipefail
+          install -d -m 700 .kamal
+          umask 077
+          trap 'rm -f .kamal/secrets' EXIT
+          printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets
+          chmod 600 .kamal/secrets
+          git check-ignore -q .kamal/secrets
           bundle exec kamal app stop --roles worker
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
@@ -504,7 +560,15 @@ jobs:
           fi
           REMOTE
       - name: Deploy the sole Worker with Kamal
-        run: bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker
+        run: |
+          set -euo pipefail
+          install -d -m 700 .kamal
+          umask 077
+          trap 'rm -f .kamal/secrets' EXIT
+          printf 'KAMAL_REGISTRY_PASSWORD=%s\n' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets
+          chmod 600 .kamal/secrets
+          git check-ignore -q .kamal/secrets
+          bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker
       - name: Verify runtime, network connectivity, and Worker heartbeat
         env:
           EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.database_head }}

@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import yaml
 
@@ -25,6 +26,62 @@ def test_kamal_release_has_three_jobs_and_owner_gated_deploy():
     assert workflow["jobs"]["deploy"]["environment"]["name"] == "production"
     assert workflow["jobs"]["deploy"]["permissions"]["packages"] == "read"
     assert workflow["jobs"]["deploy"]["permissions"]["actions"] == "read"
+
+
+def test_tests_job_loads_pinned_kamal_config_with_synthetic_secret_without_deploy_access():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    tests = workflow["jobs"]["tests"]
+    setup = next(step for step in tests["steps"] if step.get("uses", "").startswith("ruby/setup-ruby@"))
+    verify = next(step for step in tests["steps"] if step.get("name") == "Load Kamal config with synthetic registry secret")
+
+    assert setup["uses"] == "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b"
+    assert setup["with"]["ruby-version"] == "3.3.6"
+    assert setup["with"]["bundler-cache"] == "true"
+    assert tests["env"]["BUNDLE_GEMFILE"] == "Gemfile.kamal"
+    lockfile = (ROOT / "Gemfile.kamal.lock").read_text()
+    assert "kamal (2.12.0)" in lockfile
+    assert "KAMAL_REGISTRY_PASSWORD" in verify["run"]
+    assert "secrets.token_hex(32)" in verify["run"]
+    assert "unset synthetic_registry_secret" in verify["run"]
+    assert "chmod 600 .kamal/secrets" in verify["run"]
+    assert "git check-ignore -q .kamal/secrets" in verify["run"]
+    assert "trap 'rm -f .kamal/secrets' EXIT" in verify["run"]
+    assert "test ! -e .kamal/secrets" in verify["run"]
+    assert "bundle exec kamal config" in verify["run"]
+    assert "kamal registry login" not in verify["run"]
+    assert "kamal deploy" not in verify["run"]
+    assert "kamal app stop" not in verify["run"]
+    assert "ssh " not in verify["run"]
+    subprocess.run(["git", "check-ignore", "-q", ".kamal/secrets"], cwd=ROOT, check=True)
+    assert workflow["jobs"]["build"]["needs"] == "tests"
+
+
+def test_every_normal_deploy_kamal_step_creates_private_secrets_file_and_cleans_it():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    deploy = workflow["jobs"]["deploy"]
+    assert deploy["env"]["KAMAL_REGISTRY_PASSWORD"] == "${{ github.token }}"
+    steps = deploy["steps"]
+    kamal_calls = {
+        "Verify exact GHCR image and Kamal configuration": (
+            "bundle exec kamal config",
+            "bundle exec kamal registry login",
+        ),
+        "Deploy application with Kamal": ("bundle exec kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles api",),
+        "Stop the existing Kamal Worker before starting its replacement": (
+            "bundle exec kamal app stop --roles worker",
+        ),
+        "Deploy the sole Worker with Kamal": ("bundle exec kamal deploy --skip-push --version \"$IMAGE_VERSION\" --roles worker",),
+    }
+    for name, calls in kamal_calls.items():
+        step = next(step for step in steps if step.get("name") == name)
+        run = step["run"]
+        assert all(call in run for call in calls)
+        assert "install -d -m 700 .kamal" in run
+        assert "umask 077" in run
+        assert 'printf \'KAMAL_REGISTRY_PASSWORD=%s\\n\' "$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets' in run
+        assert "chmod 600 .kamal/secrets" in run
+        assert "git check-ignore -q .kamal/secrets" in run
+        assert "trap 'rm -f .kamal/secrets' EXIT" in run
 
 
 def test_kamal_build_is_run_scoped_and_records_source_sha_and_digest():
