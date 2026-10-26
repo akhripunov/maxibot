@@ -1,3 +1,14 @@
+## OWNER exception — ME-51 first Compose → Kamal cutover
+
+For ME-51 only, the OWNER-authorized first Compose → Kamal cutover uses `.github/workflows/maxibot-first-kamal-cutover.yml` instead of the legacy `scripts/release_prod.sh` path. This exception supersedes conflicting V5/sole-mutation-path requirements only for that one transition and its documented recovery. The existing DevOps authority has been transferred by OWNER to Codex chat `01a1778b-db7d-7490-900e-90a71ee73f40` for ME-51.
+
+Publish the scoped, clean, tested candidate only within OWNER's ME-51 authorization; require successful exact-SHA hosted Tests/Build, immutable GHCR digest/platform/source/SBOM/provenance verification, protected `production` Environment approval, and a successful fresh preflight before Apply. Preserve backup/isolated restore, single Poller, Worker 512 MiB, unchanged PostgreSQL/Redis/volumes, strict SSH, frozen-path/security gates and the documented Compose recovery baseline. `OWNER_ACCEPTED_UNROTATED` records accepted risk, never completed rotation. No direct ad/provider writes, GPoint changes, credential/network-policy changes, or gate bypass are authorized.
+
+After verified first cutover, ordinary ME-51 release validation uses the existing `.github/workflows/maxibot-native-release.yml` protected stock Kamal `--skip-push` path with the same identity and runtime safety gates, following Linear «Правила релизов NEW». Legacy V5/Compose application mutation entrypoints must not operate concurrently on the same application containers; recovery material remains until OWNER confirms migration. This exception grants no permission for unrelated future releases and does not remove mandatory GitHub approval.
+
+
+---
+
 ## CURRENT OWNER TASK AUTHORIZATION — 2026-10-20
 
 MAXIBOT follows the current GPoint V5 full-cycle OWNER-task model in

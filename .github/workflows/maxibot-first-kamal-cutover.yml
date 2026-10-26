@@ -38,7 +38,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: maxibot-first-kamal-cutover
+  group: maxibot-production-release
   cancel-in-progress: false
 
 env:
@@ -54,6 +54,7 @@ jobs:
     timeout-minutes: 45
     environment:
       name: production
+      deployment: false
     permissions:
       actions: read
       contents: read
@@ -293,8 +294,8 @@ jobs:
           gate=caddy_owns_public_ports
           caddy_id="$(docker inspect "$caddy" --format '{{.Id}}')"
           for port in 80 443; do
-            mapfile -t owners < <(docker ps -q --no-trunc --filter "publish=$port")
-            [[ ${#owners[@]} == 1 && "${owners[0]}" == "$caddy_id" ]]
+            owners="$(docker ps -q --no-trunc --filter "publish=$port")"
+            [[ "$caddy_id" =~ ^[0-9a-f]{64}$ && "$owners" == "$caddy_id" ]]
           done
           gate=kamal_proxy_absent
           kamal_proxy_ids="$(docker ps -aq --no-trunc --filter 'name=^/kamal-proxy$')"
@@ -303,8 +304,8 @@ jobs:
             exit 1
           fi
           gate=no_kamal_app_containers
-          mapfile -t kamal_apps < <(docker ps -q --filter label=service=maxibot)
-          test "${#kamal_apps[@]}" = 0
+          kamal_apps="$(docker ps -q --filter label=service=maxibot)"
+          test -z "$kamal_apps"
           gate=compose_polling_and_worker_memory
           docker inspect "$api" "$worker" >/dev/null
           api_polling="$(docker inspect "$api" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAX_RUN_POLLING=//p')"
@@ -341,6 +342,7 @@ jobs:
           [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]
           gate=api_database_and_redis_connectivity
           docker exec "$api" python -c 'import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in (("db",5432),("redis",6379))]'
+          docker exec "$api" python -c 'exec("try:\n from redis import Redis\n from app.core.config import settings\n assert Redis.from_url(settings.redis_url, socket_timeout=5, socket_connect_timeout=5).ping() is True\nexcept Exception:\n raise SystemExit(\"Redis PING failed\") from None")'
           gate=postgres_alembic_head
           head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
           gate=recovery_runtime_files
@@ -351,6 +353,7 @@ jobs:
             running_image="$(docker inspect "$container" --format '{{.Image}}')"
             test "$(docker image inspect "$configured_image" --format '{{.Id}}')" = "$running_image"
           done
+          docker inspect "$api" "$worker" | python3 -c 'import json,sys; api,worker=json.load(sys.stdin); expected=sys.argv[1]; assert api["Image"] == worker["Image"]; assert all([e for e in c["Config"].get("Env",[]) if e.startswith("MAXIBOT_COMMIT_SHA=")] == ["MAXIBOT_COMMIT_SHA="+expected] for c in (api,worker))' "$baseline_sha"
           gate=fresh_backup_and_archive_integrity
           backup_dir=/opt/maxibot/backups
           backup_path="$(find "$backup_dir" -maxdepth 1 -type f -name 'maxibot-db-*.dump' -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
@@ -362,7 +365,8 @@ jobs:
           db_image="$(docker inspect "$db" --format '{{.Image}}')"
           restore_name="maxibot-first-cutover-restore-$run_id"
           gate=isolated_restore_name_available
-          if docker container inspect "$restore_name" >/dev/null 2>&1; then exit 1; fi
+          restore_ids="$(docker ps -aq --no-trunc --filter "name=^/$restore_name$")"
+          test -z "$restore_ids"
           gate=isolated_restore_capacity
           db_data_dir="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}')"
           test -n "$db_data_dir" && test -d "$db_data_dir"
@@ -376,15 +380,20 @@ jobs:
             result=$?
             trap - EXIT HUP INT TERM
             cleanup_failed=0
-            if docker container inspect "$restore_name" >/dev/null 2>&1; then
+            if ! restore_ids="$(docker ps -aq --no-trunc --filter "name=^/$restore_name$")"; then
+              cleanup_failed=1
+            elif [[ -n "$restore_ids" ]]; then
               docker rm -f "$restore_name" >/dev/null || cleanup_failed=1
+            fi
+            if ! restore_ids="$(docker ps -aq --no-trunc --filter "name=^/$restore_name$")"; then
+              cleanup_failed=1
+            elif [[ -n "$restore_ids" ]]; then
+              cleanup_failed=1
             fi
             if ! docker info >/dev/null 2>&1; then
               cleanup_failed=1
-            elif docker container inspect "$restore_name" >/dev/null 2>&1; then
-              cleanup_failed=1
             fi
-            if [[ -n "${restore_data_dir:-}" && -d "$restore_data_dir" ]]; then
+            if (( cleanup_failed == 0 )) && [[ -n "${restore_data_dir:-}" && -d "$restore_data_dir" ]]; then
               rm -rf -- "$restore_data_dir" || cleanup_failed=1
             fi
             if (( cleanup_failed )); then
@@ -450,7 +459,12 @@ jobs:
           printf 'Five-domain DNS/TLS readback, Caddy recovery config/port owner, single Compose poller, DB/Redis, 512 MiB Worker, rollback files/images, and isolated backup restore: PASS\nBaseline fingerprint: `%s`\nBackup SHA-256: `%s`\n' "$fingerprint" "$backup_sha256" >> "$GITHUB_STEP_SUMMARY"
           git cat-file -e "$CANDIDATE_SHA^{commit}"
           git cat-file -e "$baseline_sha^{commit}"
-          bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"
+          # ME-51 OWNER approved the existing owner-console middleware diff.
+          # All other frozen paths still require their own scoped authorization.
+          approved_admin_diff="$(git diff "$baseline_sha" "$CANDIDATE_SHA" -- app/main.py | sha256sum | awk '{print $1}')"
+          test "$approved_admin_diff" = e5e57b4a46afc6fcbf6246eb4ae2ee0b830db2b80e8cb169f0126f84498b9535
+          bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" \
+            --owner-approved-task ME-51 --owner-approved-path app/main.py
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- alembic app/db/models.py docker-compose.vps.yml; then
             echo 'First cutover refuses schema or production Compose changes.' >&2
             exit 1
@@ -599,8 +613,8 @@ jobs:
           expected_backup_sha="$1"; max_backup_age="$2"
           [[ "$max_backup_age" =~ ^[0-9]+$ ]]
           api=maxibot-vps-api-1; worker=maxibot-vps-worker-1; db=maxibot-vps-db-1; redis=maxibot-vps-redis-1; caddy=maxibot-vps-https-1
-          mapfile -t kamal_apps < <(docker ps -q --filter label=service=maxibot)
-          test "${#kamal_apps[@]}" = 0
+          kamal_apps="$(docker ps -q --filter label=service=maxibot)"
+          test -z "$kamal_apps"
           test "$(docker inspect "$api" --format '{{.State.Running}}')" = true
           test "$(docker inspect "$worker" --format '{{.State.Running}}')" = true
           test "$(docker inspect "$db" --format '{{.State.Running}}')" = true
@@ -623,7 +637,8 @@ jobs:
             "$(docker inspect "$caddy" --format '{{.Id}}')" "$head" "$api_uploads" "$db_volume" "$redis_volume"
           REMOTE
           )"
-          current_fingerprint="$(printf '%s|' ${current//|/ } | sha256sum | awk '{print $1}')"
+          IFS='|' read -r sha api_id worker_id db_id redis_id caddy_id head api_uploads db_volume redis_volume <<< "$current"
+          current_fingerprint="$(printf '%s|' "$sha" "$api_id" "$worker_id" "$db_id" "$redis_id" "$caddy_id" "$head" "$api_uploads" "$db_volume" "$redis_volume" | sha256sum | awk '{print $1}')"
           test "$current_fingerprint" = "$EXPECTED_FINGERPRINT"
           echo 'Apply preconditions re-read; production baseline and fresh backup still match preflight.' >> "$GITHUB_STEP_SUMMARY"
 
@@ -668,8 +683,8 @@ jobs:
           api=maxibot-vps-api-1; caddy=maxibot-vps-https-1
           caddy_id="$(docker inspect "$caddy" --format '{{.Id}}')"
           for port in 80 443; do
-            mapfile -t owners < <(docker ps -q --no-trunc --filter "publish=$port")
-            [[ ${#owners[@]} == 1 && "${owners[0]}" == "$caddy_id" ]]
+            owners="$(docker ps -q --no-trunc --filter "publish=$port")"
+            [[ "$caddy_id" =~ ^[0-9a-f]{64}$ && "$owners" == "$caddy_id" ]]
           done
           network_id="$(docker network inspect maxibot-vps-frontend --format '{{.Id}}')"
           api_id="$(docker inspect "$api" --format '{{.Id}}')"
@@ -714,7 +729,10 @@ jobs:
             exit 1
           fi
           docker stop maxibot-vps-https-1 >/dev/null
-          for port in 80 443; do [[ -z "$(docker ps -q --filter "publish=$port")" ]]; done
+          for port in 80 443; do
+            owners="$(docker ps -q --no-trunc --filter "publish=$port")"
+            test -z "$owners"
+          done
           REMOTE
           bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
@@ -759,7 +777,7 @@ jobs:
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
           cat app/worker_health.py scripts/worker_health_preflight.py > "$RUNNER_TEMP/maxibot-worker-health.py"
           scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$RUNNER_TEMP/maxibot-worker-health.py" "root@$PRODUCTION_HOST:/tmp/maxibot-worker-health-$GITHUB_RUN_ID.py"
-          worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" 'docker ps -q --filter label=service=maxibot --filter label=role=worker')"
+          worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" 'docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker')"
           [[ "$worker_id" =~ ^[0-9a-f]{64}$ ]]
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 35 --max-age 90 --expected-release '$CANDIDATE_SHA'"
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$IMAGE_DIGEST" "$EXPECTED_DATABASE_HEAD" "$EXPECTED_DB_ID" "$EXPECTED_REDIS_ID" "$EXPECTED_CADDY_ID" "$EXPECTED_UPLOADS_VOLUME" "$EXPECTED_DB_VOLUME" "$EXPECTED_REDIS_VOLUME" <<'REMOTE'
@@ -776,6 +794,7 @@ jobs:
           pollers=[x['Id'] for x in items if 'MAX_RUN_POLLING=true' in x['Config'].get('Env',[])]
           workers=[x for x in items if x['Config'].get('Labels',{}).get('service')=='maxibot' and x['Config'].get('Labels',{}).get('role')=='worker']
           apis=[x for x in items if x['Config'].get('Labels',{}).get('service')=='maxibot' and x['Config'].get('Labels',{}).get('role')=='api']
+          assert len(apis)==1, 'Expected exactly one Kamal API'
           assert len(workers)==1 and pollers==[workers[0]['Id']], pollers
           assert apis[0]['Config']['Env'] and 'MAX_RUN_POLLING=false' in apis[0]['Config']['Env']
           assert workers[0]['HostConfig']['Memory']==536870912

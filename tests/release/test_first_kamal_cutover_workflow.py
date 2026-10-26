@@ -3,6 +3,9 @@ import json
 import os
 import re
 import subprocess
+import sys
+
+import pytest
 
 import yaml
 
@@ -481,11 +484,10 @@ def test_caddy_port_ownership_uses_full_ids_and_requires_one_expected_owner_in_b
         start = remote.index(start_marker)
         gate = remote[start:remote.index(end_marker, start)]
         assert 'docker ps -q --no-trunc --filter "publish=$port"' in gate
-        comparison = next(line.strip() for line in gate.splitlines() if line.strip().startswith("[[ ${#owners[@]}"))
-        for owner_ids, expected in (([caddy_id], 0), ([other_id], 1), ([], 1), ([caddy_id, other_id], 1)):
-            script = f'caddy_id="{caddy_id}"; owners=({" ".join(owner_ids)}); {comparison}'
-            result = subprocess.run(["bash", "-c", script], capture_output=True, check=False)
-            assert (result.returncode == 0) is (expected == 0)
+        fake = 'docker() { if [[ "$1" == inspect ]]; then printf "%s" "$CADDY"; else printf "%s" "$OWNERS"; return "$STATUS"; fi; }'
+        for owner_ids, status, ok in ((caddy_id,0,True),(other_id,0,False),('',0,False),(caddy_id+'\n'+other_id,0,False),('',42,False)):
+            result = subprocess.run(['bash','-c','set -euo pipefail\ncaddy=fixture\n'+fake+'\n'+gate],env={**os.environ,'CADDY':caddy_id,'OWNERS':owner_ids,'STATUS':str(status)},capture_output=True)
+            assert (result.returncode == 0) is ok
 
 
 def test_kamal_proxy_absence_guard_fails_closed_in_preflight_and_apply():
@@ -513,3 +515,156 @@ def test_kamal_proxy_absence_guard_fails_closed_in_preflight_and_apply():
                 check=False,
             )
             assert (result.returncode == 0) is (expected == 0)
+
+
+def _workflow_step(job, name):
+    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    return next(s['run'] for s in workflow['jobs'][job]['steps'] if s.get('name') == name)
+
+
+def _preflight_remote():
+    return _workflow_step('preflight', 'Read-only Compose, Caddy, rollback and isolated backup-restore preflight').split("<<'REMOTE'\n", 1)[1].split('\nREMOTE', 1)[0]
+
+
+@pytest.mark.parametrize('status,ids,ok', [(0, '', True), (42, '', False), (0, 'a'*64, False)])
+def test_released_ports_reject_docker_failure(status, ids, ok):
+    run = _workflow_step('apply', 'Stop Compose Worker, API and Caddy in order; release ports 80/443 to Kamal Proxy')
+    remote = run.split("<<'REMOTE'\n", 1)[1].split('\nREMOTE', 1)[0]
+    guard = remote[remote.index('for port in 80 443;'):]
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\ndocker() { printf "%s" "$IDS"; return "$STATUS"; }\n' + guard], env={**os.environ, 'STATUS': str(status), 'IDS': ids}, capture_output=True)
+    assert (result.returncode == 0) is ok
+
+
+@pytest.mark.parametrize('ids,status,ok', [('a'*64, 0, True), ('a'*12, 0, False), ('', 0, False), ('a'*64+'\n'+'b'*64, 0, False), ('', 42, False)])
+def test_worker_selection_requires_exactly_one_full_id(ids, status, ok):
+    run = _workflow_step('apply', 'Start the sole Kamal Worker and verify runtime invariants')
+    guard = run[run.index('worker_id="$('):run.index('\nssh ', run.index('worker_id="$('))]
+    fake = 'ssh() { [[ "$*" == *--no-trunc* ]] || { printf "%s" "${IDS:0:12}"; return 0; }; printf "%s" "$IDS"; return "$STATUS"; }'
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\n'+fake+'\n'+guard], env={**os.environ, 'STATUS': str(status), 'IDS': ids, 'PRODUCTION_SSH': 'fixture', 'PRODUCTION_KNOWN_HOSTS_FILE': 'fixture', 'PRODUCTION_HOST': 'fixture'}, capture_output=True)
+    assert (result.returncode == 0) is ok
+
+
+@pytest.mark.parametrize('present,list_status,rm_status,ok', [(False,0,0,True),(True,0,0,True),(False,42,0,False),(True,0,42,False)])
+def test_restore_cleanup_cannot_hide_docker_api_or_remove_failure(tmp_path, present, list_status, rm_status, ok):
+    remote = _preflight_remote()
+    cleanup = remote[remote.index('cleanup() {'):remote.index('\ntrap cleanup EXIT')]
+    data = tmp_path / 'data'; data.mkdir()
+    state = tmp_path / 'present'
+    if present: state.touch()
+    fake = '''docker() {
+      if [[ "$1" == ps ]]; then
+        [[ "$LIST_STATUS" == 0 ]] || return "$LIST_STATUS"
+        [[ ! -f "$STATE" ]] || printf '%s\\n' "$restore_name"
+      elif [[ "$1" == rm ]]; then
+        [[ "$RM_STATUS" == 0 ]] || return "$RM_STATUS"
+        rm -f "$STATE"
+      elif [[ "$1" == info ]]; then return 0
+      elif [[ "$1" == container ]]; then return 42
+      else return 99; fi
+    }'''
+    script = 'set -euo pipefail\nrestore_name=fixture\n'+fake+'\n'+cleanup+'\ntrap cleanup EXIT\ntrue'
+    result = subprocess.run(['bash','-c',script],env={**os.environ,'restore_data_dir':str(data),'STATE':str(state),'LIST_STATUS':str(list_status),'RM_STATUS':str(rm_status)},capture_output=True)
+    assert (result.returncode == 0) is ok
+    if present and not ok: assert data.exists(), 'Do not delete a bind mount whose container cleanup is unconfirmed'
+
+
+@pytest.mark.parametrize('worker_sha,image,ok', [('a'*40,'sha256:same',True),('b'*40,'sha256:same',False),('', 'sha256:same',False),('a'*40,'sha256:other',False)])
+def test_compose_baseline_requires_api_worker_sha_and_image_parity(tmp_path, worker_sha, image, ok):
+    remote = _preflight_remote()
+    gate = remote[remote.index('gate=compose_image_integrity'):remote.index('\ngate=fresh_backup_and_archive_integrity')]
+    fake = '''docker() {
+      if [[ "$1" == inspect && "$3" == --format ]]; then
+        case "$4" in
+          *Config.Image*) echo fixture ;;
+          *'{{.Image}}'*) echo sha256:same ;;
+        esac
+      elif [[ "$1" == image ]]; then echo sha256:same
+      elif [[ "$1" == inspect ]]; then printf '%s' "$ITEMS"
+      else return 99; fi
+    }'''
+    items=[{'Image':'sha256:same','Config':{'Env':['MAXIBOT_COMMIT_SHA='+'a'*40]}},{'Image':image,'Config':{'Env':['MAXIBOT_COMMIT_SHA='+worker_sha]}}]
+    result = subprocess.run(['bash','-c','set -euo pipefail\napi=api; worker=worker; baseline_sha='+('a'*40)+'\n'+fake+'\n'+gate],env={**os.environ,'ITEMS':json.dumps(items),'PATH':str(Path(sys.executable).parent)+os.pathsep+os.environ['PATH']},capture_output=True)
+    assert (result.returncode == 0) is ok
+
+
+@pytest.mark.parametrize('reply,ok', [('True',True),('False',False),('error',False)])
+def test_preflight_redis_uses_authenticated_application_ping_and_hides_failures(tmp_path, reply, ok):
+    import shlex
+    remote = _preflight_remote()
+    gate = remote[remote.index('gate=api_database_and_redis_connectivity'):remote.index('\ngate=postgres_alembic_head')]
+    commands = [shlex.split(line)[-1] for line in gate.splitlines() if line.startswith('docker exec ') and 'Redis' in line]
+    assert len(commands) == 1, 'A TCP connection alone does not prove Redis command readiness'
+    (tmp_path/'app'/'core').mkdir(parents=True)
+    (tmp_path/'app'/'core'/'config.py').write_text('class Settings:\n redis_url="redis://user:fixture-secret@redis:6379/0"\nsettings=Settings()\n')
+    (tmp_path/'redis.py').write_text('''class Redis:
+ @staticmethod
+ def from_url(url, **kwargs):
+  assert url == "redis://user:fixture-secret@redis:6379/0"
+  assert kwargs["socket_timeout"] > 0 and kwargs["socket_connect_timeout"] > 0
+  return Redis()
+ def ping(self):
+'''+ ('  raise RuntimeError("fixture-secret")\n' if reply=='error' else '  return '+reply+'\n'))
+    result = subprocess.run([sys.executable,'-c',commands[0]],cwd=tmp_path,env={**os.environ,'PYTHONPATH':str(tmp_path)},text=True,capture_output=True)
+    assert (result.returncode == 0) is ok
+    assert 'fixture-secret' not in result.stdout+result.stderr
+
+
+def test_first_cutover_and_ordinary_deploy_share_one_non_cancelling_production_lock():
+    cutover = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    native = yaml.load((ROOT / '.github/workflows/maxibot-native-release.yml').read_text(), Loader=yaml.BaseLoader)
+    assert cutover['concurrency'] == native['concurrency']
+    assert cutover['concurrency']['cancel-in-progress'] == 'false'
+
+
+def test_read_only_preflight_retains_production_approval_without_recording_a_deployment():
+    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    assert workflow['jobs']['preflight']['environment'] == {'name':'production','deployment':'false'}
+    assert workflow['jobs']['apply']['environment'].get('deployment', 'true') == 'true'
+
+
+@pytest.mark.parametrize('failure,expected', [('',True),('ports',False),('docker',False),('api_deploy',False),('https',False)])
+def test_actual_stop_and_api_step_orders_consumer_handoff_and_stops_on_failure(tmp_path, failure, expected):
+    """Execute the workflow shell; only SSH, Docker, Kamal and HTTP are external doubles."""
+    run = _workflow_step('apply', 'Stop Compose Worker, API and Caddy in order; release ports 80/443 to Kamal Proxy')
+    stubs = r'''
+    ssh() { bash -s; }
+    docker() {
+      if [[ "$1" == stop ]]; then printf '%s\n' "$2" >> "$TRACE"; return 0; fi
+      if [[ "$1" == inspect ]]; then echo true; return 0; fi
+      if [[ "$1" == ps ]]; then
+        if [[ "$*" == *publish=* ]]; then
+          [[ "$FAILURE" != docker ]] || return 42
+          [[ "$FAILURE" != ports ]] || echo aaaaaaaaaaaa
+        fi
+        return 0
+      fi
+      return 99
+    }
+    bundle() {
+      printf 'kamal:%s\n' "$*" >> "$TRACE"
+      [[ "$FAILURE" != api_deploy ]]
+    }
+    curl() {
+      [[ "$FAILURE" != https ]] || return 22
+      local prev=''
+      for arg in "$@"; do
+        if [[ "$prev" == --dump-header ]]; then
+          printf 'content-security-policy: fixture\nstrict-transport-security: fixture\nx-frame-options: DENY\nx-content-type-options: nosniff\nreferrer-policy: no-referrer\ncache-control: no-store\n' > "$arg"
+        elif [[ "$prev" == -o ]]; then echo 'OWNER CONSOLE' > "$arg"; fi
+        prev="$arg"
+      done
+      if [[ "$*" == *redirect_url* ]]; then echo https://fixture/health/ready
+      else printf '{"commit_sha":"%s"}\n' "$CANDIDATE_SHA"; fi
+    }
+    export -f docker
+    '''
+    env={**os.environ,'PATH':str(Path(sys.executable).parent)+os.pathsep+os.environ['PATH'],'TRACE':str(tmp_path/'trace'),'FAILURE':failure,'PRODUCTION_SSH':'fixture','PRODUCTION_KNOWN_HOSTS_FILE':'fixture','PRODUCTION_HOST':'fixture','CANDIDATE_SHA':'a'*40,'IMAGE_VERSION':'fixture','RUNNER_TEMP':str(tmp_path),'KAMAL_REGISTRY_PASSWORD':'fixture'}
+    result = subprocess.run(['bash','-c',stubs+'\n'+run],cwd=tmp_path,env=env,capture_output=True)
+    assert (result.returncode == 0) is expected, result.stderr
+    events=(tmp_path/'trace').read_text().splitlines()
+    assert events[:3] == ['maxibot-vps-worker-1','maxibot-vps-api-1','maxibot-vps-https-1']
+    if failure in ('ports','docker'):
+        assert len(events) == 3, 'Never start Kamal when public-port release is unproven'
+    else:
+        assert events[3] == 'kamal:exec kamal deploy --skip-push --version fixture --roles api'
+    assert not (tmp_path/'.kamal'/'secrets').exists()
