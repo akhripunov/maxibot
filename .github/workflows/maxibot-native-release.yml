@@ -500,7 +500,7 @@ jobs:
               assert alias in c["NetworkSettings"]["Networks"]["kamal"]["Aliases"]
           caddy = json.loads(subprocess.check_output(["docker", "inspect", "maxibot-vps-https-1"], text=True))[0]
           assert "maxibot-vps-frontend" in caddy["NetworkSettings"]["Networks"]
-          subprocess.run(["docker", "exec", api, "python", "-c", "import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]"], check=True)
+          subprocess.run(["docker", "exec", api, "python", "-c", "import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]]"], check=True)
           env = dict(x.split("=",1) for x in by_id[api]["Config"]["Env"] if "=" in x)
           worker_env = dict(x.split("=",1) for x in by_id[worker]["Config"]["Env"] if "=" in x)
           assert env.get("MAX_RUN_POLLING") == "false"
@@ -650,7 +650,7 @@ jobs:
               assert not old["State"]["Running"], (name, old["State"])
           uploads=next(m["Name"] for m in by_id[api]["Mounts"] if m["Destination"] == "/app/uploads")
           assert uploads == expected_uploads_volume
-          subprocess.run(["docker","exec",api,"python","-c","import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]"],check=True)
+          subprocess.run(["docker","exec",api,"python","-c","import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]]"],check=True)
           ids=subprocess.check_output(["docker","ps","-q"],text=True).split()
           allc=json.loads(subprocess.check_output(["docker","inspect",*ids],text=True)) if ids else []
           assert not any("caddy" in (c["Name"]+c["Config"].get("Image","")).lower() for c in allc)
@@ -662,7 +662,7 @@ jobs:
           assert db_head == expected_db_head
           for name, cmd in (("maxibot-vps-db-1",["pg_isready","-U","maxibot","-d","maxibot"]),("maxibot-vps-redis-1",["redis-cli","ping"])):
               subprocess.run(["docker","exec",name,*cmd],check=True,stdout=subprocess.DEVNULL)
-          subprocess.run(["docker","exec",api,"python","-c","import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]"],check=True)
+          subprocess.run(["docker","exec",api,"python","-c","import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]]"],check=True)
           PY
           REMOTE
           cat app/worker_health.py scripts/worker_health_preflight.py > "$RUNNER_TEMP/maxibot-worker-health.py"

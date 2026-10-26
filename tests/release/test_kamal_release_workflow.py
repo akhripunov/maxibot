@@ -2,6 +2,7 @@ from pathlib import Path
 import subprocess
 import os
 import re
+import ast
 
 import pytest
 
@@ -211,3 +212,19 @@ def test_every_normal_kamal_step_inherits_the_dispatch_source_sha():
     for step in deploy['steps']:
         if 'bundle exec kamal ' in step.get('run',''):
             assert step['env']['MAXIBOT_COMMIT_SHA']=='${{ env.CANDIDATE_SHA }}'
+
+
+def test_nested_docker_python_commands_compile_before_any_release():
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    checked=0
+    for step in doc['jobs']['deploy']['steps']:
+        for body in re.findall(r"<<'PY'\n(.*?)\nPY",step.get('run',''),re.S):
+            tree=ast.parse(body)
+            for node in ast.walk(tree):
+                if not isinstance(node,ast.Call) or not node.args or not isinstance(node.args[0],ast.List): continue
+                args=node.args[0].elts
+                for i,arg in enumerate(args[:-1]):
+                    if i and isinstance(args[i-1],ast.Constant) and args[i-1].value in ('python','python3') and isinstance(arg,ast.Constant) and arg.value=='-c' and isinstance(args[i+1],ast.Constant):
+                        compile(args[i+1].value,'nested docker python -c','exec')
+                        checked+=1
+    assert checked>=3
