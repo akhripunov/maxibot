@@ -293,11 +293,15 @@ jobs:
           gate=caddy_owns_public_ports
           caddy_id="$(docker inspect "$caddy" --format '{{.Id}}')"
           for port in 80 443; do
-            mapfile -t owners < <(docker ps -q --filter "publish=$port")
+            mapfile -t owners < <(docker ps -q --no-trunc --filter "publish=$port")
             [[ ${#owners[@]} == 1 && "${owners[0]}" == "$caddy_id" ]]
           done
           gate=kamal_proxy_absent
-          ! docker inspect kamal-proxy >/dev/null 2>&1
+          kamal_proxy_ids="$(docker ps -aq --no-trunc --filter 'name=^/kamal-proxy$')"
+          if [[ -n "$kamal_proxy_ids" ]]; then
+            echo 'Expected kamal-proxy to be absent before the first cutover.' >&2
+            exit 1
+          fi
           gate=no_kamal_app_containers
           mapfile -t kamal_apps < <(docker ps -q --filter label=service=maxibot)
           test "${#kamal_apps[@]}" = 0
@@ -664,7 +668,7 @@ jobs:
           api=maxibot-vps-api-1; caddy=maxibot-vps-https-1
           caddy_id="$(docker inspect "$caddy" --format '{{.Id}}')"
           for port in 80 443; do
-            mapfile -t owners < <(docker ps -q --filter "publish=$port")
+            mapfile -t owners < <(docker ps -q --no-trunc --filter "publish=$port")
             [[ ${#owners[@]} == 1 && "${owners[0]}" == "$caddy_id" ]]
           done
           network_id="$(docker network inspect maxibot-vps-frontend --format '{{.Id}}')"
@@ -703,7 +707,12 @@ jobs:
           if [[ -n "$ids" ]]; then docker inspect $ids | python3 -c 'import json,sys; xs=json.load(sys.stdin); ps=[x["Id"] for x in xs if "MAX_RUN_POLLING=true" in x["Config"].get("Env",[])]; assert not ps, ps'; fi
           docker stop maxibot-vps-api-1 >/dev/null
           test "$(docker inspect maxibot-vps-https-1 --format '{{.State.Running}}')" = true
-          ! docker inspect kamal-proxy >/dev/null 2>&1
+          gate=kamal_proxy_absent
+          kamal_proxy_ids="$(docker ps -aq --no-trunc --filter 'name=^/kamal-proxy$')"
+          if [[ -n "$kamal_proxy_ids" ]]; then
+            echo 'Expected kamal-proxy to be absent before stopping Caddy.' >&2
+            exit 1
+          fi
           docker stop maxibot-vps-https-1 >/dev/null
           for port in 80 443; do [[ -z "$(docker ps -q --filter "publish=$port")" ]]; done
           REMOTE

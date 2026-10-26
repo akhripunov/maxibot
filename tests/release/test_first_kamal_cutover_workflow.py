@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import re
 import subprocess
 
@@ -55,7 +56,7 @@ def test_first_cutover_preflight_checks_immutable_build_and_fails_closed_before_
     assert "openssl s_client" in preflight
     for host in ("maxibot.pro", "www.maxibot.pro", "api.maxibot.pro", "go.maxibot.pro", "admin.maxibot.pro"):
         assert host in preflight
-    assert "docker ps -q --filter \"publish=$port\"" in preflight
+    assert "docker ps -q --no-trunc --filter \"publish=$port\"" in preflight
     assert "pg_restore --list" in preflight
     assert "cutover_restore_probe" in preflight
     assert '"$IMAGE_NAME@$attestation_digest" --raw' in preflight
@@ -453,3 +454,62 @@ def test_remote_preflight_reports_sanitized_gate_name_on_failure():
         assert f"gate={gate}" in remote
     assert "PRODUCTION_SSH_KEY" not in remote
     assert "KAMAL_REGISTRY_PASSWORD" not in remote
+
+
+def _remote_step(workflow, job_name, step_name):
+    run = next(step["run"] for step in workflow["jobs"][job_name]["steps"] if step.get("name") == step_name)
+    return run.split("<<'REMOTE'\n", 1)[1].split("\nREMOTE", 1)[0]
+
+
+def test_caddy_port_ownership_uses_full_ids_and_requires_one_expected_owner_in_both_jobs():
+    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    checks = (
+        (
+            _remote_step(workflow, "preflight", "Read-only Compose, Caddy, rollback and isolated backup-restore preflight"),
+            "gate=caddy_owns_public_ports",
+            "\ngate=kamal_proxy_absent",
+        ),
+        (
+            _remote_step(workflow, "apply", "Prepare DB, Redis and Compose API recovery connectivity without removing existing networks"),
+            'caddy_id="$(docker inspect "$caddy"',
+            "\nnetwork_id=",
+        ),
+    )
+    caddy_id, other_id = "a" * 64, "b" * 64
+
+    for remote, start_marker, end_marker in checks:
+        start = remote.index(start_marker)
+        gate = remote[start:remote.index(end_marker, start)]
+        assert 'docker ps -q --no-trunc --filter "publish=$port"' in gate
+        comparison = next(line.strip() for line in gate.splitlines() if line.strip().startswith("[[ ${#owners[@]}"))
+        for owner_ids, expected in (([caddy_id], 0), ([other_id], 1), ([], 1), ([caddy_id, other_id], 1)):
+            script = f'caddy_id="{caddy_id}"; owners=({" ".join(owner_ids)}); {comparison}'
+            result = subprocess.run(["bash", "-c", script], capture_output=True, check=False)
+            assert (result.returncode == 0) is (expected == 0)
+
+
+def test_kamal_proxy_absence_guard_fails_closed_in_preflight_and_apply():
+    workflow_text = WORKFLOW_PATH.read_text()
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    preflight = _remote_step(workflow, "preflight", "Read-only Compose, Caddy, rollback and isolated backup-restore preflight")
+    apply = _remote_step(workflow, "apply", "Stop Compose Worker, API and Caddy in order; release ports 80/443 to Kamal Proxy")
+    checks = (
+        (preflight, "gate=kamal_proxy_absent", "\ngate=no_kamal_app_containers"),
+        (apply, "gate=kamal_proxy_absent", "\ndocker stop maxibot-vps-https-1"),
+    )
+    mock_docker = 'docker() { [[ "$MOCK_STATUS" == 0 ]] || return "$MOCK_STATUS"; printf "%s\\n" "$MOCK_IDS"; }'
+
+    assert "! docker inspect kamal-proxy" not in workflow_text
+    for remote, start_marker, end_marker in checks:
+        start = remote.index(start_marker)
+        guard = remote[start:remote.index(end_marker, start)]
+        assert "docker ps -aq --no-trunc --filter 'name=^/kamal-proxy$'" in guard
+        for ids, status, expected in (("", "0", 0), ("c" * 64, "0", 1), ("", "1", 1)):
+            env = {**os.environ, "MOCK_IDS": ids, "MOCK_STATUS": status}
+            result = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\n" + mock_docker + "\n" + guard],
+                env=env,
+                capture_output=True,
+                check=False,
+            )
+            assert (result.returncode == 0) is (expected == 0)
