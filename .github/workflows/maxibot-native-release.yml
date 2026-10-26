@@ -123,7 +123,7 @@ jobs:
           assert config['proxy']['app_port'] == 8000
           assert config['proxy']['healthcheck']['path'] == '/health/ready'
           assert set(config['servers']) == {'api', 'worker'}
-          assert config['servers']['api']['proxy'] is not False
+          assert config['servers']['api'].get('proxy', True) is not False
           assert config['servers']['worker']['proxy'] is False
           PY
           rm -f .kamal/secrets
