@@ -11,7 +11,7 @@ import json
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Body, Cookie, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from webauthn import (
@@ -33,6 +33,7 @@ from webauthn.helpers.structs import (
 from app.core.config import settings
 from app.db.models import Admin, WebAdminAuthChallenge, WebAdminSession, WebAuthnCredential
 from app.db.session import get_session
+from app.web_admin_security import enforce_web_admin_rate_limit, require_owner_console_host, require_owner_console_origin
 
 router = APIRouter(prefix="/admin/auth", tags=["web-admin-auth"])
 
@@ -59,14 +60,6 @@ async def _owner(db: AsyncSession) -> Admin:
     return owner
 
 
-async def require_edge_token(
-    x_maxibot_admin_token: str | None = Header(default=None, alias="X-MAXIBOT-Admin-Token"),
-) -> None:
-    configured = settings.web_admin_internal_token
-    if not configured or not x_maxibot_admin_token or not secrets.compare_digest(x_maxibot_admin_token, configured):
-        raise HTTPException(status_code=401, detail="web admin edge authorization required")
-
-
 async def require_qa_ingest_token(
     x_maxibot_admin_token: str | None = Header(default=None, alias="X-MAXIBOT-Admin-Token"),
 ) -> None:
@@ -79,8 +72,8 @@ async def require_qa_ingest_token(
 async def require_web_admin(
     request: Request,
     db: AsyncSession = Depends(get_session),
-    _: None = Depends(require_edge_token),
 ) -> Admin:
+    require_owner_console_host(request)
     raw = request.cookies.get("maxibot_admin_session")
     if not raw:
         raise HTTPException(status_code=401, detail="web admin session required")
@@ -106,7 +99,7 @@ def _cookie(response: Response, token: str, *, max_age: int) -> None:
         token,
         max_age=max_age,
         httponly=True,
-        secure=settings.web_admin_cookie_secure,
+        secure=True,
         samesite="strict",
         path="/",
     )
@@ -128,7 +121,7 @@ def _usable(row: WebAdminAuthChallenge | None, purpose: str) -> bool:
     return bool(row and row.purpose == purpose and row.used_at is None and row.expires_at > _now())
 
 
-@router.get("/status", dependencies=[Depends(require_edge_token)])
+@router.get("/status", dependencies=[Depends(require_owner_console_host)])
 async def auth_status(request: Request, db: AsyncSession = Depends(get_session)):
     owner = await _owner(db)
     credential_count = int(
@@ -150,11 +143,13 @@ async def auth_status(request: Request, db: AsyncSession = Depends(get_session))
     return {"enrolled": credential_count > 0, "authenticated": authenticated}
 
 
-@router.post("/register/options", dependencies=[Depends(require_edge_token)])
+@router.post("/register/options", dependencies=[Depends(require_owner_console_origin)])
 async def registration_options(
+    request: Request,
     x_web_admin_bootstrap: str | None = Header(default=None, alias="X-WebAdmin-Bootstrap"),
     db: AsyncSession = Depends(get_session),
 ):
+    await enforce_web_admin_rate_limit(request, "register-options")
     owner = await _owner(db)
     existing = int(await db.scalar(select(func.count()).select_from(WebAuthnCredential).where(WebAuthnCredential.admin_id == owner.id, WebAuthnCredential.revoked_at.is_(None))) or 0)
     if existing:
@@ -179,8 +174,9 @@ async def registration_options(
     return {"challenge_id": challenge.id, "publicKey": json.loads(options_to_json(options))}
 
 
-@router.post("/register/verify", dependencies=[Depends(require_edge_token)])
-async def registration_verify(payload: dict = Body(...), db: AsyncSession = Depends(get_session)):
+@router.post("/register/verify", dependencies=[Depends(require_owner_console_origin)])
+async def registration_verify(request: Request, payload: dict = Body(...), db: AsyncSession = Depends(get_session)):
+    await enforce_web_admin_rate_limit(request, "register-verify")
     owner = await _owner(db)
     challenge = await db.get(WebAdminAuthChallenge, str(payload.get("challenge_id") or ""))
     if not _usable(challenge, "registration") or challenge.admin_id != owner.id:
@@ -209,8 +205,9 @@ async def registration_verify(payload: dict = Body(...), db: AsyncSession = Depe
     return {"registered": True}
 
 
-@router.post("/login/options", dependencies=[Depends(require_edge_token)])
-async def login_options(db: AsyncSession = Depends(get_session)):
+@router.post("/login/options", dependencies=[Depends(require_owner_console_origin)])
+async def login_options(request: Request, db: AsyncSession = Depends(get_session)):
+    await enforce_web_admin_rate_limit(request, "login-options")
     owner = await _owner(db)
     credentials = list((await db.scalars(select(WebAuthnCredential).where(WebAuthnCredential.admin_id == owner.id, WebAuthnCredential.revoked_at.is_(None)))).all())
     if not credentials:
@@ -225,8 +222,9 @@ async def login_options(db: AsyncSession = Depends(get_session)):
     return {"challenge_id": challenge.id, "publicKey": json.loads(options_to_json(options))}
 
 
-@router.post("/login/verify", dependencies=[Depends(require_edge_token)])
-async def login_verify(payload: dict = Body(...), response: Response = None, db: AsyncSession = Depends(get_session)):
+@router.post("/login/verify", dependencies=[Depends(require_owner_console_origin)])
+async def login_verify(request: Request, payload: dict = Body(...), response: Response = None, db: AsyncSession = Depends(get_session)):
+    await enforce_web_admin_rate_limit(request, "login-verify")
     owner = await _owner(db)
     challenge = await db.get(WebAdminAuthChallenge, str(payload.get("challenge_id") or ""))
     if not _usable(challenge, "authentication") or challenge.admin_id != owner.id:
@@ -258,7 +256,7 @@ async def login_verify(payload: dict = Body(...), response: Response = None, db:
     return {"authenticated": True}
 
 
-@router.post("/logout", dependencies=[Depends(require_edge_token)])
+@router.post("/logout", dependencies=[Depends(require_owner_console_origin)])
 async def logout(request: Request, response: Response, db: AsyncSession = Depends(get_session)):
     raw = request.cookies.get("maxibot_admin_session")
     if raw:
@@ -266,5 +264,5 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
         if session:
             session.revoked_at = _now()
             await db.commit()
-    response.delete_cookie("maxibot_admin_session", path="/")
+    response.delete_cookie("maxibot_admin_session", path="/", secure=True, httponly=True, samesite="strict")
     return {"authenticated": False}

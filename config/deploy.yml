@@ -7,7 +7,6 @@ servers:
     hosts:
       - 135.106.166.46
     cmd: uvicorn app.main:app --host 0.0.0.0 --port 8000
-    proxy: false
     env:
       clear:
         MAX_RUN_POLLING: false
@@ -17,7 +16,6 @@ servers:
         ADS_AUTOPILOT_ENABLED: false
         ADS_WRITE_ACTIONS_ENABLED: false
     options:
-      network: maxibot-vps-frontend
       network-alias: api
       env-file:
         - /opt/maxibot/.env
@@ -43,6 +41,19 @@ servers:
         - /opt/maxibot/secrets/mail_cloud.env
       memory: 512m
       memory-swap: 512m
+
+proxy:
+  hosts:
+    - maxibot.pro
+    - www.maxibot.pro
+    - api.maxibot.pro
+    - go.maxibot.pro
+    - admin.maxibot.pro
+  app_port: 8000
+  ssl: true
+  ssl_redirect: true
+  healthcheck:
+    path: /health/ready
 
 registry:
   server: ghcr.io

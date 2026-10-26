@@ -47,7 +47,7 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.qa_observability import UNKNOWN, decode_json, parity_status, persist_qa_result
-from app.web_admin_auth import require_edge_token, require_qa_ingest_token, require_web_admin
+from app.web_admin_auth import require_qa_ingest_token, require_web_admin
 
 router = APIRouter(prefix="/admin", tags=["web-admin"])
 

@@ -51,7 +51,7 @@ def test_kamal_deploy_selects_a_prior_successful_build_and_verifies_its_digest()
     assert '.event == "push"' in deploy
     assert '.status == "completed"' in deploy
     assert '.conclusion == "success"' in deploy
-    assert '.path == ".github/workflows/maxibot-native-release.yml@refs/heads/main"' in deploy
+    assert '.path == ".github/workflows/maxibot-native-release.yml"' in deploy
     assert 'image_version="$CANDIDATE_SHA-$BUILD_RUN_ID-$build_attempt"' in deploy
     assert 'APPROVED_DIGEST' in deploy
     assert 'test "$image_digest" = "$APPROVED_DIGEST"' in deploy
@@ -82,16 +82,28 @@ def test_kamal_deploy_verifies_only_api_worker_and_preserves_safety_invariants()
     assert "docker compose" not in deploy
     assert '"pg_isready","-U","maxibot","-d","maxibot"' in deploy
     assert '"redis-cli","ping"' in deploy
-    assert '"caddy","validate","--config","/etc/caddy/Caddyfile"' in deploy
+    assert 'kamal-proxy' in deploy
+    assert 'maxibot-vps-https-1' in deploy
+    assert "for host in maxibot.pro www.maxibot.pro api.maxibot.pro go.maxibot.pro admin.maxibot.pro" in deploy
+    assert '"https://$host/health/ready"' in deploy
+    assert "content-security-policy:" in deploy
+    assert "strict-transport-security:" in deploy
+    assert "x-frame-options: DENY" in deploy
+    assert "x-content-type-options: nosniff" in deploy
+    assert "referrer-policy: no-referrer" in deploy
+    assert "cache-control: no-store" in deploy
     assert 'assert not old["State"]["Running"]' in deploy
+    assert 'assert not any("caddy" in (c["Name"]+c["Config"].get("Image","")).lower()' in deploy
     assert "kamal rollback" not in deploy
 
 
-def test_kamal_config_uses_existing_networks_and_caddy_alias():
+def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
     config = yaml.safe_load((ROOT / "config/deploy.yml").read_text())
     compose = (ROOT / "docker-compose.vps.yml").read_text()
 
-    assert config["servers"]["api"]["options"]["network"] == "maxibot-vps-frontend"
+    assert config["proxy"]["ssl"] is True
+    assert set(config["proxy"]["hosts"]) == {"maxibot.pro", "www.maxibot.pro", "api.maxibot.pro", "go.maxibot.pro", "admin.maxibot.pro"}
+    assert "network" not in config["servers"]["api"]["options"]
     assert config["servers"]["api"]["options"]["network-alias"] == "api"
     assert "network" not in config["servers"]["worker"]["options"]
     assert "name: maxibot-vps-internal" in compose
@@ -99,3 +111,4 @@ def test_kamal_config_uses_existing_networks_and_caddy_alias():
     assert "accessories" not in config
     assert config["servers"]["api"]["options"]["volume"] == "maxibot-vps_maxibot_uploads:/app/uploads"
     assert config["servers"]["worker"]["options"]["memory"] == "512m"
+    assert config["servers"]["worker"]["proxy"] is False

@@ -52,8 +52,10 @@ def test_first_cutover_preflight_checks_immutable_build_and_fails_closed_before_
     assert "MAXIBOT_PRODUCTION_KNOWN_HOSTS" in preflight
     assert "repos/$GITHUB_REPOSITORY/environments/production" in preflight
     assert "required_reviewers" in preflight
-    assert "https://api.maxibot.pro/health/ready" in preflight
-    assert "public_ready" in preflight
+    assert "openssl s_client" in preflight
+    for host in ("maxibot.pro", "www.maxibot.pro", "api.maxibot.pro", "go.maxibot.pro", "admin.maxibot.pro"):
+        assert host in preflight
+    assert "docker ps -q --filter \"publish=$port\"" in preflight
     assert "pg_restore --list" in preflight
     assert "cutover_restore_probe" in preflight
     assert '"$IMAGE_NAME@$attestation_digest" --raw' in preflight
@@ -112,7 +114,8 @@ def test_first_cutover_apply_preserves_two_networks_single_poller_and_has_recove
     assert "do not auto-rollback" in apply
     assert "bundle exec kamal app stop --roles worker" in apply
     assert "bundle exec kamal app stop --roles api" in apply
-    assert "docker compose" in apply
+    assert "docker start maxibot-vps-api-1" in apply
+    assert "docker start maxibot-vps-https-1" in apply
     assert "IMAGE_DIGEST" in apply and "RepoDigests" in apply
     assert "EXPECTED_DATABASE_HEAD" in apply
     assert "EXPECTED_CADDY_ID" in apply
@@ -220,6 +223,15 @@ def test_preflight_is_read_only_and_only_the_explicit_apply_job_changes_services
     assert "docker network connect --alias" in apply
     assert "docker stop maxibot-vps-worker-1" in apply
     assert "docker stop maxibot-vps-api-1" in apply
+    assert "docker stop maxibot-vps-https-1" in apply
+    assert "bundle exec kamal proxy stop" in apply
+    assert "80/tcp" in apply and "443/tcp" in apply
+    assert "assert not any('caddy' in (x['Name']+x['Config'].get('Image','')).lower()" in apply
+    assert "--resolve \"$host:443:$PRODUCTION_HOST\"" in apply
+    assert "--resolve \"$host:80:$PRODUCTION_HOST\"" in apply
+    assert "strict-transport-security:" in apply
+    assert "content-security-policy:" in apply
+    assert "x-content-type-options: nosniff" in apply
     assert "inputs.confirm_apply == 'APPLY_FIRST_COMPOSE_TO_KAMAL'" in workflow["jobs"]["apply"]["if"]
 
 
@@ -379,10 +391,7 @@ def test_competing_run_filter_rejects_release_workflows_but_ignores_unrelated_wo
 def test_exact_diff_is_rechecked_immediately_before_first_apply_mutation():
     workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
     apply_steps = workflow["jobs"]["apply"]["steps"]
-    mutation_step = next(
-        step for step in apply_steps
-        if step.get("name") == "Attach only DB and Redis to Kamal while retaining internal network"
-    )
+    mutation_step = next(step for step in apply_steps if step.get("name") == "Prepare DB, Redis and Compose API recovery connectivity without removing existing networks")
     run = mutation_step["run"]
 
     compare_check = run.index('gh api "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_SHA...$main_sha"')
@@ -403,7 +412,7 @@ def test_kamal_registry_password_is_loaded_from_ephemeral_secrets_file_for_each_
     }
     kamal_steps = (
         "Set up Kamal and confirm resolved configuration",
-        "Stop Compose Worker and prove zero pollers before API replacement",
+        "Stop Compose Worker, API and Caddy in order; release ports 80/443 to Kamal Proxy",
         "Start the sole Kamal Worker and verify runtime invariants",
     )
 

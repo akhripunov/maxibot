@@ -72,6 +72,15 @@ jobs:
       db_volume: ${{ steps.baseline.outputs.db_volume }}
       redis_volume: ${{ steps.baseline.outputs.redis_volume }}
     steps:
+      - name: Resolve all public domains and validate their current HTTPS certificates
+        shell: bash
+        run: |
+          set -euo pipefail
+          for host in maxibot.pro www.maxibot.pro api.maxibot.pro go.maxibot.pro admin.maxibot.pro; do
+            getent ahostsv4 "$host" | awk 'NF {found=1} END {exit !found}'
+            timeout 15 openssl s_client -connect "$PRODUCTION_HOST:443" -servername "$host" -verify_hostname "$host" -verify_return_error </dev/null >/dev/null
+            echo "DNS and currently served TLS hostname: PASS — $host" >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: Verify OWNER attestation and exact successful Build image
         id: image
         env:
@@ -278,6 +287,12 @@ jobs:
           for container in "$api" "$worker" "$db" "$redis" "$caddy"; do
             test "$(docker inspect "$container" --format '{{.State.Running}}')" = true
           done
+          caddy_id="$(docker inspect "$caddy" --format '{{.Id}}')"
+          for port in 80 443; do
+            mapfile -t owners < <(docker ps -q --filter "publish=$port")
+            [[ ${#owners[@]} == 1 && "${owners[0]}" == "$caddy_id" ]]
+          done
+          ! docker inspect kamal-proxy >/dev/null 2>&1
           mapfile -t kamal_apps < <(docker ps -q --filter label=service=maxibot)
           test "${#kamal_apps[@]}" = 0
           docker inspect "$api" "$worker" >/dev/null
@@ -299,13 +314,18 @@ jobs:
           api_item=next(x for x in inspect if x['Name'].lstrip('/') == api)
           caddy=next(x for x in inspect if x['Name'].lstrip('/') == 'maxibot-vps-https-1')
           assert 'maxibot-vps-frontend' in caddy['NetworkSettings']['Networks']
-          assert 'maxibot-vps-frontend' in api_item['NetworkSettings']['Networks'], 'API/Caddy shared network missing'
           assert 'maxibot-vps-internal' in api_item['NetworkSettings']['Networks'], 'API/internal network missing'
+          net=json.loads(subprocess.check_output(['docker','network','inspect','maxibot-vps-frontend'],text=True))[0]
+          attached=list(net.get('Containers',{}))
+          others=[c for c in attached if c != api_item['Id']]
+          if others:
+              all_items=json.loads(subprocess.check_output(['docker','inspect',*others],text=True))
+              assert all('api' not in x['NetworkSettings']['Networks'].get('maxibot-vps-frontend',{}).get('Aliases',[]) for x in all_items)
           PY
-          docker exec "$caddy" wget -qO- --timeout=5 http://api:8000/health/live >/dev/null
+          docker exec "$caddy" caddy validate --config /etc/caddy/Caddyfile >/dev/null
           baseline_sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')"
           [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]
-          docker exec "$api" python -c 'import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in (("db",5432),("redis",6379),("https",80))]'
+          docker exec "$api" python -c 'import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in (("db",5432),("redis",6379))]'
           head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
           for path in /opt/maxibot/.env /opt/maxibot/secrets/mail_cloud.env; do test -s "$path"; done
           for container in "$api" "$worker"; do
@@ -401,9 +421,7 @@ jobs:
           echo "api_uploads_volume=$api_uploads" >> "$GITHUB_OUTPUT"
           echo "db_volume=$db_volume" >> "$GITHUB_OUTPUT"
           echo "redis_volume=$redis_volume" >> "$GITHUB_OUTPUT"
-          public_ready="$(curl --silent --show-error --fail --max-time 10 https://api.maxibot.pro/health/ready)"
-          python3 -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$baseline_sha" <<< "$public_ready"
-          printf 'Caddy→API, public readiness, dual API networks, single Compose poller, 512 MiB Worker, rollback files/images, and isolated backup restore: PASS\nBaseline fingerprint: `%s`\nBackup SHA-256: `%s`\n' "$fingerprint" "$backup_sha256" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Five-domain DNS/TLS readback, Caddy recovery config/port owner, single Compose poller, DB/Redis, 512 MiB Worker, rollback files/images, and isolated backup restore: PASS\nBaseline fingerprint: `%s`\nBackup SHA-256: `%s`\n' "$fingerprint" "$backup_sha256" >> "$GITHUB_STEP_SUMMARY"
           git cat-file -e "$CANDIDATE_SHA^{commit}"
           git cat-file -e "$baseline_sha^{commit}"
           bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"
@@ -596,7 +614,7 @@ jobs:
           trap 'rm -f .kamal/secrets' EXIT
           bundle exec kamal config >/dev/null
           bundle exec kamal registry login
-      - name: Attach only DB and Redis to Kamal while retaining internal network
+      - name: Prepare DB, Redis and Compose API recovery connectivity without removing existing networks
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ inputs.candidate }}
@@ -621,6 +639,19 @@ jobs:
           ' <<< "$main_comparison" >/dev/null
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
+          api=maxibot-vps-api-1; caddy=maxibot-vps-https-1
+          caddy_id="$(docker inspect "$caddy" --format '{{.Id}}')"
+          for port in 80 443; do
+            mapfile -t owners < <(docker ps -q --filter "publish=$port")
+            [[ ${#owners[@]} == 1 && "${owners[0]}" == "$caddy_id" ]]
+          done
+          network_id="$(docker network inspect maxibot-vps-frontend --format '{{.Id}}')"
+          api_id="$(docker inspect "$api" --format '{{.Id}}')"
+          docker network inspect "$network_id" | python3 -c 'import json,subprocess,sys; n=json.load(sys.stdin)[0]; ids=list(n.get("Containers",{})); xs=json.loads(subprocess.check_output(["docker","inspect",*ids],text=True)) if ids else []; api=sys.argv[1]; assert all(x["Id"]==api or "api" not in x["NetworkSettings"]["Networks"].get("maxibot-vps-frontend",{}).get("Aliases",[]) for x in xs)' "$api_id"
+          attached="$(docker inspect "$api" --format '{{json .NetworkSettings.Networks}}' | python3 -c 'import json,sys; print("yes" if "maxibot-vps-frontend" in json.load(sys.stdin) else "no")')"
+          if [[ "$attached" == no ]]; then docker network connect --alias api maxibot-vps-frontend "$api"; fi
+          docker inspect "$api" | python3 -c 'import json,sys; n=json.load(sys.stdin)[0]["NetworkSettings"]["Networks"]; assert "maxibot-vps-internal" in n and "maxibot-vps-frontend" in n and "api" in n["maxibot-vps-frontend"]["Aliases"]'
+          docker exec "$caddy" wget -qO- --timeout=5 http://api:8000/health/live >/dev/null
           docker network inspect kamal >/dev/null 2>&1 || docker network create kamal >/dev/null
           for spec in 'maxibot-vps-db-1 db' 'maxibot-vps-redis-1 redis'; do
             read -r container alias <<< "$spec"
@@ -629,9 +660,8 @@ jobs:
             if [[ "$attached" == false ]]; then docker network connect --alias "$alias" kamal "$container"; fi
             docker inspect "$container" | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; n=c["NetworkSettings"]["Networks"]; assert "maxibot-vps-internal" in n and "kamal" in n; assert sys.argv[1] in n["kamal"]["Aliases"]' "$alias"
           done
-          docker inspect maxibot-vps-https-1 | python3 -c 'import json,sys; n=json.load(sys.stdin)[0]["NetworkSettings"]["Networks"]; assert "maxibot-vps-frontend" in n'
           REMOTE
-      - name: Stop Compose Worker and prove zero pollers before API replacement
+      - name: Stop Compose Worker, API and Caddy in order; release ports 80/443 to Kamal Proxy
         env:
           CANDIDATE_SHA: ${{ inputs.candidate }}
           IMAGE_VERSION: ${{ needs.preflight.outputs.image_version }}
@@ -650,10 +680,29 @@ jobs:
           ids="$(docker ps -q)"
           if [[ -n "$ids" ]]; then docker inspect $ids | python3 -c 'import json,sys; xs=json.load(sys.stdin); ps=[x["Id"] for x in xs if "MAX_RUN_POLLING=true" in x["Config"].get("Env",[])]; assert not ps, ps'; fi
           docker stop maxibot-vps-api-1 >/dev/null
+          test "$(docker inspect maxibot-vps-https-1 --format '{{.State.Running}}')" = true
+          ! docker inspect kamal-proxy >/dev/null 2>&1
+          docker stop maxibot-vps-https-1 >/dev/null
+          for port in 80 443; do [[ -z "$(docker ps -q --filter "publish=$port")" ]]; done
           REMOTE
           bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
+          for host in maxibot.pro www.maxibot.pro api.maxibot.pro go.maxibot.pro admin.maxibot.pro; do
+            curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 --resolve "$host:443:$PRODUCTION_HOST" "https://$host/health/ready" | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
+            curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 "https://$host/health/ready" | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
+            redirect="$(curl --silent --show-error --output /dev/null --write-out '%{redirect_url}' --resolve "$host:80:$PRODUCTION_HOST" "http://$host/health/ready")"
+            [[ "$redirect" == https://* ]]
+          done
+          admin_headers="$RUNNER_TEMP/maxibot-admin-headers.txt"
+          curl --silent --show-error --fail --resolve "admin.maxibot.pro:443:$PRODUCTION_HOST" --dump-header "$admin_headers" https://admin.maxibot.pro/ -o "$RUNNER_TEMP/maxibot-admin.html"
+          grep -qi '^content-security-policy:' "$admin_headers"
+          grep -qi '^strict-transport-security:' "$admin_headers"
+          grep -qi '^x-frame-options: DENY' "$admin_headers"
+          grep -qi '^x-content-type-options: nosniff' "$admin_headers"
+          grep -qi '^referrer-policy: no-referrer' "$admin_headers"
+          grep -qi '^cache-control: no-store' "$admin_headers"
+          grep -q 'OWNER CONSOLE' "$RUNNER_TEMP/maxibot-admin.html"
       - name: Start the sole Kamal Worker and verify runtime invariants
         env:
           BUNDLE_GEMFILE: Gemfile.kamal
@@ -692,6 +741,7 @@ jobs:
           candidate_sha, image_version, image_digest, expected_database_head, expected_db_id, expected_redis_id, expected_caddy_id, expected_uploads_volume, expected_db_volume, expected_redis_volume = sys.argv[1:]
           ids=subprocess.check_output(['docker','ps','-q'],text=True).split()
           items=json.loads(subprocess.check_output(['docker','inspect',*ids],text=True)) if ids else []
+          assert not any('caddy' in (x['Name']+x['Config'].get('Image','')).lower() for x in items)
           pollers=[x['Id'] for x in items if 'MAX_RUN_POLLING=true' in x['Config'].get('Env',[])]
           workers=[x for x in items if x['Config'].get('Labels',{}).get('service')=='maxibot' and x['Config'].get('Labels',{}).get('role')=='worker']
           apis=[x for x in items if x['Config'].get('Labels',{}).get('service')=='maxibot' and x['Config'].get('Labels',{}).get('role')=='api']
@@ -710,6 +760,10 @@ jobs:
           assert db['Id']==expected_db_id
           assert redis['Id']==expected_redis_id
           assert caddy['Id']==expected_caddy_id
+          assert caddy['State']['Running'] is False
+          proxy=json.loads(subprocess.check_output(['docker','inspect','kamal-proxy'],text=True))[0]
+          assert proxy['State']['Running'] is True
+          assert proxy['NetworkSettings']['Ports']['80/tcp'] and proxy['NetworkSettings']['Ports']['443/tcp']
           assert next(m['Name'] for m in apis[0]['Mounts'] if m['Destination']=='/app/uploads')==expected_uploads_volume
           assert next(m['Name'] for m in db['Mounts'] if m['Destination']=='/var/lib/postgresql/data')==expected_db_volume
           assert next(m['Name'] for m in redis['Mounts'] if m['Destination']=='/data')==expected_redis_volume
@@ -721,15 +775,12 @@ jobs:
               state=json.loads(subprocess.check_output(['docker','inspect',old],text=True))[0]['State']
               assert state['Running'] is False
           assert 'kamal' in workers[0]['NetworkSettings']['Networks']
-          assert {'kamal','maxibot-vps-frontend'} <= set(apis[0]['NetworkSettings']['Networks'])
+          assert {'kamal'} <= set(apis[0]['NetworkSettings']['Networks'])
           for name, alias in (('maxibot-vps-db-1','db'),('maxibot-vps-redis-1','redis')):
               c=json.loads(subprocess.check_output(['docker','inspect',name],text=True))[0]
               assert {'maxibot-vps-internal','kamal'} <= set(c['NetworkSettings']['Networks'])
               assert alias in c['NetworkSettings']['Networks']['kamal']['Aliases']
-          subprocess.run(['docker','exec',apis[0]['Id'],'python','-c','import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in (("db",5432),("redis",6379),("https",80))]'],check=True)
-          caddy=json.loads(subprocess.check_output(['docker','inspect','maxibot-vps-https-1'],text=True))[0]
-          assert 'maxibot-vps-frontend' in caddy['NetworkSettings']['Networks']
-          subprocess.run(['docker','exec','maxibot-vps-https-1','wget','-qO-','--timeout=5','http://api:8000/health/live'],check=True,stdout=subprocess.DEVNULL)
+          subprocess.run(['docker','exec',apis[0]['Id'],'python','-c','import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in (("db",5432),("redis",6379))]'],check=True)
           subprocess.run(['docker','exec','maxibot-vps-db-1','pg_isready','-U','maxibot','-d','maxibot'],check=True,stdout=subprocess.DEVNULL)
           subprocess.run(['docker','exec','maxibot-vps-redis-1','redis-cli','ping'],check=True,stdout=subprocess.DEVNULL)
           PY
@@ -740,10 +791,13 @@ jobs:
         run: |
           {
             echo 'Apply failed or Verify is incomplete. Do not retry or auto-rollback.'
-            echo 'Reconcile read-only first. From the same pinned checkout, stop Kamal Worker, then API; verify zero MAX_RUN_POLLING=true containers before restoring Compose API:'
+            echo 'Reconcile read-only first. Keep PostgreSQL, Redis, volumes, Caddy files/images, and the stopped Compose recovery containers. Never delete them before OWNER confirms the migration.'
+            echo 'From the same pinned checkout, stop Kamal Worker and API, verify zero MAX_RUN_POLLING=true containers, then stop Kamal Proxy to release ports 80/443:'
             echo 'bundle exec kamal app stop --roles worker'
             echo 'bundle exec kamal app stop --roles api'
-            echo 'docker compose --env-file /opt/maxibot/.env -p maxibot-vps -f /opt/maxibot/docker-compose.vps.yml up -d --no-build --no-deps api'
+            echo 'bundle exec kamal proxy stop'
+            echo 'docker start maxibot-vps-api-1'
+            echo 'docker start maxibot-vps-https-1'
             echo 'Check the restored API through Caddy and confirm its recorded pre-cutover SHA before continuing.'
-            echo 'docker compose --env-file /opt/maxibot/.env -p maxibot-vps -f /opt/maxibot/docker-compose.vps.yml up -d --no-build --no-deps worker'
+            echo 'Only then restore the single Compose Worker: docker start maxibot-vps-worker-1'
           } >> "$GITHUB_STEP_SUMMARY"

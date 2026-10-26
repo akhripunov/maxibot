@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Header
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
@@ -28,6 +28,7 @@ from app.integrations.max_client import RealMaxClient, StubMaxClient
 from app.bot.runtime import MaxBotRuntime
 from app.core.config import settings
 from app.security import enforce_public_message_rate_limit, validate_max_init_data
+from app.web_admin_security import is_machine_qa_ingest, is_owner_console_path, owner_console_security_headers, require_owner_console_host
 from app.integrations.yandex_oauth import authorize_url, combined_scope, configured, consume_oauth_ticket, consume_state, create_bot_state, create_state, create_system_state, direct_scope, exchange_code, get_encrypted_token, save_bot_token, save_token, save_system_token
 from app.integrations.yandex_metrica import ensure_channel_setup, ensure_system_setup
 from app.integrations.yandex_direct import YandexDirectAPIError, YandexDirectClient
@@ -301,6 +302,22 @@ async def lifespan(app):
             await client.close()
 
 app = FastAPI(title="MAXIBOT MVP", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def restrict_owner_console_host(request: Request, call_next):
+    is_admin_origin_root = request.url.path == "/" and (request.url.hostname or "").lower() == settings.web_admin_rp_id.lower()
+    if (is_owner_console_path(request.url.path) and not is_machine_qa_ingest(request.url.path)) or is_admin_origin_root:
+        try:
+            require_owner_console_host(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        response = await call_next(request)
+        for name, value in owner_console_security_headers().items():
+            response.headers[name] = value
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    return await call_next(request)
 mini_dir = Path(__file__).parent.parent / "miniapp"
 uploads_dir = Path(settings.uploads_dir)
 uploads_dir.mkdir(parents=True, exist_ok=True)

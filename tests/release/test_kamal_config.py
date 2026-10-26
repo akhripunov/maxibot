@@ -16,7 +16,15 @@ def test_kamal_is_pinned_and_has_a_production_configuration():
     assert config["image"] == "akhripunov/maxibot-vps-api"
     assert config["registry"]["server"] == "ghcr.io"
     assert config["ssh"]["user"] == "root"
-    assert all(role["proxy"] is False for role in config["servers"].values())
+    assert "proxy" not in config["servers"]["api"]
+    assert config["servers"]["worker"]["proxy"] is False
+    assert config["proxy"]["app_port"] == 8000
+    assert config["proxy"]["ssl"] is True
+    assert config["proxy"]["ssl_redirect"] is True
+    assert config["proxy"]["healthcheck"]["path"] == "/health/ready"
+    assert config["proxy"]["hosts"] == [
+        "maxibot.pro", "www.maxibot.pro", "api.maxibot.pro", "go.maxibot.pro", "admin.maxibot.pro"
+    ]
 
 
 def test_kamal_owns_only_api_and_single_polling_worker():
@@ -34,7 +42,7 @@ def test_kamal_owns_only_api_and_single_polling_worker():
     assert roles["worker"]["env"]["clear"]["ADS_WRITE_ACTIONS_ENABLED"] is False
     assert roles["worker"]["options"]["memory"] == "512m"
     assert roles["worker"]["options"]["memory-swap"] == "512m"
-    assert roles["api"]["options"]["network"] == "maxibot-vps-frontend"
+    assert "network" not in roles["api"]["options"]
     assert roles["api"]["options"]["network-alias"] == "api"
     assert "network" not in roles["worker"]["options"]
     assert "db" not in roles and "redis" not in roles and "https" not in roles

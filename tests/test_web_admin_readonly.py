@@ -1,7 +1,7 @@
 import pytest
 from fastapi import HTTPException
 
-from app.web_admin_auth import require_edge_token, require_qa_ingest_token
+from app.web_admin_auth import require_qa_ingest_token
 from app.web_admin_readonly import BOT_STAGES, CHANNEL_STAGES, _bot_integrity_status, _main_drop, _stage_payload, canonical_metric_definitions
 
 
@@ -87,23 +87,6 @@ def test_main_drop_is_user_dropoff_not_technical_failure():
 
 
 @pytest.mark.asyncio
-async def test_web_admin_rejects_missing_internal_auth(monkeypatch):
-    monkeypatch.setattr("app.web_admin_auth.settings.web_admin_internal_token", "expected")
-    with pytest.raises(HTTPException) as exc:
-        await require_edge_token(None)
-    assert exc.value.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_web_admin_accepts_only_configured_internal_auth(monkeypatch):
-    monkeypatch.setattr("app.web_admin_auth.settings.web_admin_internal_token", "expected")
-    assert await require_edge_token("expected") is None
-    with pytest.raises(HTTPException) as exc:
-        await require_edge_token("wrong")
-    assert exc.value.status_code == 401
-
-
-@pytest.mark.asyncio
 async def test_qa_ingest_accepts_only_dedicated_token(monkeypatch):
     monkeypatch.setattr("app.web_admin_auth.settings.qa_result_ingest_token", "qa-expected")
     monkeypatch.setattr("app.web_admin_auth.settings.web_admin_internal_token", "web-expected")
@@ -128,5 +111,5 @@ def test_web_admin_contract_does_not_contain_secret_fields():
     assert "access_token" not in source
     assert "refresh_token" not in source
     assert "password" not in source
-    assert "web_admin_internal_token" in source
     assert "maxibot_admin_session" in source
+    assert "web_admin_internal_token" not in source
