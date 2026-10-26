@@ -125,7 +125,7 @@ jobs:
               and .event == "push"
               and .status == "completed"
               and .conclusion == "success"
-              and .path == ".github/workflows/maxibot-native-release.yml@refs/heads/main"' \
+              and .path == ".github/workflows/maxibot-native-release.yml"' \
             <<< "$build_run" >/dev/null
           build_jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100")"
           jq -e '[.jobs[] | select(.name == "tests" and .conclusion == "success")] | length == 1' <<< "$build_jobs" >/dev/null
@@ -138,7 +138,7 @@ jobs:
           ' <<< "$environment" >/dev/null
           for state in queued in_progress; do
             active="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=$state&per_page=100")"
-            jq -e --argjson current "$GITHUB_RUN_ID" '[.workflow_runs[] | select(.id != $current and (.path == ".github/workflows/maxibot-native-release.yml@refs/heads/main" or .path == ".github/workflows/maxibot-first-kamal-cutover.yml@refs/heads/main"))] | length == 0' <<< "$active" >/dev/null
+            jq -e --argjson current "$GITHUB_RUN_ID" '[.workflow_runs[] | select(.id != $current and (.path == ".github/workflows/maxibot-native-release.yml" or .path == ".github/workflows/maxibot-first-kamal-cutover.yml"))] | length == 0' <<< "$active" >/dev/null
           done
           build_attempt="$(jq -r .run_attempt <<< "$build_run")"
           [[ "$build_attempt" =~ ^[0-9]+$ ]]
@@ -456,7 +456,7 @@ jobs:
           ' <<< "$environment" >/dev/null
           for state in queued in_progress; do
             active="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=$state&per_page=100")"
-            jq -e --argjson current "$GITHUB_RUN_ID" '[.workflow_runs[] | select(.id != $current and (.path == ".github/workflows/maxibot-native-release.yml@refs/heads/main" or .path == ".github/workflows/maxibot-first-kamal-cutover.yml@refs/heads/main"))] | length == 0' <<< "$active" >/dev/null
+            jq -e --argjson current "$GITHUB_RUN_ID" '[.workflow_runs[] | select(.id != $current and (.path == ".github/workflows/maxibot-native-release.yml" or .path == ".github/workflows/maxibot-first-kamal-cutover.yml"))] | length == 0' <<< "$active" >/dev/null
           done
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ && "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$APPROVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ && "$EXPECTED_BACKUP_SHA" =~ ^[0-9a-f]{64}$ ]]
@@ -538,7 +538,7 @@ jobs:
             )
           ' <<< "$main_comparison" >/dev/null
           run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
-          jq -e --arg sha "$CANDIDATE_SHA" '.head_sha==$sha and .head_branch=="main" and .event=="push" and .status=="completed" and .conclusion=="success" and .path==".github/workflows/maxibot-native-release.yml@refs/heads/main"' <<< "$run" >/dev/null
+          jq -e --arg sha "$CANDIDATE_SHA" '.head_sha==$sha and .head_branch=="main" and .event=="push" and .status=="completed" and .conclusion=="success" and .path==".github/workflows/maxibot-native-release.yml"' <<< "$run" >/dev/null
           build_jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/jobs?per_page=100")"
           jq -e '[.jobs[] | select(.name == "tests" and .conclusion == "success")] | length == 1' <<< "$build_jobs" >/dev/null
           jq -e '[.jobs[] | select(.name == "build" and .conclusion == "success")] | length == 1' <<< "$build_jobs" >/dev/null

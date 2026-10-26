@@ -318,6 +318,64 @@ def test_build_to_dispatch_diff_allows_cutover_docs_and_blocks_runtime_changes()
         assert blocked.returncode != 0
 
 
+def test_actions_api_build_path_is_matched_without_ref_suffix_in_both_jobs():
+    workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
+    api_response = {
+        "head_sha": "4b88530bc6334f63f879740603945c4f1a3056b6",
+        "head_branch": "main",
+        "event": "push",
+        "status": "completed",
+        "conclusion": "success",
+        "path": ".github/workflows/maxibot-native-release.yml",
+    }
+    steps = {
+        step.get("name"): step.get("run", "")
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+    }
+    build_steps = (
+        steps["Verify OWNER attestation and exact successful Build image"],
+        steps["Reconcile exact Compose baseline and current main before any Apply"],
+    )
+
+    for run in build_steps:
+        path_match = re.search(r'\.path\s*==\s*"([^"]+)"', run)
+        assert path_match and path_match.group(1) == api_response["path"]
+        assert subprocess.run(
+            ["jq", "-e", f'.path == "{path_match.group(1)}"'],
+            input=json.dumps(api_response), text=True, capture_output=True, check=False,
+        ).returncode == 0
+
+    api_response["path"] += "@refs/heads/main"
+    assert subprocess.run(
+        ["jq", "-e", f'.path == "{path_match.group(1)}"'],
+        input=json.dumps(api_response), text=True, capture_output=True, check=False,
+    ).returncode != 0
+
+
+def test_competing_run_filter_rejects_release_workflows_but_ignores_unrelated_workflows():
+    workflow = WORKFLOW_PATH.read_text()
+    filters = re.findall(
+        r'jq -e --argjson current "\$GITHUB_RUN_ID" \'([^\']+)\' <<< "\$active"',
+        workflow,
+    )
+    assert len(filters) == 2
+    assert filters[0] == filters[1]
+    def no_competitor(runs):
+        return subprocess.run(
+            ["jq", "-e", "--argjson", "current", "10", filters[0]],
+            input=json.dumps({"workflow_runs": runs}),
+            text=True,
+            capture_output=True,
+            check=False,
+        ).returncode == 0
+
+    assert no_competitor([{"id": 11, "path": ".github/workflows/unrelated.yml"}])
+    assert no_competitor([{"id": 10, "path": ".github/workflows/maxibot-native-release.yml"}])
+    assert not no_competitor([{"id": 11, "path": ".github/workflows/maxibot-native-release.yml"}])
+    assert not no_competitor([{"id": 11, "path": ".github/workflows/maxibot-first-kamal-cutover.yml"}])
+
+
 def test_exact_diff_is_rechecked_immediately_before_first_apply_mutation():
     workflow = yaml.load(WORKFLOW_PATH.read_text(), Loader=yaml.BaseLoader)
     apply_steps = workflow["jobs"]["apply"]["steps"]
