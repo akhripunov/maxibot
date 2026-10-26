@@ -423,3 +423,33 @@ def test_kamal_registry_password_is_loaded_from_ephemeral_secrets_file_for_each_
         assert "KAMAL_REGISTRY_PASSWORD=%s" in run
         assert '"$KAMAL_REGISTRY_PASSWORD" > .kamal/secrets' in run
         assert 'trap \'rm -f .kamal/secrets\' EXIT' in run
+
+def test_remote_preflight_reports_sanitized_gate_name_on_failure():
+    workflow = WORKFLOW_PATH.read_text()
+    preflight = workflow.split("\n  preflight:\n", 1)[1].split("\n  apply:\n", 1)[0]
+    remote = preflight.split("<<'REMOTE'\n", 1)[1].split("\n          REMOTE", 1)[0]
+
+    trap_command = next(line.strip() for line in remote.splitlines() if line.strip().startswith("trap 'status=$?;"))
+    simulation = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\ngate=synthetic_gate\n" + trap_command + "\nfalse"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert simulation.returncode == 1
+    assert simulation.stderr.strip() == "PREFLIGHT_REMOTE_GATE_FAILED=synthetic_gate status=1"
+
+    for gate in (
+        "compose_containers_running",
+        "caddy_owns_public_ports",
+        "kamal_proxy_absent",
+        "single_poller_and_network_topology",
+        "isolated_restore_name_available",
+        "isolated_restore_capacity",
+        "isolated_restore_create_resources",
+        "isolated_restore_consistency",
+        "persistent_volume_identity",
+    ):
+        assert f"gate={gate}" in remote
+    assert "PRODUCTION_SSH_KEY" not in remote
+    assert "KAMAL_REGISTRY_PASSWORD" not in remote
