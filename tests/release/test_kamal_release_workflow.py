@@ -203,3 +203,12 @@ def test_external_build_sets_kamal_service_label_and_deploy_verifies_it():
     assert 'service=maxibot' in build['with']['labels'].splitlines()
     deploy='\n'.join(s.get('run','') for s in workflow['jobs']['deploy']['steps'])
     assert deploy.count('test "$service_label" = maxibot')==2
+
+
+def test_every_normal_kamal_step_inherits_the_dispatch_source_sha():
+    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
+    deploy=doc['jobs']['deploy']
+    assert deploy['env']['MAXIBOT_COMMIT_SHA']=='${{ inputs.candidate }}'
+    for step in deploy['steps']:
+        if 'bundle exec kamal ' in step.get('run',''):
+            assert step.get('env',{}).get('MAXIBOT_COMMIT_SHA',deploy['env']['MAXIBOT_COMMIT_SHA'])=='${{ inputs.candidate }}'
