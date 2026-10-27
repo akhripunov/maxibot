@@ -10,23 +10,22 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Explicit protected application operation; never automatic recovery
+        description: Explicit production rollback only; normal deploys follow successful main push CI and Build
         required: true
         type: choice
-        default: deploy
+        default: rollback
         options:
-          - deploy
           - rollback
       candidate:
-        description: Exact current-main deploy SHA or previous successful production rollback SHA
+        description: Exact SHA of the previous successful production version to restore
         required: true
         type: string
       build_run_id:
-        description: Run ID of the successful main CI/Build to deploy
+        description: Run ID of the successful main Build for the rollback image
         required: true
         type: string
       image_digest:
-        description: Exact sha256 digest reported by that successful Build
+        description: Exact sha256 digest reported by that rollback Build
         required: true
         type: string
 
@@ -142,6 +141,9 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/codex/native-release-maxibot' && github.actor == github.repository_owner) ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: tests
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
+      image_version: ${{ steps.version.outputs.value }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -211,12 +213,19 @@ jobs:
           echo "MAXIBOT_BUILD_RUN_ID=$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
           echo "MAXIBOT_BUILD_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
           echo "MAXIBOT_BUILD_SHA=$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
-          printf 'CI_BUILD_ONLY: `%s` → `%s`\n' "$CANDIDATE_SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          printf 'NATIVE_RELEASE_BUILD: `%s` → `%s`\n' "$CANDIDATE_SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
           echo 'MAXIBOT_GHCR_DIGEST_PLATFORM=PASS' >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner)
+      always() &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.tests.result == 'success' && needs.build.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.actor == github.repository_owner && inputs.operation == 'rollback')
+      )
+    needs:
+      - tests
+      - build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
@@ -228,7 +237,9 @@ jobs:
       packages: read
       deployments: write
     env:
-      RELEASE_OPERATION: ${{ inputs.operation || 'deploy' }}
+      RELEASE_OPERATION: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'deploy' || inputs.operation || '' }}
+      BUILD_RUN_ID: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_id || inputs.build_run_id }}
+      BUILD_IMAGE_VERSION: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.outputs.image_version || '' }}
       PRODUCTION_HOST: 135.106.166.46
       BUNDLE_GEMFILE: Gemfile.kamal
       KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
@@ -239,12 +250,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Select and verify the prior successful exact-SHA build image
+      - name: Select and verify the exact-SHA build image
         id: image
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
-          APPROVED_DIGEST: ${{ inputs.image_digest }}
+          APPROVED_DIGEST: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.outputs.image_digest || inputs.image_digest }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_OPERATION" == deploy || "$RELEASE_OPERATION" == rollback ]]
@@ -254,15 +264,30 @@ jobs:
           [[ "$APPROVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           build_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
-          jq -e --arg sha "$CANDIDATE_SHA" \
-            '.head_sha == $sha
-              and .head_branch == "main"
-              and .event == "push"
-              and .status == "completed"
-              and .conclusion == "success"
-            and .path == ".github/workflows/maxibot-native-release.yml"' \
-            <<< "$build_run" >/dev/null
-          build_attempt="$(jq -r .run_attempt <<< "$build_run")"
+          if [[ "$RELEASE_OPERATION" == deploy ]]; then
+            test "$GITHUB_EVENT_NAME" = push
+            test "$GITHUB_REF" = refs/heads/main
+            test "$BUILD_RUN_ID" = "$GITHUB_RUN_ID"
+            build_attempt="$GITHUB_RUN_ATTEMPT"
+            test "$BUILD_IMAGE_VERSION" = "$CANDIDATE_SHA-$BUILD_RUN_ID-$build_attempt"
+            jq -e --arg sha "$CANDIDATE_SHA" --arg attempt "$build_attempt" \
+              '.head_sha == $sha
+                and .head_branch == "main"
+                and .event == "push"
+                and .run_attempt == ($attempt | tonumber)
+                and .path == ".github/workflows/maxibot-native-release.yml"
+                and .status == "in_progress"' <<< "$build_run" >/dev/null
+          else
+            jq -e --arg sha "$CANDIDATE_SHA" \
+              '.head_sha == $sha
+                and .head_branch == "main"
+                and .event == "push"
+                and .status == "completed"
+                and .conclusion == "success"
+                and .path == ".github/workflows/maxibot-native-release.yml"' \
+              <<< "$build_run" >/dev/null
+            build_attempt="$(jq -r .run_attempt <<< "$build_run")"
+          fi
           [[ "$build_attempt" =~ ^[0-9]+$ ]]
           image_version="$CANDIDATE_SHA-$BUILD_RUN_ID-$build_attempt"
           image_tag="ghcr.io/akhripunov/maxibot-vps-api:$image_version"
@@ -290,7 +315,7 @@ jobs:
             echo "IMAGE_TAG=$image_tag"
             echo "IMAGE_REF=$image_ref"
           } >> "$GITHUB_ENV"
-          printf 'PRIOR_BUILD_RUN=%s (attempt %s)\nIMAGE_TAG=`%s`\nIMMUTABLE_IMAGE=`%s`\n' \
+          printf 'BUILD_RUN=%s (attempt %s)\nIMAGE_TAG=`%s`\nIMMUTABLE_IMAGE=`%s`\n' \
             "$BUILD_RUN_ID" "$build_attempt" "$image_tag" "$image_ref" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -413,7 +438,7 @@ jobs:
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- docs/frozen_paths.yaml scripts/frozen_path_guard.sh; then
             fail 'ordinary Kamal Deploy refuses frozen-path policy or guard changes'
           fi
-          bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" --owner-approved-task ME-53 --owner-approved-path app/main.py || fail 'frozen-path guard rejected the candidate'
+          bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" || fail 'frozen-path guard rejected the candidate'
           echo 'PRODUCTION_BASELINE=PASS' >> "$GITHUB_STEP_SUMMARY"
           echo 'FROZEN_PATH_REGRESSION=PASS' >> "$GITHUB_STEP_SUMMARY"
           echo "baseline_sha=$baseline_sha" >> "$GITHUB_OUTPUT"

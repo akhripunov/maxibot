@@ -13,11 +13,14 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/maxibot-native-release.yml"
 
 
-def test_kamal_release_has_three_jobs_and_owner_gated_deploy():
+def test_kamal_release_automatically_deploys_main_after_tests_and_build():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
 
     assert "main" in workflow["on"]["push"]["branches"]
     assert workflow["on"]["pull_request"]["branches"] == ["main"]
+    operation = workflow["on"]["workflow_dispatch"]["inputs"]["operation"]
+    assert operation["options"] == ["rollback"]
+    assert operation["default"] == "rollback"
     assert workflow["on"]["workflow_dispatch"]["inputs"]["candidate"]["required"] == "true"
     assert workflow["on"]["workflow_dispatch"]["inputs"]["build_run_id"]["required"] == "true"
     assert workflow["on"]["workflow_dispatch"]["inputs"]["image_digest"]["required"] == "true"
@@ -26,11 +29,20 @@ def test_kamal_release_has_three_jobs_and_owner_gated_deploy():
     assert workflow["jobs"]["build"]["needs"] == "tests"
     assert "workflow_dispatch" not in workflow["jobs"]["build"]["if"]
     assert "github.event_name == 'push'" in workflow["jobs"]["build"]["if"]
-    assert workflow["jobs"]["deploy"].get("needs") is None
+    deploy = workflow["jobs"]["deploy"]
+    assert deploy["needs"] == ["tests", "build"]
+    assert "always()" in deploy["if"]
+    assert "github.event_name == 'push'" in deploy["if"]
+    assert "github.ref == 'refs/heads/main'" in deploy["if"]
+    assert "needs.tests.result == 'success'" in deploy["if"]
+    assert "needs.build.result == 'success'" in deploy["if"]
+    assert "inputs.operation == 'rollback'" in deploy["if"]
+    assert "pull_request" not in deploy["if"]
+    assert "codex/native-release-maxibot" not in deploy["if"]
     assert "inputs.mode" not in workflow["jobs"]["build"]["if"]
-    assert workflow["jobs"]["deploy"]["environment"]["name"] == "production"
-    assert workflow["jobs"]["deploy"]["permissions"]["packages"] == "read"
-    assert workflow["jobs"]["deploy"]["permissions"]["actions"] == "read"
+    assert deploy["environment"]["name"] == "production"
+    assert deploy["permissions"]["packages"] == "read"
+    assert deploy["permissions"]["actions"] == "read"
 
 
 def test_tests_job_loads_pinned_kamal_config_with_synthetic_secret_without_deploy_access():
@@ -90,6 +102,7 @@ def test_every_normal_deploy_kamal_step_creates_private_secrets_file_and_cleans_
 
 
 def test_kamal_build_is_run_scoped_and_records_source_sha_and_digest():
+    document = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     workflow = WORKFLOW.read_text()
 
     assert "value=$CANDIDATE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" in workflow
@@ -98,14 +111,18 @@ def test_kamal_build_is_run_scoped_and_records_source_sha_and_digest():
     assert "steps.image.outputs.digest" in workflow
     assert 'MAXIBOT_BUILD_RUN_ID=$GITHUB_RUN_ID' in workflow
     assert 'MAXIBOT_BUILD_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT' in workflow
+    assert document["jobs"]["build"]["outputs"]["image_digest"] == "${{ steps.image.outputs.digest }}"
+    assert document["jobs"]["build"]["outputs"]["image_version"] == "${{ steps.version.outputs.value }}"
     assert "actions/upload-artifact@" not in workflow
     assert "actions/download-artifact@" not in workflow
     assert "packages: write" in workflow
 
 
-def test_kamal_deploy_selects_a_prior_successful_build_and_verifies_its_digest():
+def test_kamal_deploy_uses_same_run_build_outputs_and_verifies_exact_digest():
     workflow = WORKFLOW.read_text()
-    deploy = workflow.split("\n  deploy:\n", 1)[1]
+    document = yaml.load(workflow, Loader=yaml.BaseLoader)
+    deploy_job = document["jobs"]["deploy"]
+    deploy = "\n".join(step.get("run", "") for step in deploy_job["steps"])
 
     assert 'actions/runs/$BUILD_RUN_ID' in deploy
     assert '.head_sha == $sha' in deploy
@@ -115,14 +132,28 @@ def test_kamal_deploy_selects_a_prior_successful_build_and_verifies_its_digest()
     assert '.conclusion == "success"' in deploy
     assert '.path == ".github/workflows/maxibot-native-release.yml"' in deploy
     assert 'image_version="$CANDIDATE_SHA-$BUILD_RUN_ID-$build_attempt"' in deploy
+    assert "needs.build.outputs.image_digest" in str(deploy_job)
+    assert "github.run_id" in deploy_job["env"]["BUILD_RUN_ID"]
+    build_selection = re.search(
+        r'if \[\[ "\$RELEASE_OPERATION" == deploy \]\]; then(.*?)\n\s*else\n(.*?)\n\s*fi',
+        deploy,
+        re.S,
+    )
+    assert build_selection
+    same_run, rollback_build = build_selection.groups()
+    assert 'test "$BUILD_RUN_ID" = "$GITHUB_RUN_ID"' in same_run
+    assert '.run_attempt == ($attempt | tonumber)' in same_run
+    assert '.status == "in_progress"' in same_run
+    assert '.status == "completed"' in rollback_build
+    assert '.conclusion == "success"' in rollback_build
     assert 'APPROVED_DIGEST' in deploy
     assert 'test "$image_digest" = "$APPROVED_DIGEST"' in deploy
     assert 'git/ref/heads/main' in deploy
     assert 'docker buildx imagetools inspect "$IMAGE_TAG"' in deploy
     assert 'docker pull "$IMAGE_REF"' in deploy
-    assert 'needs.build.outputs' not in deploy
     assert "docker/build-push-action@" not in deploy
-    assert deploy.index("Select and verify the prior successful exact-SHA build image") < deploy.index("actions/checkout@")
+    deploy_workflow = workflow.split("\n  deploy:\n", 1)[1]
+    assert deploy_workflow.index("Select and verify the exact-SHA build image") < deploy_workflow.index("actions/checkout@")
     assert 'bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api' in deploy
     assert 'bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker' in deploy
     assert 'bundle exec kamal app stop --roles worker' in deploy
@@ -188,7 +219,8 @@ def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_rest
     assert "kamal-proxy" in runtime
     assert "PRODUCTION_BASELINE=FAIL:" in baseline
     assert "Redis PING command failed" in baseline
-    assert 'bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" --owner-approved-task ME-53 --owner-approved-path app/main.py' in baseline
+    assert 'bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"' in baseline
+    assert "--owner-approved-task ME-53" not in baseline
 
 
 def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():
@@ -273,8 +305,8 @@ def test_nested_docker_python_commands_compile_before_any_release():
 def test_rollback_is_explicit_and_executes_trusted_current_main_workflow():
     doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
     operation=doc['on']['workflow_dispatch']['inputs']['operation']
-    assert operation['options']==['deploy','rollback']
-    assert operation['default']=='deploy'
+    assert operation['options']==['rollback']
+    assert operation['default']=='rollback'
     checkout=next(s for s in doc['jobs']['deploy']['steps'] if s.get('uses','').startswith('actions/checkout@'))
     assert checkout['with']['ref']=='${{ github.sha }}'
     source=WORKFLOW.read_text()
