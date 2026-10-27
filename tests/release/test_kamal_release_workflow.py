@@ -145,7 +145,7 @@ def test_kamal_deploy_verifies_only_api_worker_and_preserves_safety_invariants()
     assert '"pg_isready","-U","maxibot","-d","maxibot"' in deploy
     assert '"redis-cli","ping"' in deploy
     assert 'kamal-proxy' in deploy
-    assert 'maxibot-vps-https-1' in deploy
+    assert 'maxibot-vps-https-1' not in deploy
     assert "for host in maxibot.pro www.maxibot.pro api.maxibot.pro go.maxibot.pro admin.maxibot.pro" in deploy
     assert '"https://$host/health/ready"' in deploy
     assert "content-security-policy:" in deploy
@@ -155,9 +155,48 @@ def test_kamal_deploy_verifies_only_api_worker_and_preserves_safety_invariants()
     assert "referrer-policy: no-referrer" in deploy
     assert "cache-control: no-store" in deploy
     assert 'assert not old["State"]["Running"]' in deploy
-    assert 'assert not any("caddy" in (c["Name"]+c["Config"].get("Image","")).lower()' in deploy
+    assert 'assert not any("caddy"' not in deploy
     assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles api' in deploy
     assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles worker' in deploy
+
+
+def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_restore_or_caddy():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    deploy_script = "\n".join(step.get("run", "") for step in steps)
+    baseline = next(step for step in steps if step.get("name") == "Verify exact main and read the current production baseline")["run"]
+    kamal_config = next(step for step in steps if step.get("name") == "Verify exact GHCR image and Kamal configuration")["run"]
+    runtime = next(step for step in steps if step.get("name") == "Verify runtime, network connectivity, and Worker heartbeat")["run"]
+
+    assert "api_compose" not in baseline and "worker_compose" not in baseline
+    assert "db=maxibot-vps-db-1" in baseline and 'require_running "$db"' in baseline
+    assert "redis=maxibot-vps-redis-1" in baseline and 'require_running "$redis"' in baseline
+    assert "redis-cli ping" in baseline and '[[ "$redis_ping" == PONG ]]' in baseline
+    assert "health/ready" in baseline
+    assert "[[ \"$api_sha\" == \"$worker_sha\" ]]" in baseline
+    assert "alembic_version" in baseline
+    assert "old_db_volume" in baseline and "old_redis_volume" in baseline and "old_uploads_volume" in baseline
+    assert "MAXIBOT_BACKUP_MAX_AGE_SECONDS" not in deploy_script
+    assert "pg_restore" not in deploy_script
+    assert "native_restore_probe" not in deploy_script
+    assert "maxibot-native-restore" not in deploy_script
+    assert "caddy" not in deploy_script.lower()
+    assert "maxibot-vps-https-1" not in deploy_script
+    assert "BASELINE_MODE" not in kamal_config
+    assert "FIRST_COMPOSE_TO_KAMAL_CUTOVER_REQUIRED" not in kamal_config
+    assert "EXPECTED_CADDY_ID" not in runtime
+    assert "kamal-proxy" in runtime
+    assert "PRODUCTION_BASELINE=FAIL:" in baseline
+    assert "Redis PING command failed" in baseline
+    assert 'bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" --owner-approved-task ME-53 --owner-approved-path app/main.py' in baseline
+
+
+def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():
+    cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
+
+    assert "pg_restore --list" in cutover
+    assert "cutover_restore_probe" in cutover
+    assert "--network none" in cutover
 
 
 def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
@@ -298,9 +337,10 @@ def test_pinned_rollback_interface_uses_loaded_cli_metadata_not_help_text():
     assert 'kamal rollback --help | grep' not in verify['run']
 
 
-def test_isolated_restore_cleanup_removes_its_anonymous_data_volume():
-    doc=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
-    baseline=next(s['run'] for s in doc['jobs']['deploy']['steps'] if s.get('id')=='baseline')
-    assert baseline.count('docker rm -f -v "$restore_name"')==2
-    assert 'docker volume prune' not in baseline
-    assert 'NATIVE_RESTORE_DISK=FAIL' in baseline
+def test_isolated_cutover_restore_cleanup_remains_fail_closed_and_never_prunes_volumes():
+    cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
+
+    assert 'docker rm -f "$restore_name"' in cutover
+    assert "cleanup_failed=1" in cutover
+    assert "docker volume prune" not in cutover
+    assert "cutover_restore_probe" in cutover

@@ -230,7 +230,6 @@ jobs:
     env:
       RELEASE_OPERATION: ${{ inputs.operation || 'deploy' }}
       PRODUCTION_HOST: 135.106.166.46
-      MAXIBOT_BACKUP_MAX_AGE_SECONDS: '86400'
       BUNDLE_GEMFILE: Gemfile.kamal
       KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
     steps:
@@ -311,12 +310,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$IMAGE_REF" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]]
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
-          test "$PRODUCTION_HOST" = 135.106.166.46
-          test -n "$PRODUCTION_SSH_KEY" && test -n "$PRODUCTION_KNOWN_HOSTS"
+          fail() { printf 'PRODUCTION_BASELINE=FAIL: %s\n' "$1" >&2; exit 1; }
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail 'candidate SHA is malformed'
+          [[ "$IMAGE_REF" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]] || fail 'image reference is not an immutable GHCR digest'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA" || fail 'checkout does not match workflow SHA'
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" || fail 'GitHub main read failed'
+          test "$main_sha" = "$GITHUB_SHA" || fail 'GitHub main no longer matches workflow SHA'
+          test "$PRODUCTION_HOST" = 135.106.166.46 || fail 'production host does not match MAXIBOT VPS'
+          test -n "$PRODUCTION_SSH_KEY" && test -n "$PRODUCTION_KNOWN_HOSTS" || fail 'production SSH credentials are not configured'
           install -d -m 700 "$RUNNER_TEMP/ssh" "$HOME/.ssh"
           printf '%s\n' "$PRODUCTION_SSH_KEY" > "$RUNNER_TEMP/ssh/id_ed25519"
           chmod 600 "$RUNNER_TEMP/ssh/id_ed25519"
@@ -340,130 +341,48 @@ jobs:
           echo "PRODUCTION_KNOWN_HOSTS_FILE=$RUNNER_TEMP/ssh/known_hosts" >> "$GITHUB_ENV"
           remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
-          api_compose=maxibot-vps-api-1; worker_compose=maxibot-vps-worker-1
-          db=maxibot-vps-db-1
-          running() { [[ "$(docker inspect "$1" --format '{{.State.Running}}' 2>/dev/null || true)" == true ]]; }
-          if running "$api_compose" && running "$worker_compose"; then
-            mode=compose; api="$api_compose"; worker="$worker_compose"
-          elif ! running "$api_compose" && ! running "$worker_compose"; then
-            api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
-            worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
-            [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]]
-            mode=kamal
-          else
-            echo 'Mixed Compose/Kamal production topology; read-only reconciliation required.' >&2
-            exit 1
-          fi
-          test "$(docker inspect maxibot-vps-db-1 --format '{{.State.Running}}')" = true
-          test "$(docker inspect maxibot-vps-redis-1 --format '{{.State.Running}}')" = true
-          if [[ "$mode" == compose ]]; then
-            test "$(docker inspect maxibot-vps-https-1 --format '{{.State.Running}}')" = true
-          else
-            test "$(docker inspect maxibot-vps-https-1 --format '{{.State.Running}}')" = false
-            test "$(docker inspect kamal-proxy --format '{{.State.Running}}')" = true
-          fi
-          sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')"
-          worker_sha="$(docker inspect "$worker" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p')"
-          test "$sha" = "$worker_sha"
-          head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
-          db_id="$(docker inspect "$db" --format '{{.Id}}')"
-          redis_id="$(docker inspect maxibot-vps-redis-1 --format '{{.Id}}')"
-          caddy_id="$(docker inspect maxibot-vps-https-1 --format '{{.Id}}')"
-          db_volume="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')"
-          redis_volume="$(docker inspect maxibot-vps-redis-1 --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')"
-          uploads_volume="$(docker inspect "$api" --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Name}}{{end}}{{end}}')"
-          printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$sha" "$head" "$mode" "$db_id" "$redis_id" "$caddy_id" "$db_volume" "$redis_volume" "$uploads_volume"
-          REMOTE
-          )"
-          IFS='|' read -r baseline_sha database_head baseline_mode old_db_id old_redis_id old_caddy_id old_db_volume old_redis_volume old_uploads_volume <<< "$remote"
-          [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]]
-          [[ "$baseline_mode" == compose || "$baseline_mode" == kamal ]]
-          [[ "$old_db_id" =~ ^[0-9a-f]{64}$ && "$old_redis_id" =~ ^[0-9a-f]{64}$ && "$old_caddy_id" =~ ^[0-9a-f]{64}$ ]]
-          [[ -n "$old_db_volume" && -n "$old_redis_volume" && -n "$old_uploads_volume" ]]
-          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]]
-          test "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" = 86400
-          backup_remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s -- "$GITHUB_RUN_ID" "$MAXIBOT_BACKUP_MAX_AGE_SECONDS" <<'REMOTE'
-          set -Eeuo pipefail
-          run_id="$1"
-          max_age="$2"
-          [[ "$run_id" =~ ^[0-9]+$ && "$max_age" =~ ^[0-9]+$ ]]
-          root=/opt/maxibot
-          backup_dir="$root/backups"
-          db=maxibot-vps-db-1
-          test -d "$backup_dir"
-          backup_path="$(find "$backup_dir" -maxdepth 1 -type f -name 'maxibot-db-*.dump' -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')"
-          [[ "$backup_path" == "$backup_dir"/maxibot-db-*.dump ]]
-          backup_epoch="$(stat -c %Y "$backup_path")"
-          backup_bytes="$(stat -c %s "$backup_path")"
-          backup_age=$(($(date +%s) - backup_epoch))
-          [[ "$backup_epoch" =~ ^[0-9]+$ && "$backup_bytes" =~ ^[0-9]+$ ]]
-          (( backup_bytes > 0 && backup_age >= 0 && backup_age <= max_age ))
-          docker exec -i "$db" pg_restore --list < "$backup_path" >/dev/null
-          database_head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
-          source_extensions="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")"
-          source_tables="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
-          source_db_bytes="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select pg_database_size('maxibot')")"
-          [[ "$source_db_bytes" =~ ^[0-9]+$ ]]
-          docker_root="$(docker info --format '{{.DockerRootDir}}')"
-          free_kb="$(df -Pk "$docker_root" | awk 'NR == 2 {print $4}')"
-          required_kb=$(((source_db_bytes * 3 / 2 + backup_bytes * 2 + 134217728) / 1024))
-          [[ "$free_kb" =~ ^[0-9]+$ ]]
-          if (( free_kb < required_kb )); then
-            printf 'NATIVE_RESTORE_DISK=FAIL free_kb=%s required_kb=%s\n' "$free_kb" "$required_kb" >&2
-            exit 1
-          fi
-          db_image="$(docker inspect "$db" --format '{{.Image}}')"
-          [[ "$db_image" =~ ^sha256:[0-9a-f]{64}$ ]]
-          restore_name="maxibot-native-restore-$run_id"
-          if docker container inspect "$restore_name" >/dev/null 2>&1; then
-            echo 'A restore-probe container with this run id already exists; refusing to touch it.' >&2
-            exit 1
-          fi
-          restore_started=0
-          cleanup_restore() {
-            status=$?
-            trap - EXIT
-            if (( restore_started )) && docker container inspect "$restore_name" >/dev/null 2>&1; then
-              docker rm -f -v "$restore_name" >/dev/null || status=1
-            fi
-            exit "$status"
+          fail() { printf 'PRODUCTION_BASELINE=FAIL: %s\n' "$1" >&2; exit 1; }
+          require_running() {
+            local name="$1" state
+            state="$(docker inspect "$name" --format '{{.State.Running}}' 2>/dev/null)" || fail "cannot inspect required container $name"
+            [[ "$state" == true ]] || fail "required container $name is not running"
           }
-          trap cleanup_restore EXIT
-          docker run --detach --rm --name "$restore_name" --network none \
-            --mount "type=bind,src=$backup_path,dst=/tmp/maxibot-backup.dump,readonly" \
-            -e POSTGRES_USER=maxibot -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
-            "$db_image" >/dev/null
-          restore_started=1
-          ready=0
-          for _ in $(seq 1 60); do
-            if docker exec "$restore_name" pg_isready -U maxibot -d postgres >/dev/null 2>&1; then ready=1; break; fi
-            sleep 1
-          done
-          test "$ready" = 1
-          docker exec "$restore_name" createdb -U maxibot native_restore_probe
-          docker exec "$restore_name" pg_restore --exit-on-error --no-owner --no-privileges -U maxibot -d native_restore_probe /tmp/maxibot-backup.dump >/dev/null
-          restored_head="$(docker exec "$restore_name" psql -X -U maxibot -d native_restore_probe -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')"
-          restored_extensions="$(docker exec "$restore_name" psql -X -U maxibot -d native_restore_probe -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")"
-          restored_tables="$(docker exec "$restore_name" psql -X -U maxibot -d native_restore_probe -At -v ON_ERROR_STOP=1 -c "select count(*) from information_schema.tables where table_schema not in ('pg_catalog','information_schema')")"
-          test "$restored_head" = "$database_head"
-          test "$restored_extensions" = "$source_extensions"
-          test "$restored_tables" = "$source_tables"
-          backup_sha256="$(sha256sum "$backup_path" | awk '{print $1}')"
-          [[ "$backup_sha256" =~ ^[0-9a-f]{64}$ ]]
-          docker rm -f -v "$restore_name" >/dev/null
-          trap - EXIT
-          printf '%s|%s|%s|%s|%s|%s\n' "$backup_epoch" "$backup_bytes" "$backup_sha256" "$database_head" "$restored_head" "$restored_tables"
+          db=maxibot-vps-db-1
+          redis=maxibot-vps-redis-1
+          require_running "$db"
+          require_running "$redis"
+          docker exec "$db" pg_isready -U maxibot -d maxibot >/dev/null 2>&1 || fail 'PostgreSQL is not accepting connections'
+          redis_ping="$(docker exec "$redis" redis-cli ping 2>/dev/null)" || fail 'Redis PING command failed'
+          [[ "$redis_ping" == PONG ]] || fail 'Redis did not return PONG'
+
+          api="$(docker ps --no-trunc -q --filter label=service=maxibot --filter label=role=api)" || fail 'Docker API query for Kamal API failed'
+          worker="$(docker ps --no-trunc -q --filter label=service=maxibot --filter label=role=worker)" || fail 'Docker API query for Kamal Worker failed'
+          [[ "$api" =~ ^[0-9a-f]{64}$ ]] || fail 'expected exactly one running Kamal API container'
+          [[ "$worker" =~ ^[0-9a-f]{64}$ ]] || fail 'expected exactly one running Kamal Worker container'
+          require_running "$api"
+          require_running "$worker"
+          api_sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])' 2>/dev/null)" || fail 'API readiness endpoint failed'
+          [[ "$api_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'API readiness returned an invalid source SHA'
+          worker_sha="$(docker inspect "$worker" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p')" || fail 'Worker source SHA inspection failed'
+          [[ "$api_sha" == "$worker_sha" ]] || fail 'API and Worker source SHAs do not match'
+          database_head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" || fail 'PostgreSQL Alembic head query failed'
+          [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]] || fail 'PostgreSQL Alembic head is empty or malformed'
+          db_id="$(docker inspect "$db" --format '{{.Id}}')" || fail 'PostgreSQL container identity read failed'
+          redis_id="$(docker inspect "$redis" --format '{{.Id}}')" || fail 'Redis container identity read failed'
+          db_volume="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" || fail 'PostgreSQL volume read failed'
+          redis_volume="$(docker inspect "$redis" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')" || fail 'Redis volume read failed'
+          uploads_volume="$(docker inspect "$api" --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Name}}{{end}}{{end}}')" || fail 'API uploads volume read failed'
+          [[ "$db_id" =~ ^[0-9a-f]{64}$ && "$redis_id" =~ ^[0-9a-f]{64}$ ]] || fail 'PostgreSQL or Redis container identity is malformed'
+          [[ -n "$db_volume" && -n "$redis_volume" && -n "$uploads_volume" ]] || fail 'required PostgreSQL, Redis, or uploads volume is missing'
+          printf '%s|%s|%s|%s|%s|%s|%s\n' "$api_sha" "$database_head" "$db_id" "$redis_id" "$db_volume" "$redis_volume" "$uploads_volume"
           REMOTE
-          )"
-          IFS='|' read -r backup_epoch backup_bytes backup_sha256 backup_db_head restored_db_head restored_tables <<< "$backup_remote"
-          [[ "$backup_epoch" =~ ^[0-9]+$ && "$backup_bytes" =~ ^[0-9]+$ && "$backup_sha256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$restored_tables" =~ ^[0-9]+$ ]]
-          test "$backup_db_head" = "$database_head" && test "$restored_db_head" = "$database_head"
-          backup_time_utc="$(date -u -d "@$backup_epoch" '+%Y-%m-%dT%H:%M:%SZ')"
-          printf 'NATIVE_BACKUP_FRESHNESS=PASS: `%s`, %s bytes, SHA-256 `%s`\nNATIVE_BACKUP_RESTORE=PASS: isolated offline Docker restore; database head `%s`, restored tables `%s`.\n' "$backup_time_utc" "$backup_bytes" "$backup_sha256" "$database_head" "$restored_tables" >> "$GITHUB_STEP_SUMMARY"
-          git cat-file -e "$baseline_sha^{commit}"
+          )" || fail 'SSH could not read the production runtime baseline'
+          IFS='|' read -r baseline_sha database_head old_db_id old_redis_id old_db_volume old_redis_volume old_uploads_volume <<< "$remote"
+          [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'production baseline SHA is missing or malformed'
+          [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]] || fail 'production database head is missing or malformed'
+          [[ "$old_db_id" =~ ^[0-9a-f]{64}$ && "$old_redis_id" =~ ^[0-9a-f]{64}$ ]] || fail 'production data-container identity is missing or malformed'
+          [[ -n "$old_db_volume" && -n "$old_redis_volume" && -n "$old_uploads_volume" ]] || fail 'production data volume identity is missing'
+          git cat-file -e "$baseline_sha^{commit}" || fail 'production baseline SHA is not present in the checked-out Git history'
           # ROLLBACK_DEPLOYMENT_GATE_BEGIN
           if [[ "$RELEASE_OPERATION" == rollback ]]; then
             previous_success=
@@ -483,28 +402,24 @@ jobs:
           fi
           # ROLLBACK_DEPLOYMENT_GATE_END
           if [[ "$RELEASE_OPERATION" == rollback ]]; then
-            test "$baseline_mode" = kamal
             test "$baseline_sha" != "$CANDIDATE_SHA"
             git merge-base --is-ancestor "$CANDIDATE_SHA" "$baseline_sha"
             git diff --quiet "$CANDIDATE_SHA" "$baseline_sha" -- app alembic config .kamal Dockerfile Gemfile.kamal Gemfile.kamal.lock pyproject.toml
             git diff --quiet "$CANDIDATE_SHA" "$GITHUB_SHA" -- app alembic config .kamal Dockerfile Gemfile.kamal Gemfile.kamal.lock pyproject.toml
           fi
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- alembic app/db/models.py docker-compose.vps.yml; then
-            echo 'Native runtime Apply refuses database/model or production Compose changes; migration gates are not implemented in this candidate.' >&2
-            exit 1
+            fail 'ordinary Kamal Deploy refuses database/model or production Compose changes'
           fi
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- docs/frozen_paths.yaml scripts/frozen_path_guard.sh; then
-            echo 'Native runtime Apply refuses edits to the frozen-path policy or its guard.' >&2
-            exit 1
+            fail 'ordinary Kamal Deploy refuses frozen-path policy or guard changes'
           fi
-          bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"
+          bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" --owner-approved-task ME-53 --owner-approved-path app/main.py || fail 'frozen-path guard rejected the candidate'
+          echo 'PRODUCTION_BASELINE=PASS' >> "$GITHUB_STEP_SUMMARY"
           echo 'FROZEN_PATH_REGRESSION=PASS' >> "$GITHUB_STEP_SUMMARY"
           echo "baseline_sha=$baseline_sha" >> "$GITHUB_OUTPUT"
           echo "database_head=$database_head" >> "$GITHUB_OUTPUT"
-          echo "baseline_mode=$baseline_mode" >> "$GITHUB_OUTPUT"
           echo "old_db_id=$old_db_id" >> "$GITHUB_OUTPUT"
           echo "old_redis_id=$old_redis_id" >> "$GITHUB_OUTPUT"
-          echo "old_caddy_id=$old_caddy_id" >> "$GITHUB_OUTPUT"
           echo "old_db_volume=$old_db_volume" >> "$GITHUB_OUTPUT"
           echo "old_redis_volume=$old_redis_volume" >> "$GITHUB_OUTPUT"
           echo "old_uploads_volume=$old_uploads_volume" >> "$GITHUB_OUTPUT"
@@ -512,13 +427,11 @@ jobs:
         env:
           MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
           GH_TOKEN: ${{ github.token }}
-          BASELINE_MODE: ${{ steps.baseline.outputs.baseline_mode }}
         run: |
           set -euo pipefail
           install -d -m 700 .kamal
           umask 077
           trap 'rm -f .kamal/secrets' EXIT
-          test "$BASELINE_MODE" = kamal || { echo 'FIRST_COMPOSE_TO_KAMAL_CUTOVER_REQUIRED=BLOCKED' >&2; exit 1; }
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s <<'REMOTE'
           set -euo pipefail
           api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
@@ -531,16 +444,12 @@ jobs:
           by_id = {item["Id"]: item for item in items}
           assert "kamal" in by_id[api]["NetworkSettings"]["Networks"]
           assert "kamal" in by_id[worker]["NetworkSettings"]["Networks"]
-          caddy = json.loads(subprocess.check_output(["docker", "inspect", "maxibot-vps-https-1"], text=True))[0]
-          assert caddy["State"]["Running"] is False
           proxy = json.loads(subprocess.check_output(["docker", "inspect", "kamal-proxy"], text=True))[0]
           assert proxy["State"]["Running"] is True
           for name, alias in (("maxibot-vps-db-1", "db"), ("maxibot-vps-redis-1", "redis")):
               c = json.loads(subprocess.check_output(["docker", "inspect", name], text=True))[0]
               assert {"maxibot-vps-internal", "kamal"} <= set(c["NetworkSettings"]["Networks"])
               assert alias in c["NetworkSettings"]["Networks"]["kamal"]["Aliases"]
-          caddy = json.loads(subprocess.check_output(["docker", "inspect", "maxibot-vps-https-1"], text=True))[0]
-          assert "maxibot-vps-frontend" in caddy["NetworkSettings"]["Networks"]
           subprocess.run(["docker", "exec", api, "python", "-c", "import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]]"], check=True)
           env = dict(x.split("=",1) for x in by_id[api]["Config"]["Env"] if "=" in x)
           worker_env = dict(x.split("=",1) for x in by_id[worker]["Config"]["Env"] if "=" in x)
@@ -677,24 +586,23 @@ jobs:
           EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.database_head }}
           EXPECTED_DB_ID: ${{ steps.baseline.outputs.old_db_id }}
           EXPECTED_REDIS_ID: ${{ steps.baseline.outputs.old_redis_id }}
-          EXPECTED_CADDY_ID: ${{ steps.baseline.outputs.old_caddy_id }}
           EXPECTED_DB_VOLUME: ${{ steps.baseline.outputs.old_db_volume }}
           EXPECTED_REDIS_VOLUME: ${{ steps.baseline.outputs.old_redis_volume }}
           EXPECTED_UPLOADS_VOLUME: ${{ steps.baseline.outputs.old_uploads_volume }}
         run: |
           set -euo pipefail
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
-          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$IMAGE_REF" "$EXPECTED_DATABASE_HEAD" "$EXPECTED_DB_ID" "$EXPECTED_REDIS_ID" "$EXPECTED_CADDY_ID" "$EXPECTED_DB_VOLUME" "$EXPECTED_REDIS_VOLUME" "$EXPECTED_UPLOADS_VOLUME" <<'REMOTE'
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$IMAGE_REF" "$EXPECTED_DATABASE_HEAD" "$EXPECTED_DB_ID" "$EXPECTED_REDIS_ID" "$EXPECTED_DB_VOLUME" "$EXPECTED_REDIS_VOLUME" "$EXPECTED_UPLOADS_VOLUME" <<'REMOTE'
           set -euo pipefail
           sha="$1"; version="$2"; image_ref="$3"; expected_db_head="$4"
-          expected_db_id="$5"; expected_redis_id="$6"; expected_caddy_id="$7"
-          expected_db_volume="$8"; expected_redis_volume="$9"; expected_uploads_volume="${10}"
+          expected_db_id="$5"; expected_redis_id="$6"
+          expected_db_volume="$7"; expected_redis_volume="$8"; expected_uploads_volume="$9"
           api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
           worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
           [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]]
-          python3 - "$api" "$worker" "$sha" "$version" "$image_ref" "$expected_db_head" "$expected_db_id" "$expected_redis_id" "$expected_caddy_id" "$expected_db_volume" "$expected_redis_volume" "$expected_uploads_volume" <<'PY'
+          python3 - "$api" "$worker" "$sha" "$version" "$image_ref" "$expected_db_head" "$expected_db_id" "$expected_redis_id" "$expected_db_volume" "$expected_redis_volume" "$expected_uploads_volume" <<'PY'
           import json, subprocess, sys
-          api, worker, sha, version, image_ref, expected_db_head, expected_db_id, expected_redis_id, expected_caddy_id, expected_db_volume, expected_redis_volume, expected_uploads_volume = sys.argv[1:]
+          api, worker, sha, version, image_ref, expected_db_head, expected_db_id, expected_redis_id, expected_db_volume, expected_redis_volume, expected_uploads_volume = sys.argv[1:]
           items = json.loads(subprocess.check_output(["docker", "inspect", api, worker], text=True))
           by_id = {item["Id"]: item for item in items}
           for cid, required_networks, polling in ((api, {"kamal"}, "false"), (worker, {"kamal"}, "true")):
@@ -716,9 +624,6 @@ jobs:
               destination = "/var/lib/postgresql/data" if alias == "db" else "/data"
               volume = next(m["Name"] for m in c["Mounts"] if m["Destination"] == destination)
               assert volume == (expected_db_volume if alias == "db" else expected_redis_volume)
-          caddy=json.loads(subprocess.check_output(["docker","inspect","maxibot-vps-https-1"],text=True))[0]
-          assert caddy["Id"] == expected_caddy_id
-          assert caddy["State"]["Running"] is False
           proxy=json.loads(subprocess.check_output(["docker","inspect","kamal-proxy"],text=True))[0]
           assert proxy["State"]["Running"] is True
           ports=proxy["NetworkSettings"]["Ports"]
@@ -731,7 +636,6 @@ jobs:
           subprocess.run(["docker","exec",api,"python","-c","import socket; [socket.create_connection((h,p),timeout=5).close() for h,p in [('db',5432),('redis',6379)]]"],check=True)
           ids=subprocess.check_output(["docker","ps","-q"],text=True).split()
           allc=json.loads(subprocess.check_output(["docker","inspect",*ids],text=True)) if ids else []
-          assert not any("caddy" in (c["Name"]+c["Config"].get("Image","")).lower() for c in allc)
           pollers=[c["Id"] for c in allc if "MAX_RUN_POLLING=true" in c["Config"].get("Env",[])]
           assert pollers == [worker], pollers
           assert by_id[worker]["HostConfig"]["Memory"] == 536870912

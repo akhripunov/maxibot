@@ -37,19 +37,24 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("environment:\n      name: production", deploy)
         self.assertIn("deployments: write", deploy)
 
-    def test_deploy_requires_fresh_backup_and_isolated_restore_before_apply(self):
+    def test_ordinary_deploy_checks_runtime_without_running_full_backup_restore(self):
         deploy = self.source.split("\n  deploy:\n", 1)[1]
-        backup_gate = deploy.split("- name: Verify exact main and read the current production baseline", 1)[1]
-        backup_gate = backup_gate.split("- name: Verify exact GHCR image and Kamal configuration", 1)[0]
-        self.assertIn("MAXIBOT_BACKUP_MAX_AGE_SECONDS", backup_gate)
-        self.assertIn("pg_restore --list", backup_gate)
-        self.assertIn("--network none", backup_gate)
-        self.assertIn("pg_restore --exit-on-error", backup_gate)
-        self.assertIn("NATIVE_BACKUP_RESTORE=PASS", backup_gate)
-        self.assertIn("trap cleanup_restore EXIT", backup_gate)
-        self.assertEqual(sum(line.endswith("\\") for line in backup_gate.splitlines()), 3)
-        for line in backup_gate.splitlines():
-            self.assertFalse(line.endswith("\\\\"), line)
+        baseline = deploy.split("- name: Verify exact main and read the current production baseline", 1)[1]
+        baseline = baseline.split("- name: Verify exact GHCR image and Kamal configuration", 1)[0]
+        self.assertNotIn("MAXIBOT_BACKUP_MAX_AGE_SECONDS", deploy)
+        self.assertNotIn("pg_restore", deploy)
+        self.assertNotIn("native_restore_probe", deploy)
+        self.assertIn("PostgreSQL is not accepting connections", baseline)
+        self.assertIn("Redis PING command failed", baseline)
+        self.assertIn("Redis did not return PONG", baseline)
+        self.assertIn("API and Worker source SHAs do not match", baseline)
+        self.assertIn("PRODUCTION_BASELINE=FAIL:", baseline)
+
+    def test_first_cutover_keeps_backup_restore_checks_as_a_separate_procedure(self):
+        cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
+        self.assertIn("pg_restore --list", cutover)
+        self.assertIn("cutover_restore_probe", cutover)
+        self.assertIn("--network none", cutover)
 
     def test_legacy_release_workflows_have_no_automatic_triggers(self):
         prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
@@ -155,7 +160,7 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("MAX_RUN_POLLING", self.source)
         self.assertIn('old_db_id', self.source)
         self.assertIn('old_redis_id', self.source)
-        self.assertIn('old_caddy_id', self.source)
+        self.assertNotIn('old_caddy_id', self.source)
         self.assertIn('old_uploads_volume', self.source)
         self.assertIn('EXPECTED_DB_ID', self.source)
         self.assertIn('EXPECTED_REDIS_ID', self.source)
@@ -174,7 +179,7 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn('test "$digest_readback" = "$approved_digest"', deploy)
         self.assertIn('bundle exec kamal config', deploy)
         self.assertIn('docker network inspect kamal', deploy)
-        self.assertIn('maxibot-vps-frontend', deploy)
+        self.assertNotIn('maxibot-vps-frontend', deploy)
         self.assertIn('docker exec "$api" python', deploy)
         self.assertIn('MAXIBOT_KAMAL_DEPLOY_VERIFY=PASS', deploy)
         self.assertNotIn('docker compose', deploy)
