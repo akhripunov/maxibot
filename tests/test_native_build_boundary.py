@@ -29,11 +29,16 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("tags: ghcr.io/akhripunov/maxibot-vps-api:${{ steps.version.outputs.value }}", self.source)
         self.assertNotIn("${{ inputs.candidate }}", self.source)
 
-    def test_production_deploy_requires_explicit_dispatch_not_main_push(self):
+    def test_production_deploy_follows_successful_main_build_or_explicit_rollback(self):
         deploy = self.source.split("\n  deploy:\n", 1)[1]
-        self.assertNotIn("github.event_name == 'push'", deploy)
+        self.assertIn("github.event_name == 'push'", deploy)
+        self.assertIn("github.ref == 'refs/heads/main'", deploy)
+        self.assertIn("needs.tests.result == 'success'", deploy)
+        self.assertIn("needs.build.result == 'success'", deploy)
         self.assertIn("github.event_name == 'workflow_dispatch'", deploy)
-        self.assertIn("github.ref == 'refs/heads/main' && github.actor == github.repository_owner", deploy)
+        self.assertIn("github.actor == github.repository_owner", deploy)
+        self.assertIn("inputs.operation == 'rollback'", deploy)
+        self.assertNotIn("pull_request", deploy)
         self.assertIn("environment:\n      name: production", deploy)
         self.assertIn("deployments: write", deploy)
 
@@ -149,7 +154,9 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             return
         self.assertIn("environment:\n      name: production", self.source)
         self.assertIn("group: maxibot-production-release", self.source)
-        self.assertIn("APPROVED_DIGEST: ${{ inputs.image_digest }}", self.source)
+        self.assertIn("needs.build.outputs.image_digest", self.source)
+        self.assertIn("|| inputs.image_digest }}", self.source)
+        self.assertIn("BUILD_IMAGE_VERSION: ${{ github.event_name == 'push'", self.source)
         self.assertIn('actions/runs/$BUILD_RUN_ID', self.source)
         self.assertIn('.head_sha == $sha', self.source)
         self.assertIn('image_version="$CANDIDATE_SHA-$BUILD_RUN_ID-$build_attempt"', self.source)
