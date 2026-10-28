@@ -1,4 +1,14 @@
-## OWNER exception — ME-51 first Compose → Kamal cutover
+# CURRENT MAXIBOT RELEASE / PRE-PUSH POLICY (2026-10-28)
+
+For ordinary, OWNER-authorized production releases the executable source of truth is `.github/workflows/maxibot-native-release.yml`: a `push` to `main` runs hosted **Tests → Build/GHCR → Kamal Deploy → Runtime Verify** in the same run. GitHub `production` no longer requires manual reviewer approval. Codex and Mac are NOT stages after push. A manual `workflow_dispatch` is reserved for the explicitly authorized rollback operation, never routine deploy.
+
+**Important:** every `main` push, including docs and `AGENTS.md`, can trigger a real production deployment. Do not push implementation-only or instruction-only changes to `main` without OWNER release authorization for that scope. A branch/PR is safe for review and must not be mistaken for a production release. GitHub CI and protected production safety gates remain mandatory; no bypass to save time. Historical ME-51, V2/V5, Compose and Mac-runner instructions below are archive, NOT the ordinary release procedure.
+
+**Pre-push speed:** use the scope-based FAST/FULL decision in `docs/ORCHESTRATION_PROTOCOL.md` and the timing checklist in `docs/RELEASE_AUTOMATION.md`. Do not load old release archives, relaunch completed checks, or invoke ceremonial subagents for an unaffected path. Always read the current required GitHub access runbook before GitHub operations, check the exact remote SHA, preserve existing worktrees, and apply mandatory gates for changed paths.
+
+---
+
+## Historical exception — ME-51 first Compose → Kamal cutover (completed; not active)
 
 For ME-51 only, the OWNER-authorized first Compose → Kamal cutover uses `.github/workflows/maxibot-first-kamal-cutover.yml` instead of the legacy `scripts/release_prod.sh` path. This exception supersedes conflicting V5/sole-mutation-path requirements only for that one transition and its documented recovery. The existing DevOps authority has been transferred by OWNER to Codex chat `01a1778b-db7d-7490-900e-90a71ee73f40` for ME-51.
 
@@ -49,19 +59,19 @@ After verified first cutover, ordinary ME-51 release validation uses the existin
 
 ## MAXIBOT release boundaries
 
-- MAXIBOT Release Orchestrator V2 is `COMPLETE / PASS / FROZEN`. Do not change its implementation as part of instruction work.
-- Follow only MAXIBOT's `EXACT_SHA` / `TASK_SCOPED_AUTO` rules. Exact-main Prepare automatically triggers the existing controller's read-only preflight; `scripts/release_prod.sh` is the sole production mutation path. Retain immutable provenance, `linux/amd64`, API/Worker image parity, exact Alembic target, MAXIBOT backup/migration, locks, rollback, health, worker and regression gates. `READY_FOR_OWNER` is read-only readiness, not production authorization. Technical PASS is not owner acceptance.
-- A task to implement alone does not authorize production apply. For protected or ambiguous actions, use the MAXIBOT authorization record and approval gates; never borrow a GPoint approval. Do not perform a production deploy for changes to `AGENTS.md`.
-- Release workflows are dispatched and monitored only through the authorized CLI/API or GitHub API/MCP workflow tools, never browser UI. Check for active runs before dispatch; do not duplicate, cancel, or rerun a release unnecessarily. The repository-scoped `maxibot-production` runner is for trusted release jobs only, never untrusted PR/fork jobs.
+- V2/V5 Release Orchestrator, Compose, `scripts/release_prod.sh` and Mac/controller are historical or recovery-specific; they are not the ordinary production mutation path. Keep historical implementation frozen unless separately authorized.
+- The ordinary release is the single push-triggered hosted Tests → Build → Kamal Deploy → Runtime Verify workflow. Preserve exact SHA/digest, linux/amd64, provenance, frozen paths, single Poller, Worker 512 MiB, PostgreSQL/Redis/volumes, Alembic, backup/rollback and runtime safety gates. Do not infer owner/product acceptance from technical PASS.
+- A development-only task does not authorize a `main` push because it would automatically deploy. OWNER must authorize publication and resulting release for the named scope. Never borrow GPoint authorization. Do not directly publish instruction-only changes to `main` without that authorization; use a PR instead.
+- Do not manually dispatch routine Deploy, rerun an uncertain/partial Apply, or use an old Mac controller. The manually dispatched rollback operation remains owner-scoped and safety-gated. Check active runs and remote SHA before writes; browser UI is not a release execution tool. Untrusted PR/fork code must never have production secrets.
 
 ## GitHub instruction publication — OWNER decision 2026-10-08
 
 - Once the OWNER has approved the task, DEV may publish scoped edits to `AGENTS.md`, Codex instructions, and role/bootstrap documents directly to exact current `origin/main` without a mandatory PR or separate approval per ordinary instruction commit, **only when current repository controls permit direct writes**. A PR is optional or used when technically required, not a general instruction-publication gate. Do not reset, switch, stash, overwrite, or update another active chat's branch/worktree.
 - Read the exact current main file/blob SHA and applicable policies before editing. Preserve concurrent changes, run relevant syntax, policy, security, frozen-path and independent QA gates where applicable, and record the exact published commit SHA. Never bypass branch protection or required reviews/checks; on a blocked direct write, stop and report a compliant alternative.
 - An explicit, scope-specific OWNER authorization is still required for material changes to agent authority/autonomy, safety, OWNER-only operations, release rules, protected paths, access controls and other protected policies. The decision to eliminate mandatory PRs is **not** blanket approval for unrelated protected changes or production apply. Preserve MAXIBOT-only exact-SHA/TASK_SCOPED_AUTO rules and all independent gates.
-- After publishing, verify `origin/main` via fresh readback; synchronize the corresponding Linear mirror/policy and safely refresh authorized Mac instructions without disturbing existing Codex chats. Prove actual role/profile/subagent/model loading separately; static config is not runtime proof. A push may trigger Prepare/read-only preflight but never authorizes production Deploy. No production Deploy for instruction-only changes.
+- Before an OWNER-authorized `main` push, acknowledge that GitHub will attempt automatic production Deploy even for instruction-only changes. Verify the exact remote SHA and active-run state; after publication verify the new exact SHA and hosted workflow result, then synchronize Linear. Otherwise publish a branch/PR only; never represent this as production COMPLETE. Do not disturb existing Codex worktrees or credentials.
 
 ## Task completion
 
 - Run relevant tests and the full applicable suite; run frozen-path and QA gates when affected. Distinguish code/test evidence from real device, production, and OWNER acceptance; report `NOT_VERIFIED` where evidence is missing.
-- Leave the task worktree clean with committed/published changes or report remaining files, exact commit/optional PR and blocking gates. Never perform protected policy changes without their scope-specific OWNER authorization or deploy production for instruction changes.
+- Leave the task worktree clean with committed/published changes or report remaining files, exact commit/PR and blocking gates. Do not bypass protected policy gates. A `main` push is production-triggering; branch-only work is not production SUCCESS.

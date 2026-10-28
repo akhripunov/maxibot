@@ -1,3 +1,22 @@
+# Current MAXIBOT release authorization (Native First V3, 2026-10-28)
+
+Current executable release flow: a successful, OWNER-authorized `push` to
+`main` starts hosted Tests → Build/GHCR → Kamal Deploy → Runtime Verify in
+`.github/workflows/maxibot-native-release.yml`. This applies even to docs or
+instruction changes. It no longer requires a Mac/controller, a second
+`workflow_dispatch`, a TASK_SCOPED_AUTO V5 activation claim or manual
+Environment reviewer. **This is an operational change, not blanket release
+permission:** development-only tasks do not authorize pushing to `main`;
+protected policy, traffic, data, security and release tooling scopes still
+require explicit OWNER authorization and their applicable gates. Manual
+rollback remains separately authorized and guarded.
+
+**Archive below:** ME-51 cutover and GPoint-derived V5 authorization records
+describe old workflows only; do not require them for a current ordinary Kamal
+release. Preserve them for historical evidence and possible recovery.
+
+---
+
 ## OWNER exception — ME-51 first Compose → Kamal cutover
 
 For ME-51 only, the OWNER-authorized first Compose → Kamal cutover uses `.github/workflows/maxibot-first-kamal-cutover.yml` instead of the legacy `scripts/release_prod.sh` path. This exception supersedes conflicting V5/sole-mutation-path requirements only for that one transition and its documented recovery. The existing DevOps authority has been transferred by OWNER to Codex chat `01a1778b-db7d-7490-900e-90a71ee73f40` for ME-51.

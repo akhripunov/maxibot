@@ -67,6 +67,41 @@ Every future code MASTER TASK must record the pre-task `git status --short`,
 branch, HEAD (or unborn HEAD), and the pre-existing diff/state before assigning
 implementation work. Task changes must be reviewed against that baseline.
 
+## Scope-based pre-push FAST / FULL (ordinary MAXIBOT work)
+
+The existing required GitHub-access runbook, OWNER scope/authorization, exact
+remote SHA, worktree isolation, frozen-path protection and applicable QA gates
+apply in BOTH modes. Never shorten or bypass a production safety gate.
+
+- **FAST — narrow non-policy docs-only changes:** after verifying the actual
+  diff has no application, test, workflow, `AGENTS.md`, release policy,
+  security, secrets, migration, infrastructure or frozen/shared-dependency paths,
+  record HEAD/status and changed paths once; perform `git diff --check` plus
+  relevant Markdown/link checks; rely on the required hosted Tests/Build before
+  automatic Deploy after an OWNER-authorized `main` push. Do not run a duplicate
+  local full Python suite only for an unaffected plain-document change when
+  the applicable task rules allow relying on hosted CI.
+- **FULL — executable or protected changes:** changes affecting application,
+  tests, frozen BOT/CHANNEL behavior, `AGENTS.md`, policy or release docs,
+  CI/Kamal, credentials, security, ADS/provider writes, Alembic/DB or runtime
+  require their existing applicable tests, independent review/authorization
+  and exact-SHA safety gates. Classify from actual changed paths and semantic
+  impact; an apparently small change is not automatically FAST.
+- **No ceremony:** read only relevant canonical context, not an entire
+  historical archive; don't repeat unchanged baseline, long tests, or QA
+  without a state/scope change or a required gate. One primary agent by default.
+  A new network/access problem does require the documented runbook reread.
+- **Publish carefully:** the local Mac `main` checkout may be stale or dirty;
+  never reset/stash/overwrite another worker's changes. Use an isolated
+  worktree/branch or the existing scoped GitHub connector. On ambiguous write
+  or timeout read back exact remote SHA and Actions runs before retrying.
+  No force push, new tokens, reviewer bypass or manual Deploy to save time.
+- **Time evidence:** record task start when actually observable (otherwise
+  `NOT_VERIFIED`), preflight done, edit done, local checks done, commit done,
+  remote push readback and GitHub run creation; use UTC timestamps and record
+  retry/network delays. Distinguish commit timestamp from actual push, and
+  do not claim a precise owner-request-to-push duration without its timestamp.
+
 ## Mandatory GitHub/GHCR access preflight
 
 Before touching GitHub/GHCR or asserting that access is blocked, load the current [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80) through the available Linear integration, then apply only the steps compatible with the current MAXIBOT repository, existing credential scope, and granted permissions. Also load it again after context compaction if its actual contents are no longer present, or immediately after a new GitHub authentication/transport failure.
@@ -142,9 +177,11 @@ the active runtime model in a new chat rather than treating the file as proof.
   approval and regression evidence is blocked; no guard bypass is accepted.
 - A GPoint release approval presented for MAXIBOT (or vice versa) is rejected;
   fetch and apply only the target repository's own authorization and evidence.
-- Production dispatch without the applicable exact-SHA or eligible,
-  unconsumed `TASK_SCOPED_AUTO` authorization and `READY_FOR_OWNER` evidence is
-  blocked before apply.
+- A `main` push automatically starts the ordinary Kamal production release;
+  it must not be made for implementation-only or unauthorized scope. Manual
+  `workflow_dispatch` is for separately authorized rollback only, not routine
+  production deploy. Missing authorization, exact-SHA gates or safety evidence
+  blocks publication/Apply.
 - Missing real-device mobile smoke remains `BLOCKED`/`NOT_VERIFIED`; a unit
   test or headless browser result cannot be reported as device acceptance.
 
@@ -162,28 +199,28 @@ the active runtime model in a new chat rather than treating the file as proof.
 | Full attribution flow | DEV + WEBDEV + ДИРЕКТОЛОГ | Yes | Gated | DEV |
 | Advertising runtime diagnosis | Existing Ads Codex Worker flow | Per existing runtime gate | No automatic advertising write | DEV for product decisions |
 
-## Deployment handoff
+## Deployment handoff — current Native First V3
 
-Executable release flow is fixed:
+Executable ordinary production release for an OWNER-authorized main push:
 
 ```text
-DEV exact SHA
-  → deterministic tests + exact-SHA technical gates
-  → predeploy snapshot/platform/source guard
-  → canonical linux/amd64 build
-  → SYSADMIN replacement
-  → SYSADMIN postdeploy health/polling/errors/parity
-  → CHANNEL regression
-  → DEV final verdict
+DEV reviewed scope + exact main SHA
+  → GitHub push to main
+  → hosted Tests
+  → immutable linux/amd64 GHCR Build
+  → Kamal Deploy of API + sole Worker
+  → Runtime Verify + GitHub Deployment
+  → DEV final report / Linear evidence
 ```
 
-SYSADMIN may block or roll back a release but cannot approve architecture,
-replace QA, own release decisions, or operate advertising campaigns. A failed
-platform/source guard blocks replacement before any production container is
-recreated.
-
-Do not invoke every role automatically. Specialist roles submit proposals and
-structured handoffs; DEV accepts, modifies, or rejects them.
+No Mac/controller handoff, separate Deploy dispatch, Required reviewer, or
+mandatory human SYSADMIN step belongs in the routine automatic chain. GitHub
+jobs enforce exact-SHA/digest, frozen paths, production safety and runtime
+invariants; a failed gate blocks release. Human SYSADMIN and QA specialist
+involvement remains available or mandatory only when actual scope/policy,
+risk, incident or manual acceptance requires it. Manual rollback remains
+separately authorized; never auto-rollback or blind-retry partial Apply.
+Do not invoke roles ceremonially.
 
 ## Frozen production path governance
 

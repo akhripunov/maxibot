@@ -2,6 +2,36 @@
 
 Событие `push` в `main` автоматически запускает **Tests → Build/GHCR → Kamal Deploy → Runtime Verify** для одного exact SHA. Контрольный успешный push-run: [#40634112830](https://github.com/akhripunov/maxibot/actions/runs/40634112830). Обычный релиз не требует отдельного `workflow_dispatch` или ручного Deploy.
 
+## Pre-push optimization — scope-based fast path
+
+The preparation phase ends at confirmed `main` push. It is distinct from
+the automatically measured GitHub Actions duration after push.
+
+1. Check current exact `origin/main` SHA, worktree status, diff scope and
+   active conflicting releases once. Respect OWNER authorization: a push
+   to `main` triggers production, including documentation-only pushes.
+2. Read the mandatory current GitHub access runbook and only task-relevant
+   policy. Use `docs/ORCHESTRATION_PROTOCOL.md` FAST only for plain,
+   non-policy docs with no executable/protected impact; `AGENTS.md`,
+   release policy, CI/Kamal and other protected paths are FULL.
+3. Make minimal changes in an isolated worktree or branch if the current Mac
+   checkout is stale/dirty. Never overwrite unrelated changes.
+4. Run applicable scoped local checks; leave full hosted Tests/Build and all
+   production gates intact. Do not duplicate the full local suite for
+   unaffected non-policy docs unless a current policy explicitly requires it.
+5. Use one existing authorized Git/GitHub publication path. On ambiguous API
+   timeout, first read back commit SHA / branch ref / Actions run; never
+   blindly retry writes. Publish to `main` only when production-triggering
+   release is authorized, otherwise create a branch/PR.
+6. Measure each pre-push checkpoint: task received (or NOT_VERIFIED),
+   preflight complete, edit complete, checks complete, commit created, push
+   confirmed by remote SHA, Actions run created. Do not equate commit date
+   with push date. Report objective waits/failures separately.
+
+Goal: reduce unnecessary pre-push work while retaining approval, frozen,
+security, CI, GHCR and Kamal runtime gates. The prior 2–4 minute pre-push
+target is unverified until measured across multiple comparable changes.
+
 ## Исторический материал
 
 Разделы ниже сохранены как архив прежних процессов и переходов (включая ME-51, Release Orchestrator V2/V5 и Mac-runner/controller-процедуры). Они не описывают текущий обычный релиз и не отменяют актуальный workflow `.github/workflows/maxibot-native-release.yml` и действующие правила MAXIBOT.
