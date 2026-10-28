@@ -1,3 +1,11 @@
+# Текущая автоматическая схема — Native First V3
+
+Событие `push` в `main` автоматически запускает **Tests → Build/GHCR → Kamal Deploy → Runtime Verify** для одного exact SHA. Контрольный успешный push-run: [#40634112830](https://github.com/akhripunov/maxibot/actions/runs/40634112830). Обычный релиз не требует отдельного `workflow_dispatch` или ручного Deploy.
+
+## Исторический материал
+
+Разделы ниже сохранены как архив прежних процессов и переходов (включая ME-51, Release Orchestrator V2/V5 и Mac-runner/controller-процедуры). Они не описывают текущий обычный релиз и не отменяют актуальный workflow `.github/workflows/maxibot-native-release.yml` и действующие правила MAXIBOT.
+
 ## OWNER exception — ME-51 first Compose → Kamal cutover
 
 For ME-51 only, the OWNER-authorized first Compose → Kamal cutover uses `.github/workflows/maxibot-first-kamal-cutover.yml` instead of the legacy `scripts/release_prod.sh` path. This exception supersedes conflicting V5/sole-mutation-path requirements only for that one transition and its documented recovery. The existing DevOps authority has been transferred by OWNER to Codex chat `01a1778b-db7d-7490-900e-90a71ee73f40` for ME-51.
