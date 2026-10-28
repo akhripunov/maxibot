@@ -3,6 +3,7 @@ import subprocess
 import os
 import re
 import ast
+import json
 
 import pytest
 
@@ -142,7 +143,9 @@ def test_kamal_deploy_uses_same_run_build_outputs_and_verifies_exact_digest():
     assert build_selection
     same_run, rollback_build = build_selection.groups()
     assert 'test "$BUILD_RUN_ID" = "$GITHUB_RUN_ID"' in same_run
-    assert '.run_attempt == ($attempt | tonumber)' in same_run
+    assert 'build_attempt="${BUILD_IMAGE_VERSION##*-}"' in same_run
+    assert '.run_attempt >= ($attempt | tonumber)' in same_run
+    assert 'build_attempt="$GITHUB_RUN_ATTEMPT"' not in same_run
     assert '.status == "in_progress"' in same_run
     assert '.status == "completed"' in rollback_build
     assert '.conclusion == "success"' in rollback_build
@@ -376,3 +379,98 @@ def test_isolated_cutover_restore_cleanup_remains_fail_closed_and_never_prunes_v
     assert "cleanup_failed=1" in cutover
     assert "docker volume prune" not in cutover
     assert "cutover_restore_probe" in cutover
+
+
+def _run_build_selection(workflow_text, tmp_path, *, run_attempt, build_attempt, candidate_sha=None, build_sha=None, approved_digest=None, manifest_digest=None):
+    import json
+    document = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    step = next(item for item in document["jobs"]["deploy"]["steps"] if item.get("name") == "Select and verify the exact-SHA build image")
+    sha = candidate_sha or "a" * 40
+    build_image_sha = build_sha or sha
+    digest = approved_digest or ("sha256:" + "1" * 64)
+    actual_digest = manifest_digest or digest
+    build_run_id = "40597659419"
+    (tmp_path / "build-run.json").write_text(json.dumps({
+        "head_sha": sha, "head_branch": "main", "event": "push",
+        "run_attempt": run_attempt, "path": ".github/workflows/maxibot-native-release.yml",
+        "status": "in_progress",
+    }))
+    gh = tmp_path / "gh"
+    gh.write_text('#!/usr/bin/env bash\nif [[ "$2" == *git/ref/heads/main* ]]; then printf "%s\\n" "$MAIN_SHA"; else cat "$BUILD_RUN_JSON"; fi\n')
+    gh.chmod(0o700)
+    jq = tmp_path / "jq"
+    jq.write_text(
+        "#!/usr/bin/env python3\nimport json,sys\nargs=sys.argv[1:]\ndata=json.load(sys.stdin)\n"
+        "if args[0]=='-r': print(data['run_attempt']); raise SystemExit(0)\n"
+        "sha=args[args.index('--arg')+2]\n"
+        "attempt=int(args[args.index('--arg', args.index('--arg')+1)+2])\n"
+        "ok=(data.get('head_sha')==sha and data.get('head_branch')=='main' and data.get('event')=='push' "
+        "and data.get('run_attempt',0)>=attempt and data.get('path')=='.github/workflows/maxibot-native-release.yml' "
+        "and data.get('status')=='in_progress')\nraise SystemExit(0 if ok else 1)\n"
+    )
+    jq.chmod(0o700)
+    docker = tmp_path / "docker"
+    docker.write_text(
+        '#!/usr/bin/env bash\ncase "$*" in\n'
+        '  "buildx imagetools inspect "*) printf "Digest: %s\\n    Platform: linux/amd64\\n" "$MANIFEST_DIGEST" ;;\n'
+        '  "pull "*) exit 0 ;;\n'
+        '  "image inspect "*) if [[ "$*" == *"{{.Os}}/{{.Architecture}}"* ]]; then echo linux/amd64; '
+        'elif [[ "$*" == *"service"* ]]; then echo maxibot; else echo "$CANDIDATE_SHA"; fi ;;\n'
+        '  *) exit 91 ;;\nesac\n'
+    )
+    docker.chmod(0o700)
+    output, envfile, summary = (tmp_path / name for name in ("github-output", "github-env", "github-summary"))
+    for path in (output, envfile, summary): path.touch()
+    version = f"{build_image_sha}-{build_run_id}-{build_attempt}"
+    env = {
+        **os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+        "CANDIDATE_SHA": sha, "RELEASE_OPERATION": "deploy", "GITHUB_SHA": sha, "GITHUB_REF": "refs/heads/main",
+        "GITHUB_EVENT_NAME": "push", "GITHUB_RUN_ID": build_run_id,
+        "GITHUB_RUN_ATTEMPT": str(run_attempt), "GITHUB_REPOSITORY": "akhripunov/maxibot",
+        "BUILD_RUN_ID": build_run_id, "BUILD_IMAGE_VERSION": version,
+        "BUILD_RUN_JSON": str(tmp_path / "build-run.json"), "MAIN_SHA": sha,
+        "APPROVED_DIGEST": digest, "MANIFEST_DIGEST": actual_digest,
+        "GITHUB_OUTPUT": str(output), "GITHUB_ENV": str(envfile),
+        "GITHUB_STEP_SUMMARY": str(summary), "GH_TOKEN": "test-only",
+    }
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", step["run"]], cwd=ROOT, env=env, text=True, capture_output=True)
+    return result, output.read_text()
+
+
+@pytest.mark.parametrize(
+    "current_attempt,build_attempt",
+    [(1, 1), (2, 1), (2, 2)],
+    ids=["ordinary-push", "failed-deploy-rerun-reuses-build-1", "full-rerun-uses-build-2"],
+)
+def test_build_selection_uses_the_successful_build_output_attempt(current_attempt, build_attempt, tmp_path):
+    result, output = _run_build_selection(WORKFLOW.read_text(), tmp_path, run_attempt=current_attempt, build_attempt=build_attempt)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"image_version={'a' * 40}-40597659419-{build_attempt}" in output
+
+
+@pytest.mark.parametrize("wrong_sha,wrong_digest", [(True, False), (False, True)])
+def test_build_selection_fails_closed_on_wrong_sha_or_digest(wrong_sha, wrong_digest, tmp_path):
+    correct = "a" * 40
+    result, _ = _run_build_selection(
+        WORKFLOW.read_text(), tmp_path, run_attempt=2, build_attempt=1,
+        build_sha=("b" * 40 if wrong_sha else correct),
+        approved_digest=("sha256:" + "2" * 64 if wrong_digest else None),
+        manifest_digest=("sha256:" + "1" * 64 if wrong_digest else None),
+    )
+    assert result.returncode != 0
+
+
+def test_automatic_deploy_keeps_environment_serialization_and_single_apply():
+    document = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    deploy = document["jobs"]["deploy"]
+    assert deploy["environment"]["name"] == "production"
+    assert document["concurrency"]["group"] == "maxibot-production-release"
+    assert document["concurrency"]["cancel-in-progress"] == "false"
+    assert deploy["needs"] == ["tests", "build"]
+    assert "needs.build.result == 'success'" in deploy["if"]
+    assert "inputs.operation == 'rollback'" in deploy["if"]
+    assert not any("approval" in step.get("name", "").lower() for step in deploy["steps"])
+    api_applies = [step for step in deploy["steps"] if 'bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api' in step.get("run", "")]
+    worker_applies = [step for step in deploy["steps"] if 'bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker' in step.get("run", "")]
+    assert len(api_applies) == 1
+    assert len(worker_applies) == 1
