@@ -116,7 +116,7 @@ async def test_missing_maxibot_owner_configuration_hides_owner_buttons_without_r
 
 
 @pytest.mark.asyncio
-async def test_new_channel_admin_opens_channel_menu_without_entitlement(db, monkeypatch):
+async def test_new_channel_admin_opens_free_channel_menu_and_yandex_setup(db, monkeypatch):
     monkeypatch.setattr(menu.settings, "maxibot_owner_user_id", "maxibot-owner")
     ordinary = Admin(external_id="new-test-user")
     db.add(ordinary)
@@ -134,6 +134,6 @@ async def test_new_channel_admin_opens_channel_menu_without_entitlement(db, monk
     assert f"promotion_analytics:{channel.id}" in callbacks
     assert f"delete:{channel.id}" in callbacks
 
-    # Paid promotion sections remain gated for users without channel entitlement.
-    paid_screen, _ = await menu.render_screen(db, ordinary, f"promotion_yandex:{channel.id}")
-    assert paid_screen == menu.subscription_text(channel.title)
+    # The lifetime Free tier includes the first channel and its Yandex setup.
+    yandex_screen, _ = await menu.render_screen(db, ordinary, f"promotion_yandex:{channel.id}")
+    assert "Подключение Яндекс.Директ" in yandex_screen
