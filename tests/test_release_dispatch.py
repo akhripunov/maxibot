@@ -2091,7 +2091,7 @@ def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper):
         "id": 40093864867, "run_attempt": 3, "head_sha": old_sha,
         "head_branch": "main", "path": ".github/workflows/maxibot-auto-preflight.yml",
         "event": "workflow_run", "status": "completed", "conclusion": "failure",
-        "updated_at": "2026-10-24T13:00:35Z",
+        "updated_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
     }
     first_steps = [
         {"name": name, "status": "completed", "conclusion": conclusion}
