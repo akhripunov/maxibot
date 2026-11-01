@@ -243,10 +243,17 @@ async def test_free_promotion_menu_has_landing_link_and_yandex_analytics_but_no_
             await db.commit()
 
             text, keyboard, _message_id, _media = await repo.render(admin.external_id, f"promotion_channel:{channel.id}")
-            link = next(button for row in keyboard for button in row if button.get("text") == "🌐 Открыть лендинг")
-            assert link["type"] == "link"
-            assert link["url"].endswith("/") is False
-            assert f"/{link['url'].rsplit('/', 1)[-1]}" in text
+            landing = await db.scalar(select(LandingPage).where(
+                LandingPage.channel_id == channel.id,
+                LandingPage.is_active.is_(True),
+            ))
+            assert landing is not None
+            assert menu.public_landing_url(landing.public_id) in text
+            assert not any(
+                button.get("text") == "🌐 Открыть лендинг"
+                for row in keyboard
+                for button in row
+            )
             assert not any(button.get("callback_data") == f"ads:{channel.id}" for row in keyboard for button in row)
 
             yandex_text, _ = await menu.render_screen(db, admin, f"promotion_yandex:{channel.id}")
