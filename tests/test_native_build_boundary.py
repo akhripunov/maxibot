@@ -55,6 +55,25 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("API and Worker source SHAs do not match", baseline)
         self.assertIn("PRODUCTION_BASELINE=FAIL:", baseline)
 
+    def test_me55_frozen_path_transition_is_bound_to_exact_production_baselines_and_path_sets(self):
+        baseline = self.source.split("- name: Verify exact main and read the current production baseline", 1)[1]
+        baseline = baseline.split("- name: Verify exact GHCR image and Kamal configuration", 1)[0]
+        self.assertIn("policy_transition_baseline='a4ee838545a5bb396ee39f3527f85541c7788ad0'", baseline)
+        self.assertIn("policy_correction_baseline='f7279c1adc9f635a6e7952b9cf4878f95126ac82'", baseline)
+        self.assertIn("frozen-path policy change is not allowed from this exact production baseline", baseline)
+        self.assertIn("frozen-path policy diff does not match the exact baseline-bound ME-55 path scope", baseline)
+        for path in (
+            ".github/workflows/maxibot-native-release.yml",
+            "app/bot/menu.py",
+            "docs/frozen_paths.yaml",
+            "scripts/frozen_path_guard.sh",
+            "tests/test_free_tier_lifetime.py",
+            "tests/test_frozen_guard_bridge_controls.py",
+            "tests/test_frozen_path_guard.py",
+            "tests/test_native_build_boundary.py",
+        ):
+            self.assertIn(path, baseline)
+
     def test_first_cutover_keeps_backup_restore_checks_as_a_separate_procedure(self):
         cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
         self.assertIn("pg_restore --list", cutover)
