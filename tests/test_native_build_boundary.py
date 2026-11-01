@@ -61,7 +61,7 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("policy_transition_baseline='a4ee838545a5bb396ee39f3527f85541c7788ad0'", baseline)
         self.assertIn("policy_correction_baseline='f7279c1adc9f635a6e7952b9cf4878f95126ac82'", baseline)
         self.assertIn("frozen-path policy change is not allowed from this exact production baseline", baseline)
-        self.assertIn("frozen-path policy diff does not match the exact baseline-bound ME-55 path scope", baseline)
+        self.assertIn("one-time frozen-path policy transition does not match the exact ME-55 candidate scope", baseline)
         for path in (
             ".github/workflows/maxibot-native-release.yml",
             "app/bot/menu.py",
