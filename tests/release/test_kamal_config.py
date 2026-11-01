@@ -34,10 +34,12 @@ def test_kamal_owns_only_api_and_single_polling_worker():
     assert set(roles) == {"api", "worker"}
     assert roles["api"]["cmd"] == "uvicorn app.main:app --host 0.0.0.0 --port 8000"
     assert roles["api"]["env"]["clear"]["MAX_RUN_POLLING"] is False
+    assert roles["api"]["env"]["clear"]["TRAFFIC_BOT_ATTRIBUTION_ENABLED"] is True
     assert roles["api"]["env"]["clear"]["ADS_AUTOPILOT_ENABLED"] is False
     assert roles["api"]["env"]["clear"]["ADS_WRITE_ACTIONS_ENABLED"] is False
     assert roles["worker"]["cmd"] == "python -m app.poller"
     assert roles["worker"]["env"]["clear"]["MAX_RUN_POLLING"] is True
+    assert roles["worker"]["env"]["clear"]["TRAFFIC_BOT_ATTRIBUTION_ENABLED"] is True
     assert roles["worker"]["env"]["clear"]["ADS_AUTOPILOT_ENABLED"] is False
     assert roles["worker"]["env"]["clear"]["ADS_WRITE_ACTIONS_ENABLED"] is False
     assert roles["worker"]["options"]["memory"] == "512m"

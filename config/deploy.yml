@@ -10,6 +10,7 @@ servers:
     env:
       clear:
         MAX_RUN_POLLING: false
+        TRAFFIC_BOT_ATTRIBUTION_ENABLED: true
         MAXIBOT_RELEASE_ID: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
         MAXIBOT_RELEASE_MARKER: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
         MAXIBOT_COMMIT_SHA: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
@@ -30,6 +31,7 @@ servers:
     env:
       clear:
         MAX_RUN_POLLING: true
+        TRAFFIC_BOT_ATTRIBUTION_ENABLED: true
         MAXIBOT_RELEASE_ID: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
         MAXIBOT_RELEASE_MARKER: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
         MAXIBOT_COMMIT_SHA: <%= ENV.fetch("MAXIBOT_COMMIT_SHA") %>
