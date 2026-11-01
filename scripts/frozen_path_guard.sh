@@ -55,10 +55,26 @@ if not manifest_path.is_absolute():
 text = manifest_path.read_text(encoding="utf-8")
 lists: dict[str, list[str]] = {}
 scoped_bot_only: list[tuple[str, str]] = []
+regression_contracts: list[str] = []
 in_paths = False
 current = None
 in_scoped = False
+in_regressions = False
 for line in text.splitlines():
+    if line == "regression_contracts:":
+        in_regressions = True
+        in_scoped = False
+        in_paths = False
+        current = None
+        continue
+    if in_regressions:
+        if line and not line.startswith(" "):
+            in_regressions = False
+        else:
+            match = re.match(r"^  - (.+)$", line)
+            if match:
+                regression_contracts.append(match.group(1).strip())
+            continue
     if line == "scoped_bot_only:":
         in_scoped = True
         in_paths = False
@@ -95,6 +111,18 @@ def matches(pattern: str, path: str) -> bool:
         return fnmatch.fnmatch(path, pattern)
     return path == pattern
 
+if not regression_contracts:
+    print("FROZEN_PATH_GUARD=BLOCK")
+    print("REASON=manifest-has-no-regression-contracts", file=sys.stderr)
+    raise SystemExit(1)
+tree_paths = set(subprocess.check_output(
+    ["git", "-C", repo, "ls-tree", "-r", "--name-only", head], text=True
+).splitlines())
+missing_contracts = sorted(set(regression_contracts) - tree_paths)
+if missing_contracts:
+    print("FROZEN_PATH_GUARD=BLOCK")
+    print("MISSING_REGRESSION_CONTRACTS=" + ",".join(missing_contracts), file=sys.stderr)
+    raise SystemExit(1)
 changed = subprocess.check_output(
     ["git", "-C", repo, "diff", "--name-only", f"{base}..{head}"], text=True
 ).splitlines()
@@ -334,6 +362,7 @@ def state(direct: list[str], shared_hit: bool) -> str:
 print(f"BOT_FROZEN_PATH_CHANGED={state(bot_direct, bool(shared_for_impact))}")
 print(f"CHANNEL_FROZEN_PATH_CHANGED={state(channel_direct, bool(shared_for_impact))}")
 print(f"OWNER_FROZEN_CHANGE_APPROVAL={'YES' if approval_complete else 'NO'}")
+print(f"FROZEN_PATH_REGRESSION_CONTRACTS=PASS:{len(regression_contracts)}")
 if not protected or approval_complete:
     print("FROZEN_PATH_GUARD=PASS")
     raise SystemExit(0)

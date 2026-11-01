@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +21,14 @@ def _case(tmp_path: Path, changes: dict[str, str], base_files: dict[str, str] | 
     (repo / "scripts").mkdir()
     shutil.copy2(GUARD, repo / "scripts/frozen_path_guard.sh")
     shutil.copy2(MANIFEST, repo / "docs/frozen_paths.yaml")
+    contracts = MANIFEST.read_text(encoding="utf-8").split("regression_contracts:\n", 1)[1]
+    for line in contracts.splitlines():
+        if not line.startswith("  - "):
+            continue
+        name = line[4:].strip()
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, path)
     for name, content in (base_files or {}).items():
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,10 +111,18 @@ def test_bridge_plus_unrelated_migration_blocks(tmp_path):
     }) != 0
 
 
-def test_bridge_plus_frozen_domains_blocks(tmp_path):
+def test_bridge_plus_ordinary_runtime_changes_pass_and_critical_paths_block(tmp_path):
     for name, content in {
-        "app/main.py": "# BOT runtime change\n",
-        "app/bot/runtime.py": "# CHANNEL runtime change\n",
+        "app/main.py": "# ordinary bot scenario change\n",
+        "app/bot/runtime.py": "# ordinary menu/runtime scenario change\n",
+    }.items():
+        case = tmp_path / name.replace("/", "_")
+        case.mkdir()
+        assert _case(case, {
+            "alembic/versions/0075a_alembic_version_width.py": BRIDGE,
+            name: content,
+        }) == 0
+    for name, content in {
         "app/traffic/system_conversion_processor.py": "# Metrika change\n",
         "app/traffic/system_conversion.py": "# paid_dedupe change\n",
         "app/db/models.py": "# cross_object change\n",

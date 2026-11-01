@@ -8,49 +8,24 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
 from app.bot.menu import (
-    FREE_TRIAL_INFO_TEXT,
-    expired_trial_status_text,
-    free_trial_active_text,
+    FREE_TIER_INFO_TEXT,
     paid_subscription_status_text,
     service_subscription_text,
-    trial_subscription_status_text,
-    free_trial_used_text,
 )
 from app.integrations.subscriptions import (
     channel_promotion_entitlement,
     channel_promotion_entitlement_source,
-    free_trial_status,
-    service_entitlement_active,
 )
 from app.db.models import Admin, Base, Channel, FreeTrial, LandingPage, TrafficProfile, TrafficVisit
 
 
-def test_free_trial_copy_and_buttons_are_exactly_owner_facing():
-    assert FREE_TRIAL_INFO_TEXT == (
-        "🎁 7 дней бесплатно\n\n"
-        "Попробуйте MAXIBOT бесплатно в течение 7 дней.\n\n"
-        "✅ Один канал\n"
-        "✅ Все функции продвижения\n"
-        "✅ Интеграция с Яндекс.Директ\n"
-        "✅ Аналитика и ежедневные отчёты\n\n"
-        "Бесплатный период доступен один раз."
-    )
-    assert free_trial_active_text("Новости", datetime(2026, 10, 5, tzinfo=timezone.utc)) == (
-        "🎁 Бесплатный период уже активен\n\nКанал: Новости\nАктивен до: 05.10.2026"
-    )
-    assert "Бесплатный период уже использован." in free_trial_used_text()
+def test_free_tier_copy_has_no_trial_or_activation_requirement():
+    assert "Free действует бессрочно" in FREE_TIER_INFO_TEXT
+    assert "Дополнительная активация не требуется" in FREE_TIER_INFO_TEXT
+    assert "7 дней" not in FREE_TIER_INFO_TEXT
 
 
-def test_trial_is_user_level_access_and_expires_after_seven_days():
-    now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
-    end = now + timedelta(days=7)
-    assert free_trial_status(end, now=now) == "активен"
-    assert free_trial_status(end, now=end) == "истёк"
-    assert service_entitlement_active(None, end, now=now) is True
-    assert service_entitlement_active(None, end, now=end) is False
-
-
-def test_trial_scope_is_service_level_and_one_channel_is_only_a_quota_marker():
+def test_legacy_trial_records_remain_stored_for_history_without_new_schema():
     models = (Path(__file__).parents[1] / "app" / "db" / "models.py").read_text()
     migration = (Path(__file__).parents[1] / "alembic" / "versions" / "0073_free_trial_v1.py").read_text()
     assert "admin_id: Mapped[str]" in models
@@ -60,14 +35,13 @@ def test_trial_scope_is_service_level_and_one_channel_is_only_a_quota_marker():
     assert "ondelete=\"SET NULL\"" in migration
 
 
-def test_channel_promotion_predicate_allows_only_trial_channel_and_preserves_paid_access():
+def test_channel_promotion_predicate_grants_first_free_channel_without_expiry():
     now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
-    end = now + timedelta(days=7)
-    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=now) == "TRIAL"
-    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-b", now=now) == "NONE"
-    assert channel_promotion_entitlement_source(end, end, "channel-a", "channel-b", now=now) == "PAID"
-    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=end) == "NONE"
-    assert channel_promotion_entitlement_source(None, end, "channel-a", "channel-a", now=now) == "TRIAL"
+    assert channel_promotion_entitlement_source(None, True, "channel-a", now=now) == "FREE"
+    assert channel_promotion_entitlement_source(None, True, "channel-a", now=now + timedelta(days=30)) == "FREE"
+    assert channel_promotion_entitlement_source(None, False, "channel-b", now=now) == "NONE"
+    assert channel_promotion_entitlement_source(now + timedelta(days=3), False, "channel-b", now=now) == "PAID"
+    assert channel_promotion_entitlement_source(now - timedelta(days=1), True, "channel-a", now=now) == "FREE"
 
 
 @pytest.mark.asyncio
@@ -123,6 +97,12 @@ async def test_canonical_owner_gets_only_own_channel_promotion_access_without_ac
                     yandex_enabled=False,
                     target_url="https://max.ru/owner-channel-invite",
                 ),
+                TrafficProfile(
+                    channel_id=ordinary_channel.id,
+                    enabled=True,
+                    yandex_enabled=False,
+                    target_url="https://max.ru/ordinary-channel-invite",
+                ),
             ])
             db.add(FreeTrial(
                 admin_id=owner.id,
@@ -135,11 +115,11 @@ async def test_canonical_owner_gets_only_own_channel_promotion_access_without_ac
 
             assert await channel_promotion_entitlement(db, owner.external_id, owner_channel.id) == "OWNER"
             assert await channel_promotion_entitlement(db, owner.external_id, ordinary_channel.id) == "NONE"
-            assert await channel_promotion_entitlement(db, ordinary.external_id, ordinary_channel.id) == "NONE"
+            assert await channel_promotion_entitlement(db, ordinary.external_id, ordinary_channel.id) == "FREE"
             assert await channel_promotion_entitlement(db, owner.external_id, "missing-channel") == "NONE"
 
             monkeypatch.setattr("app.integrations.subscriptions.settings.maxibot_owner_user_id", None)
-            assert await channel_promotion_entitlement(db, owner.external_id, owner_channel.id) == "NONE"
+            assert await channel_promotion_entitlement(db, owner.external_id, owner_channel.id) == "FREE"
             monkeypatch.setattr("app.integrations.subscriptions.settings.maxibot_owner_user_id", "configured-owner")
 
             from app import main as main_module
@@ -186,20 +166,16 @@ async def test_canonical_owner_gets_only_own_channel_promotion_access_without_ac
             assert redirect_response.status_code == 307
             assert redirect_response.headers["location"] == "https://max.ru/owner-channel-invite"
 
-            with pytest.raises(HTTPException) as blocked:
-                await main_module._landing_page(
-                    ordinary_landing.public_id, request("/l/ordinary-landing"), db,
-                )
-            assert blocked.value.status_code == 402
-            assert await db.scalar(select(TrafficVisit).where(
-                TrafficVisit.landing_page_id == ordinary_landing.id,
-            )) is None
+            ordinary_response = await main_module._landing_page(
+                ordinary_landing.public_id, request("/l/ordinary-landing"), db,
+            )
+            assert ordinary_response.status_code == 307
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_owner_bypass_does_not_change_paid_or_trial_channel_entitlements(monkeypatch):
+async def test_paid_and_free_channels_are_separate_from_legacy_trial_rows(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -222,9 +198,15 @@ async def test_owner_bypass_does_not_change_paid_or_trial_channel_entitlements(m
             ]
             db.add_all(channels)
             await db.flush()
+            unentitled_second = Channel(
+                admin_id=unentitled.id, external_id="unentitled-second", title="Second",
+                public_slug="unentitled-second",
+            )
+            db.add(unentitled_second)
+            await db.flush()
             db.add(FreeTrial(
-                admin_id=trial.id,
-                activated_channel_id=channels[1].id,
+                admin_id=unentitled.id,
+                activated_channel_id=unentitled_second.id,
                 status="ACTIVE",
                 trial_start_at=now - timedelta(days=1),
                 trial_end_at=now + timedelta(days=6),
@@ -232,8 +214,9 @@ async def test_owner_bypass_does_not_change_paid_or_trial_channel_entitlements(m
             await db.commit()
 
             assert await channel_promotion_entitlement(db, paid.external_id, channels[0].id) == "PAID"
-            assert await channel_promotion_entitlement(db, trial.external_id, channels[1].id) == "TRIAL"
-            assert await channel_promotion_entitlement(db, unentitled.external_id, channels[2].id) == "NONE"
+            assert await channel_promotion_entitlement(db, trial.external_id, channels[1].id) == "FREE"
+            assert await channel_promotion_entitlement(db, unentitled.external_id, channels[2].id) == "FREE"
+            assert await channel_promotion_entitlement(db, unentitled.external_id, unentitled_second.id) == "NONE"
     finally:
         await engine.dispose()
 
@@ -255,10 +238,10 @@ def test_second_channel_is_visible_but_paid_only_paths_use_the_canonical_gate():
     assert 'channel_promotion_entitlement(db, owner.external_id, channel.id)' in main
 
 
-def test_paid_tariff_screen_keeps_trial_above_the_three_existing_plans():
+def test_subscription_screen_keeps_paid_plans_and_separates_ai_offer():
     source = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
     start = source.index('if screen == "subscription":')
-    end = source.index('if screen == "free_trial":', start)
+    end = source.index('if screen.startswith("subscription_limit:")', start)
     block = source[start:end]
     assert '"Тариф Start", "subscription_tariff:start"' in block
     assert '"Тариф Pro", "subscription_tariff:pro"' in block
@@ -271,14 +254,8 @@ def test_subscription_status_copy_is_service_level_and_server_side():
     assert service_subscription_text() == (
         "💳 Оплата тарифа\n\n🤖 MAXIBOT\n\nПодписка не активна.\n\nВыберите период подписки:"
     )
-    assert trial_subscription_status_text(expiry, now=now) == (
-        "🎁 Пробный период активен\n\nАктивен до: 14.09.2026\nОсталось: 7 дней"
-    )
     assert paid_subscription_status_text(expiry, now=now) == (
         "✅ Подписка активна\n\nОплачено до: 14.09.2026\nОсталось: 7 дней"
-    )
-    assert expired_trial_status_text() == (
-        "⏳ Бесплатный период завершён\n\nВыберите тариф, чтобы продолжить пользоваться MAXIBOT."
     )
 
 
@@ -288,29 +265,27 @@ def test_subscription_status_handles_hours_without_timezone_ambiguity():
     assert "expiry.astimezone(MOSCOW)" in source
 
 
-def test_existing_channel_subscription_open_lazily_activates_trial_idempotently():
+def test_opening_subscription_does_not_create_or_activate_a_trial():
     source = (Path(__file__).parents[1] / "app" / "bot" / "menu.py").read_text()
-    assert 'if screen == "subscription":' in source
-    assert "await self.ensure_existing_channel_free_trial(external_id)" in source
-    assert "with_for_update()" in source[source.index("async def ensure_existing_channel_free_trial"):source.index("async def begin_free_trial")]
-    assert "order_by(Channel.connected_at.asc(), Channel.id.asc())" in source
+    assert "ensure_existing_channel_free_trial" not in source
+    assert "activate_free_trial" not in source
 
 
-def test_start_free_sets_only_pending_intent_then_uses_canonical_connect_screen():
+def test_legacy_free_trial_start_callback_only_opens_channel_connection():
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
     start = source.index('elif action == "free_trial_start":')
     end = source.index('elif action == "free_trial_connect":', start)
     block = source[start:end]
-    assert 'await self.repo.begin_free_trial(str(user_id))' in block
+    assert 'await self.repo.begin_free_trial(str(user_id))' not in block
     assert 'await self._render(user_id, "connect_channel")' in block
     assert "activate_free_trial" not in block
 
 
-def test_start_free_reuses_canonical_channel_connection_without_activating_trial():
+def test_legacy_free_trial_callback_does_not_activate_or_write_a_trial():
     source = (Path(__file__).parents[1] / "app" / "bot" / "runtime.py").read_text()
     start = source.index('elif action == "free_trial_start":')
     end = source.index('elif action == "free_trial_connect":', start)
     block = source[start:end]
-    assert 'await self.repo.begin_free_trial(str(user_id))' in block
+    assert 'await self.repo.begin_free_trial(str(user_id))' not in block
     assert 'await self._render(user_id, "connect_channel")' in block
     assert "activate_free_trial" not in block

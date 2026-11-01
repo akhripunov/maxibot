@@ -149,6 +149,30 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertNotIn('scripts/maxibot_impact_v3.py', self.source)
         self.assertNotIn('scripts/prepare_frozen_path_guard.py', self.source)
 
+    def test_critical_frozen_regressions_are_run_as_a_named_hosted_gate(self):
+        if not (ROOT / 'pyproject.toml').exists():
+            return
+        self.assertIn('Run frozen attribution, security, data, and Worker regressions', self.source)
+        for contract in (
+            'tests/regression/test_mobile_max_handoff_contract.py',
+            'tests/regression/test_single_poller_safety.py',
+            'tests/test_traffic_deep_link.py',
+            'tests/test_landing_ui_contract.py',
+            'tests/test_update_payload.py',
+            'tests/test_traffic_attribution.py',
+            'tests/test_system_conversion_mapping.py',
+            'tests/test_system_conversion_processor.py',
+            'tests/test_bot_paid_conversion_dedupe.py',
+            'tests/test_web_admin_passkey_contract.py',
+            'tests/test_public_security_fixes.py',
+            'tests/test_public_compose_security.py',
+            'tests/test_worker_health.py',
+            'tests/test_worker_health_collector.py',
+            'tests/test_migration_rehearsal.py',
+            'tests/test_release_migration_safety.py',
+        ):
+            self.assertIn(contract, self.source)
+
     def test_maxibot_native_deploy_is_digest_bound_and_keeps_single_poller(self):
         if not (ROOT / 'pyproject.toml').exists():
             return
@@ -176,10 +200,30 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("worker_health_preflight.py", self.source)
         self.assertIn("-- alembic app/db/models.py docker-compose.vps.yml", self.source)
         self.assertIn("-- docs/frozen_paths.yaml scripts/frozen_path_guard.sh", self.source)
+        self.assertIn("policy_transition_baseline='a4ee838545a5bb396ee39f3527f85541c7788ad0'", self.source)
+        self.assertIn("one-time frozen-path policy transition does not match the exact ME-55 candidate scope", self.source)
+        self.assertIn("actual_policy_paths=", self.source)
+        for path in (
+            '.github/workflows/maxibot-native-release.yml',
+            'app/bot/menu.py',
+            'app/bot/runtime.py',
+            'app/integrations/subscriptions.py',
+            'docs/frozen_paths.yaml',
+            'qa/TEST_CASES.md',
+            'scripts/frozen_path_guard.sh',
+            'tests/regression/test_owner_only_channel_menu_buttons.py',
+            'tests/test_free_tier_lifetime.py',
+            'tests/test_free_trial.py',
+            'tests/test_frozen_guard_bridge_controls.py',
+            'tests/test_frozen_path_guard.py',
+            'tests/test_native_build_boundary.py',
+        ):
+            self.assertIn(path, self.source)
         self.assertNotIn("scripts/release_prod.sh", self.source)
         self.assertNotIn("scripts/run_release_workflow.py", self.source)
         deploy = self.source.split("\n  deploy:\n", 1)[1]
         self.assertIn("scripts/frozen_path_guard.sh --base", deploy)
+        self.assertIn("FROZEN_PATH_POLICY_TRANSITION=PASS", deploy)
         self.assertIn("FROZEN_PATH_REGRESSION=PASS", deploy)
         self.assertIn('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha', deploy)
         self.assertIn('docker buildx imagetools inspect "$IMAGE_TAG"', deploy)
