@@ -489,7 +489,7 @@ jobs:
               fail 'frozen-path policy change is not allowed from this exact production baseline'
             fi
             actual_policy_paths="$(git diff --name-only "$baseline_sha" "$CANDIDATE_SHA" | LC_ALL=C sort)" || fail 'could not read exact policy-transition diff'
-            [[ "$actual_policy_paths" == "$expected_policy_paths" ]] || fail 'frozen-path policy diff does not match the exact baseline-bound ME-55 path scope'
+            [[ "$actual_policy_paths" == "$expected_policy_paths" ]] || fail 'one-time frozen-path policy transition does not match the exact ME-55 candidate scope'
             echo "FROZEN_PATH_POLICY_TRANSITION=PASS ($policy_transition_label)" >> "$GITHUB_STEP_SUMMARY"
           fi
           bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" || fail 'frozen-path guard rejected the candidate'
