@@ -10,10 +10,13 @@ the automatically measured GitHub Actions duration after push.
 1. Check current exact `origin/main` SHA, worktree status, diff scope and
    active conflicting releases once. Respect OWNER authorization: a push
    to `main` triggers production, including documentation-only pushes.
-2. Read the mandatory current GitHub access runbook and only task-relevant
-   policy. Use `docs/ORCHESTRATION_PROTOCOL.md` FAST only for plain,
-   non-policy docs with no executable/protected impact; `AGENTS.md`,
-   release policy, CI/Kamal and other protected paths are FULL.
+2. Read only task-relevant policy. On an actual GitHub/GHCR transport, DNS,
+   TLS, authentication, authorization or permission error, read the current
+   [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80)
+   and follow its applicable diagnostic steps. Successful access needs no
+   runbook read. Use `docs/ORCHESTRATION_PROTOCOL.md` FAST only for plain,
+   non-policy docs with no executable/protected impact;
+   `AGENTS.md`, release policy, CI/Kamal and other protected paths are FULL.
 3. Make minimal changes in an isolated worktree or branch if the current Mac
    checkout is stale/dirty. Never overwrite unrelated changes.
 4. Run applicable scoped local checks; leave full hosted Tests/Build and all
@@ -30,7 +33,10 @@ the automatically measured GitHub Actions duration after push.
 
 Goal: reduce unnecessary pre-push work while retaining approval, frozen,
 security, CI, GHCR and Kamal runtime gates. The prior 2–4 minute pre-push
-target is unverified until measured across multiple comparable changes.
+target is unverified until measured across multiple comparable changes. On a
+healthy access path this policy removes one unnecessary Linear runbook read;
+its time saving is NOT_VERIFIED until measured. For requested benchmarks only,
+record runbook reads and their wait separately from Git and release timings.
 
 ## Исторический материал
 

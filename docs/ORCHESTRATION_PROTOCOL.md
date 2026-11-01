@@ -69,9 +69,10 @@ implementation work. Task changes must be reviewed against that baseline.
 
 ## Scope-based pre-push FAST / FULL (ordinary MAXIBOT work)
 
-The existing required GitHub-access runbook, OWNER scope/authorization, exact
-remote SHA, worktree isolation, frozen-path protection and applicable QA gates
-apply in BOTH modes. Never shorten or bypass a production safety gate.
+OWNER scope/authorization, exact remote SHA, worktree isolation,
+frozen-path protection and applicable QA gates apply in BOTH modes. Never
+shorten or bypass a production safety gate. Open the current GitHub access
+diagnostic runbook only when an actual GitHub/GHCR access error needs diagnosis.
 
 - **FAST — narrow non-policy docs-only changes:** after verifying the actual
   diff has no application, test, workflow, `AGENTS.md`, release policy,
@@ -90,7 +91,9 @@ apply in BOTH modes. Never shorten or bypass a production safety gate.
 - **No ceremony:** read only relevant canonical context, not an entire
   historical archive; don't repeat unchanged baseline, long tests, or QA
   without a state/scope change or a required gate. One primary agent by default.
-  A new network/access problem does require the documented runbook reread.
+  On an actual GitHub/GHCR access error, read the live diagnostic runbook once
+  for that incident. Repeated instances of the same unchanged error do not
+  trigger repeated Linear reads.
 - **Publish carefully:** the local Mac `main` checkout may be stale or dirty;
   never reset/stash/overwrite another worker's changes. Use an isolated
   worktree/branch or the existing scoped GitHub connector. On ambiguous write
@@ -102,17 +105,41 @@ apply in BOTH modes. Never shorten or bypass a production safety gate.
   retry/network delays. Distinguish commit timestamp from actual push, and
   do not claim a precise owner-request-to-push duration without its timestamp.
 
-## Mandatory GitHub/GHCR access preflight
+## GitHub/GHCR access diagnostics on failure
 
-Before touching GitHub/GHCR or asserting that access is blocked, load the current [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80) through the available Linear integration, then apply only the steps compatible with the current MAXIBOT repository, existing credential scope, and granted permissions. Also load it again after context compaction if its actual contents are no longer present, or immediately after a new GitHub authentication/transport failure.
+Normal successful GitHub/GHCR access does not require reading the Linear
+[«GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80)
+document. Do not use it as a routine preflight or perform prophylactic access
+checks.
 
-Maintain these distinct evidence states:
+When a concrete DNS, TLS, transport, authentication, authorization, or
+permission failure occurs, retrieve the current document through Linear and
+apply only its relevant safe steps for this MAXIBOT repository and host.
+Record the error class and the applicable checks performed. Distinguish network
+failure from rejected credentials; `gh auth status` during unhealthy
+transport is not proof of revocation.
 
-- `GITHUB_ACCESS_RUNBOOK_READ`: current document content successfully retrieved and applicable steps identified.
-- `GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED`: content could not be retrieved; record the exact source/tool error and do not pretend a URL or remembered excerpt is a read.
-- `GITHUB_ACCESS_BLOCKED`: only after applicable safe diagnostics and bounded attempts from the live runbook were executed (or were impossible for a stated reason), and remote exact-SHA / Actions readback has ruled out a successful ambiguous write.
+Read the runbook once per incident. For retries of the same unchanged failure,
+follow its bounded retry/readback instructions without reopening Linear.
+Retrieve it again only when the failure class materially changes or the
+procedure is known to have changed. Before repeating a push or dispatch with
+an uncertain outcome, read back remote SHA and existing Actions runs first.
+Never force-push, create/rotate credentials, relax SSH/TLS checks, or change
+VPN/DNS settings without specific OWNER authorization.
 
-First classify the error: DNS, host/VPN/proxy routing, TLS/timeout, GitHub API permissions, or proven credential rejection. `gh auth status` failing while the network is unhealthy is **not** proof that the credential was revoked. Preserve valid existing Mac Keychain/CLI credentials; use the documented authorized route and retries. Before repeating a possibly successful push or workflow dispatch, read remote SHA and existing runs. No forced pushes, replacement tokens, relaxed SSH/TLS checking, or VPN/DNS configuration changes without separately authorized scope. Record which live-runbook checks passed, failed, or could not be run. Never reuse another project's credentials or approvals.
+Maintain these evidence states:
+
+- `GITHUB_ACCESS_RUNBOOK_READ`: current content was retrieved after an actual
+  access error and relevant steps were identified.
+- `GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED`: the current document could not be
+  retrieved; record the exact tool/source error and do not invent its instructions.
+- `GITHUB_ACCESS_BLOCKED`: only after applicable safe diagnostics and bounded
+  attempts were completed (or a specific step was impossible), and any
+  ambiguous write was reconciled by remote readback.
+
+A missing runbook read during healthy access is expected and is not a blocker.
+An unavailable runbook during a real access failure does not authorize bypassing
+release or security checks.
 
 ## Reuse before create
 
