@@ -2004,12 +2004,6 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             [label for label, _ in controls],
         )
         keyboard = buttons(*controls)
-        if landing:
-            keyboard.insert(0, [{
-                "text": "🌐 Открыть лендинг",
-                "type": "link",
-                "url": public_landing_url(landing.public_id),
-            }])
         return (
             promotion_channel_summary(
                 channel.title,

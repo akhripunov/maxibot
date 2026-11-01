@@ -113,7 +113,6 @@ def test_bridge_plus_unrelated_migration_blocks(tmp_path):
 
 def test_bridge_plus_ordinary_runtime_changes_pass_and_critical_paths_block(tmp_path):
     for name, content in {
-        "app/main.py": "# ordinary bot scenario change\n",
         "app/bot/runtime.py": "# ordinary menu/runtime scenario change\n",
     }.items():
         case = tmp_path / name.replace("/", "_")
@@ -123,6 +122,7 @@ def test_bridge_plus_ordinary_runtime_changes_pass_and_critical_paths_block(tmp_
             name: content,
         }) == 0
     for name, content in {
+        "app/main.py": "# protected shared entrypoint change\n",
         "app/traffic/system_conversion_processor.py": "# Metrika change\n",
         "app/traffic/system_conversion.py": "# paid_dedupe change\n",
         "app/db/models.py": "# cross_object change\n",
