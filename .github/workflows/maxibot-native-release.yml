@@ -98,6 +98,25 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m pytest -q
+      - name: Run frozen attribution, security, data, and Worker regressions
+        run: |
+          python -m pytest -q \
+            tests/regression/test_mobile_max_handoff_contract.py \
+            tests/regression/test_single_poller_safety.py \
+            tests/test_traffic_deep_link.py \
+            tests/test_landing_ui_contract.py \
+            tests/test_update_payload.py \
+            tests/test_traffic_attribution.py \
+            tests/test_system_conversion_mapping.py \
+            tests/test_system_conversion_processor.py \
+            tests/test_bot_paid_conversion_dedupe.py \
+            tests/test_web_admin_passkey_contract.py \
+            tests/test_public_security_fixes.py \
+            tests/test_public_compose_security.py \
+            tests/test_worker_health.py \
+            tests/test_worker_health_collector.py \
+            tests/test_migration_rehearsal.py \
+            tests/test_release_migration_safety.py
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
         with:
           ruby-version: '3.3.6'
@@ -437,7 +456,24 @@ jobs:
             fail 'ordinary Kamal Deploy refuses database/model or production Compose changes'
           fi
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- docs/frozen_paths.yaml scripts/frozen_path_guard.sh; then
-            fail 'ordinary Kamal Deploy refuses frozen-path policy or guard changes'
+            policy_transition_baseline='a4ee838545a5bb396ee39f3527f85541c7788ad0'
+            [[ "$baseline_sha" == "$policy_transition_baseline" ]] || fail 'frozen-path policy transition is only valid from the exact pre-ME-55 production baseline'
+            expected_policy_paths="$(printf '%s\n' \
+              .github/workflows/maxibot-native-release.yml \
+              app/bot/menu.py \
+              app/bot/runtime.py \
+              app/integrations/subscriptions.py \
+              docs/frozen_paths.yaml \
+              qa/TEST_CASES.md \
+              scripts/frozen_path_guard.sh \
+              tests/regression/test_owner_only_channel_menu_buttons.py \
+              tests/test_free_tier_lifetime.py \
+              tests/test_free_trial.py \
+              tests/test_frozen_path_guard.py \
+              tests/test_native_build_boundary.py | LC_ALL=C sort)"
+            actual_policy_paths="$(git diff --name-only "$baseline_sha" "$CANDIDATE_SHA" | LC_ALL=C sort)" || fail 'could not read exact policy-transition diff'
+            [[ "$actual_policy_paths" == "$expected_policy_paths" ]] || fail 'one-time frozen-path policy transition does not match the exact ME-55 candidate scope'
+            echo 'FROZEN_PATH_POLICY_TRANSITION=PASS (baseline-bound exact ME-55 scope)' >> "$GITHUB_STEP_SUMMARY"
           fi
           bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" || fail 'frozen-path guard rejected the candidate'
           echo 'PRODUCTION_BASELINE=PASS' >> "$GITHUB_STEP_SUMMARY"

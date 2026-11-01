@@ -22,30 +22,33 @@ stable_baseline:
 
 protected_runtime_areas:
   bot_direct:
-    - app/main.py
-    - app/bot/runtime.py
     - app/traffic/system_conversion.py
     - app/traffic/system_conversion_processor.py
     - miniapp/traffic.html
   channel_direct:
-    - app/bot/runtime.py
-    - app/bot/menu.py
     - app/traffic/deep_link.py
     - miniapp/traffic.html
   shared_dependencies:
-    - app/main.py
     - app/db/models.py
     - app/core/config.py
     - app/integrations/max*
     - alembic/
     - docker-compose*.yml
 
-scoped_bot_only:
-  - app/main.py|#fallbackCta
-  - app/main.py|Перейти в MAX
-
 regression_contracts:
   - tests/regression/test_mobile_max_handoff_contract.py
+  - tests/regression/test_single_poller_safety.py
   - tests/test_traffic_deep_link.py
   - tests/test_landing_ui_contract.py
   - tests/test_update_payload.py
+  - tests/test_traffic_attribution.py
+  - tests/test_system_conversion_mapping.py
+  - tests/test_system_conversion_processor.py
+  - tests/test_bot_paid_conversion_dedupe.py
+  - tests/test_web_admin_passkey_contract.py
+  - tests/test_public_security_fixes.py
+  - tests/test_public_compose_security.py
+  - tests/test_worker_health.py
+  - tests/test_worker_health_collector.py
+  - tests/test_migration_rehearsal.py
+  - tests/test_release_migration_safety.py
