@@ -469,6 +469,7 @@ jobs:
               tests/regression/test_owner_only_channel_menu_buttons.py \
               tests/test_free_tier_lifetime.py \
               tests/test_free_trial.py \
+              tests/test_frozen_guard_bridge_controls.py \
               tests/test_frozen_path_guard.py \
               tests/test_native_build_boundary.py | LC_ALL=C sort)"
             actual_policy_paths="$(git diff --name-only "$baseline_sha" "$CANDIDATE_SHA" | LC_ALL=C sort)" || fail 'could not read exact policy-transition diff'

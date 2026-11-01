@@ -214,6 +214,7 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             'tests/regression/test_owner_only_channel_menu_buttons.py',
             'tests/test_free_tier_lifetime.py',
             'tests/test_free_trial.py',
+            'tests/test_frozen_guard_bridge_controls.py',
             'tests/test_frozen_path_guard.py',
             'tests/test_native_build_boundary.py',
         ):
