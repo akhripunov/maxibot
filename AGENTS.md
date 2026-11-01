@@ -4,7 +4,15 @@ For ordinary, OWNER-authorized production releases the executable source of trut
 
 **Important:** every `main` push, including docs and `AGENTS.md`, can trigger a real production deployment. Do not push implementation-only or instruction-only changes to `main` without OWNER release authorization for that scope. A branch/PR is safe for review and must not be mistaken for a production release. GitHub CI and protected production safety gates remain mandatory; no bypass to save time. Historical ME-51, V2/V5, Compose and Mac-runner instructions below are archive, NOT the ordinary release procedure.
 
-**Pre-push speed:** use the scope-based FAST/FULL decision in `docs/ORCHESTRATION_PROTOCOL.md` and the timing checklist in `docs/RELEASE_AUTOMATION.md`. Do not load old release archives, relaunch completed checks, or invoke ceremonial subagents for an unaffected path. Always read the current required GitHub access runbook before GitHub operations, check the exact remote SHA, preserve existing worktrees, and apply mandatory gates for changed paths.
+**Pre-push speed:** use the scope-based FAST/FULL decision in
+`docs/ORCHESTRATION_PROTOCOL.md` and the timing checklist in
+`docs/RELEASE_AUTOMATION.md`. Do not load old release archives, relaunch
+completed checks, or invoke ceremonial subagents for an unaffected path. Open
+the current GitHub access runbook only when an actual GitHub/GHCR transport,
+DNS, TLS, authentication or permission error needs diagnosis. Healthy access
+does not require that Linear read. Check exact remote SHA when a write or
+release task requires it, preserve existing worktrees, and apply required gates
+for changed paths.
 
 ---
 
@@ -29,12 +37,14 @@ After verified first cutover, ordinary ME-51 release validation uses the existin
 - Release sources are MAXIBOT's [Linear release rules](https://linear.app/bestuzhev/document/pravila-reliza-maxibot-825471a52588), [release journal](https://linear.app/bestuzhev/document/zhurnal-relizov-maxibot-3e615fe7e879), `docs/RELEASE_AUTHORIZATION.md`, and `docs/RELEASE_AUTOMATION.md`.
 - GPoint and MAXIBOT are independent projects with separate authorization, workflows, runners, migrations, artifacts, release ledgers, Linear documents, and production environments. Never apply GPoint release procedures or authorization to MAXIBOT, or MAXIBOT release procedures or authorization to GPoint. Resolve each project's rules independently for cross-project work.
 
-## Mandatory GitHub/GHCR access recovery — MAXIBOT
+## GitHub/GHCR access diagnostics — MAXIBOT
 
-- For any MAXIBOT task involving GitHub, GHCR, a Git remote, GitHub Actions, push, workflow dispatch, or repository authentication, **read the current [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80) before the first relevant access operation**. It is a mandatory operating procedure, not optional background context. Use its safe steps for this repository and this host only; it does not transfer PROSTOR/GPoint credentials, runners, or authority to MAXIBOT.
-- After a context compaction, on a newly encountered DNS/TLS/HTTPS/auth failure, or whenever the procedure is no longer reliably in context, **retrieve the current document again**. A remembered summary, an old quote, and a link without a successful read are not evidence that the procedure was followed.
-- Before declaring `GITHUB_ACCESS_BLOCKED`, distinguish DNS/proxy/VPN/transport failure from genuine rejected credentials; `gh auth status` during a network failure is not sufficient proof of revocation. Apply the document's existing-credential recovery and bounded retry/readback steps without printing secrets. Report the document read status, checks attempted, and exact remaining failure. If Linear is unreachable, report `GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED`; do not invent its steps.
-- A timed-out push/dispatch may have succeeded: read back the remote exact SHA and existing Actions runs **before** retrying. Never force push, rotate/create credentials, relax host-key/TLS verification, or alter VPN/DNS/network settings without the applicable OWNER authorization. This instruction does not authorize production Apply or broaden release permissions.
+- The current [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80) is a diagnostic runbook, not a prerequisite for ordinary MAXIBOT work or successful GitHub/GHCR operations. Do not read it for a healthy `git fetch`, push, GitHub API, or GHCR request, and do not run prophylactic access checks.
+- When an actual DNS, TLS, HTTPS/transport, GitHub/GHCR authentication, authorization, or permission error occurs, retrieve the current document and apply the relevant safe steps for this repository and host only. It does not transfer PROSTOR/GPoint credentials, runners, or authority to MAXIBOT.
+- Classify the failure before acting. A failed `gh auth status` during unhealthy transport does not prove credential revocation. Preserve existing credentials; never create/rotate credentials or change VPN, DNS, SSH/TLS policy without applicable OWNER authorization.
+- Read the runbook once for the current incident. For the same unchanged failure, use its bounded diagnostics and retries without repeatedly reopening Linear. Re-read only for a materially different failure class or when the current procedure is known to have changed.
+- A timed-out push/dispatch may have succeeded: read back the remote exact SHA and existing Actions runs before retrying. Never force-push or repeat an ambiguous write blindly.
+- Before reporting `GITHUB_ACCESS_BLOCKED`, report whether the runbook was read and which applicable checks passed, failed, or could not be run. If the runbook cannot be retrieved, report `GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED`; do not invent its steps or bypass a required protection. This policy does not authorize production Apply or broaden release permissions.
 
 ## Critical product and safety invariants
 
