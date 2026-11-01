@@ -1,7 +1,7 @@
-"""Guard the MAXIBOT Codex GitHub-access runbook bootstrap contract.
+"""Guard the MAXIBOT GitHub-access incident diagnostics contract.
 
-The Linear document remains the sole operational runbook; this test prevents
-accidental removal of its mandatory discovery and incident-handling rules.
+The current Linear runbook is consulted on a real GitHub/GHCR access failure,
+not during healthy ordinary tasks. Safety and bounded recovery remain required.
 """
 
 from pathlib import Path
@@ -18,24 +18,35 @@ BOOTSTRAP = (
 )
 
 
-@pytest.mark.parametrize("relative_path", BOOTSTRAP)
-def test_github_access_document_link_is_mandatory_in_all_bootstraps(relative_path: str):
+@pytest.mark.parametrize(
+    ("relative_path", "healthy_access_rule"),
+    (
+        ("AGENTS.md", "not a prerequisite for ordinary MAXIBOT work"),
+        ("docs/ROLE_REGISTRY.md", "operations do not require\nreading"),
+        ("docs/ORCHESTRATION_PROTOCOL.md", "access does not require reading the Linear"),
+    ),
+)
+def test_github_access_link_is_for_incident_diagnostics_not_routine_gate(
+    relative_path: str, healthy_access_rule: str
+):
     text = (ROOT / relative_path).read_text(encoding="utf-8")
     assert RUNBOOK in text
-    assert "mandatory" in text.lower()
-    assert "linear" in text.lower()
-    assert "context compaction" in text.lower()
-    assert "access" in text.lower()
+    assert healthy_access_rule in text
+    assert "diagnostic" in text.lower()
+    assert "DNS" in text
+    assert "TLS" in text
 
 
-def test_agents_requires_live_document_and_disallows_false_auth_revocation():
+def test_agents_preserves_safe_access_failure_recovery():
     text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    assert "before the first relevant access operation" in text
     assert "gh auth status" in text
-    assert "not sufficient proof of revocation" in text
+    assert "does not prove credential revocation" in text
     assert "GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED" in text
     assert "remote exact SHA" in text
-    assert "without the applicable OWNER authorization" in text
+    assert "without applicable OWNER authorization" in text
+    assert "Read the runbook once for the current incident" in text
+    assert "Never force-push" in text
+    assert "before the first relevant access operation" not in text
 
 
 def test_protocol_separates_read_failure_from_confirmed_access_blocker():
@@ -45,16 +56,21 @@ def test_protocol_separates_read_failure_from_confirmed_access_blocker():
         "GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED",
         "GITHUB_ACCESS_BLOCKED",
         "DNS",
-        "TLS/timeout",
-        "existing runs",
-        "No forced pushes",
-        "another project's credentials",
+        "TLS",
+        "existing Actions runs",
+        "Never force-push",
+        "MAXIBOT repository",
+        "Read the runbook once per incident",
+        "A missing runbook read during healthy access is expected",
     ):
         assert required in text
+    assert "before touching GitHub" not in text.lower()
 
 
-def test_registry_applies_to_actual_github_operators_not_all_roles():
+def test_registry_applies_diagnostics_to_actual_github_operators_on_error():
     text = (ROOT / "docs/ROLE_REGISTRY.md").read_text(encoding="utf-8")
-    assert "Any role performing GitHub" in text
-    assert "DEV and SYSADMIN" in text
-    assert "current" in text.lower()
+    assert "Successful GitHub, GHCR, Git CLI, and GitHub Actions operations do not require" in text
+    assert "When an actual DNS, TLS, transport, authentication" in text
+    assert "MAXIBOT-specific credentials" in text
+    assert "without OWNER authorization" in text
+    assert "same unchanged failure" in text

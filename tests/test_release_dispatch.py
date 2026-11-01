@@ -4,6 +4,7 @@ import sys
 import json
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from pathlib import Path
 
@@ -2079,10 +2080,18 @@ def test_me50_bootstrap_only_publisher_skips_nonexecuted_attempt(monkeypatch, br
 @pytest.mark.parametrize("tamper", [
     None, "marker", "candidate_deploy", "deployment", "claim", "consumed",
     "controller_sha", "controller_conclusion", "job_extra_step", "job_runner",
-    "job_attempt", "job_cancelled_has_steps", "log", "deploy_api_unknown",
+    "job_attempt", "job_cancelled_has_steps", "controller_expired", "log", "deploy_api_unknown",
 ])
-def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper):
+def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper, monkeypatch):
     import copy
+    fixed_now = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(orchestrator.dt, "datetime", FixedDateTime)
     old_sha = "a1cdb5235cc443e7a1cd050ebeda487fd70e4f0a"
     auth = "maxibot-me50-diagnostics-recovery-20261024"
     marker = {"ref": f"maxibot-task-auth/{auth}/dispatches/prepare-40093485327-1",
@@ -2091,7 +2100,7 @@ def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper):
         "id": 40093864867, "run_attempt": 3, "head_sha": old_sha,
         "head_branch": "main", "path": ".github/workflows/maxibot-auto-preflight.yml",
         "event": "workflow_run", "status": "completed", "conclusion": "failure",
-        "updated_at": "2026-10-24T13:00:35Z",
+        "updated_at": (fixed_now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
     }
     first_steps = [
         {"name": name, "status": "completed", "conclusion": conclusion}
@@ -2142,6 +2151,8 @@ def test_me50_orphan_dispatch_requires_exact_nonexecution_proof(tamper):
         controller["head_sha"] = "f" * 40
     elif tamper == "controller_conclusion":
         controller["conclusion"] = "success"
+    elif tamper == "controller_expired":
+        controller["updated_at"] = (fixed_now - timedelta(days=8)).isoformat().replace("+00:00", "Z")
     elif tamper == "job_extra_step":
         first_steps.insert(4, {"name": "Apply", "status": "completed", "conclusion": "success"})
     elif tamper == "job_runner":

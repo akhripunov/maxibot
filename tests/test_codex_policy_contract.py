@@ -148,6 +148,39 @@ class AgentPolicyContractTests(unittest.TestCase):
         self.assertIn("docs/architect_sol_context_pack.md", audit)
         self.assertNotIn("research/maxibot_single_poller_runbook.md", audit)
 
+    def test_github_access_runbook_is_error_diagnostic_not_routine_gate(self) -> None:
+        access_docs = (AGENTS, ORCHESTRATION, ROLE_REGISTRY, RELEASE_AUTOMATION)
+        runbook_url = "https://linear.app/bestuzhev/document/github-dostup-7970682d1b80"
+        for content in access_docs:
+            self.assertIn(runbook_url, content)
+        self.assertIn("Healthy access does not require that Linear read", " ".join(AGENTS.split()))
+        self.assertIn("Normal successful GitHub/GHCR access does not require", ORCHESTRATION)
+        self.assertIn(
+            "Successful GitHub, GHCR, Git CLI, and GitHub Actions operations do not require reading",
+            " ".join(ROLE_REGISTRY.split()),
+        )
+        self.assertIn("On an actual GitHub/GHCR transport", " ".join(RELEASE_AUTOMATION.split()))
+        self.assertIn("Read the runbook once per incident", ORCHESTRATION)
+        self.assertIn("same unchanged failure", ORCHESTRATION)
+        self.assertIn("GITHUB_ACCESS_RUNBOOK_NOT_VERIFIED", ORCHESTRATION)
+        self.assertIn("GITHUB_ACCESS_BLOCKED", ORCHESTRATION)
+        self.assertIn("read back remote SHA", ORCHESTRATION)
+        combined = AGENTS + ORCHESTRATION + ROLE_REGISTRY + RELEASE_AUTOMATION
+        for stale_rule in (
+            "before the first relevant access",
+            "before relevant access",
+            "Mandatory GitHub/GHCR access preflight",
+        ):
+            self.assertNotIn(stale_rule, combined)
+        for prohibited in ("create/rotate credentials", "relax SSH/TLS checks", "VPN/DNS"):
+            self.assertIn(prohibited, ORCHESTRATION)
+        self.assertIn("single Poller", AGENTS)
+        self.assertIn("Worker 512 MiB", AGENTS)
+        self.assertIn("PostgreSQL/Redis/volumes", AGENTS)
+        self.assertIn("backup/rollback", AGENTS)
+        self.assertIn("exact SHA/digest", AGENTS)
+        self.assertIn("frozen paths", AGENTS)
+
 
 if __name__ == "__main__":
     unittest.main()
