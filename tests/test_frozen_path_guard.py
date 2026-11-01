@@ -10,7 +10,7 @@ GUARD = ROOT / "scripts/frozen_path_guard.sh"
 MANIFEST = ROOT / "docs/frozen_paths.yaml"
 
 
-def _repo(tmp_path: Path, changed_path: str) -> tuple[Path, str, str]:
+def _repo(tmp_path: Path, changed_path: str, content_override: str | None = None) -> tuple[Path, str, str]:
     repo = tmp_path / "repo"
     repo.mkdir(parents=True)
     env = {
@@ -40,9 +40,7 @@ def _repo(tmp_path: Path, changed_path: str) -> tuple[Path, str, str]:
     base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
     target = repo / changed_path
     target.parent.mkdir(parents=True, exist_ok=True)
-    content = "changed\n"
-    if changed_path == "app/main.py":
-        content = "#fallbackCta Перейти в MAX\n"
+    content = content_override if content_override is not None else "changed\n"
     target.write_text(content, encoding="utf-8")
     subprocess.run(["git", "add", changed_path], cwd=repo, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "change"], cwd=repo, check=True, env=env)
@@ -68,12 +66,31 @@ def test_unrelated_change_passes(tmp_path):
 
 
 def test_ordinary_menu_runtime_and_tariff_changes_pass_by_behavioral_contract(tmp_path):
-    for path in ("app/main.py", "app/bot/menu.py", "app/bot/runtime.py", "app/integrations/subscriptions.py"):
+    for path in ("app/bot/menu.py", "app/bot/runtime.py", "app/integrations/subscriptions.py"):
         repo, base, head = _repo(tmp_path / path.replace("/", "_"), path)
         result = _run(repo, base, head)
         assert result.returncode == 0, (path, result.stdout, result.stderr)
         assert "FROZEN_PATH_GUARD=PASS" in result.stdout
         assert "FROZEN_PATH_REGRESSION_CONTRACTS=PASS:16" in result.stdout
+
+
+def test_app_main_remains_protected_except_for_exact_scoped_bot_change(tmp_path):
+    repo, base, head = _repo(tmp_path, "app/main.py")
+    result = _run(repo, base, head)
+    assert result.returncode == 1
+    assert "BOT_FROZEN_PATH_CHANGED=YES" in result.stdout
+
+    repo, base, head = _repo(tmp_path / "scoped", "app/main.py", "#fallbackCta\n")
+    result = _run(repo, base, head)
+    assert result.returncode == 0
+    assert "FROZEN_PATH_GUARD=PASS" in result.stdout
+
+
+def test_app_main_scoped_marker_does_not_exempt_mixed_changes(tmp_path):
+    repo, base, head = _repo(tmp_path, "app/main.py", "#fallbackCta\nunrelated runtime change\n")
+    result = _run(repo, base, head)
+    assert result.returncode == 1
+    assert "FROZEN_PATH_GUARD=BLOCK" in result.stdout
 
 
 def test_channel_change_blocks_without_owner_approval(tmp_path):

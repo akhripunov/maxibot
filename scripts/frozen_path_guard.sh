@@ -340,11 +340,13 @@ def ads_only_channel_ui_change(path: str) -> bool:
     )
     return not any(marker in text for marker in frozen_markers)
 
-bot_scoped = {
-    path for path in changed
-    if any(path == scoped_path and marker in diff_for(path) for scoped_path, marker in scoped_bot_only)
-}
-bot_direct = [p for p in changed if any(matches(x, p) for x in lists.get("bot_direct", []))]
+bot_scoped = set()
+for path in changed:
+    markers = [marker for scoped_path, marker in scoped_bot_only if path == scoped_path]
+    delta_lines = [line for line in changed_lines(path).splitlines() if line]
+    if markers and delta_lines and all(any(marker in line for marker in markers) for line in delta_lines):
+        bot_scoped.add(path)
+bot_direct = [p for p in changed if p not in bot_scoped and any(matches(x, p) for x in lists.get("bot_direct", []))]
 channel_direct = [p for p in changed if any(matches(x, p) for x in lists.get("channel_direct", [])) and not ads_only_channel_ui_change(p)]
 shared = [p for p in changed if any(matches(x, p) for x in lists.get("shared_dependencies", []))]
 shared_for_impact = [p for p in shared if p not in bot_scoped and not ads_only_shared_change(p)]
