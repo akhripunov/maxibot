@@ -331,11 +331,41 @@ def test_0099_forward_resume_requires_exact_old_app_and_complete_target_schema_w
 
     assert '"$baseline_sha" == "$migration_baseline"' in baseline
     assert 'wc -l <<< "$partial_schema"' in baseline
-    assert '[[ "$partial_index" == t\\|t\\|status,metrica_upload_next_check_at ]]' in baseline
+    assert '[[ "$partial_index" == "t|t|$expected_index_semantics" ]]' in baseline
     assert '"migration_resume=$migration_resume"' in baseline
     assert 'if [[ "$migration_resume" == false ]]; then' in migration
     assert '[[ "$expected_db_head" == 0098_durable_autopilot_execution_claim_v1 ]]' in migration
     assert '[[ "$expected_db_head" == 0099_metrica_upload_reconciliation_v1 ]]' in migration
+
+
+def test_0099_preflight_and_post_apply_validate_exact_polling_index_catalog_definition():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")["run"]
+
+    expected = "t|t|f|btree|public|public|offline_conversion_queue|2|2|t|t|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)"
+    assert expected in migration
+    assert "expected_index_semantics='f|btree|public|public|offline_conversion_queue" in baseline
+    assert "[[ \"$actual_index\" == '" + expected + "' ]]" in migration
+    for fragment in (
+        "i.indisunique::text",
+        "am.amname",
+        "i.indnatts::text",
+        "i.indnkeyatts::text",
+        "(i.indpred is null)::text",
+        "(i.indexprs is null)::text",
+        "pg_get_indexdef(idx.oid)",
+    ):
+        assert baseline.count(fragment) >= 1
+        assert migration.count(fragment) >= 1
+
+
+def test_pinned_actionlint_accounts_only_for_known_self_hosted_runner_label():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    tests = workflow["jobs"]["tests"]["steps"]
+    actionlint = next(step for step in tests if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
+    assert '-ignore \'label "maxibot-production" is unknown\'' in actionlint["run"]
 
 
 def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():

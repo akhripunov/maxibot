@@ -11,6 +11,26 @@ branch_labels = None
 depends_on = None
 
 
+def _is_exact_polling_index(index) -> bool:
+    return (
+        list(index.column_names) == ["status", "metrica_upload_next_check_at"]
+        and not index.indisunique
+        and index.amname == "btree"
+        and index.index_schema == "public"
+        and index.table_schema == "public"
+        and index.table_name == "offline_conversion_queue"
+        and index.indnatts == 2
+        and index.indnkeyatts == 2
+        and index.no_predicate
+        and index.no_expressions
+        and index.index_definition == (
+            "CREATE INDEX ix_offline_conversion_queue_metrica_poll "
+            "ON public.offline_conversion_queue USING btree "
+            "(status, metrica_upload_next_check_at)"
+        )
+    )
+
+
 def upgrade() -> None:
     # Bound ACCESS EXCLUSIVE lock acquisition on the existing queue table.
     # If a conflicting transaction is active, fail before changing the schema.
@@ -42,20 +62,34 @@ def upgrade() -> None:
         raise RuntimeError("0099 partial recovery found an incompatible check-attempt default")
 
     index = bind.execute(sa.text("""
-        SELECT i.indisvalid, i.indisready,
-               array_agg(a.attname ORDER BY k.ordinality) AS column_names
+        SELECT i.indisvalid, i.indisready, i.indisunique,
+               am.amname,
+               index_ns.nspname AS index_schema,
+               table_ns.nspname AS table_schema,
+               tbl.relname AS table_name,
+               i.indnatts,
+               i.indnkeyatts,
+               (i.indpred IS NULL) AS no_predicate,
+               (i.indexprs IS NULL) AS no_expressions,
+               array_agg(coalesce(a.attname, '<expression>') ORDER BY k.ordinality) AS column_names,
+               pg_get_indexdef(idx.oid) AS index_definition
         FROM pg_class idx
         JOIN pg_index i ON i.indexrelid = idx.oid
+        JOIN pg_am am ON am.oid = idx.relam
+        JOIN pg_namespace index_ns ON index_ns.oid = idx.relnamespace
         JOIN pg_class tbl ON tbl.oid = i.indrelid
+        JOIN pg_namespace table_ns ON table_ns.oid = tbl.relnamespace
         JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON true
-        JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = k.attnum
+        LEFT JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = k.attnum
         WHERE idx.relname = 'ix_offline_conversion_queue_metrica_poll'
-          AND tbl.relname = 'offline_conversion_queue'
-        GROUP BY i.indisvalid, i.indisready
+          AND index_ns.nspname = 'public'
+        GROUP BY i.indisvalid, i.indisready, i.indisunique, am.amname,
+                 index_ns.nspname, table_ns.nspname, tbl.relname,
+                 i.indnatts, i.indnkeyatts, (i.indpred IS NULL), (i.indexprs IS NULL),
+                 idx.oid
     """)).first()
     if index is not None:
-        names = list(index.column_names)
-        if names != ["status", "metrica_upload_next_check_at"]:
+        if not _is_exact_polling_index(index):
             raise RuntimeError("0099 partial recovery found an index with an incompatible column definition")
         if index.indisvalid and index.indisready:
             return

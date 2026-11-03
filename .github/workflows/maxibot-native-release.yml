@@ -116,7 +116,7 @@ jobs:
             --output "$archive"
           printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
-          "$RUNNER_TEMP/actionlint" -color
+          "$RUNNER_TEMP/actionlint" -color -ignore 'label "maxibot-production" is unknown'
       - name: Rehearse Alembic 0098 to 0099 on isolated PostgreSQL
         env:
           DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/maxibot_rehearsal
@@ -555,11 +555,15 @@ jobs:
             active_index_builds="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from pg_stat_activity where pid <> pg_backend_pid() and query ilike '%create index concurrently%ix_offline_conversion_queue_metrica_poll%' and state <> 'idle'")" || fail '0099 active index-build query failed'
             [[ "$active_index_builds" =~ ^[0-9]+$ ]] || fail '0099 active index-build count is malformed'
             [[ "$active_index_builds" == 0 ]] || fail '0099 index build is still active; do not start a competing migration'
-            partial_index="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -F '|' -v ON_ERROR_STOP=1 -c "select i.indisvalid::text,i.indisready::text,array_to_string(array_agg(a.attname order by k.ordinality),',') from pg_class idx join pg_index i on i.indexrelid=idx.oid join pg_class tbl on tbl.oid=i.indrelid join unnest(i.indkey) with ordinality as k(attnum,ordinality) on true join pg_attribute a on a.attrelid=tbl.oid and a.attnum=k.attnum where idx.relname='ix_offline_conversion_queue_metrica_poll' and tbl.relname='offline_conversion_queue' group by i.indisvalid,i.indisready")" || fail '0099 partial-index read failed'
-            [[ -z "$partial_index" || "$partial_index" == t\|t\|status,metrica_upload_next_check_at || "$partial_index" == f\|f\|status,metrica_upload_next_check_at || "$partial_index" == f\|t\|status,metrica_upload_next_check_at ]] || fail '0099 partial state contains an incompatible polling index'
+            expected_index_semantics='f|btree|public|public|offline_conversion_queue|2|2|t|t|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)'
+            partial_index="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select concat_ws('|',i.indisvalid::text,i.indisready::text,i.indisunique::text,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts::text,i.indnkeyatts::text,(i.indpred is null)::text,(i.indexprs is null)::text,array_to_string(array_agg(coalesce(a.attname,'<expression>') order by k.ordinality),','),pg_get_indexdef(idx.oid)) from pg_class idx join pg_index i on i.indexrelid=idx.oid join pg_am am on am.oid=idx.relam join pg_namespace index_ns on index_ns.oid=idx.relnamespace join pg_class tbl on tbl.oid=i.indrelid join pg_namespace table_ns on table_ns.oid=tbl.relnamespace join unnest(i.indkey) with ordinality as k(attnum,ordinality) on true left join pg_attribute a on a.attrelid=tbl.oid and a.attnum=k.attnum where idx.relname='ix_offline_conversion_queue_metrica_poll' and index_ns.nspname='public' group by i.indisvalid,i.indisready,i.indisunique,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts,i.indnkeyatts,(i.indpred is null),(i.indexprs is null),idx.oid")" || fail '0099 partial-index read failed'
+            case "$partial_index" in
+              "t|t|$expected_index_semantics"|"f|f|$expected_index_semantics"|"f|t|$expected_index_semantics") ;;
+              *) fail '0099 partial state contains an incompatible polling index definition' ;;
+            esac
             if [[ "$migration_resume" == true ]]; then
               [[ "$(wc -l <<< "$partial_schema" | tr -d ' ')" == 6 ]] || fail '0099 forward resume requires all six exact reconciliation columns'
-              [[ "$partial_index" == t\|t\|status,metrica_upload_next_check_at ]] || fail '0099 forward resume requires the exact valid and ready polling index'
+              [[ "$partial_index" == "t|t|$expected_index_semantics" ]] || fail '0099 forward resume requires the exact valid and ready polling index'
             fi
             migration_required=true
             if [[ "$migration_resume" == true ]]; then
@@ -873,8 +877,8 @@ jobs:
           [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" == "$expected_rows" ]]
           queue_sha_after="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')"
           [[ "$queue_sha_after" == "$expected_queue_sha" ]]
-          docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select 1 from pg_indexes where schemaname='public' and tablename='offline_conversion_queue' and indexname='ix_offline_conversion_queue_metrica_poll'" | grep -qx 1
-          docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select 1 from pg_index i join pg_class x on x.oid=i.indexrelid where x.relname='ix_offline_conversion_queue_metrica_poll' and i.indisvalid and i.indisready" | grep -qx 1
+          actual_index="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select concat_ws('|',i.indisvalid::text,i.indisready::text,i.indisunique::text,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts::text,i.indnkeyatts::text,(i.indpred is null)::text,(i.indexprs is null)::text,array_to_string(array_agg(coalesce(a.attname,'<expression>') order by k.ordinality),','),pg_get_indexdef(idx.oid)) from pg_class idx join pg_index i on i.indexrelid=idx.oid join pg_am am on am.oid=idx.relam join pg_namespace index_ns on index_ns.oid=idx.relnamespace join pg_class tbl on tbl.oid=i.indrelid join pg_namespace table_ns on table_ns.oid=tbl.relnamespace join unnest(i.indkey) with ordinality as k(attnum,ordinality) on true left join pg_attribute a on a.attrelid=tbl.oid and a.attnum=k.attnum where idx.relname='ix_offline_conversion_queue_metrica_poll' and index_ns.nspname='public' group by i.indisvalid,i.indisready,i.indisunique,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts,i.indnkeyatts,(i.indpred is null),(i.indexprs is null),idx.oid")" || fail 'exact polling index read failed after migration'
+          [[ "$actual_index" == 't|t|f|btree|public|public|offline_conversion_queue|2|2|t|t|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)' ]] || fail 'polling index does not match the exact expected catalog definition'
           REMOTE
           chmod 700 "$remote_script"
           scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$remote_script" "root@$PRODUCTION_HOST:/tmp/maxibot-metrica-0099-apply-$GITHUB_RUN_ID.sh"

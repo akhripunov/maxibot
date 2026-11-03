@@ -19,6 +19,11 @@ BASELINE = "0098_durable_autopilot_execution_claim_v1"
 TARGET = "0099_metrica_upload_reconciliation_v1"
 PRODUCTION_BASE_SHA = "eda64bd2d0118009853e4e06f0a9c888ad19fd5a"
 INDEX = "ix_offline_conversion_queue_metrica_poll"
+EXPECTED_INDEX_SIGNATURE = (
+    "t|t|f|btree|public|public|offline_conversion_queue|2|2|t|t|"
+    "status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll "
+    "ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)"
+)
 NEW_COLUMNS = {
     "metrica_upload_counter_id",
     "metrica_upload_observation_started_at",
@@ -177,15 +182,32 @@ def main() -> int:
             new_counter_values = connection.execute(text(
                 "SELECT count(*) FROM offline_conversion_queue WHERE metrica_upload_check_attempts <> 0"
             )).scalar_one()
-            index_state = connection.execute(text("""
-                SELECT i.indisvalid AND i.indisready
-                FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid
-                WHERE x.relname=:index_name
-            """), {"index_name": INDEX}).scalar_one()
+            index_signature = connection.execute(text("""
+                SELECT concat_ws('|', i.indisvalid::text, i.indisready::text,
+                    i.indisunique::text, am.amname, index_ns.nspname,
+                    table_ns.nspname, tbl.relname, i.indnatts::text,
+                    i.indnkeyatts::text, (i.indpred IS NULL)::text,
+                    (i.indexprs IS NULL)::text,
+                    array_to_string(array_agg(coalesce(a.attname, '<expression>')
+                        ORDER BY k.ordinality), ','), pg_get_indexdef(idx.oid))
+                FROM pg_class idx
+                JOIN pg_index i ON i.indexrelid=idx.oid
+                JOIN pg_am am ON am.oid=idx.relam
+                JOIN pg_namespace index_ns ON index_ns.oid=idx.relnamespace
+                JOIN pg_class tbl ON tbl.oid=i.indrelid
+                JOIN pg_namespace table_ns ON table_ns.oid=tbl.relnamespace
+                JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ordinality) ON true
+                LEFT JOIN pg_attribute a ON a.attrelid=tbl.oid AND a.attnum=k.attnum
+                WHERE idx.relname=:index_name AND index_ns.nspname='public'
+                GROUP BY i.indisvalid, i.indisready, i.indisunique, am.amname,
+                    index_ns.nspname, table_ns.nspname, tbl.relname,
+                    i.indnatts, i.indnkeyatts, (i.indpred IS NULL),
+                    (i.indexprs IS NULL), idx.oid
+            """), {"index_name": INDEX}).scalar_one_or_none()
         if before_digest != after_digest or len(after_rows) != REHEARSAL_ROWS or version != TARGET:
             raise RuntimeError("0099 altered existing conversion data or did not reach the exact target head")
-        if new_counter_values != 0 or not index_state:
-            raise RuntimeError("new-field defaults or polling index state are invalid")
+        if new_counter_values != 0 or index_signature != EXPECTED_INDEX_SIGNATURE:
+            raise RuntimeError("new-field defaults or exact polling index definition are invalid")
 
         check_baseline_model(engine, REHEARSAL_ROWS)
         from app.db.models import OfflineConversion as CandidateOfflineConversion
