@@ -49,6 +49,7 @@ def test_kamal_release_automatically_deploys_main_after_tests_and_build():
 def test_tests_job_loads_pinned_kamal_config_with_synthetic_secret_without_deploy_access():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     tests = workflow["jobs"]["tests"]
+    assert tests["runs-on"] == "ubuntu-24.04"
     setup = next(step for step in tests["steps"] if step.get("uses", "").startswith("ruby/setup-ruby@"))
     verify = next(step for step in tests["steps"] if step.get("name") == "Load Kamal config with synthetic registry secret")
 
@@ -71,6 +72,18 @@ def test_tests_job_loads_pinned_kamal_config_with_synthetic_secret_without_deplo
     assert "kamal app stop" not in verify["run"]
     assert "ssh " not in verify["run"]
     subprocess.run(["git", "check-ignore", "-q", ".kamal/secrets"], cwd=ROOT, check=True)
+    assert workflow["jobs"]["build"]["needs"] == "tests"
+
+
+def test_tests_job_runs_checksum_pinned_actionlint_before_build():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    tests = workflow["jobs"]["tests"]
+    step = next(step for step in tests["steps"] if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
+
+    assert "actionlint_1.7.12_linux_amd64.tar.gz" in step["run"]
+    assert "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" in step["run"]
+    assert "sha256sum --check --strict" in step["run"]
+    assert '"$RUNNER_TEMP/actionlint" -color' in step["run"]
     assert workflow["jobs"]["build"]["needs"] == "tests"
 
 
@@ -194,7 +207,7 @@ def test_kamal_deploy_verifies_only_api_worker_and_preserves_safety_invariants()
     assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles worker' in deploy
 
 
-def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_restore_or_caddy():
+def test_kamal_deploy_uses_runtime_baseline_and_scoped_0099_backup_restore_without_caddy():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     deploy_script = "\n".join(step.get("run", "") for step in steps)
@@ -211,9 +224,13 @@ def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_rest
     assert "alembic_version" in baseline
     assert "old_db_volume" in baseline and "old_redis_volume" in baseline and "old_uploads_volume" in baseline
     assert "MAXIBOT_BACKUP_MAX_AGE_SECONDS" not in deploy_script
-    assert "pg_restore" not in deploy_script
-    assert "native_restore_probe" not in deploy_script
-    assert "maxibot-native-restore" not in deploy_script
+    assert "pg_dump -Fc" in deploy_script
+    assert "pg_restore --list" in deploy_script
+    assert "source_queue_sha" in deploy_script and "restored_queue_sha" in deploy_script
+    assert "source-table-inventory" in deploy_script
+    assert "--network none" in deploy_script
+    assert "scripts/verify_migration_schema_contract.py" in deploy_script
+    assert "0099_metrica_upload_reconciliation_v1" not in deploy_script
     assert "caddy" not in deploy_script.lower()
     assert "maxibot-vps-https-1" not in deploy_script
     assert "BASELINE_MODE" not in kamal_config
@@ -221,9 +238,132 @@ def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_rest
     assert "EXPECTED_CADDY_ID" not in runtime
     assert "kamal-proxy" in runtime
     assert "PRODUCTION_BASELINE=FAIL:" in baseline
+    assert 'if [[ -z "$PRODUCTION_SSH_KEY" || -z "$PRODUCTION_KNOWN_HOSTS" ]]; then fail' in baseline
     assert "Redis PING command failed" in baseline
     assert 'bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"' in baseline
     assert "--owner-approved-task ME-53" not in baseline
+
+
+def test_contract_migration_gate_runs_backup_restore_apply_before_kamal():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    test_steps = workflow["jobs"]["tests"]["steps"]
+    contract_index = next(i for i, step in enumerate(test_steps) if step.get("id") == "migration_contract")
+    frozen_index = next(i for i, step in enumerate(test_steps) if step.get("name") == "Run exact-candidate Frozen Path Guard")
+    rehearsal_index = next(i for i, step in enumerate(test_steps) if step.get("name") == "Rehearse the authorized migration on isolated PostgreSQL")
+    frozen_guard = test_steps[frozen_index]
+    assert contract_index < frozen_index < rehearsal_index
+    assert "scripts/frozen_path_guard.sh" in frozen_guard["run"]
+    assert "MIGRATION_FROZEN_PATHS" in frozen_guard.get("env", {})
+    assert "--owner-approved-task" in frozen_guard["run"]
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    assert "validate_owner_main_publication" in baseline
+    assert "MIGRATION_OWNER_MAIN_PUBLICATION=PASS" in baseline
+    names = [step.get("name", "") for step in steps]
+    backup = next(step for step in steps if step.get("name") == "Create and restore-check a fresh database backup for the approved migration")
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")
+    runtime = next(step for step in steps if step.get("name") == "Verify runtime, network connectivity, and Worker heartbeat")
+
+    assert "migration_release_contract.py" in baseline
+    assert "ordinary Kamal Deploy" not in baseline
+    assert "docker-compose.vps.yml" in baseline
+    assert "MIGRATION_RISK_CONTRACT=PASS" in baseline
+    assert "source_revision" in baseline and "target_revision" in baseline
+    assert "preserved_tables" in baseline
+    assert "pg_dump -Fc" in backup["run"]
+    assert "pg_restore --list" in backup["run"]
+    assert "--network none" in backup["run"]
+    assert "cleanup" in backup["run"]
+    assert "source_preserved_counts" in backup["run"] and "restored_preserved_counts" in backup["run"]
+    assert 'alembic upgrade "$migration_target"' in migration["run"]
+    assert migration.get("env", {}).get("MIGRATION_RESUME") == "${{ steps.baseline.outputs.migration_resume }}"
+    assert 'if [[ "$migration_resume" == false ]]; then' in migration["run"]
+    assert '[[ "$expected_db_head" == "$migration_target" ]]' in migration["run"]
+    assert "BACKUP_PRESERVED_COUNTS" in migration.get("env", {})
+    assert "preserved-table row counts changed during migration" in migration["run"]
+    assert names.index(backup["name"]) < names.index(migration["name"]) < names.index("Record exact application Deployment after all preflight gates")
+    assert runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD") == "${{ steps.baseline.outputs.expected_database_head }}"
+    assert "db_head == expected_db_head" in runtime["run"]
+
+def test_migration_rollback_is_contract_bound_and_database_forward_only():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    runtime = next(step for step in steps if step.get("name") == "Verify runtime, network connectivity, and Worker heartbeat")
+    rollback = next(step for step in steps if step.get("name") == "Deploy application with Kamal")["run"]
+
+    assert "release_operation=" in baseline
+    assert "migration-risk-contract.json" in baseline
+    assert "source_application_sha" in baseline
+    assert "application_rollback_sha" in baseline
+    assert "post-migration rollback target differs from the exact contract-authorized source application SHA" in baseline
+    assert "MIGRATION_FORWARD_ONLY_DB_ROLLBACK_APP_ONLY=PASS" in baseline
+    assert 'if [[ "$migration_required" == true || "$migration_rollback" == true ]]; then' in baseline
+    assert "frozen_paths[]" in baseline
+    assert runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD") == "${{ steps.baseline.outputs.expected_database_head }}"
+    assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles api' in rollback
+    assert "alembic downgrade" not in rollback
+
+def test_0099_backup_and_database_identity_are_revalidated_immediately_before_migration():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
+
+    assert '"$EXPECTED_DB_ID"' in migration
+    assert '"$EXPECTED_DB_VOLUME"' in migration
+    assert '"$expected_backup"' in migration
+    assert '"$backup_sha"' in migration
+    assert '"$expected_rows"' in migration
+    assert "pg_restore --list" in migration
+    assert 'select count(*) from offline_conversion_queue' in migration
+    assert "expected_queue_sha" in migration and "queue_sha_after" in migration
+    assert 'git/ref/heads/main' in migration
+    assert "competing production release detected immediately before migration" in migration
+
+
+def test_contract_migration_forward_resume_checks_source_or_target_schema_without_reapplying_ddl():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
+
+    assert "migration_release_contract.py" in baseline
+    assert "verify_migration_schema_contract.py" in baseline
+    assert "schema_contract_b64=" in baseline
+    assert "schema_mode=source" in baseline
+    assert 'MIGRATION_SCHEMA_${schema_mode^^}=PASS' in baseline
+    assert '"migration_resume=$migration_resume"' in baseline
+    assert 'if [[ "$migration_resume" == false ]]; then' in migration
+    assert '[[ "$expected_db_head" == "$migration_source" ]]' in migration
+    assert '[[ "$expected_db_head" == "$migration_target" ]]' in migration
+    assert 'alembic upgrade "$migration_target"' in migration
+    assert "verify_migration_schema_contract.py" in migration
+    assert "MIGRATION_SCHEMA_SNAPSHOT_B64=" in migration
+    assert "--mode target" in migration
+    assert "0099" not in baseline + migration
+
+
+def test_migration_schema_verification_is_contract_driven_and_not_revision_specific():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
+
+    contract = json.loads((ROOT / "docs/release/migration-risk-contract.json").read_text())
+    index = contract["schema"]["target"]["indexes"][0]
+    assert index["definition"].startswith("CREATE INDEX ix_offline_conversion_queue_metrica_poll ")
+    assert index["valid"] is True and index["ready"] is True
+    assert "0099" not in WORKFLOW.read_text()
+
+
+def test_pinned_actionlint_accounts_only_for_known_self_hosted_runner_label():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    tests = workflow["jobs"]["tests"]["steps"]
+    actionlint = next(step for step in tests if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
+    config = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
+    assert config["self-hosted-runner"]["labels"] == ["maxibot-production"]
+    assert 'actionlint" -color .github/workflows/maxibot-native-release.yml' in actionlint["run"]
+    assert "-ignore" not in actionlint["run"]
 
 
 def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():
@@ -255,7 +395,12 @@ def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
 def test_normal_kamal_selection_provides_exact_inspect_ids_and_rejects_docker_failures(ids,status,ok):
     workflow=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
     steps=workflow['jobs']['deploy']['steps']
-    runs=[s['run'] for s in steps if 'run' in s and 'mapfile -t apis' in s['run'] or 'run' in s and 'api="$(docker ps ' in s['run']]
+    required_names={
+        'Verify exact main and read the current production baseline',
+        'Verify exact GHCR image and Kamal configuration',
+        'Verify runtime, network connectivity, and Worker heartbeat',
+    }
+    runs=[s['run'] for s in steps if s.get('name') in required_names]
     assert len(runs)==3
     for run in runs:
         blocks=re.findall(r'api="\$\(docker ps [^\n]+\n\s*worker="\$\(docker ps [^\n]+\n\s*\[\[ [^\n]+',run)

@@ -26,11 +26,17 @@ def _safe_response_headers(response: httpx.Response) -> dict[str, str]:
     }
 
 
-def _log_yandex_http_error(response: httpx.Response, *, operation: str, yclid: str | None = None) -> None:
+def _log_yandex_http_error(
+    response: httpx.Response,
+    *,
+    operation: str,
+    yclid: str | None = None,
+    include_response_body: bool = True,
+) -> None:
     safe_details = {
         "operation": operation,
         "http_status": response.status_code,
-        "response_body": response.text[:2000],
+        "response_body": response.text[:2000] if include_response_body else None,
         "response_headers": _safe_response_headers(response),
         "yclid_hash": hashlib.sha256(yclid.encode()).hexdigest() if yclid else None,
     }
@@ -52,12 +58,24 @@ class YandexMetricaClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> dict:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        error_log_operation: str | None = None,
+        include_error_body: bool = True,
+        **kwargs: Any,
+    ) -> dict:
         response = await self._client.request(method, path, **kwargs)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError:
-            _log_yandex_http_error(response, operation=f"{method} {path}")
+            _log_yandex_http_error(
+                response,
+                operation=error_log_operation or f"{method} {path}",
+                include_response_body=include_error_body,
+            )
             raise
         return response.json()
 
@@ -115,6 +133,8 @@ class YandexMetricaClient:
         return await self._request(
             "GET",
             f"/management/v1/counter/{counter_id}/offline_conversions/uploading/{upload_id}",
+            error_log_operation="GET offline-conversions upload status",
+            include_error_body=False,
         )
 
     async def goal_id_by_name(self, counter_id: int, goal_name: str) -> int | None:

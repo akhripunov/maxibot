@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "task": "ME-57",
+  "owner_authorization": {
+    "status": "OWNER_AUTHORIZED",
+    "reference": "ME-57: Metrica Reconciliation V1 + Migration 0099",
+    "risk_category": "additive_schema_forward_only"
+  },
+  "source_application_sha": "eda64bd2d0118009853e4e06f0a9c888ad19fd5a",
+  "source_revision": "0098_durable_autopilot_execution_claim_v1",
+  "target_revision": "0099_metrica_upload_reconciliation_v1",
+  "migration_paths": [
+    "alembic/versions/0099_metrica_upload_reconciliation_v1.py"
+  ],
+  "approved_paths": [
+    ".github/actionlint.yaml",
+    ".github/workflows/maxibot-native-release.yml",
+    "alembic/versions/0099_metrica_upload_reconciliation_v1.py",
+    "app/bot/menu.py",
+    "app/db/models.py",
+    "app/integrations/yandex_metrica.py",
+    "app/traffic/metrica_upload_tracker.py",
+    "docs/release/metrica-0099-risk-contract.md",
+    "docs/release/migration-risk-contract.json",
+    "scripts/migration_release_contract.py",
+    "scripts/postgres_migration_rehearsal.py",
+    "scripts/verify_migration_schema_contract.py",
+    "tests/release/test_kamal_release_workflow.py",
+    "tests/test_metrica_upload_tracker_reconciliation.py",
+    "tests/test_migration_release_contract.py",
+    "tests/test_native_build_boundary.py",
+    "tests/test_postgres_migration_rehearsal.py",
+    "tests/test_release_finalization.py",
+    "tests/test_release_prod_tooling.py",
+    "tests/test_yandex_metrica_upload_status_logging.py"
+  ],
+  "rehearsal_script": "scripts/postgres_migration_rehearsal.py",
+  "frozen_paths": [
+    "alembic/versions/0099_metrica_upload_reconciliation_v1.py",
+    "app/bot/menu.py",
+    "app/db/models.py",
+    "app/integrations/yandex_metrica.py",
+    "app/traffic/metrica_upload_tracker.py"
+  ],
+  "preserved_tables": [
+    "offline_conversion_queue"
+  ],
+  "schema": {
+    "source": {
+      "required_columns": [
+        {"table": "offline_conversion_queue", "name": "id", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "visit_id", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "membership_id", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "target", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "goal", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "conversion_datetime", "data_type": "timestamp with time zone"},
+        {"table": "offline_conversion_queue", "name": "status", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "attempts", "data_type": "integer"},
+        {"table": "offline_conversion_queue", "name": "created_at", "data_type": "timestamp with time zone"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_id", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_status", "data_type": "character varying"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_checked_at", "data_type": "timestamp with time zone"}
+      ],
+      "absent_columns": [
+        {"table": "offline_conversion_queue", "name": "metrica_upload_counter_id"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_observation_started_at"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_check_attempts"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_next_check_at"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_check_error"},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_recovered_at"}
+      ],
+      "absent_indexes": ["ix_offline_conversion_queue_metrica_poll"],
+      "absent_constraints": []
+    },
+    "target": {
+      "columns": [
+        {"table": "offline_conversion_queue", "name": "metrica_upload_counter_id", "data_type": "character varying", "max_length": 32, "nullable": true},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_observation_started_at", "data_type": "timestamp with time zone", "nullable": true},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_check_attempts", "data_type": "integer", "nullable": false, "default_any": ["0", "0::integer"]},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_next_check_at", "data_type": "timestamp with time zone", "nullable": true},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_check_error", "data_type": "character varying", "max_length": 64, "nullable": true},
+        {"table": "offline_conversion_queue", "name": "metrica_upload_recovered_at", "data_type": "timestamp with time zone", "nullable": true}
+      ],
+      "indexes": [
+        {"table": "offline_conversion_queue", "name": "ix_offline_conversion_queue_metrica_poll", "definition": "CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)", "method": "btree", "unique": false, "valid": true, "ready": true}
+      ],
+      "constraints": []
+    }
+  },
+  "resume_allowed": true,
+  "recovery": {
+    "database": "forward_only",
+    "application_rollback_sha": "eda64bd2d0118009853e4e06f0a9c888ad19fd5a"
+  }
+}
