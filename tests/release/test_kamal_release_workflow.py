@@ -673,7 +673,7 @@ def test_preserved_migration_tables_parser_is_valid_python_and_keeps_every_table
 def test_migration_restore_comparisons_fail_closed_and_name_each_mismatch():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     backup = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"] if step.get("id") == "migration_backup")
-    block = backup.split("# RESTORE_VERIFICATION_BLOCK_BEGIN\n", 1)[1].split("\n          # RESTORE_VERIFICATION_BLOCK_END", 1)[0]
+    block = backup.split("# RESTORE_VERIFICATION_BLOCK_BEGIN\n", 1)[1].split("# RESTORE_VERIFICATION_BLOCK_END", 1)[0]
     script = 'set -euo pipefail\nfail() { echo "FAIL:$1" >&2; exit 1; }\n' + block
     pairs = {
         "table_inventory": ("source_tables", "restored_tables"),
