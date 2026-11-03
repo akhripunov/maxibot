@@ -668,3 +668,36 @@ def test_preserved_migration_tables_parser_is_valid_python_and_keeps_every_table
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == tables
+
+
+def test_migration_restore_comparisons_fail_closed_and_name_each_mismatch():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    backup = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"] if step.get("id") == "migration_backup")
+    block = backup.split("# RESTORE_VERIFICATION_BLOCK_BEGIN\n", 1)[1].split("\n          # RESTORE_VERIFICATION_BLOCK_END", 1)[0]
+    script = 'set -euo pipefail\nfail() { echo "FAIL:$1" >&2; exit 1; }\n' + block
+    pairs = {
+        "table_inventory": ("source_tables", "restored_tables"),
+        "extensions": ("source_ext", "restored_ext"),
+        "queue_row_count": ("source_rows", "restored_rows"),
+        "queue_checksum": ("source_queue_sha", "restored_queue_sha"),
+        "alembic_head": ("restored_head", "expected_db_head"),
+    }
+    values = {
+        "source_tables": "public.a", "restored_tables": "public.a",
+        "source_ext": "plpgsql", "restored_ext": "plpgsql",
+        "source_rows": "3", "restored_rows": "3",
+        "source_queue_sha": "a" * 64, "restored_queue_sha": "a" * 64,
+        "restored_head": "0098_source", "expected_db_head": "0098_source",
+    }
+
+    for mismatch, pair in [(None, None), *pairs.items()]:
+        env = os.environ | values
+        if mismatch is not None:
+            env[pair[1]] = "different"
+        result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
+        if mismatch is None:
+            assert result.returncode == 0, result.stderr
+        else:
+            assert result.returncode != 0
+            assert f"MIGRATION_RESTORE_COMPARE=FAIL:{mismatch}" in result.stderr
+            assert "FAIL:restore-verification-mismatch" in result.stderr
