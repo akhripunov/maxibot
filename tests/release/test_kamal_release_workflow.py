@@ -366,12 +366,6 @@ def test_pinned_actionlint_accounts_only_for_known_self_hosted_runner_label():
     assert "-ignore" not in actionlint["run"]
 
 
-def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():
-    cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
-
-    assert "pg_restore --list" in cutover
-    assert "cutover_restore_probe" in cutover
-    assert "--network none" in cutover
 
 
 def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
@@ -517,13 +511,6 @@ def test_pinned_rollback_interface_uses_loaded_cli_metadata_not_help_text():
     assert 'kamal rollback --help | grep' not in verify['run']
 
 
-def test_isolated_cutover_restore_cleanup_remains_fail_closed_and_never_prunes_volumes():
-    cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
-
-    assert 'docker rm -f "$restore_name"' in cutover
-    assert "cleanup_failed=1" in cutover
-    assert "docker volume prune" not in cutover
-    assert "cutover_restore_probe" in cutover
 
 
 def _run_build_selection(workflow_text, tmp_path, *, run_attempt, build_attempt, candidate_sha=None, build_sha=None, approved_digest=None, manifest_digest=None):

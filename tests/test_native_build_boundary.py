@@ -20,8 +20,18 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("codex/native-release-maxibot", self.source)
         self.assertIn("- main", self.source)
         self.assertIn("workflow_dispatch:", self.source)
+        self.assertIn("Explicit production rollback only", self.source)
         self.assertNotIn("workflow_run:", self.source)
         self.assertNotIn("workflow_call:", self.source)
+        for retired in (
+            ".github/workflows/maxibot-auto-preflight.yml",
+            ".github/workflows/maxibot-deploy.yml",
+            ".github/workflows/maxibot-first-kamal-cutover.yml",
+            ".github/workflows/maxibot-linear-reconcile.yml",
+            ".github/workflows/maxibot-prepare.yml",
+            ".github/workflows/maxibot-release-diagnostics.yml",
+        ):
+            self.assertFalse((ROOT / retired).exists(), f"retired release entrypoint remains: {retired}")
 
     def test_candidate_sha_is_used_for_all_events(self):
         self.assertIn("github.event_name == 'pull_request' && github.event.pull_request.head.sha", self.source)
@@ -193,7 +203,8 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             'tests/test_worker_health.py',
             'tests/test_worker_health_collector.py',
             'tests/test_migration_rehearsal.py',
-            'tests/test_release_migration_safety.py',
+            'tests/test_migration_release_contract.py',
+            'tests/test_postgres_migration_rehearsal.py',
         ):
             self.assertIn(contract, self.source)
 
