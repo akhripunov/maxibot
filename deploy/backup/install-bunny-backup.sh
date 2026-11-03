@@ -10,7 +10,7 @@ systemd_version="$(systemctl --version | awk 'NR == 1 {print $2}')"
   echo "systemd 250 or newer is required for encrypted service credentials." >&2
   exit 1
 }
-for command in install systemctl systemd-creds docker aws age flock python3 tar sha256sum awk df date wc tr sed grep cmp mktemp rm chmod mkdir cp ln; do
+for command in install systemctl systemd-creds docker aws age flock timeout python3 tar sha256sum awk df date wc tr sed grep cmp mktemp rm chmod mkdir cp ln; do
   command -v "$command" >/dev/null 2>&1 || { echo "Required command unavailable: $command" >&2; exit 1; }
 done
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"

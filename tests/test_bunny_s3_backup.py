@@ -150,6 +150,15 @@ def test_monthly_restore_drill_runs_after_daily_backup_timeout_window():
     assert "Persistent=true" in timer
 
 
+def test_backup_and_restore_wait_for_shared_lock_with_bounded_service_timeout():
+    for unit_path in (UNIT, DRILL_UNIT):
+        unit = unit_path.read_text()
+        assert "flock --wait 18000 /run/lock/maxibot-bunny-backup.lock" in unit
+        assert "timeout --signal=TERM --kill-after=60s 4h /usr/local/sbin/maxibot-bunny-backup" in unit
+        assert "flock -n" not in unit
+        assert "TimeoutStartSec=10h" in unit
+
+
 def test_secret_provisioning_never_overwrites_existing_credentials():
     source = PROVISIONER.read_text()
     assert 'if [[ -e "$destination" ]]' in source
@@ -164,7 +173,7 @@ def test_installer_fails_before_mutation_without_encrypted_credential_support():
     source = INSTALLER.read_text()
     assert "-ge 250" in source
     assert "systemd-creds" in source
-    for command in ("python3", "tar", "sha256sum", "aws", "age", "docker", "flock"):
+    for command in ("python3", "tar", "sha256sum", "aws", "age", "docker", "flock", "timeout"):
         assert command in source
     assert source.index("systemd 250 or newer") < source.index('install -d -o root')
 

@@ -6,8 +6,8 @@ User=root
 EnvironmentFile=/etc/maxibot/bunny-backup.conf
 LoadCredentialEncrypted=bunny-s3:/etc/credstore.encrypted/maxibot-bunny-s3
 LoadCredentialEncrypted=backup-age-identity:/etc/credstore.encrypted/maxibot-backup-age-identity
-ExecStart=/usr/bin/flock -n /run/lock/maxibot-bunny-backup.lock /usr/local/sbin/maxibot-bunny-backup restore-drill
-TimeoutStartSec=4h
+ExecStart=/usr/bin/flock --wait 18000 /run/lock/maxibot-bunny-backup.lock /usr/bin/timeout --signal=TERM --kill-after=60s 4h /usr/local/sbin/maxibot-bunny-backup restore-drill
+TimeoutStartSec=10h
 ProtectSystem=full
 ProtectHome=yes
 NoNewPrivileges=yes
