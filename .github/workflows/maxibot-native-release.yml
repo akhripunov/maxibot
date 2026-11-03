@@ -594,7 +594,7 @@ jobs:
             schema_contract_b64="$(jq -c '.schema' <<< "$migration_contract" | base64 -w0)"
             schema_mode=source
             [[ "$migration_resume" != true ]] || schema_mode=target
-            schema_validation="$(python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-b64 "$schema_snapshot_b64" --mode "$schema_mode" 2>&1)" || {
+            schema_validation="$(printf '%s' "$schema_snapshot_b64" | base64 -d | python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode "$schema_mode" 2>&1)" || {
               printf '%s\n' "$schema_validation" >&2
               fail "production schema contract mismatch: $schema_validation"
             }
@@ -979,7 +979,7 @@ jobs:
           rm -f "$remote_script"
           schema_snapshot_b64="$(sed -n 's/^MIGRATION_SCHEMA_SNAPSHOT_B64=//p' <<< "$remote_output" | tail -n 1)"
           [[ "$schema_snapshot_b64" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo 'post-migration schema snapshot readback is missing' >&2; exit 1; }
-          python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-b64 "$schema_snapshot_b64" --mode target
+          printf '%s' "$schema_snapshot_b64" | base64 -d | python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode target
           echo "MIGRATION_APPLY=PASS TARGET=$MIGRATION_TARGET" >> "$GITHUB_STEP_SUMMARY"
       - name: Record exact application Deployment after all preflight gates
         id: deployment

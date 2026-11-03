@@ -634,3 +634,15 @@ def test_migration_contract_and_frozen_guard_share_exact_declared_baseline():
     assert guard["env"]["MIGRATION_VALIDATION_BASE_SHA"] == "${{ steps.migration_contract.outputs.validation_base_sha }}"
     assert 'base_sha="$MIGRATION_VALIDATION_BASE_SHA"' in guard["run"]
     assert 'git merge-base "$CANDIDATE_SHA" "origin/$GITHUB_BASE_REF"' not in guard["run"]
+
+
+def test_schema_snapshot_is_streamed_to_verifier_stdin_in_both_production_checks():
+    workflow = WORKFLOW.read_text()
+    streamed_calls = [
+        line for line in workflow.splitlines()
+        if "base64 -d | python scripts/verify_migration_schema_contract.py" in line
+    ]
+
+    assert len(streamed_calls) == 2
+    assert all("--snapshot-stdin" in line for line in streamed_calls)
+    assert '--snapshot-b64 "$schema_snapshot_b64"' not in workflow
