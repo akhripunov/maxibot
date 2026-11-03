@@ -124,13 +124,13 @@ async def test_linkage_failure_can_be_reconciled_to_processed_without_resending(
     assert conversion.metrica_upload_next_check_at is None
     assert conversion.metrica_upload_recovered_at is not None
     assert conversion.sent_at is not None
-    assert client.get_calls == [("100", "upload-1")]
+    assert client.get_calls == [(100, "upload-1")]
     assert not hasattr(client, "upload_offline_conversion")
     assert client.closed
 
     # A second tracker tick cannot create or upload another conversion.
     assert await tracker.refresh_metrica_upload_statuses(database) == 0
-    assert client.get_calls == [("100", "upload-1")]
+    assert client.get_calls == [(100, "upload-1")]
     async with database() as db:
         assert await db.scalar(select(func.count(OfflineConversion.id))) == 1
 
@@ -146,7 +146,7 @@ async def test_uploaded_subscribe_reconciliation_keeps_goal_and_counter_snapshot
     conversion = await read_conversion(database, conversion_id)
     assert conversion.status == "sent"
     assert conversion.goal == "userDidSubscribe"
-    assert client.get_calls == [("321", "upload-1")]  # never the mutable current profile counter
+    assert client.get_calls == [(321, "upload-1")]  # never the mutable current profile counter
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ async def test_provider_errors_are_categorized_and_backed_off(monkeypatch, datab
     assert conversion.status == "linkage_failure"
     assert conversion.metrica_upload_check_error == category
     assert as_utc(conversion.metrica_upload_next_check_at) > datetime.now(timezone.utc)
-    assert client.get_calls == [("100", "upload-1")]
+    assert client.get_calls == [(100, "upload-1")]
     assert client.closed
 
 
