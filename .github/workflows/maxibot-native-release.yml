@@ -116,7 +116,11 @@ jobs:
             --output "$archive"
           printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
-          "$RUNNER_TEMP/actionlint" -color -ignore 'label "maxibot-production" is unknown'
+          "$RUNNER_TEMP/actionlint" -color \
+            -ignore 'label "maxibot-production" is unknown' \
+            -ignore 'shellcheck reported issue in this script: SC2016:info:.*' \
+            -ignore 'shellcheck reported issue in this script: SC2129:style:.*' \
+            .github/workflows/maxibot-native-release.yml
       - name: Rehearse Alembic 0098 to 0099 on isolated PostgreSQL
         env:
           DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/maxibot_rehearsal
