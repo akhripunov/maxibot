@@ -1,5 +1,6 @@
 from pathlib import Path
 import importlib.util
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,10 @@ def _contract(source_sha="a" * 40):
         "frozen_paths": ["app/db/models.py"],
         "rehearsal_script": "scripts/postgres_migration_rehearsal.py",
         "preserved_tables": ["offline_conversion_queue"],
+        "schema": {
+            "source": {"required_columns": [], "absent_columns": [], "absent_indexes": [], "absent_constraints": []},
+            "target": {"columns": [], "indexes": [], "constraints": []},
+        },
         "resume_allowed": True,
         "recovery": {"database": "forward_only", "application_rollback_sha": source_sha},
     }
@@ -77,6 +82,19 @@ def test_synthetic_0100_uses_the_same_graph_and_contract_mechanism():
         ],
         frozen_paths=["app/db/models.py"],
         preserved_tables=["synthetic_records"],
+        schema={
+            "source": {
+                "required_columns": [{"table": "records", "name": "id", "data_type": "bigint"}],
+                "absent_columns": [{"table": "records", "name": "created_by_0100"}],
+                "absent_indexes": ["ix_records_created_by_0100"],
+                "absent_constraints": ["fk_records_created_by_0100"],
+            },
+            "target": {
+                "columns": [{"table": "records", "name": "created_by_0100", "data_type": "text", "nullable": True}],
+                "indexes": [{"table": "records", "name": "ix_records_created_by_0100", "definition": "CREATE INDEX ix_records_created_by_0100 ON public.records USING btree (created_by_0100)", "method": "btree", "unique": False, "valid": True, "ready": True}],
+                "constraints": [{"table": "records", "name": "fk_records_created_by_0100", "type": "f", "definition": "FOREIGN KEY (created_by_0100) REFERENCES owners(id)", "validated": True}],
+            },
+        },
     )
     graph = [
         {"revision": "0099_target", "parents": [], "path": "alembic/versions/0099_target.py"},
@@ -88,6 +106,50 @@ def test_synthetic_0100_uses_the_same_graph_and_contract_mechanism():
     assert result["migration_required"] is True
     assert result["target_revision"] == "0100_synthetic"
     assert result["migration_paths"] == ["alembic/versions/0100_synthetic.py"]
+
+
+def test_synthetic_0100_schema_contract_accepts_clean_source_and_exact_target_only():
+    contract = _contract()
+    contract["schema"] = {
+        "source": {
+            "required_columns": [{"table": "records", "name": "id", "data_type": "bigint"}],
+            "absent_columns": [{"table": "records", "name": "created_by_0100"}],
+            "absent_indexes": ["ix_records_created_by_0100"],
+            "absent_constraints": ["fk_records_created_by_0100"],
+        },
+        "target": {
+            "columns": [{"table": "records", "name": "created_by_0100", "data_type": "text", "nullable": True}],
+            "indexes": [{"table": "records", "name": "ix_records_created_by_0100", "definition": "CREATE INDEX ix_records_created_by_0100 ON public.records USING btree (created_by_0100)", "method": "btree", "unique": False, "valid": True, "ready": True}],
+            "constraints": [{"table": "records", "name": "fk_records_created_by_0100", "type": "f", "definition": "FOREIGN KEY (created_by_0100) REFERENCES owners(id)", "validated": True}],
+        },
+    }
+    source = {"columns": [{"table": "records", "name": "id", "data_type": "bigint"}], "indexes": [], "constraints": []}
+    target = {"columns": source["columns"] + [{"table": "records", "name": "created_by_0100", "data_type": "text", "nullable": True}], "indexes": [{"table": "records", "name": "ix_records_created_by_0100", "definition": "CREATE INDEX ix_records_created_by_0100 ON public.records USING btree (created_by_0100)", "method": "btree", "unique": False, "valid": True, "ready": True}], "constraints": [{"table": "records", "name": "fk_records_created_by_0100", "type": "f", "definition": "FOREIGN KEY (created_by_0100) REFERENCES owners(id)", "validated": True}]}
+    CONTRACT_MODULE.validate_schema_snapshot(contract["schema"], source, "source")
+    CONTRACT_MODULE.validate_schema_snapshot(contract["schema"], target, "target")
+
+    for bad_snapshot, mode in (
+        ({"columns": source["columns"] + [{"table": "records", "name": "created_by_0100", "data_type": "text", "nullable": True}], "indexes": []}, "source"),
+        ({"columns": target["columns"], "indexes": []}, "target"),
+        ({"columns": target["columns"], "indexes": [{**target["indexes"][0], "valid": False}]}, "target"),
+        ({"columns": target["columns"], "indexes": target["indexes"], "constraints": [{**target["constraints"][0], "validated": False}]}, "target"),
+    ):
+        try:
+            CONTRACT_MODULE.validate_schema_snapshot(contract["schema"], bad_snapshot, mode)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid {mode} schema snapshot was accepted")
+
+
+def test_schema_verifier_cli_prints_one_reusable_postgresql_catalog_query():
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts/verify_migration_schema_contract.py"), "--print-query"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    )
+    assert "information_schema.columns" in result.stdout
+    assert "pg_get_indexdef" in result.stdout
+    assert "pg_get_constraintdef" in result.stdout
 
 
 def test_unapproved_scope_or_authorization_is_rejected():

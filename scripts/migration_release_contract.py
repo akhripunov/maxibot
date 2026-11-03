@@ -104,7 +104,7 @@ def evaluate_contract(
     required = {
         "version", "task", "owner_authorization", "source_application_sha", "source_revision",
         "target_revision", "migration_paths", "approved_paths", "rehearsal_script",
-        "preserved_tables", "frozen_paths", "resume_allowed", "recovery",
+        "preserved_tables", "frozen_paths", "resume_allowed", "recovery", "schema",
     }
     if not required <= set(contract):
         raise ValueError(f"migration contract is missing fields: {sorted(required - set(contract))}")
@@ -154,6 +154,7 @@ def evaluate_contract(
         raise ValueError("migration must declare safe preserved-table identifiers")
     if len(tables) != len(set(tables)):
         raise ValueError("migration preserved-table list contains duplicates")
+    _validate_schema_contract(contract["schema"])
     if not isinstance(contract["resume_allowed"], bool):
         raise ValueError("migration resume_allowed must be boolean")
     recovery = contract["recovery"]
@@ -178,8 +179,132 @@ def evaluate_contract(
         "frozen_paths": frozen_paths,
         "rehearsal_script": rehearsal_script,
         "preserved_tables": tables,
+        "schema": contract["schema"],
         "task": contract["task"],
     }
+
+
+def _validate_schema_contract(schema: dict) -> None:
+    if not isinstance(schema, dict) or set(schema) != {"source", "target"}:
+        raise ValueError("migration schema contract must define exactly source and target states")
+    source = schema["source"]
+    target = schema["target"]
+    if (not isinstance(source, dict) or set(source) != {"required_columns", "absent_columns", "absent_indexes", "absent_constraints"}
+            or not isinstance(target, dict) or set(target) != {"columns", "indexes", "constraints"}):
+        raise ValueError("migration schema contract source/target fields are malformed")
+    for key in ("required_columns", "absent_columns"):
+        items = source[key]
+        if not isinstance(items, list):
+            raise ValueError(f"migration schema source {key} must be a list")
+        for item in items:
+            if not isinstance(item, dict) or not {"table", "name"} <= set(item):
+                raise ValueError(f"migration schema source {key} has a malformed column")
+            if not SQL_NAME_RE.fullmatch(item["table"]) or not SQL_NAME_RE.fullmatch(item["name"]):
+                raise ValueError(f"migration schema source {key} has an unsafe identifier")
+            if key == "required_columns" and (not isinstance(item.get("data_type"), str) or not item["data_type"]):
+                raise ValueError("migration schema required source columns need a data_type")
+    for key in ("absent_indexes", "absent_constraints"):
+        names = source[key]
+        if not isinstance(names, list) or any(not isinstance(name, str) or not SQL_NAME_RE.fullmatch(name) for name in names):
+            raise ValueError(f"migration schema source {key} must contain safe names")
+    for item in target["columns"]:
+        required = {"table", "name", "data_type", "nullable"}
+        if not isinstance(item, dict) or not required <= set(item) or set(item) - required - {"max_length", "default_any"}:
+            raise ValueError("migration schema target contains a malformed column postcondition")
+        if not SQL_NAME_RE.fullmatch(item["table"]) or not SQL_NAME_RE.fullmatch(item["name"]):
+            raise ValueError("migration schema target has an unsafe column identifier")
+        if not isinstance(item["data_type"], str) or not item["data_type"] or not isinstance(item["nullable"], bool):
+            raise ValueError("migration schema target column postcondition has invalid types")
+        if "max_length" in item and item["max_length"] is not None and (not isinstance(item["max_length"], int) or item["max_length"] < 1):
+            raise ValueError("migration schema target max_length is invalid")
+        if "default_any" in item and (not isinstance(item["default_any"], list) or not item["default_any"]):
+            raise ValueError("migration schema target default_any must be a non-empty list")
+    for item in target["indexes"]:
+        required = {"table", "name", "definition", "method", "unique", "valid", "ready"}
+        if not isinstance(item, dict) or set(item) != required:
+            raise ValueError("migration schema target contains a malformed index postcondition")
+        if any(not isinstance(item[key], str) or not item[key] for key in ("table", "name", "definition", "method")):
+            raise ValueError("migration schema target index postcondition has invalid names or definition")
+        if not SQL_NAME_RE.fullmatch(item["table"]) or not SQL_NAME_RE.fullmatch(item["name"]):
+            raise ValueError("migration schema target has an unsafe index identifier")
+        if any(not isinstance(item[key], bool) for key in ("unique", "valid", "ready")):
+            raise ValueError("migration schema target index flags must be boolean")
+    for item in target["constraints"]:
+        required = {"table", "name", "type", "definition", "validated"}
+        if not isinstance(item, dict) or set(item) != required:
+            raise ValueError("migration schema target contains a malformed constraint postcondition")
+        if (not SQL_NAME_RE.fullmatch(item["table"]) or not SQL_NAME_RE.fullmatch(item["name"])
+                or not isinstance(item["type"], str) or not item["type"]
+                or not isinstance(item["definition"], str) or not item["definition"]
+                or not isinstance(item["validated"], bool)):
+            raise ValueError("migration schema target constraint postcondition is invalid")
+
+
+def validate_schema_snapshot(schema: dict, snapshot: dict, mode: str) -> None:
+    """Fail closed unless the DB catalog is either a clean source or exact contract target."""
+    _validate_schema_contract(schema)
+    if mode not in {"source", "target"}:
+        raise ValueError("migration schema snapshot mode must be source or target")
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("columns"), list) or not isinstance(snapshot.get("indexes"), list):
+        raise ValueError("migration schema catalog snapshot is malformed")
+    columns = {}
+    for item in snapshot["columns"]:
+        if not isinstance(item, dict) or not isinstance(item.get("table"), str) or not isinstance(item.get("name"), str):
+            raise ValueError("migration schema catalog contains a malformed column")
+        key = (item["table"], item["name"])
+        if key in columns:
+            raise ValueError("migration schema catalog contains a duplicate column")
+        columns[key] = item
+    indexes = {}
+    for item in snapshot["indexes"]:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not isinstance(item.get("table"), str):
+            raise ValueError("migration schema catalog contains a malformed index")
+        key = (item["table"], item["name"])
+        if key in indexes:
+            raise ValueError("migration schema catalog contains a duplicate index")
+        indexes[key] = item
+    constraints = {}
+    for item in snapshot.get("constraints", []):
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not isinstance(item.get("table"), str):
+            raise ValueError("migration schema catalog contains a malformed constraint")
+        key = (item["table"], item["name"])
+        if key in constraints:
+            raise ValueError("migration schema catalog contains a duplicate constraint")
+        constraints[key] = item
+
+    if mode == "source":
+        for expected in schema["source"]["required_columns"]:
+            actual = columns.get((expected["table"], expected["name"]))
+            if actual is None or actual.get("data_type") != expected["data_type"]:
+                raise ValueError(f"migration source schema is missing or mismatches {expected['table']}.{expected['name']}")
+        for expected in schema["source"]["absent_columns"]:
+            if (expected["table"], expected["name"]) in columns:
+                raise ValueError(f"migration source schema already contains target column {expected['table']}.{expected['name']}")
+        for name in schema["source"]["absent_indexes"]:
+            if any(actual_name == name for _, actual_name in indexes):
+                raise ValueError(f"migration source schema already contains target index {name}")
+        for name in schema["source"]["absent_constraints"]:
+            if any(actual_name == name for _, actual_name in constraints):
+                raise ValueError(f"migration source schema already contains target constraint {name}")
+        return
+
+    for expected in schema["target"]["columns"]:
+        actual = columns.get((expected["table"], expected["name"]))
+        if actual is None:
+            raise ValueError(f"migration target schema is missing {expected['table']}.{expected['name']}")
+        for key in ("data_type", "max_length", "nullable"):
+            if key in expected and actual.get(key) != expected[key]:
+                raise ValueError(f"migration target column {expected['table']}.{expected['name']} has unexpected {key}")
+        if "default_any" in expected and actual.get("default") not in expected["default_any"]:
+            raise ValueError(f"migration target column {expected['table']}.{expected['name']} has unexpected default")
+    for expected in schema["target"]["indexes"]:
+        actual = indexes.get((expected["table"], expected["name"]))
+        if actual is None or any(actual.get(key) != expected[key] for key in ("definition", "method", "unique", "valid", "ready")):
+            raise ValueError(f"migration target index {expected['name']} does not match its exact valid postcondition")
+    for expected in schema["target"]["constraints"]:
+        actual = constraints.get((expected["table"], expected["name"]))
+        if actual is None or any(actual.get(key) != expected[key] for key in ("type", "definition", "validated")):
+            raise ValueError(f"migration target constraint {expected['name']} does not match its exact postcondition")
 
 
 def validate_owner_main_publication(ref: str, actor: str, repository_owner: str) -> None:

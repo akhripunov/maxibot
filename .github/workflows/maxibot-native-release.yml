@@ -469,9 +469,11 @@ jobs:
           chmod 600 "$HOME/.ssh/config"
           echo "PRODUCTION_SSH=$RUNNER_TEMP/ssh/id_ed25519" >> "$GITHUB_ENV"
           echo "PRODUCTION_KNOWN_HOSTS_FILE=$RUNNER_TEMP/ssh/known_hosts" >> "$GITHUB_ENV"
-          remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s -- "$RELEASE_OPERATION" <<'REMOTE'
+          schema_query_b64="$(python scripts/verify_migration_schema_contract.py --print-query | base64 -w0)"
+          remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s -- "$RELEASE_OPERATION" "$schema_query_b64" <<'REMOTE'
           set -euo pipefail
           release_operation="$1"
+          schema_query="$(printf '%s' "$2" | base64 -d)" || { echo 'PRODUCTION_BASELINE=FAIL: schema query decode failed' >&2; exit 1; }
           fail() { printf 'PRODUCTION_BASELINE=FAIL: %s\n' "$1" >&2; exit 1; }
           require_running() {
             local name="$1" state
@@ -502,7 +504,7 @@ jobs:
           fi
           database_head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" || fail 'PostgreSQL Alembic head query failed'
           [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]] || fail 'PostgreSQL Alembic head is empty or malformed'
-          active_migrations="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from pg_stat_activity where datname=current_database() and pid <> pg_backend_pid() and state <> 'idle' and (query ilike '%alter table%offline_conversion_queue%' or query ilike '%create index%ix_offline_conversion_queue_metrica_poll%' or query ilike '%alembic upgrade%')")" || fail 'active database migration read failed'
+          active_migrations="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from pg_stat_activity where datname=current_database() and pid <> pg_backend_pid() and state <> 'idle' and (query ~* '\\m(alter|create|drop|truncate|comment|grant|revoke|refresh)\\M' or query ilike '%alembic upgrade%')")" || fail 'active database migration read failed'
           [[ "$active_migrations" == 0 ]] || fail 'another production migration is active'
           queue_schema="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select column_name || ':' || data_type || ':' || is_nullable from information_schema.columns where table_schema = 'public' and table_name = 'offline_conversion_queue' order by ordinal_position")" || fail 'offline_conversion_queue schema read failed'
           [[ -n "$queue_schema" ]] || fail 'offline_conversion_queue table is absent or empty'
@@ -514,12 +516,15 @@ jobs:
           db_volume="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" || fail 'PostgreSQL volume read failed'
           redis_volume="$(docker inspect "$redis" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')" || fail 'Redis volume read failed'
           uploads_volume="$(docker inspect "$api" --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Name}}{{end}}{{end}}')" || fail 'API uploads volume read failed'
+          schema_snapshot="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "$schema_query")" || fail 'PostgreSQL schema catalog snapshot failed'
+          [[ -n "$schema_snapshot" ]] || fail 'PostgreSQL schema catalog snapshot is empty'
+          schema_snapshot_b64="$(printf '%s' "$schema_snapshot" | base64 | tr -d '\n')"
           [[ "$db_id" =~ ^[0-9a-f]{64}$ && "$redis_id" =~ ^[0-9a-f]{64}$ ]] || fail 'PostgreSQL or Redis container identity is malformed'
           [[ -n "$db_volume" && -n "$redis_volume" && -n "$uploads_volume" ]] || fail 'required PostgreSQL, Redis, or uploads volume is missing'
-          printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$api_sha" "$worker_sha" "$database_head" "$db_id" "$redis_id" "$db_volume" "$redis_volume" "$uploads_volume"
+          printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$api_sha" "$worker_sha" "$database_head" "$db_id" "$redis_id" "$db_volume" "$redis_volume" "$uploads_volume" "$schema_snapshot_b64"
           REMOTE
           )" || fail 'SSH could not read the production runtime baseline'
-          IFS='|' read -r baseline_sha worker_baseline_sha database_head old_db_id old_redis_id old_db_volume old_redis_volume old_uploads_volume <<< "$remote"
+          IFS='|' read -r baseline_sha worker_baseline_sha database_head old_db_id old_redis_id old_db_volume old_redis_volume old_uploads_volume schema_snapshot_b64 <<< "$remote"
           [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'production baseline SHA is missing or malformed'
           [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]] || fail 'production database head is missing or malformed'
           [[ "$old_db_id" =~ ^[0-9a-f]{64}$ && "$old_redis_id" =~ ^[0-9a-f]{64}$ ]] || fail 'production data-container identity is missing or malformed'
@@ -584,31 +589,11 @@ jobs:
           PY
               echo 'MIGRATION_OWNER_MAIN_PUBLICATION=PASS' >> "$GITHUB_STEP_SUMMARY"
             fi
-            if [[ "$migration_required" == true && "$migration_target" == 0099_metrica_upload_reconciliation_v1 ]]; then
-              grep -Fq 'OWNER-authorized for one release scope' docs/release/metrica-0099-risk-contract.md || fail '0099 owner risk contract record is missing'
-              grep -Fq 'This is a process authorization and is not represented as a cryptographic OWNER signature.' docs/release/metrica-0099-risk-contract.md || fail '0099 risk contract misrepresents authorization evidence'
-            partial_schema="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -F '|' -v ON_ERROR_STOP=1 -c "select column_name,coalesce(character_maximum_length::text,''),data_type,is_nullable,coalesce(column_default,'') from information_schema.columns where table_schema='public' and table_name='offline_conversion_queue' and column_name in ('metrica_upload_counter_id','metrica_upload_observation_started_at','metrica_upload_check_attempts','metrica_upload_next_check_at','metrica_upload_check_error','metrica_upload_recovered_at') order by column_name")" || fail '0099 partial-schema read failed'
-            while IFS='|' read -r name length data_type nullable default_value; do
-              [[ -n "$name" ]] || continue
-              case "$name:$length:$data_type:$nullable:$default_value" in
-                metrica_upload_counter_id:32:character\ varying:YES:|metrica_upload_check_error:64:character\ varying:YES:|metrica_upload_observation_started_at::timestamp\ with\ time\ zone:YES:|metrica_upload_next_check_at::timestamp\ with\ time\ zone:YES:|metrica_upload_recovered_at::timestamp\ with\ time\ zone:YES:|metrica_upload_check_attempts::integer:NO:0|metrica_upload_check_attempts::integer:NO:0::integer) ;;
-                *) fail "0099 partial state contains incompatible column $name" ;;
-              esac
-            done <<< "$partial_schema"
-            active_index_builds="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from pg_stat_activity where pid <> pg_backend_pid() and query ilike '%create index concurrently%ix_offline_conversion_queue_metrica_poll%' and state <> 'idle'")" || fail '0099 active index-build query failed'
-            [[ "$active_index_builds" =~ ^[0-9]+$ ]] || fail '0099 active index-build count is malformed'
-            [[ "$active_index_builds" == 0 ]] || fail '0099 index build is still active; do not start a competing migration'
-            expected_index_semantics='false|btree|public|public|offline_conversion_queue|2|2|true|true|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)'
-            partial_index="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select concat_ws('|',i.indisvalid::text,i.indisready::text,i.indisunique::text,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts::text,i.indnkeyatts::text,(i.indpred is null)::text,(i.indexprs is null)::text,array_to_string(array_agg(coalesce(a.attname,'<expression>') order by k.ordinality),','),pg_get_indexdef(idx.oid)) from pg_class idx join pg_index i on i.indexrelid=idx.oid join pg_am am on am.oid=idx.relam join pg_namespace index_ns on index_ns.oid=idx.relnamespace join pg_class tbl on tbl.oid=i.indrelid join pg_namespace table_ns on table_ns.oid=tbl.relnamespace join unnest(i.indkey) with ordinality as k(attnum,ordinality) on true left join pg_attribute a on a.attrelid=tbl.oid and a.attnum=k.attnum where idx.relname='ix_offline_conversion_queue_metrica_poll' and index_ns.nspname='public' group by i.indisvalid,i.indisready,i.indisunique,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts,i.indnkeyatts,(i.indpred is null),(i.indexprs is null),idx.oid")" || fail '0099 partial-index read failed'
-            case "$partial_index" in
-              "true|true|$expected_index_semantics"|"false|false|$expected_index_semantics"|"false|true|$expected_index_semantics") ;;
-              *) fail '0099 partial state contains an incompatible polling index definition' ;;
-            esac
-            if [[ "$migration_resume" == true ]]; then
-              [[ "$(wc -l <<< "$partial_schema" | tr -d ' ')" == 6 ]] || fail '0099 forward resume requires all six exact reconciliation columns'
-              [[ "$partial_index" == "true|true|$expected_index_semantics" ]] || fail '0099 forward resume requires the exact valid and ready polling index'
-            fi
-            fi
+            schema_contract_b64="$(jq -c '.schema' <<< "$migration_contract" | base64 -w0)"
+            schema_mode=source
+            [[ "$migration_resume" != true ]] || schema_mode=target
+            python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-b64 "$schema_snapshot_b64" --mode "$schema_mode" || fail 'production schema does not match the exact contract source or target state'
+            echo "MIGRATION_SCHEMA_${schema_mode^^}=PASS" >> "$GITHUB_STEP_SUMMARY"
             if [[ "$migration_required" == true ]]; then
               echo 'MIGRATION_RISK_CONTRACT=PASS' >> "$GITHUB_STEP_SUMMARY"
             fi
@@ -900,6 +885,7 @@ jobs:
           MIGRATION_SOURCE: ${{ steps.baseline.outputs.migration_source }}
           MIGRATION_TARGET: ${{ steps.baseline.outputs.migration_target }}
           MIGRATION_RESUME: ${{ steps.baseline.outputs.migration_resume }}
+          MIGRATION_CONTRACT_JSON: ${{ steps.baseline.outputs.migration_contract }}
         run: |
           set -euo pipefail
           [[ "$IMAGE_REF" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]]
@@ -913,6 +899,8 @@ jobs:
           [[ "$MIGRATION_SOURCE" =~ ^[A-Za-z0-9_]{1,64}$ && "$MIGRATION_TARGET" =~ ^[A-Za-z0-9_]{1,64}$ ]]
           [[ "$EXPECTED_DATABASE_HEAD" == "$MIGRATION_SOURCE" || "$EXPECTED_DATABASE_HEAD" == "$MIGRATION_TARGET" ]]
           [[ "$MIGRATION_RESUME" == true || "$MIGRATION_RESUME" == false ]]
+          schema_contract_b64="$(jq -c '.schema' <<< "$MIGRATION_CONTRACT_JSON" | base64 -w0)"
+          schema_query_b64="$(python scripts/verify_migration_schema_contract.py --print-query | base64 -w0)"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           for run_status in queued in_progress; do
             active_runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=$run_status&per_page=100")"
@@ -928,7 +916,8 @@ jobs:
           export DOCKER_CONFIG="$docker_config"
           printf '%s\n' "$registry_token" | docker login ghcr.io --username akhripunov --password-stdin >/dev/null
           unset registry_token
-          sha="$1"; image_ref="$2"; expected_rows="$3"; expected_queue_sha="$4"; expected_backup="$5"; backup_sha="$6"; expected_db_id="$7"; expected_db_volume="$8"; expected_prod_sha="$9"; expected_db_head="${10}"; migration_resume="${11}"; migration_source="${12}"; migration_target="${13}"; expected_preserved_counts_b64="${14}"
+          sha="$1"; image_ref="$2"; expected_rows="$3"; expected_queue_sha="$4"; expected_backup="$5"; backup_sha="$6"; expected_db_id="$7"; expected_db_volume="$8"; expected_prod_sha="$9"; expected_db_head="${10}"; migration_resume="${11}"; migration_source="${12}"; migration_target="${13}"; expected_preserved_counts_b64="${14}"; schema_query_b64="${15}"
+          schema_query="$(printf '%s' "$schema_query_b64" | base64 -d)" || fail 'schema query decode failed'
           db=maxibot-vps-db-1
           api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
           worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
@@ -974,15 +963,17 @@ jobs:
           queue_sha_after="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')"
           [[ "$queue_sha_after" == "$expected_queue_sha" ]]
           [[ "$(preserved_counts)" == "$preserved_counts_from_contract" ]] || fail 'preserved-table row counts changed during migration'
-          actual_index="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select concat_ws('|',i.indisvalid::text,i.indisready::text,i.indisunique::text,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts::text,i.indnkeyatts::text,(i.indpred is null)::text,(i.indexprs is null)::text,array_to_string(array_agg(coalesce(a.attname,'<expression>') order by k.ordinality),','),pg_get_indexdef(idx.oid)) from pg_class idx join pg_index i on i.indexrelid=idx.oid join pg_am am on am.oid=idx.relam join pg_namespace index_ns on index_ns.oid=idx.relnamespace join pg_class tbl on tbl.oid=i.indrelid join pg_namespace table_ns on table_ns.oid=tbl.relnamespace join unnest(i.indkey) with ordinality as k(attnum,ordinality) on true left join pg_attribute a on a.attrelid=tbl.oid and a.attnum=k.attnum where idx.relname='ix_offline_conversion_queue_metrica_poll' and index_ns.nspname='public' group by i.indisvalid,i.indisready,i.indisunique,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts,i.indnkeyatts,(i.indpred is null),(i.indexprs is null),idx.oid")" || fail 'exact polling index read failed after migration'
-          if [[ "$migration_target" == 0099_metrica_upload_reconciliation_v1 ]]; then
-            [[ "$actual_index" == 'true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)' ]] || fail 'polling index does not match the exact expected catalog definition'
-          fi
+          schema_snapshot="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "$schema_query")" || fail 'post-migration PostgreSQL schema catalog snapshot failed'
+          [[ -n "$schema_snapshot" ]] || fail 'post-migration schema catalog snapshot is empty'
+          printf 'MIGRATION_SCHEMA_SNAPSHOT_B64=%s\n' "$(printf '%s' "$schema_snapshot" | base64 | tr -d '\n')"
           REMOTE
           chmod 700 "$remote_script"
           scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$remote_script" "root@$PRODUCTION_HOST:/tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh"
-          printf '%s\n' "$KAMAL_REGISTRY_PASSWORD" | ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "bash /tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh '$CANDIDATE_SHA' '$IMAGE_REF' '$BACKUP_QUEUE_ROWS' '$BACKUP_QUEUE_SHA' '$BACKUP_PATH' '$BACKUP_SHA' '$EXPECTED_DB_ID' '$EXPECTED_DB_VOLUME' '$EXPECTED_PRODUCTION_SHA' '$EXPECTED_DATABASE_HEAD' '$MIGRATION_RESUME' '$MIGRATION_SOURCE' '$MIGRATION_TARGET' '$BACKUP_PRESERVED_COUNTS'"
+          remote_output="$(printf '%s\n' "$KAMAL_REGISTRY_PASSWORD" | ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "bash /tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh '$CANDIDATE_SHA' '$IMAGE_REF' '$BACKUP_QUEUE_ROWS' '$BACKUP_QUEUE_SHA' '$BACKUP_PATH' '$BACKUP_SHA' '$EXPECTED_DB_ID' '$EXPECTED_DB_VOLUME' '$EXPECTED_PRODUCTION_SHA' '$EXPECTED_DATABASE_HEAD' '$MIGRATION_RESUME' '$MIGRATION_SOURCE' '$MIGRATION_TARGET' '$BACKUP_PRESERVED_COUNTS' '$schema_query_b64'")"
           rm -f "$remote_script"
+          schema_snapshot_b64="$(sed -n 's/^MIGRATION_SCHEMA_SNAPSHOT_B64=//p' <<< "$remote_output" | tail -n 1)"
+          [[ "$schema_snapshot_b64" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo 'post-migration schema snapshot readback is missing' >&2; exit 1; }
+          python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-b64 "$schema_snapshot_b64" --mode target
           echo "MIGRATION_APPLY=PASS TARGET=$MIGRATION_TARGET" >> "$GITHUB_STEP_SUMMARY"
       - name: Record exact application Deployment after all preflight gates
         id: deployment

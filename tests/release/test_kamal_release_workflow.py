@@ -229,7 +229,8 @@ def test_kamal_deploy_uses_runtime_baseline_and_scoped_0099_backup_restore_witho
     assert "source_queue_sha" in deploy_script and "restored_queue_sha" in deploy_script
     assert "source-table-inventory" in deploy_script
     assert "--network none" in deploy_script
-    assert "0099_metrica_upload_reconciliation_v1" in deploy_script
+    assert "scripts/verify_migration_schema_contract.py" in deploy_script
+    assert "0099_metrica_upload_reconciliation_v1" not in deploy_script
     assert "caddy" not in deploy_script.lower()
     assert "maxibot-vps-https-1" not in deploy_script
     assert "BASELINE_MODE" not in kamal_config
@@ -320,43 +321,39 @@ def test_0099_backup_and_database_identity_are_revalidated_immediately_before_mi
     assert "competing production release detected immediately before migration" in migration
 
 
-def test_0099_forward_resume_requires_exact_old_app_and_complete_target_schema_without_reapplying_ddl():
+def test_contract_migration_forward_resume_checks_source_or_target_schema_without_reapplying_ddl():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
     migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
 
     assert "migration_release_contract.py" in baseline
-    assert 'wc -l <<< "$partial_schema"' in baseline
-    assert '[[ "$partial_index" == "true|true|$expected_index_semantics" ]]' in baseline
+    assert "verify_migration_schema_contract.py" in baseline
+    assert "schema_contract_b64=" in baseline
+    assert "schema_mode=source" in baseline
+    assert 'MIGRATION_SCHEMA_${schema_mode^^}=PASS' in baseline
     assert '"migration_resume=$migration_resume"' in baseline
     assert 'if [[ "$migration_resume" == false ]]; then' in migration
     assert '[[ "$expected_db_head" == "$migration_source" ]]' in migration
     assert '[[ "$expected_db_head" == "$migration_target" ]]' in migration
     assert 'alembic upgrade "$migration_target"' in migration
+    assert "verify_migration_schema_contract.py" in migration
+    assert "MIGRATION_SCHEMA_SNAPSHOT_B64=" in migration
+    assert "--mode target" in migration
+    assert "0099" not in baseline + migration
 
 
-def test_0099_preflight_and_post_apply_validate_exact_polling_index_catalog_definition():
+def test_migration_schema_verification_is_contract_driven_and_not_revision_specific():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
     migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
 
-    expected = "true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)"
-    assert expected in migration
-    assert "expected_index_semantics='false|btree|public|public|offline_conversion_queue" in baseline
-    assert "[[ \"$actual_index\" == '" + expected + "' ]]" in migration
-    for fragment in (
-        "i.indisunique::text",
-        "am.amname",
-        "i.indnatts::text",
-        "i.indnkeyatts::text",
-        "(i.indpred is null)::text",
-        "(i.indexprs is null)::text",
-        "pg_get_indexdef(idx.oid)",
-    ):
-        assert baseline.count(fragment) >= 1
-        assert migration.count(fragment) >= 1
+    contract = json.loads((ROOT / "docs/release/migration-risk-contract.json").read_text())
+    index = contract["schema"]["target"]["indexes"][0]
+    assert index["definition"].startswith("CREATE INDEX ix_offline_conversion_queue_metrica_poll ")
+    assert index["valid"] is True and index["ready"] is True
+    assert "0099" not in WORKFLOW.read_text()
 
 
 def test_pinned_actionlint_accounts_only_for_known_self_hosted_runner_label():
