@@ -103,7 +103,7 @@ def main() -> int:
                 raise RuntimeError("rehearsal database is not empty")
 
         alembic(BASELINE)
-        from app.db.models import Admin, Channel, LandingPage, OfflineConversion, TrafficMembership, TrafficVisit
+        from app.db.models import Admin, Channel, LandingPage, OfflineConversion, TrafficMembership, TrafficVisit, uid
 
         before_columns = {column["name"] for column in inspect(engine).get_columns("offline_conversion_queue")}
         if before_columns & NEW_COLUMNS:
@@ -134,11 +134,13 @@ def main() -> int:
                 )
                 session.add_all([visit, membership])
                 session.flush()
-                session.add(OfflineConversion(
-                    visit_id=visit.id, membership_id=membership.id, target="YANDEX",
+                session.execute(OfflineConversion.__table__.insert().values(
+                    id=uid(), visit_id=visit.id, membership_id=membership.id, target="YANDEX",
                     goal="userDidSubscribe" if index % 2 == 0 else "userDidUnsubscribe",
-                    conversion_datetime=now, status=("linkage_failure" if index % 3 == 0 else "pending"),
-                    attempts=index % 4, metrica_upload_id=f"fixture-upload-{index}",
+                    identifier_type=None, identifier_value=None, conversion_datetime=now,
+                    status=("linkage_failure" if index % 3 == 0 else "pending"),
+                    attempts=index % 4, next_retry_at=None, last_error=None, created_at=now,
+                    sent_at=None, metrica_upload_id=f"fixture-upload-{index}",
                     metrica_upload_status=("LINKAGE_FAILURE" if index % 3 == 0 else "PROCESSING"),
                     metrica_upload_checked_at=now,
                 ))

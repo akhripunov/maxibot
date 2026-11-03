@@ -26,6 +26,8 @@ def test_postgres_rehearsal_requires_real_postgresql_and_preserves_queue_rows():
     assert "TrafficMembership" in SCRIPT and "TrafficVisit" in SCRIPT
     assert "session.add_all([admin, channel])" in SCRIPT
     assert SCRIPT.index("session.add_all([admin, channel])") < SCRIPT.index("session.add(landing)")
+    assert "OfflineConversion.__table__.insert().values(" in SCRIPT
+    assert "session.add(OfflineConversion(" not in SCRIPT
     assert "session_replication_role" not in SCRIPT
     assert "BASELINE_ORM_COMPATIBILITY=PASS" in SCRIPT
     assert "BASELINE_AND_CANDIDATE_ORM=PASS" in SCRIPT
