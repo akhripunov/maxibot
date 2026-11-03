@@ -15,6 +15,7 @@ The release workflow must require the exact source baseline, exact starting head
 
 The exact one-time candidate path set is:
 
+- `.github/actionlint.yaml` — registers the existing `maxibot-production` self-hosted runner label for actionlint validation.
 - `.github/workflows/maxibot-native-release.yml`
 - `alembic/versions/0099_metrica_upload_reconciliation_v1.py`
 - `app/bot/menu.py`

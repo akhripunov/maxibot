@@ -365,10 +365,10 @@ def test_pinned_actionlint_accounts_only_for_known_self_hosted_runner_label():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     tests = workflow["jobs"]["tests"]["steps"]
     actionlint = next(step for step in tests if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
-    assert '-ignore \'label "maxibot-production" is unknown\'' in actionlint["run"]
-    assert '-ignore \'shellcheck reported issue in this script: SC2016:info:.*\'' in actionlint["run"]
-    assert '-ignore \'shellcheck reported issue in this script: SC2129:style:.*\'' in actionlint["run"]
-    assert ".github/workflows/maxibot-native-release.yml" in actionlint["run"]
+    config = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
+    assert config["self-hosted-runner"]["labels"] == ["maxibot-production"]
+    assert 'actionlint" -color .github/workflows/maxibot-native-release.yml' in actionlint["run"]
+    assert "-ignore" not in actionlint["run"]
 
 
 def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():
