@@ -143,6 +143,13 @@ def test_daily_backup_timer_runs_at_0600_moscow_with_small_jitter():
     assert "Persistent=true" in timer
 
 
+def test_monthly_restore_drill_runs_after_daily_backup_timeout_window():
+    timer = DRILL_TIMER.read_text()
+
+    assert "OnCalendar=*-*-01 08:00:00 UTC" in timer
+    assert "Persistent=true" in timer
+
+
 def test_secret_provisioning_never_overwrites_existing_credentials():
     source = PROVISIONER.read_text()
     assert 'if [[ -e "$destination" ]]' in source

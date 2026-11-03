@@ -5,7 +5,9 @@ This is an independent systemd scheduled backup, not part of the app release wor
 ## Approved policy
 
 - Daily backup, 30-day S3 retention, RPO 24 hours.
+- Daily timer at 03:00 UTC (06:00 Moscow) with a five-minute scheduling jitter.
 - Monthly isolated PostgreSQL and uploads restore drill.
+- Monthly restore drill timer at 08:00 UTC on day 1, after the daily backup's four-hour timeout window; both jobs share a non-blocking lock.
 - RTO target: 4 hours; each drill records elapsed seconds and the systemd unit has a four-hour timeout.
 - Existing VPS recovery copies stay in place until a successful restore drill reads the object back from Bunny S3 and OWNER accepts the replacement policy.
 - The system keeps the last successful restore-tested archive even after its 30-day age; expired other objects are eligible for deletion only after marker and object identity checks pass.

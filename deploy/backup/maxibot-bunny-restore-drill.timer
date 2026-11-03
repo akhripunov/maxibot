@@ -2,7 +2,7 @@
 Description=Monthly MAXIBOT Bunny S3 restore drill
 
 [Timer]
-OnCalendar=*-*-01 03:20:00 UTC
+OnCalendar=*-*-01 08:00:00 UTC
 AccuracySec=1min
 RandomizedDelaySec=10min
 Persistent=true
