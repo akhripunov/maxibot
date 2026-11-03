@@ -38,4 +38,15 @@ def test_native_migration_backup_uses_one_snapshot_and_isolated_verified_restore
         assert marker in script
 
     assert script.index("source_preserved_counts=") < script.index("pg_dump -Fc --snapshot=")
-    assert "source_preserved_counts="$( in script
+    assert 'source_preserved_counts="$(snapshot_preserved_counts)"' in script
+
+
+def test_native_migration_apply_is_forward_only_and_follows_verified_backup():
+    steps, backup, migration = _migration_steps()
+    apply_script = migration["run"]
+
+    assert steps.index(backup) < steps.index(migration)
+    assert 'alembic upgrade "$migration_target"' in apply_script
+    assert "alembic downgrade" not in apply_script
+    assert '[[ "$expected_db_head" == "$migration_target" ]]' in apply_script
+    assert "MIGRATION_APPLY=SUCCESS" in apply_script
