@@ -130,11 +130,19 @@ jobs:
           else
             base_sha="$GITHUB_EVENT_BEFORE"
           fi
+          changed_paths="$(git diff --name-only "$base_sha" "$CANDIDATE_SHA")"
+          if grep -Fxq 'docs/release/migration-risk-contract.json' <<< "$changed_paths"; then
+            declared_source_sha="$(python -c 'import json; print(json.load(open("docs/release/migration-risk-contract.json"))["source_application_sha"])')"
+            [[ "$declared_source_sha" =~ ^[0-9a-f]{40}$ ]]
+            git merge-base --is-ancestor "$declared_source_sha" "$CANDIDATE_SHA"
+            base_sha="$declared_source_sha"
+          fi
           [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           contract="$(python scripts/migration_release_contract.py --base-sha "$base_sha" --head-sha "$CANDIDATE_SHA" --database-head "$(python -c 'import json; print(json.load(open("docs/release/migration-risk-contract.json"))["source_revision"])')")"
-          python - "$contract" >> "$GITHUB_OUTPUT" <<'PY'
+          python - "$contract" "$base_sha" >> "$GITHUB_OUTPUT" <<'PY'
           import json, sys
           contract=json.loads(sys.argv[1])
+          print(f"validation_base_sha={sys.argv[2]}")
           for name in ("migration_required", "migration_resume", "source_revision", "target_revision", "rehearsal_script", "task"):
               print(f"{name}={str(contract.get(name, '')).lower() if isinstance(contract.get(name), bool) else contract.get(name, '')}")
           print(f"frozen_paths={json.dumps(contract.get('frozen_paths', []), separators=(',', ':'))}")
@@ -145,16 +153,10 @@ jobs:
           MIGRATION_REQUIRED: ${{ steps.migration_contract.outputs.migration_required }}
           MIGRATION_TASK: ${{ steps.migration_contract.outputs.task }}
           MIGRATION_FROZEN_PATHS: ${{ steps.migration_contract.outputs.frozen_paths }}
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
-          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
-          GITHUB_BASE_REF: ${{ github.base_ref }}
+          MIGRATION_VALIDATION_BASE_SHA: ${{ steps.migration_contract.outputs.validation_base_sha }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-            base_sha="$(git merge-base "$CANDIDATE_SHA" "origin/$GITHUB_BASE_REF")"
-          else
-            base_sha="$GITHUB_EVENT_BEFORE"
-          fi
+          base_sha="$MIGRATION_VALIDATION_BASE_SHA"
           [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           if [[ "$MIGRATION_REQUIRED" == true ]]; then
             [[ -n "$MIGRATION_TASK" ]]
