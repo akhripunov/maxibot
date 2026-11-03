@@ -97,9 +97,9 @@ def test_corrupt_heartbeat_is_rejected():
 
 
 def test_release_keeps_ads_write_flags_disabled():
-    source = open("scripts/release_prod.sh", encoding="utf-8").read()
-    assert "ADS_AUTOPILOT_ENABLED=false" in source
-    assert "ADS_WRITE_ACTIONS_ENABLED=false" in source
+    source = open(".github/workflows/maxibot-native-release.yml", encoding="utf-8").read()
+    assert "ADS_AUTOPILOT_ENABLED: 'false'" in source
+    assert "ADS_WRITE_ACTIONS_ENABLED: 'false'" in source
 
 
 def test_primary_runtime_heartbeat_follows_durable_marker_and_stop(monkeypatch):

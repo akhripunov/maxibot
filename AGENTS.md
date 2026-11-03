@@ -16,15 +16,6 @@ for changed paths.
 
 ---
 
-## Historical exception — ME-51 first Compose → Kamal cutover (completed; not active)
-
-For ME-51 only, the OWNER-authorized first Compose → Kamal cutover uses `.github/workflows/maxibot-first-kamal-cutover.yml` instead of the legacy `scripts/release_prod.sh` path. This exception supersedes conflicting V5/sole-mutation-path requirements only for that one transition and its documented recovery. The existing DevOps authority has been transferred by OWNER to Codex chat `01a1778b-db7d-7490-900e-90a71ee73f40` for ME-51.
-
-Publish the scoped, clean, tested candidate only within OWNER's ME-51 authorization; require successful exact-SHA hosted Tests/Build, immutable GHCR digest/platform/source/SBOM/provenance verification, protected `production` Environment approval, and a successful fresh preflight before Apply. Preserve backup/isolated restore, single Poller, Worker 512 MiB, unchanged PostgreSQL/Redis/volumes, strict SSH, frozen-path/security gates and the documented Compose recovery baseline. `OWNER_ACCEPTED_UNROTATED` records accepted risk, never completed rotation. No direct ad/provider writes, GPoint changes, credential/network-policy changes, or gate bypass are authorized.
-
-After verified first cutover, ordinary ME-51 release validation uses the existing `.github/workflows/maxibot-native-release.yml` protected stock Kamal `--skip-push` path with the same identity and runtime safety gates, following Linear «Правила релизов NEW». Legacy V5/Compose application mutation entrypoints must not operate concurrently on the same application containers; recovery material remains until OWNER confirms migration. This exception grants no permission for unrelated future releases and does not remove mandatory GitHub approval.
-
-
 ---
 
 # MAXIBOT project instructions
@@ -69,7 +60,7 @@ After verified first cutover, ordinary ME-51 release validation uses the existin
 
 ## MAXIBOT release boundaries
 
-- V2/V5 Release Orchestrator, Compose, `scripts/release_prod.sh` and Mac/controller are historical or recovery-specific; they are not the ordinary production mutation path. Keep historical implementation frozen unless separately authorized.
+- The V2/V5 Release Orchestrator, Compose Apply, and Mac-runner/controller deployment paths are retired and removed. Do not recreate an alternate production mutation path; preserve Native Release gates and stock Kamal recovery.
 - The ordinary release is the single push-triggered hosted Tests → Build → Kamal Deploy → Runtime Verify workflow. Preserve exact SHA/digest, linux/amd64, provenance, frozen paths, single Poller, Worker 512 MiB, PostgreSQL/Redis/volumes, Alembic, backup/rollback and runtime safety gates. Do not infer owner/product acceptance from technical PASS.
 - A development-only task does not authorize a `main` push because it would automatically deploy. OWNER must authorize publication and resulting release for the named scope. Never borrow GPoint authorization. Do not directly publish instruction-only changes to `main` without that authorization; use a PR instead.
 - Do not manually dispatch routine Deploy, rerun an uncertain/partial Apply, or use an old Mac controller. The manually dispatched rollback operation remains owner-scoped and safety-gated. Check active runs and remote SHA before writes; browser UI is not a release execution tool. Untrusted PR/fork code must never have production secrets.
@@ -78,7 +69,7 @@ After verified first cutover, ordinary ME-51 release validation uses the existin
 
 - Once the OWNER has approved the task, DEV may publish scoped edits to `AGENTS.md`, Codex instructions, and role/bootstrap documents directly to exact current `origin/main` without a mandatory PR or separate approval per ordinary instruction commit, **only when current repository controls permit direct writes**. A PR is optional or used when technically required, not a general instruction-publication gate. Do not reset, switch, stash, overwrite, or update another active chat's branch/worktree.
 - Read the exact current main file/blob SHA and applicable policies before editing. Preserve concurrent changes, run relevant syntax, policy, security, frozen-path and independent QA gates where applicable, and record the exact published commit SHA. Never bypass branch protection or required reviews/checks; on a blocked direct write, stop and report a compliant alternative.
-- An explicit, scope-specific OWNER authorization is still required for material changes to agent authority/autonomy, safety, OWNER-only operations, release rules, protected paths, access controls and other protected policies. The decision to eliminate mandatory PRs is **not** blanket approval for unrelated protected changes or production apply. Preserve MAXIBOT-only exact-SHA/TASK_SCOPED_AUTO rules and all independent gates.
+- An explicit, scope-specific OWNER authorization is still required for material changes to agent authority/autonomy, safety, OWNER-only operations, release rules, protected paths, access controls and other protected policies. The decision to eliminate mandatory PRs is **not** blanket approval for unrelated protected changes or production apply. Preserve exact-SHA image identity and all independent gates; do not reintroduce task claim/consume controllers.
 - Before an OWNER-authorized `main` push, acknowledge that GitHub will attempt automatic production Deploy even for instruction-only changes. Verify the exact remote SHA and active-run state; after publication verify the new exact SHA and hosted workflow result, then synchronize Linear. Otherwise publish a branch/PR only; never represent this as production COMPLETE. Do not disturb existing Codex worktrees or credentials.
 
 ## Task completion

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,30 +23,27 @@ FORBIDDEN_MIGRATION_PATHS = {"docker-compose.vps.yml"}
 
 
 def load_alembic_graph(directory: Path) -> list[dict]:
+    script_location = directory.parent if directory.name == "versions" else directory
+    config = Config()
+    config.set_section_option("alembic", "script_location", str(script_location))
+    try:
+        script = ScriptDirectory.from_config(config)
+        revisions = script.walk_revisions(base="base", head="heads")
+    except Exception as error:
+        raise ValueError(f"Alembic could not load the candidate revision graph: {type(error).__name__}") from error
+
+    relative_root = ROOT if script_location.is_relative_to(ROOT) else script_location.parent
     graph = []
-    for path in sorted(directory.glob("*.py")):
-        if path.name == "__init__.py":
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (OSError, SyntaxError) as error:
-            raise ValueError(f"cannot parse Alembic revision {path.name}: {error}") from error
-        values = {}
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-                name = node.targets[0].id
-                if name in {"revision", "down_revision"}:
-                    try:
-                        values[name] = ast.literal_eval(node.value)
-                    except (ValueError, TypeError) as error:
-                        raise ValueError(f"revision metadata must be literal in {path.name}") from error
-        revision = values.get("revision")
-        if revision is None:
-            continue
-        parent = values.get("down_revision")
-        parents = list(parent) if isinstance(parent, (tuple, list)) else ([] if parent is None else [parent])
-        graph.append({"revision": revision, "parents": parents, "path": path.relative_to(ROOT).as_posix()})
-    return graph
+    for revision in revisions:
+        path = Path(revision.path)
+        parent = revision.down_revision
+        parents = list(parent) if isinstance(parent, tuple) else ([] if parent is None else [parent])
+        graph.append({
+            "revision": revision.revision,
+            "parents": parents,
+            "path": path.relative_to(relative_root).as_posix(),
+        })
+    return sorted(graph, key=lambda node: node["revision"])
 
 
 def resolve_linear_chain(graph: list[dict], source_revision: str, target_revision: str) -> list[str]:

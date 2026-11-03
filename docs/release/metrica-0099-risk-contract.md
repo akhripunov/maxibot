@@ -1,5 +1,7 @@
 # MAXIBOT Metrica Reconciliation 0099 — scoped risk contract
 
+Historical record: this is the one-time authorization snapshot for the completed 0099 release. The candidate path list below records the files covered at authorization time; it is not a current release allowlist. `tests/test_release_prod_tooling.py` was later retired with the legacy release tooling and is not an active test or execution entrypoint.
+
 Status: OWNER-authorized for one release scope; this document is not evidence that a gate has passed.
 
 ## Fixed transition

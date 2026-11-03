@@ -58,6 +58,24 @@ def _graph(revision="0099_target", parent="0098_source", path="alembic/versions/
     ]
 
 
+def test_candidate_revision_graph_comes_from_alembic_scriptdirectory(tmp_path):
+    versions = tmp_path / "alembic" / "versions"
+    versions.mkdir(parents=True)
+    (versions / "0001_base.py").write_text(
+        "revision = '0001_base'\ndown_revision = None\n", encoding="utf-8"
+    )
+    (versions / "0002_child.py").write_text(
+        "revision = '0002_child'\ndown_revision = '0001_base'\n", encoding="utf-8"
+    )
+
+    graph = CONTRACT_MODULE.load_alembic_graph(versions)
+
+    assert graph == [
+        {"revision": "0001_base", "parents": [], "path": "alembic/versions/0001_base.py"},
+        {"revision": "0002_child", "parents": ["0001_base"], "path": "alembic/versions/0002_child.py"},
+    ]
+
+
 def test_app_only_candidate_keeps_the_existing_release_path():
     result = CONTRACT_MODULE.evaluate_contract(
         _contract(), ["app/main.py"], "a" * 40, "0098_source", _graph()

@@ -46,6 +46,20 @@ def test_kamal_release_automatically_deploys_main_after_tests_and_build():
     assert deploy["permissions"]["actions"] == "read"
 
 
+def test_deploy_records_schema_and_application_skip_or_apply_decisions():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    deploy = workflow["jobs"]["deploy"]
+    baseline = next(step for step in deploy["steps"] if step.get("id") == "baseline")
+    release_plan = next(step for step in deploy["steps"] if step.get("name") == "Record exact production Deployment after all preflight gates")
+    assert 'app_deploy_required=$app_deploy_required' in baseline["run"]
+    assert "SCHEMA_ACTION=APPLY" in baseline["run"]
+    assert "SCHEMA_ACTION=SKIP" in baseline["run"]
+    assert release_plan["env"]["APP_DEPLOY_REQUIRED"] == "${{ steps.baseline.outputs.app_deploy_required }}"
+    assert release_plan["env"]["SCHEMA_ACTION"] == "${{ steps.baseline.outputs.migration_required == 'true' && 'APPLY' || 'SKIP' }}"
+    assert "app_deploy_required:$app_deploy" in release_plan["run"]
+    assert "schema_action:$schema_action" in release_plan["run"]
+
+
 def test_tests_job_loads_pinned_kamal_config_with_synthetic_secret_without_deploy_access():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     tests = workflow["jobs"]["tests"]
@@ -281,7 +295,7 @@ def test_contract_migration_gate_runs_backup_restore_apply_before_kamal():
     assert '[[ "$expected_db_head" == "$migration_target" ]]' in migration["run"]
     assert "BACKUP_PRESERVED_COUNTS" in migration.get("env", {})
     assert "queue_rows_non_decreasing" in migration["run"]
-    assert names.index(backup["name"]) < names.index(migration["name"]) < names.index("Record exact application Deployment after all preflight gates")
+    assert names.index(backup["name"]) < names.index(migration["name"]) < names.index("Record exact production Deployment after all preflight gates")
     assert runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD") == "${{ steps.baseline.outputs.expected_database_head }}"
     assert "db_head == expected_db_head" in runtime["run"]
 
@@ -358,22 +372,12 @@ def test_migration_schema_verification_is_contract_driven_and_not_revision_speci
     assert "0099" not in WORKFLOW.read_text()
 
 
-def test_pinned_actionlint_accounts_only_for_known_self_hosted_runner_label():
+def test_pinned_actionlint_validates_the_active_native_workflow_without_suppressions():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     tests = workflow["jobs"]["tests"]["steps"]
     actionlint = next(step for step in tests if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
-    config = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text())
-    assert config["self-hosted-runner"]["labels"] == ["maxibot-production"]
     assert 'actionlint" -color .github/workflows/maxibot-native-release.yml' in actionlint["run"]
     assert "-ignore" not in actionlint["run"]
-
-
-def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():
-    cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
-
-    assert "pg_restore --list" in cutover
-    assert "cutover_restore_probe" in cutover
-    assert "--network none" in cutover
 
 
 def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
@@ -517,15 +521,6 @@ def test_pinned_rollback_interface_uses_loaded_cli_metadata_not_help_text():
     assert 'Main.class_options.keys.map(&:to_s).include?("roles")' in verify['run']
     assert 'Main.all_commands.key?("rollback")' in verify['run']
     assert 'kamal rollback --help | grep' not in verify['run']
-
-
-def test_isolated_cutover_restore_cleanup_remains_fail_closed_and_never_prunes_volumes():
-    cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
-
-    assert 'docker rm -f "$restore_name"' in cutover
-    assert "cleanup_failed=1" in cutover
-    assert "docker volume prune" not in cutover
-    assert "cutover_restore_probe" in cutover
 
 
 def _run_build_selection(workflow_text, tmp_path, *, run_attempt, build_attempt, candidate_sha=None, build_sha=None, approved_digest=None, manifest_digest=None):

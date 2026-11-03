@@ -71,7 +71,7 @@ def test_ordinary_menu_runtime_and_tariff_changes_pass_by_behavioral_contract(tm
         result = _run(repo, base, head)
         assert result.returncode == 0, (path, result.stdout, result.stderr)
         assert "FROZEN_PATH_GUARD=PASS" in result.stdout
-        assert "FROZEN_PATH_REGRESSION_CONTRACTS=PASS:16" in result.stdout
+        assert "FROZEN_PATH_REGRESSION_CONTRACTS=PASS:18" in result.stdout
 
 
 def test_app_main_remains_protected_except_for_exact_scoped_bot_change(tmp_path):

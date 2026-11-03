@@ -4,7 +4,12 @@ These tests do not attest to production readiness or hosted cache performance.
 """
 from pathlib import Path
 import re
+import subprocess
 import unittest
+import os
+import tempfile
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / ".github/workflows/maxibot-native-release.yml"
@@ -14,6 +19,21 @@ class NativeBuildBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(TEMPLATE.is_file(), "Native CI/build candidate is missing")
         self.source = TEMPLATE.read_text()
+
+    def test_only_native_release_remains_for_maxibot_production(self):
+        self.assertFalse((ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").exists())
+        self.assertFalse((ROOT / "docs/KAMAL_FIRST_CUTOVER.md").exists())
+        for name in (
+            "maxibot-prepare.yml", "maxibot-deploy.yml", "maxibot-auto-preflight.yml",
+            "maxibot-linear-reconcile.yml", "maxibot-release-diagnostics.yml",
+        ):
+            self.assertFalse((ROOT / ".github/workflows" / name).exists(), name)
+        for path in (
+            "scripts/release_orchestrator.py", "scripts/run_release_workflow.py",
+            "scripts/release_prod.sh", "scripts/ghcr_prepare_cache.py",
+            "scripts/publish_release_to_linear.py",
+        ):
+            self.assertFalse((ROOT / path).exists(), path)
 
     def test_native_candidate_ci_is_active_and_single_workflow(self):
         self.assertFalse((ROOT / ".github/native-release/ci-build.yml").exists())
@@ -60,6 +80,96 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertIn("API and Worker source SHAs do not match", baseline)
         self.assertIn("PRODUCTION_BASELINE=FAIL:", baseline)
 
+    def test_app_db_and_combined_release_scenarios_choose_expected_steps(self):
+        source = self.source
+        start = source.index("          app_deploy_required=true\n")
+        end = source.index('          if [[ "$app_deploy_required" == false', start)
+        classifier = source[start:end]
+        migration_selector = (
+            'migration_required=false; '
+            'if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- '
+            'alembic app/db/models.py docker-compose.vps.yml; then '
+            'migration_required=true; fi; '
+        )
+
+        def app_deploy_for(changed_paths):
+            with tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory)
+
+                def git(*args):
+                    return subprocess.run(
+                        ["git", *args], cwd=repo, check=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    ).stdout.strip()
+
+                git("init", "-q")
+                git("config", "user.name", "MAXIBOT isolated release test")
+                git("config", "user.email", "release-test@example.invalid")
+                (repo / "README.md").write_text("baseline\n")
+                git("add", "README.md")
+                git("commit", "-qm", "baseline")
+                baseline = git("rev-parse", "HEAD")
+                for relative in changed_paths:
+                    path = repo / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("isolated scenario\n")
+                git("add", *changed_paths)
+                git("commit", "-qm", "scenario")
+                candidate = git("rev-parse", "HEAD")
+                script = (
+                    'set -euo pipefail; '
+                    'RELEASE_OPERATION=deploy; '
+                    f'baseline_sha={baseline}; CANDIDATE_SHA={candidate}; '
+                    + migration_selector
+                    + classifier
+                    + 'printf "%s|%s\\n" "$migration_required" "$app_deploy_required"'
+                )
+                return subprocess.run(
+                    ["bash", "-c", script], cwd=repo, check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    env=os.environ.copy(),
+                ).stdout.strip()
+
+        scenarios = (
+            (("app/main.py",), "false|true", "app-only: schema/backup skipped, Kamal API/Worker deploy, Runtime Verify"),
+            (("alembic/versions/0100_example.py", "docs/release/migration-risk-contract.json"), "true|false", "DB-only: schema Apply with migration backup/restore, Kamal skipped, Runtime Verify"),
+            (("app/main.py", "alembic/versions/0100_example.py", "docs/release/migration-risk-contract.json"), "true|true", "app+DB: schema Apply with migration backup/restore, Kamal deploy, Runtime Verify"),
+            ((".github/workflows/maxibot-native-release.yml",), "false|false", "infrastructure-only: schema/backup/Kamal skipped, Runtime Verify"),
+        )
+        for paths, expected_outcome, _label in scenarios:
+            with self.subTest(paths=paths):
+                self.assertEqual(app_deploy_for(paths), expected_outcome)
+
+        deploy = source.split("\n  deploy:\n", 1)[1]
+        self.assertIn('! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- alembic app/db/models.py docker-compose.vps.yml', deploy)
+        self.assertIn("if: steps.baseline.outputs.migration_required == 'true'", deploy)
+        kamal_steps = (
+            "- name: Deploy application with Kamal",
+            "- name: Stop the existing Kamal Worker before starting its replacement",
+            "- name: Deploy the sole Worker with Kamal",
+        )
+        for step in kamal_steps:
+            step_body = deploy.split(step, 1)[1].split("\n      - name:", 1)[0]
+            self.assertIn("if: steps.baseline.outputs.app_deploy_required == 'true'", step_body)
+        verify = deploy.split("- name: Verify runtime, network connectivity, and Worker heartbeat", 1)[1]
+        verify = verify.split("\n      - name:", 1)[0]
+        self.assertNotIn("        if:", verify)
+        self.assertIn("EXPECTED_RUNTIME_SHA", verify)
+        self.assertIn("expected_api_id", verify)
+        self.assertIn("expected_worker_id", verify)
+        self.assertIn("old_api_started_at", source)
+        self.assertIn("old_worker_started_at", source)
+        self.assertIn('c["State"]["StartedAt"] == (expected_api_started_at if role == "api" else expected_worker_started_at)', verify)
+        for outcome in (
+            "SCHEMA_ACTION=APPLY",
+            "SCHEMA_ACTION=SKIP",
+            "MIGRATION_BACKUP_RESTORE=REQUIRED",
+            "MIGRATION_BACKUP_RESTORE=SKIP",
+            "KAMAL_APP_DEPLOY=API_AND_WORKER",
+            "KAMAL_APP_DEPLOY=SKIP_NO_RUNTIME_CHANGE",
+        ):
+            self.assertIn(outcome, source)
+
     def test_me55_frozen_path_transition_is_bound_to_exact_production_baselines_and_path_sets(self):
         baseline = self.source.split("- name: Verify exact main and read the current production baseline", 1)[1]
         baseline = baseline.split("- name: Verify exact GHCR image and Kamal configuration", 1)[0]
@@ -78,21 +188,6 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             "tests/test_native_build_boundary.py",
         ):
             self.assertIn(path, baseline)
-
-    def test_first_cutover_keeps_backup_restore_checks_as_a_separate_procedure(self):
-        cutover = (ROOT / ".github/workflows/maxibot-first-kamal-cutover.yml").read_text()
-        self.assertIn("pg_restore --list", cutover)
-        self.assertIn("cutover_restore_probe", cutover)
-        self.assertIn("--network none", cutover)
-
-    def test_legacy_release_workflows_have_no_automatic_triggers(self):
-        prepare = (ROOT / ".github/workflows/maxibot-prepare.yml").read_text()
-        auto = (ROOT / ".github/workflows/maxibot-auto-preflight.yml").read_text()
-        prepare_events = prepare.split("on:", 1)[1].split("permissions:", 1)[0]
-        auto_events = auto.split("on:", 1)[1].split("permissions:", 1)[0]
-        self.assertNotIn("push:", prepare_events)
-        self.assertNotIn("workflow_run:", auto_events)
-        self.assertIn("if: ${{ false }}", auto)
 
     def test_write_job_requires_owner_main_and_exact_candidate(self):
         self.assertIn("github.actor == github.repository_owner", self.source)
@@ -193,9 +288,19 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             'tests/test_worker_health.py',
             'tests/test_worker_health_collector.py',
             'tests/test_migration_rehearsal.py',
-            'tests/test_release_migration_safety.py',
+            'tests/test_migration_release_contract.py',
+            'tests/release/test_kamal_release_workflow.py',
         ):
             self.assertIn(contract, self.source)
+
+    def test_frozen_regression_job_references_existing_test_files(self):
+        workflow = yaml.load(self.source, Loader=yaml.BaseLoader)
+        tests = workflow["jobs"]["tests"]["steps"]
+        regression_step = next(step for step in tests if step.get("name") == "Run frozen attribution, security, data, and Worker regressions")
+        for line in regression_step["run"].splitlines():
+            path = line.strip().rstrip("\\").strip()
+            if path.startswith("tests/"):
+                self.assertTrue((ROOT / path).is_file(), f"workflow regression path does not exist: {path}")
 
     def test_maxibot_native_deploy_is_digest_bound_and_keeps_single_poller(self):
         if not (ROOT / 'pyproject.toml').exists():

@@ -197,7 +197,8 @@ jobs:
             tests/test_worker_health_collector.py \
             tests/test_migration_rehearsal.py \
             tests/test_postgres_migration_rehearsal.py \
-            tests/test_release_migration_safety.py
+            tests/test_migration_release_contract.py \
+            tests/release/test_kamal_release_workflow.py
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
         with:
           ruby-version: '3.3.6'
@@ -518,18 +519,24 @@ jobs:
           db_volume="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" || fail 'PostgreSQL volume read failed'
           redis_volume="$(docker inspect "$redis" --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}')" || fail 'Redis volume read failed'
           uploads_volume="$(docker inspect "$api" --format '{{range .Mounts}}{{if eq .Destination "/app/uploads"}}{{.Name}}{{end}}{{end}}')" || fail 'API uploads volume read failed'
+          api_id="$(docker inspect "$api" --format '{{.Id}}')" || fail 'API container identity read failed'
+          worker_id="$(docker inspect "$worker" --format '{{.Id}}')" || fail 'Worker container identity read failed'
+          api_started_at="$(docker inspect "$api" --format '{{.State.StartedAt}}')" || fail 'API start time read failed'
+          worker_started_at="$(docker inspect "$worker" --format '{{.State.StartedAt}}')" || fail 'Worker start time read failed'
           schema_snapshot="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "$schema_query")" || fail 'PostgreSQL schema catalog snapshot failed'
           [[ -n "$schema_snapshot" ]] || fail 'PostgreSQL schema catalog snapshot is empty'
           schema_snapshot_b64="$(printf '%s' "$schema_snapshot" | base64 | tr -d '\n')"
           [[ "$db_id" =~ ^[0-9a-f]{64}$ && "$redis_id" =~ ^[0-9a-f]{64}$ ]] || fail 'PostgreSQL or Redis container identity is malformed'
           [[ -n "$db_volume" && -n "$redis_volume" && -n "$uploads_volume" ]] || fail 'required PostgreSQL, Redis, or uploads volume is missing'
-          printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$api_sha" "$worker_sha" "$database_head" "$db_id" "$redis_id" "$db_volume" "$redis_volume" "$uploads_volume" "$schema_snapshot_b64"
+          printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$api_sha" "$worker_sha" "$database_head" "$db_id" "$redis_id" "$db_volume" "$redis_volume" "$uploads_volume" "$schema_snapshot_b64" "$api_id" "$worker_id" "$api_started_at" "$worker_started_at"
           REMOTE
           )" || fail 'SSH could not read the production runtime baseline'
-          IFS='|' read -r baseline_sha worker_baseline_sha database_head old_db_id old_redis_id old_db_volume old_redis_volume old_uploads_volume schema_snapshot_b64 <<< "$remote"
+          IFS='|' read -r baseline_sha worker_baseline_sha database_head old_db_id old_redis_id old_db_volume old_redis_volume old_uploads_volume schema_snapshot_b64 old_api_id old_worker_id old_api_started_at old_worker_started_at <<< "$remote"
           [[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]] || fail 'production baseline SHA is missing or malformed'
           [[ "$database_head" =~ ^[A-Za-z0-9_]+$ ]] || fail 'production database head is missing or malformed'
           [[ "$old_db_id" =~ ^[0-9a-f]{64}$ && "$old_redis_id" =~ ^[0-9a-f]{64}$ ]] || fail 'production data-container identity is missing or malformed'
+          [[ "$old_api_id" =~ ^[0-9a-f]{64}$ && "$old_worker_id" =~ ^[0-9a-f]{64}$ ]] || fail 'production API or Worker identity is missing or malformed'
+          [[ "$old_api_started_at" =~ ^[0-9TZ:.-]+$ && "$old_worker_started_at" =~ ^[0-9TZ:.-]+$ ]] || fail 'production API or Worker start time is missing or malformed'
           [[ -n "$old_db_volume" && -n "$old_redis_volume" && -n "$old_uploads_volume" ]] || fail 'production data volume identity is missing'
           git cat-file -e "$baseline_sha^{commit}" || fail 'production baseline SHA is not present in the checked-out Git history'
           # ROLLBACK_DEPLOYMENT_GATE_BEGIN
@@ -607,6 +614,25 @@ jobs:
               echo 'MIGRATION_FORWARD_RESUME=PASS' >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
+          app_deploy_required=true
+          if [[ "$RELEASE_OPERATION" != rollback ]] && git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- app config .kamal Dockerfile docker Gemfile.kamal Gemfile.kamal.lock pyproject.toml; then
+            app_deploy_required=false
+          fi
+          if [[ "$app_deploy_required" == false && "$migration_required" != true ]]; then
+            echo 'NO_RUNTIME_OR_SCHEMA_CHANGES=true' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$migration_required" == true ]]; then
+            echo 'SCHEMA_ACTION=APPLY' >> "$GITHUB_STEP_SUMMARY"
+            echo 'MIGRATION_BACKUP_RESTORE=REQUIRED' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'SCHEMA_ACTION=SKIP' >> "$GITHUB_STEP_SUMMARY"
+            echo 'MIGRATION_BACKUP_RESTORE=SKIP' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$app_deploy_required" == true ]]; then
+            echo 'KAMAL_APP_DEPLOY=API_AND_WORKER' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'KAMAL_APP_DEPLOY=SKIP_NO_RUNTIME_CHANGE' >> "$GITHUB_STEP_SUMMARY"
+          fi
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- docs/frozen_paths.yaml scripts/frozen_path_guard.sh; then
             policy_transition_baseline='a4ee838545a5bb396ee39f3527f85541c7788ad0'
             policy_correction_baseline='f7279c1adc9f635a6e7952b9cf4878f95126ac82'
@@ -661,8 +687,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           {
             echo "baseline_sha=$baseline_sha"
+            echo "worker_baseline_sha=$worker_baseline_sha"
             echo "database_head=$database_head"
             echo "migration_required=$migration_required"
+            echo "app_deploy_required=$app_deploy_required"
             echo "migration_resume=$migration_resume"
             echo "migration_rollback=$migration_rollback"
             echo "migration_source=$migration_source"
@@ -676,6 +704,10 @@ jobs:
             fi
             echo "old_db_id=$old_db_id"
             echo "old_redis_id=$old_redis_id"
+            echo "old_api_id=$old_api_id"
+            echo "old_worker_id=$old_worker_id"
+            echo "old_api_started_at=$old_api_started_at"
+            echo "old_worker_started_at=$old_worker_started_at"
             echo "old_db_volume=$old_db_volume"
             echo "old_redis_volume=$old_redis_volume"
             echo "old_uploads_volume=$old_uploads_volume"
@@ -1097,20 +1129,24 @@ jobs:
           [[ "$schema_snapshot_b64" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo 'MIGRATION_APPLY=FAIL:post-migration-schema-snapshot-missing' >&2; exit 1; }
           printf '%s' "$schema_snapshot_b64" | base64 -d | python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode target
           echo "MIGRATION_APPLY=PASS TARGET=$MIGRATION_TARGET" >> "$GITHUB_STEP_SUMMARY"
-      - name: Record exact application Deployment after all preflight gates
+      - name: Record exact production Deployment after all preflight gates
         id: deployment
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          APP_DEPLOY_REQUIRED: ${{ steps.baseline.outputs.app_deploy_required }}
+          SCHEMA_ACTION: ${{ steps.baseline.outputs.migration_required == 'true' && 'APPLY' || 'SKIP' }}
         run: |
           set -euo pipefail
           jq -n --arg ref "$CANDIDATE_SHA" --arg digest "$IMAGE_REF" --arg operation "$RELEASE_OPERATION" --arg workflow_sha "$GITHUB_SHA" --arg build "$BUILD_RUN_ID" \
-            '{ref:$ref,environment:"production",auto_merge:false,required_contexts:[],payload:{image:$digest,operation:$operation,workflow_sha:$workflow_sha,build_run_id:$build}}' > "$RUNNER_TEMP/deployment.json"
+            --arg app_deploy "$APP_DEPLOY_REQUIRED" --arg schema_action "$SCHEMA_ACTION" \
+            '{ref:$ref,environment:"production",auto_merge:false,required_contexts:[],payload:{image:$digest,operation:$operation,workflow_sha:$workflow_sha,build_run_id:$build,app_deploy_required:$app_deploy,schema_action:$schema_action}}' > "$RUNNER_TEMP/deployment.json"
           deployment_id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input "$RUNNER_TEMP/deployment.json" --jq .id)"
           [[ "$deployment_id" =~ ^[0-9]+$ ]]
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$deployment_id/statuses" -f state=in_progress -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null
       - name: Deploy application with Kamal
+        if: steps.baseline.outputs.app_deploy_required == 'true'
         env:
           MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
         run: |
@@ -1127,24 +1163,8 @@ jobs:
           else
             bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles api
           fi
-          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
-          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
-          for host in maxibot.pro www.maxibot.pro api.maxibot.pro go.maxibot.pro admin.maxibot.pro; do
-            curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 --resolve "$host:443:$PRODUCTION_HOST" "https://$host/health/ready" | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
-            curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 "https://$host/health/ready" | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
-            redirect="$(curl --silent --show-error --output /dev/null --write-out '%{redirect_url}' --resolve "$host:80:$PRODUCTION_HOST" "http://$host/health/ready")"
-            [[ "$redirect" == https://* ]]
-          done
-          admin_headers="$RUNNER_TEMP/maxibot-admin-headers.txt"
-          curl --silent --show-error --fail --resolve "admin.maxibot.pro:443:$PRODUCTION_HOST" --dump-header "$admin_headers" https://admin.maxibot.pro/ -o "$RUNNER_TEMP/maxibot-admin.html"
-          grep -qi '^content-security-policy:' "$admin_headers"
-          grep -qi '^strict-transport-security:' "$admin_headers"
-          grep -qi '^x-frame-options: DENY' "$admin_headers"
-          grep -qi '^x-content-type-options: nosniff' "$admin_headers"
-          grep -qi '^referrer-policy: no-referrer' "$admin_headers"
-          grep -qi '^cache-control: no-store' "$admin_headers"
-          grep -q 'OWNER CONSOLE' "$RUNNER_TEMP/maxibot-admin.html"
       - name: Stop the existing Kamal Worker before starting its replacement
+        if: steps.baseline.outputs.app_deploy_required == 'true'
         env:
           MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
         run: |
@@ -1164,6 +1184,7 @@ jobs:
           fi
           REMOTE
       - name: Deploy the sole Worker with Kamal
+        if: steps.baseline.outputs.app_deploy_required == 'true'
         env:
           MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
         run: |
@@ -1181,6 +1202,13 @@ jobs:
           fi
       - name: Verify runtime, network connectivity, and Worker heartbeat
         env:
+          APP_DEPLOY_REQUIRED: ${{ steps.baseline.outputs.app_deploy_required }}
+          EXPECTED_RUNTIME_SHA: ${{ steps.baseline.outputs.app_deploy_required == 'true' && env.CANDIDATE_SHA || steps.baseline.outputs.baseline_sha }}
+          EXPECTED_WORKER_SHA: ${{ steps.baseline.outputs.app_deploy_required == 'true' && env.CANDIDATE_SHA || steps.baseline.outputs.worker_baseline_sha }}
+          EXPECTED_API_ID: ${{ steps.baseline.outputs.old_api_id }}
+          EXPECTED_WORKER_ID: ${{ steps.baseline.outputs.old_worker_id }}
+          EXPECTED_API_STARTED_AT: ${{ steps.baseline.outputs.old_api_started_at }}
+          EXPECTED_WORKER_STARTED_AT: ${{ steps.baseline.outputs.old_worker_started_at }}
           EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.expected_database_head }}
           EXPECTED_DB_ID: ${{ steps.baseline.outputs.old_db_id }}
           EXPECTED_REDIS_ID: ${{ steps.baseline.outputs.old_redis_id }}
@@ -1189,30 +1217,51 @@ jobs:
           EXPECTED_UPLOADS_VOLUME: ${{ steps.baseline.outputs.old_uploads_volume }}
         run: |
           set -euo pipefail
-          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$CANDIDATE_SHA"
-          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$CANDIDATE_SHA" "$IMAGE_VERSION" "$IMAGE_REF" "$EXPECTED_DATABASE_HEAD" "$EXPECTED_DB_ID" "$EXPECTED_REDIS_ID" "$EXPECTED_DB_VOLUME" "$EXPECTED_REDIS_VOLUME" "$EXPECTED_UPLOADS_VOLUME" <<'REMOTE'
+          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
+          curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/ready | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$EXPECTED_RUNTIME_SHA"
+          for host in maxibot.pro www.maxibot.pro api.maxibot.pro go.maxibot.pro admin.maxibot.pro; do
+            curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 --resolve "$host:443:$PRODUCTION_HOST" "https://$host/health/ready" | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$EXPECTED_RUNTIME_SHA"
+            curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 "https://$host/health/ready" | python -c 'import json,sys; assert json.load(sys.stdin)["commit_sha"] == sys.argv[1]' "$EXPECTED_RUNTIME_SHA"
+            redirect="$(curl --silent --show-error --output /dev/null --write-out '%{redirect_url}' --resolve "$host:80:$PRODUCTION_HOST" "http://$host/health/ready")"
+            [[ "$redirect" == https://* ]]
+          done
+          admin_headers="$RUNNER_TEMP/maxibot-admin-headers.txt"
+          curl --silent --show-error --fail --resolve "admin.maxibot.pro:443:$PRODUCTION_HOST" --dump-header "$admin_headers" https://admin.maxibot.pro/ -o "$RUNNER_TEMP/maxibot-admin.html"
+          grep -qi '^content-security-policy:' "$admin_headers"
+          grep -qi '^strict-transport-security:' "$admin_headers"
+          grep -qi '^x-frame-options: DENY' "$admin_headers"
+          grep -qi '^x-content-type-options: nosniff' "$admin_headers"
+          grep -qi '^referrer-policy: no-referrer' "$admin_headers"
+          grep -qi '^cache-control: no-store' "$admin_headers"
+          grep -q 'OWNER CONSOLE' "$RUNNER_TEMP/maxibot-admin.html"
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$EXPECTED_RUNTIME_SHA" "$EXPECTED_WORKER_SHA" "$IMAGE_VERSION" "$IMAGE_REF" "$EXPECTED_DATABASE_HEAD" "$APP_DEPLOY_REQUIRED" "$EXPECTED_API_ID" "$EXPECTED_WORKER_ID" "$EXPECTED_API_STARTED_AT" "$EXPECTED_WORKER_STARTED_AT" "$EXPECTED_DB_ID" "$EXPECTED_REDIS_ID" "$EXPECTED_DB_VOLUME" "$EXPECTED_REDIS_VOLUME" "$EXPECTED_UPLOADS_VOLUME" <<'REMOTE'
           set -euo pipefail
-          sha="$1"; version="$2"; image_ref="$3"; expected_db_head="$4"
-          expected_db_id="$5"; expected_redis_id="$6"
-          expected_db_volume="$7"; expected_redis_volume="$8"; expected_uploads_volume="$9"
+          api_sha="$1"; worker_sha="$2"; version="$3"; image_ref="$4"; expected_db_head="$5"; app_deploy_required="$6"
+          expected_api_id="$7"; expected_worker_id="$8"; expected_api_started_at="$9"; expected_worker_started_at="${10}"
+          expected_db_id="${11}"; expected_redis_id="${12}"
+          expected_db_volume="${13}"; expected_redis_volume="${14}"; expected_uploads_volume="${15}"
           api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
           worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
           [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]]
-          python3 - "$api" "$worker" "$sha" "$version" "$image_ref" "$expected_db_head" "$expected_db_id" "$expected_redis_id" "$expected_db_volume" "$expected_redis_volume" "$expected_uploads_volume" <<'PY'
+          python3 - "$api" "$worker" "$api_sha" "$worker_sha" "$version" "$image_ref" "$expected_db_head" "$app_deploy_required" "$expected_api_id" "$expected_worker_id" "$expected_api_started_at" "$expected_worker_started_at" "$expected_db_id" "$expected_redis_id" "$expected_db_volume" "$expected_redis_volume" "$expected_uploads_volume" <<'PY'
           import json, subprocess, sys
-          api, worker, sha, version, image_ref, expected_db_head, expected_db_id, expected_redis_id, expected_db_volume, expected_redis_volume, expected_uploads_volume = sys.argv[1:]
+          api, worker, api_sha, worker_sha, version, image_ref, expected_db_head, app_deploy_required, expected_api_id, expected_worker_id, expected_api_started_at, expected_worker_started_at, expected_db_id, expected_redis_id, expected_db_volume, expected_redis_volume, expected_uploads_volume = sys.argv[1:]
           items = json.loads(subprocess.check_output(["docker", "inspect", api, worker], text=True))
           by_id = {item["Id"]: item for item in items}
-          for cid, required_networks, polling in ((api, {"kamal"}, "false"), (worker, {"kamal"}, "true")):
+          for cid, role, expected_sha, polling in ((api, "api", api_sha, "false"), (worker, "worker", worker_sha, "true")):
               c = by_id[cid]
               assert c["State"]["Running"]
-              assert c["Config"]["Image"] == f"ghcr.io/akhripunov/maxibot-vps-api:{version}"
-              assert c["Config"]["Labels"]["org.opencontainers.image.revision"] == sha
-              assert required_networks <= set(c["NetworkSettings"]["Networks"])
+              assert c["Config"]["Labels"]["org.opencontainers.image.revision"] == expected_sha
+              assert {"kamal"} <= set(c["NetworkSettings"]["Networks"])
               env = dict(x.split("=",1) for x in c["Config"]["Env"] if "=" in x)
               assert env.get("MAX_RUN_POLLING") == polling
-              image = json.loads(subprocess.check_output(["docker","image","inspect",c["Image"]],text=True))[0]
-              assert image_ref in image.get("RepoDigests",[])
+              if app_deploy_required == "true":
+                  assert c["Config"]["Image"] == f"ghcr.io/akhripunov/maxibot-vps-api:{version}"
+                  image = json.loads(subprocess.check_output(["docker","image","inspect",c["Image"]],text=True))[0]
+                  assert image_ref in image.get("RepoDigests",[])
+              else:
+                  assert cid == (expected_api_id if role == "api" else expected_worker_id)
+                  assert c["State"]["StartedAt"] == (expected_api_started_at if role == "api" else expected_worker_started_at)
           for name in ("maxibot-vps-db-1","maxibot-vps-redis-1"):
               c=json.loads(subprocess.check_output(["docker","inspect",name],text=True))[0]
               assert {"maxibot-vps-internal","kamal"} <= set(c["NetworkSettings"]["Networks"])
@@ -1249,7 +1298,7 @@ jobs:
           scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$RUNNER_TEMP/maxibot-worker-health.py" "root@$PRODUCTION_HOST:/tmp/maxibot-worker-health-$GITHUB_RUN_ID.py"
           worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker")"
           [[ "$worker_id" =~ ^[0-9a-f]{64}$ ]]
-          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 60 --max-age 90 --expected-release '$CANDIDATE_SHA'"
+          ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 60 --max-age 90 --expected-release '$EXPECTED_WORKER_SHA'"
           echo 'MAXIBOT_KAMAL_DEPLOY_VERIFY=PASS' >> "$GITHUB_STEP_SUMMARY"
       - name: Record the actual verified application result
         if: always() && steps.deployment.outputs.id != ''

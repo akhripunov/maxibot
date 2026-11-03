@@ -57,4 +57,6 @@ regression_contracts:
   - tests/test_worker_health.py
   - tests/test_worker_health_collector.py
   - tests/test_migration_rehearsal.py
-  - tests/test_release_migration_safety.py
+  - tests/test_migration_release_contract.py
+  - tests/test_postgres_migration_rehearsal.py
+  - tests/release/test_kamal_release_workflow.py

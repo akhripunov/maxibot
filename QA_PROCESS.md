@@ -8,21 +8,13 @@ Run the single entry point:
 
 The runner executes static checks, unit tests, integration tests, the full regression baseline, Docker build, staging health, and staging E2E in that order. It records `QA_VERDICT` for information. Deterministic test, build, staging, and E2E failures still stop the run. Independent/manual QA findings may produce `NO_GO`, which is advisory for prospective candidate release readiness.
 
-The default run never deploys production. Configure `QA_STAGING_URL` and `QA_STAGING_E2E_CMD` to make staging mandatory. For local Docker Desktop on macOS, use the isolated staging stack:
+The QA runner never deploys production. Production releases use the protected Native Release workflow and Kamal. Extra arguments are rejected so QA cannot become an alternate deployment engine. Configure `QA_STAGING_URL` and `QA_STAGING_E2E_CMD` to make staging mandatory. For local Docker Desktop on macOS, use the isolated staging stack:
 
 ```bash
 QA_LOCAL_DOCKER=1 ./scripts/qa_check.sh
 ```
 
 This builds the candidate image, starts the local Postgres/Redis/API stack with a unique Compose project and isolated API port (`18000` by default), waits for `/health/ready`, runs health/mini-app/traffic smoke checks, and removes only that QA stack on exit. Set `QA_STAGING_PORT`, `QA_HEALTH_RETRIES`, and `QA_HEALTH_INTERVAL` when needed.
-
-To use the legacy QA-runner deploy path, an owner must explicitly run:
-
-```bash
-OWNER_APPROVED=1 ./scripts/qa_check.sh DEPLOY
-```
-
-The deploy command must be supplied through `PRODUCTION_DEPLOY_CMD`; smoke uses `PRODUCTION_URL/health/ready`. Deployment requires that deterministic steps in this runner completed successfully, plus owner approval and the deploy command. `QA_VERDICT` itself is advisory and does not gate deployment. A failed production smoke invokes `PRODUCTION_ROLLBACK_CMD` when configured and records the rollback result. Previous and candidate SHAs are recorded before deployment.
 
 The runner stores logs under `.qa-logs/` (override with `QA_LOG_DIR`) and keeps immutable release records under `releases/`. Secrets must be passed through the environment and are not printed by the runner.
 

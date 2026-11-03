@@ -15,7 +15,7 @@ Kamal manages only API and Worker. API uses both the default `kamal` network and
 - Deploy takes a read-only production baseline, verifies backup/restore, refuses schema/frozen-policy changes, verifies the existing Kamal topology and API connectivity to DB, Redis, and Caddy, and then deploys only API and Worker through Kamal.
 - Post-deploy assertions compare DB/Redis/Caddy identities and named volumes, verify API uploads volume, network reachability, health, Alembic head, Worker heartbeat, single poller, memory limit, and stopped legacy Compose API/Worker containers.
 - Updated obsolete Native First deploy assertions to cover Kamal behavior.
-- Drafted `docs/KAMAL_FIRST_CUTOVER.md` as a separate one-time stop-before-start procedure; its protected execution path and rollback rehearsal are still required before a production cutover.
+- Historical note: the one-time Compose → Kamal procedure was completed and retired. Its old workflow and executable instructions are no longer part of the release path; ordinary deployments use Native Release and Kamal rollback.
 
 ## Verification and blockers
 

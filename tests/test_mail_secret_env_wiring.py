@@ -17,11 +17,3 @@ def test_api_and_worker_load_main_then_protected_mail_env():
     assert expected in worker
     assert compose.count("/opt/maxibot/secrets/mail_cloud.env") == 2
     assert "MAIL_CLOUD_APP_PASSWORD" not in compose
-
-
-def test_release_rewrites_main_env_but_preserves_protected_secret_path():
-    release = (ROOT / "scripts/release_prod.sh").read_text()
-    compose = (ROOT / "docker-compose.vps.yml").read_text()
-    assert 's.replace("      - .env\\n", "      - /opt/maxibot/.env\\n")' in release
-    assert "/opt/maxibot/secrets/mail_cloud.env" in compose
-    assert "MAIL_CLOUD_APP_PASSWORD=" not in release

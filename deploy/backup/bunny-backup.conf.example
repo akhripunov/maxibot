@@ -1,0 +1,10 @@
+BUNNY_S3_BUCKET=maxibot-backups
+BUNNY_S3_ENDPOINT=https://de-s3.storage.bunnycdn.com
+BUNNY_S3_REGION=de
+BUNNY_S3_PREFIX=maxibot/daily
+BUNNY_RESTORE_MARKER_KEY=maxibot/control/last-restore-tested.json
+BUNNY_RETENTION_DAYS=30
+BUNNY_AGE_RECIPIENT=age1replace-with-public-recipient
+MAXIBOT_DB_CONTAINER=maxibot-vps-db-1
+MAXIBOT_DB_NAME=maxibot
+MAXIBOT_UPLOADS_VOLUME=maxibot-vps_maxibot_uploads

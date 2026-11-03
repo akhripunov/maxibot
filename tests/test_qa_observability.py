@@ -81,6 +81,14 @@ def test_qa_runner_emits_machine_artifact_and_no_raw_failure_messages():
     assert "QA_PRODUCTION_URL/health/ready" in (ROOT / "QA_PROCESS.md").read_text(encoding="utf-8")
 
 
+def test_qa_runner_has_no_arbitrary_production_deploy_or_rollback_command():
+    script = (ROOT / "scripts/qa_check.sh").read_text(encoding="utf-8")
+    assert 'QA runner does not deploy production' in script
+    assert "PRODUCTION_DEPLOY_CMD" not in script
+    assert "PRODUCTION_ROLLBACK_CMD" not in script
+    assert 'if [ "${1:-}" = "DEPLOY" ]; then' not in script
+
+
 def test_production_sha_has_explicit_runtime_source_and_never_uses_release_marker():
     config = (ROOT / "app/core/config.py").read_text(encoding="utf-8")
     main = (ROOT / "app/main.py").read_text(encoding="utf-8")

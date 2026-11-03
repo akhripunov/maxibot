@@ -5,6 +5,20 @@ set -u -o pipefail
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
+if (($#)); then
+  case "$1" in
+    -h|--help)
+      echo "Usage: scripts/qa_check.sh"
+      echo "This QA runner does not deploy production; production releases use the protected Native Release workflow."
+      exit 0
+      ;;
+    *)
+      echo "QA runner does not deploy production; use the protected Native Release workflow." >&2
+      exit 2
+      ;;
+  esac
+fi
+
 RELEASE_ID="$(date -u +%Y-%m-%dT%H%M%SZ)"
 RELEASE_DATE="$(date -u +%Y-%m-%d)"
 RUN_STARTED_EPOCH="$(date -u +%s)"
@@ -466,37 +480,13 @@ E2E="PASS"
 if [ "$BROKEN_CRITICAL" -gt 0 ] || [ "$UNKNOWN_CRITICAL" -gt 0 ]; then
   VERDICT="NO_GO"
   write_status
-  if [ "${1:-}" != "DEPLOY" ]; then
-    finalize
-    exit 1
-  fi
+  finalize
+  exit 1
 else
   VERDICT="GO"
 fi
 NEW_FEATURE="✅"
 
-PRODUCTION="WAITING_OWNER_APPROVAL"
 write_status
-
-if [ "${1:-}" = "DEPLOY" ]; then
-  if ! git cat-file -e "$CANDIDATE_SHA:scripts/release_policy.py" 2>/dev/null; then
-    echo "DEPLOY BLOCKED: candidate predates prospective release policy" >&2
-    fail_gate
-  fi
-  if [ "${OWNER_APPROVED:-0}" != "1" ] || [ -z "${PRODUCTION_DEPLOY_CMD:-}" ]; then
-    echo "DEPLOY BLOCKED: require OWNER_APPROVED=1 and PRODUCTION_DEPLOY_CMD after deterministic gates pass" >&2
-    fail_gate
-  fi
-  echo "QA_STATUS=$VERDICT (advisory; not a release gate)"
-  PRODUCTION="DEPLOYED"; PRODUCTION_CHANGED="YES"; CURRENT_PROD_SHA="$CANDIDATE_SHA"
-  if ! bash -o pipefail -c "$PRODUCTION_DEPLOY_CMD" >"$LOG_DIR/production-deploy.log" 2>&1; then PRODUCTION_SMOKE="FAIL"; fail_gate; fi
-  if [ -z "${PRODUCTION_URL:-}" ] || ! curl --fail --silent --show-error --max-time "${QA_HTTP_TIMEOUT:-15}" "$PRODUCTION_URL/health/ready" >"$LOG_DIR/production-smoke.json" 2>"$LOG_DIR/production-smoke.log"; then
-    PRODUCTION_SMOKE="FAIL"
-    ROLLBACK_SHA="$PREVIOUS_GOOD_SHA"
-    if [ -n "${PRODUCTION_ROLLBACK_CMD:-}" ] && bash -o pipefail -c "$PRODUCTION_ROLLBACK_CMD" >>"$LOG_DIR/rollback.log" 2>&1; then ROLLBACK="PASS"; else ROLLBACK="FAIL"; fi
-    fail_gate
-  fi
-  PRODUCTION_SMOKE="PASS"
-fi
 finalize || exit 1
 exit 0

@@ -376,16 +376,14 @@ including separate app, PostgreSQL, volumes, `.env.staging`, ports, static,
 unit, integration, regression, build, health, and E2E checks.
 
 QA returns `GO`, `NO_GO`, `NOT_RUN`, or `TIMEOUT` as advisory information and
-does not change `CANDIDATE_READY`, `RELEASE_READY`, or `DEPLOY_ALLOWED` by
-itself. For candidate commit trees containing `scripts/release_policy.py`,
-readiness comes from deterministic technical evidence: targeted tests, full
-suite with zero failures, frozen-path guard where applicable, exact source SHA,
-exact `linux/amd64` image, API/worker parity, platform preflight, migration
-rehearsal when applicable, release dry-run, production rehearsal, and
-post-deploy health/SHA readback. Trees predating that policy marker retain the
-historical policy. Defects reproduced by mandatory deterministic gates remain
-blockers. Bugs require regression coverage, and new functionality requires new
-or updated canonical test cases. Preserve the existing TC-ID, classification,
+does not authorize a production release. The active Native Release workflow
+enforces exact SHA, hosted tests, immutable GHCR digest, `linux/amd64`, image
+source labels, frozen-path guard, migration rehearsal/backup/restore when
+applicable, Kamal deployment and post-deploy health/SHA readback. Do not use
+historical release-policy markers or old release scripts to determine
+readiness. Defects reproduced by mandatory deterministic gates remain blockers.
+Bugs require regression coverage, and new functionality requires new or
+updated canonical test cases. Preserve the existing TC-ID, classification,
 priority, and critical-regression rules.
 
 QA may repair QA tooling within the existing policy, but must not rewrite

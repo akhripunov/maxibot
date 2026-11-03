@@ -1,0 +1,16 @@
+[Unit]
+Description=MAXIBOT encrypted PostgreSQL and uploads backup to Bunny S3
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/maxibot/bunny-backup.conf
+LoadCredentialEncrypted=bunny-s3:/etc/credstore.encrypted/maxibot-bunny-s3
+ExecStart=/usr/bin/flock -n /run/lock/maxibot-bunny-backup.lock /usr/local/sbin/maxibot-bunny-backup backup
+TimeoutStartSec=4h
+ProtectSystem=full
+ProtectHome=yes
+NoNewPrivileges=yes
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maxibot-bunny-backup
