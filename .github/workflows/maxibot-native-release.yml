@@ -781,6 +781,8 @@ jobs:
           run_id="$1"; expected_db_id="$2"; expected_db_volume="$3"; expected_prod_sha="$4"; expected_db_head="$5"
           preserved_tables_json="$(printf '%s' "$6" | base64 -d)" || fail preserved-table-contract-decode
           fail() { echo "MIGRATION_BACKUP_RESTORE=FAIL:$1" >&2; exit 1; }
+          preserved_table_list="$(python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); assert isinstance(x,list) and x and all(isinstance(v,str) and re.fullmatch(r"[a-z_][a-z0-9_]*",v) for v in x); print("\n".join(x))' "$preserved_tables_json")" || fail preserved-table-contract
+          mapfile -t preserved_tables <<< "$preserved_table_list"
           api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)" || fail api-query
           [[ "$api" =~ ^[0-9a-f]{64}$ ]] || fail api-cardinality
           actual_sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')" || fail api-health
@@ -863,12 +865,21 @@ jobs:
             local query="$1"
             docker exec "$db" psql -X -qAt -v ON_ERROR_STOP=1 -U maxibot -d maxibot -c "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT '$snapshot_id'; $query; COMMIT;"
           }
+          snapshot_preserved_counts() {
+            local table rows
+            for table in "${preserved_tables[@]}"; do
+              rows="$(snapshot_query "select count(*) from public.\"$table\"")" || return 1
+              [[ "$rows" =~ ^[0-9]+$ ]] || return 1
+              printf '%s|%s\n' "$table" "$rows"
+            done
+          }
           source_head="$(snapshot_query 'select version_num from alembic_version')" || fail source-head-read
           [[ "$source_head" == "$expected_db_head" ]] || fail db-head-drift
           source_tables="$(snapshot_query "select table_schema || '.' || table_name from information_schema.tables where table_schema not in ('pg_catalog','information_schema') order by table_schema,table_name")" || fail source-table-inventory
           source_ext="$(snapshot_query "select string_agg(extname, ',' order by extname) from pg_extension")" || fail source-extension-read
           source_rows="$(snapshot_query 'select count(*) from offline_conversion_queue')" || fail source-queue-count
           source_queue_sha="$(snapshot_query "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail source-queue-checksum
+          source_preserved_counts="$(snapshot_preserved_counts)" || fail preserved-source-counts
           docker exec "$db" pg_dump -Fc --snapshot="$snapshot_id" -U maxibot -d maxibot > "$backup" || fail pg-dump
           snapshot_release || fail snapshot-release
           chmod 600 "$backup"
@@ -910,8 +921,6 @@ jobs:
           restored_ext="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")" || fail restored-extension-read
           restored_rows="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" || fail restored-queue-count
           restored_queue_sha="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail restored-queue-checksum
-          preserved_table_list="$(python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); assert isinstance(x,list) and x and all(isinstance(v,str) and re.fullmatch(r"[a-z_][a-z0-9_]*",v) for v in x); print("\n".join(x))' "$preserved_tables_json")" || fail preserved-table-contract
-          mapfile -t preserved_tables <<< "$preserved_table_list"
           preserved_counts() {
             local container="$1" database="$2" table rows
             for table in "${preserved_tables[@]}"; do
@@ -920,7 +929,6 @@ jobs:
               printf '%s|%s\n' "$table" "$rows"
             done
           }
-          source_preserved_counts="$(preserved_counts "$db" maxibot)" || fail preserved-source-counts
           restored_preserved_counts="$(preserved_counts "$restore_name" maxibot_restore_probe)" || fail preserved-restore-counts
           [[ "$source_preserved_counts" == "$restored_preserved_counts" ]] || fail preserved-table-restore-mismatch
           restored_head="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" || fail restored-head-read
@@ -1224,3 +1232,4 @@ jobs:
             -f state="$state" -f environment=production -f environment_url=https://api.maxibot.pro \
             -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             -f description="$RELEASE_OPERATION $CANDIDATE_SHA runtime Verify: $JOB_RESULT" >/dev/null
+

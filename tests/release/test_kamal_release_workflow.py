@@ -711,7 +711,12 @@ def test_restore_backup_and_queue_comparison_share_one_exported_postgres_snapsho
     for name in ("source_head", "source_tables", "source_ext", "source_rows", "source_queue_sha"):
         line = next(line for line in backup.splitlines() if line.strip().startswith(name + "="))
         assert "snapshot_query" in line
-    assert backup.index("source_queue_sha=") < backup.index("pg_dump -Fc --snapshot=") < backup.index("snapshot_release || fail snapshot-release")
+    assert "snapshot_preserved_counts()" in backup
+    helper = backup.split("snapshot_preserved_counts() {", 1)[1].split("\n          }", 1)[0]
+    assert "snapshot_query" in helper
+    assert 'source_preserved_counts="$(snapshot_preserved_counts)"' in backup
+    assert 'source_preserved_counts="$(preserved_counts "$db" maxibot)"' not in backup
+    assert backup.index("source_queue_sha=") < backup.index("source_preserved_counts=") < backup.index("pg_dump -Fc --snapshot=") < backup.index("snapshot_release || fail snapshot-release")
     assert 'SET TRANSACTION SNAPSHOT \'$snapshot_id\'' in backup
 
 
@@ -746,3 +751,4 @@ def test_exported_postgres_snapshot_session_releases_cleanly_with_same_token(tmp
 
     assert result.returncode == 0, result.stderr
     assert "SNAPSHOT_SESSION=PASS" in result.stdout
+
