@@ -630,7 +630,7 @@ def test_migration_contract_and_frozen_guard_share_exact_declared_baseline():
     assert "docs/release/migration-risk-contract.json" in contract["run"]
     assert "source_application_sha" in contract["run"]
     assert 'git merge-base --is-ancestor "$declared_source_sha" "$CANDIDATE_SHA"' in contract["run"]
-    assert "validation_base_sha=$base_sha" in contract["run"]
+    assert 'print(f"validation_base_sha={sys.argv[2]}")' in contract["run"]
     assert guard["env"]["MIGRATION_VALIDATION_BASE_SHA"] == "${{ steps.migration_contract.outputs.validation_base_sha }}"
     assert 'base_sha="$MIGRATION_VALIDATION_BASE_SHA"' in guard["run"]
     assert 'git merge-base "$CANDIDATE_SHA" "origin/$GITHUB_BASE_REF"' not in guard["run"]
