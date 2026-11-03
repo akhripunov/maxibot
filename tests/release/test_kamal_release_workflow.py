@@ -724,8 +724,8 @@ def test_exported_postgres_snapshot_session_releases_cleanly_with_same_token(tmp
         "#!/usr/bin/env bash\n"
         "while IFS= read -r statement; do\n"
         "  case \"$statement\" in\n"
-        "    \\"SELECT pg_export_snapshot();\\") printf '%s\\\\n' '00000003-0000000B-1' ;;\n"
-        "    \\"\\\\q\\") exit 0 ;;\n"
+        "    \"SELECT pg_export_snapshot();\") printf '%s\\n' '00000003-0000000B-1' ;;\\n"
+        "    \"\\\\q\") exit 0 ;;\\n"
         "  esac\n"
         "done\n"
     )
@@ -734,7 +734,7 @@ def test_exported_postgres_snapshot_session_releases_cleanly_with_same_token(tmp
         "set -euo pipefail\n"
         f"backup_dir={str(tmp_path)!r}\nrun_id=snapshot-test\ndb=fake-db\n"
         + helpers
-        + "\nsnapshot_begin\ntest \\\"$snapshot_id\\\" = 00000003-0000000B-1\nsnapshot_release\nprintf 'SNAPSHOT_SESSION=PASS\\\\n'\n"
+        + "\nsnapshot_begin\ntest \"$snapshot_id\" = 00000003-0000000B-1\nsnapshot_release\nprintf 'SNAPSHOT_SESSION=PASS\\n'\n"
     )
     result = subprocess.run(
         ["bash", "-euo", "pipefail", "-c", script],
@@ -745,4 +745,4 @@ def test_exported_postgres_snapshot_session_releases_cleanly_with_same_token(tmp
     )
 
     assert result.returncode == 0, result.stderr
-    assert "SNAPSHOT_SESSION=PASS" in result.stdout
+        + "\nsnapshot_begin\ntest \"$snapshot_id\" = 00000003-0000000B-1\nsnapshot_release\nprintf 'SNAPSHOT_SESSION=PASS\\n'\n"
