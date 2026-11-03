@@ -858,7 +858,15 @@ jobs:
           restored_preserved_counts="$(preserved_counts "$restore_name" maxibot_restore_probe)" || fail preserved-restore-counts
           [[ "$source_preserved_counts" == "$restored_preserved_counts" ]] || fail preserved-table-restore-mismatch
           restored_head="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" || fail restored-head-read
-          [[ "$source_tables" == "$restored_tables" && "$source_ext" == "$restored_ext" && "$source_rows" == "$restored_rows" && "$source_queue_sha" == "$restored_queue_sha" && "$restored_head" == "$expected_db_head" ]] || fail restore-verification-mismatch
+          # RESTORE_VERIFICATION_BLOCK_BEGIN
+          restore_mismatch=0
+          [[ "$source_tables" == "$restored_tables" ]] || { echo 'MIGRATION_RESTORE_COMPARE=FAIL:table_inventory' >&2; restore_mismatch=1; }
+          [[ "$source_ext" == "$restored_ext" ]] || { echo 'MIGRATION_RESTORE_COMPARE=FAIL:extensions' >&2; restore_mismatch=1; }
+          [[ "$source_rows" == "$restored_rows" ]] || { echo 'MIGRATION_RESTORE_COMPARE=FAIL:queue_row_count' >&2; restore_mismatch=1; }
+          [[ "$source_queue_sha" == "$restored_queue_sha" ]] || { echo 'MIGRATION_RESTORE_COMPARE=FAIL:queue_checksum' >&2; restore_mismatch=1; }
+          [[ "$restored_head" == "$expected_db_head" ]] || { echo 'MIGRATION_RESTORE_COMPARE=FAIL:alembic_head' >&2; restore_mismatch=1; }
+          (( restore_mismatch == 0 )) || fail restore-verification-mismatch
+          # RESTORE_VERIFICATION_BLOCK_END
           backup_sha="$(sha256sum "$backup" | awk '{print $1}')"
           preserved_counts_b64="$(printf '%s' "$source_preserved_counts" | base64 -w0)"
           printf '%s|%s|%s|%s|%s\n' "$backup" "$backup_sha" "$source_rows" "$source_queue_sha" "$preserved_counts_b64"
