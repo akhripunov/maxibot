@@ -396,7 +396,7 @@ jobs:
             jq -e --arg current "$GITHUB_RUN_ID" 'all(.workflow_runs[]; (.id | tostring) == $current or .head_branch != "main" or .event != "push" or ((.name | test("release|deploy|cutover|kamal";"i")) | not))' <<< "$active_runs" >/dev/null || fail 'another MAXIBOT production release is queued or running'
           done
           test "$PRODUCTION_HOST" = 135.106.166.46 || fail 'production host does not match MAXIBOT VPS'
-          test -n "$PRODUCTION_SSH_KEY" && test -n "$PRODUCTION_KNOWN_HOSTS" || fail 'production SSH credentials are not configured'
+          if [[ -z "$PRODUCTION_SSH_KEY" || -z "$PRODUCTION_KNOWN_HOSTS" ]]; then fail 'production SSH credentials are not configured'; fi
           install -d -m 700 "$RUNNER_TEMP/ssh" "$HOME/.ssh"
           printf '%s\n' "$PRODUCTION_SSH_KEY" > "$RUNNER_TEMP/ssh/id_ed25519"
           chmod 600 "$RUNNER_TEMP/ssh/id_ed25519"

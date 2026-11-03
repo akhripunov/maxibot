@@ -237,6 +237,7 @@ def test_kamal_deploy_uses_runtime_baseline_and_scoped_0099_backup_restore_witho
     assert "EXPECTED_CADDY_ID" not in runtime
     assert "kamal-proxy" in runtime
     assert "PRODUCTION_BASELINE=FAIL:" in baseline
+    assert 'if [[ -z "$PRODUCTION_SSH_KEY" || -z "$PRODUCTION_KNOWN_HOSTS" ]]; then fail' in baseline
     assert "Redis PING command failed" in baseline
     assert 'bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"' in baseline
     assert "--owner-approved-task ME-53" not in baseline
