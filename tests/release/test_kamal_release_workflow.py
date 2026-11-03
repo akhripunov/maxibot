@@ -711,7 +711,7 @@ def test_restore_backup_and_queue_comparison_share_one_exported_postgres_snapsho
     for name in ("source_head", "source_tables", "source_ext", "source_rows", "source_queue_sha"):
         line = next(line for line in backup.splitlines() if line.strip().startswith(name + "="))
         assert "snapshot_query" in line
-    assert backup.index("source_queue_sha=") < backup.index("pg_dump -Fc --snapshot=") < backup.index("snapshot_release")
+    assert backup.index("source_queue_sha=") < backup.index("pg_dump -Fc --snapshot=") < backup.index("snapshot_release || fail snapshot-release")
     assert 'SET TRANSACTION SNAPSHOT \'$snapshot_id\'' in backup
 
 
