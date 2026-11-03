@@ -723,7 +723,7 @@ def test_exported_postgres_snapshot_session_releases_cleanly_with_same_token(tmp
     docker.write_text(
         "#!/usr/bin/env bash\n"
         "while IFS= read -r statement; do\n"
-        "  case \\"$statement\\" in\n"
+        "  case \"$statement\" in\n"
         "    \\"SELECT pg_export_snapshot();\\") printf '%s\\\\n' '00000003-0000000B-1' ;;\n"
         "    \\"\\\\q\\") exit 0 ;;\n"
         "  esac\n"
