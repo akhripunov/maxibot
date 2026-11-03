@@ -798,16 +798,85 @@ jobs:
           install -d -m 700 "$backup_dir"
           backup="$backup_dir/maxibot-db-migration-$run_id.dump"
           [[ ! -e "$backup" ]] || fail backup-path-exists
-          docker exec "$db" pg_dump -Fc -U maxibot -d maxibot > "$backup" || fail pg-dump
+          db_image="$(docker inspect "$db" --format '{{.Image}}')" || fail db-image-read
+          db_data_dir="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}')" || fail db-volume-read
+          [[ -n "$db_data_dir" && -d "$db_data_dir" ]] || fail db-data-path
+          data_bytes="$(du -sb "$db_data_dir" | awk '{print $1}')"
+          free_bytes="$(df -PB1 "$backup_dir" | awk 'NR == 2 {print $4}')"
+          [[ "$data_bytes" =~ ^[0-9]+$ && "$free_bytes" =~ ^[0-9]+$ ]] || fail disk-capacity-read
+          (( free_bytes >= data_bytes * 2 + 1073741824 )) || fail insufficient-preliminary-restore-space
+          # SNAPSHOT_SESSION_HELPERS_BEGIN
+          snapshot_dir=""
+          snapshot_pid=""
+          snapshot_fifo_open=0
+          snapshot_id=""
+          snapshot_cleanup() {
+            local cleanup_failed=0
+            if (( snapshot_fifo_open )); then
+              if [[ -n "$snapshot_pid" ]]; then printf 'ROLLBACK;\n\\q\n' >&3 2>/dev/null || cleanup_failed=1; fi
+              exec 3>&- || cleanup_failed=1
+              snapshot_fifo_open=0
+            fi
+            if [[ -n "$snapshot_pid" ]]; then wait "$snapshot_pid" 2>/dev/null || cleanup_failed=1; snapshot_pid=""; fi
+            if [[ -n "$snapshot_dir" && -d "$snapshot_dir" ]]; then rm -rf -- "$snapshot_dir" || cleanup_failed=1; fi
+            snapshot_dir=""
+            return "$cleanup_failed"
+          }
+          snapshot_exit_cleanup() {
+            result=$?
+            trap - EXIT
+            snapshot_cleanup || { echo 'migration snapshot cleanup failed' >&2; result=1; }
+            exit "$result"
+          }
+          snapshot_begin() {
+            snapshot_dir="$(mktemp -d "$backup_dir/.migration-snapshot-$run_id.XXXXXX")" || return 1
+            chmod 700 "$snapshot_dir" || return 1
+            snapshot_fifo="$snapshot_dir/psql.in"
+            snapshot_output="$snapshot_dir/psql.out"
+            mkfifo -m 600 "$snapshot_fifo" || return 1
+            exec 3<>"$snapshot_fifo" || return 1
+            snapshot_fifo_open=1
+            docker exec -i "$db" psql -X -qAt -v ON_ERROR_STOP=1 -U maxibot -d maxibot < "$snapshot_fifo" > "$snapshot_output" 2>&1 &
+            snapshot_pid=$!
+            printf 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\nSELECT pg_export_snapshot();\n' >&3 || return 1
+            for _ in $(seq 1 50); do
+              snapshot_id="$(sed -n '1p' "$snapshot_output" 2>/dev/null || true)"
+              [[ "$snapshot_id" =~ ^[0-9A-F]+-[0-9A-F]+-[0-9]+$ ]] && return 0
+              kill -0 "$snapshot_pid" 2>/dev/null || { cat "$snapshot_output" >&2; return 1; }
+              sleep 0.1
+            done
+            cat "$snapshot_output" >&2
+            return 1
+          }
+          snapshot_release() {
+            printf 'COMMIT;\n\\q\n' >&3 || return 1
+            exec 3>&- || return 1
+            snapshot_fifo_open=0
+            wait "$snapshot_pid" || { snapshot_pid=""; return 1; }
+            snapshot_pid=""
+            snapshot_cleanup
+          }
+          # SNAPSHOT_SESSION_HELPERS_END
+          trap snapshot_exit_cleanup EXIT
+          snapshot_begin || fail snapshot-export
+          snapshot_query() {
+            local query="$1"
+            docker exec "$db" psql -X -qAt -v ON_ERROR_STOP=1 -U maxibot -d maxibot -c "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT '$snapshot_id'; $query; COMMIT;"
+          }
+          source_head="$(snapshot_query 'select version_num from alembic_version')" || fail source-head-read
+          [[ "$source_head" == "$expected_db_head" ]] || fail db-head-drift
+          source_tables="$(snapshot_query "select table_schema || '.' || table_name from information_schema.tables where table_schema not in ('pg_catalog','information_schema') order by table_schema,table_name")" || fail source-table-inventory
+          source_ext="$(snapshot_query "select string_agg(extname, ',' order by extname) from pg_extension")" || fail source-extension-read
+          source_rows="$(snapshot_query 'select count(*) from offline_conversion_queue')" || fail source-queue-count
+          source_queue_sha="$(snapshot_query "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail source-queue-checksum
+          docker exec "$db" pg_dump -Fc --snapshot="$snapshot_id" -U maxibot -d maxibot > "$backup" || fail pg-dump
+          snapshot_release || fail snapshot-release
           chmod 600 "$backup"
           backup_bytes="$(stat -c %s "$backup")"
           (( backup_bytes > 0 )) || fail backup-empty
           docker exec -i "$db" pg_restore --list < "$backup" >/dev/null || fail pg-restore-list
-          db_image="$(docker inspect "$db" --format '{{.Image}}')" || fail db-image-read
-          db_data_dir="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}')" || fail db-volume-read
-          [[ -n "$db_data_dir" && -d "$db_data_dir" ]] || fail db-data-path
-          data_bytes="$(du -sb "$db_data_dir" | awk '{print $1}')"; free_bytes="$(df -PB1 "$backup_dir" | awk 'NR == 2 {print $4}')"
-          [[ "$data_bytes" =~ ^[0-9]+$ && "$free_bytes" =~ ^[0-9]+$ ]] || fail disk-capacity-read
+          free_bytes="$(df -PB1 "$backup_dir" | awk 'NR == 2 {print $4}')"
+          [[ "$free_bytes" =~ ^[0-9]+$ ]] || fail disk-capacity-read
           (( free_bytes >= data_bytes + backup_bytes + 1073741824 )) || fail insufficient-restore-space
           restore_name="maxibot-migration-restore-$run_id"
           restore_ids="$(docker ps -aq --no-trunc --filter "name=^/$restore_name$")" || fail restore-container-query
@@ -816,6 +885,7 @@ jobs:
           chmod 700 "$restore_data"
           cleanup() {
             result=$?; trap - EXIT HUP INT TERM; failed=0
+            snapshot_cleanup || failed=1
             if ! ids="$(docker ps -aq --no-trunc --filter "name=^/$restore_name$")"; then failed=1
             elif [[ -n "$ids" ]]; then docker rm -f "$restore_name" >/dev/null || failed=1; fi
             if ! ids="$(docker ps -aq --no-trunc --filter "name=^/$restore_name$")"; then failed=1
@@ -836,13 +906,9 @@ jobs:
           [[ "$ready" == 1 ]] || fail restore-postgres-ready
           docker exec "$restore_name" createdb -U maxibot maxibot_restore_probe || fail restore-create-db
           docker exec "$restore_name" pg_restore --exit-on-error --no-owner --no-privileges -U maxibot -d maxibot_restore_probe /tmp/backup.dump >/dev/null || fail isolated-pg-restore
-          source_tables="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select table_schema || '.' || table_name from information_schema.tables where table_schema not in ('pg_catalog','information_schema') order by table_schema,table_name")" || fail source-table-inventory
           restored_tables="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c "select table_schema || '.' || table_name from information_schema.tables where table_schema not in ('pg_catalog','information_schema') order by table_schema,table_name")" || fail restored-table-inventory
-          source_ext="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")" || fail source-extension-read
           restored_ext="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c "select string_agg(extname, ',' order by extname) from pg_extension")" || fail restored-extension-read
-          source_rows="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" || fail source-queue-count
           restored_rows="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" || fail restored-queue-count
-          source_queue_sha="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail source-queue-checksum
           restored_queue_sha="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail restored-queue-checksum
           preserved_table_list="$(python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); assert isinstance(x,list) and x and all(isinstance(v,str) and re.fullmatch(r"[a-z_][a-z0-9_]*",v) for v in x); print("\n".join(x))' "$preserved_tables_json")" || fail preserved-table-contract
           mapfile -t preserved_tables <<< "$preserved_table_list"
