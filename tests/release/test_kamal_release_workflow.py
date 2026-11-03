@@ -646,3 +646,25 @@ def test_schema_snapshot_is_streamed_to_verifier_stdin_in_both_production_checks
     assert len(streamed_calls) == 2
     assert all("--snapshot-stdin" in line for line in streamed_calls)
     assert '--snapshot-b64 "$schema_snapshot_b64"' not in workflow
+
+
+def test_preserved_migration_tables_parser_is_valid_python_and_keeps_every_table():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    backup = next(step["run"] for step in workflow["jobs"]["deploy"]["steps"] if step.get("id") == "migration_backup")
+    line = next(line for line in backup.splitlines() if "preserved_table_list=" in line)
+    prefix = "python3 -c '"
+    suffix = "' \"$preserved_tables_json\")\" || fail preserved-table-contract"
+    start = line.index(prefix) + len(prefix)
+    end = line.index(suffix, start)
+    code = line[start:end]
+    tables = ["offline_conversion_queue", "alembic_version"]
+
+    result = subprocess.run(
+        ["python3", "-c", code, json.dumps(tables)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == tables

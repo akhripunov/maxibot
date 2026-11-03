@@ -844,7 +844,7 @@ jobs:
           restored_rows="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" || fail restored-queue-count
           source_queue_sha="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail source-queue-checksum
           restored_queue_sha="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail restored-queue-checksum
-          preserved_table_list="$(python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); assert isinstance(x,list) and x and all(isinstance(v,str) and re.fullmatch(r"[a-z_][a-z0-9_]*",v) for v in x); print(\"\\n\".join(x))' "$preserved_tables_json")" || fail preserved-table-contract
+          preserved_table_list="$(python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); assert isinstance(x,list) and x and all(isinstance(v,str) and re.fullmatch(r"[a-z_][a-z0-9_]*",v) for v in x); print("\n".join(x))' "$preserved_tables_json")" || fail preserved-table-contract
           mapfile -t preserved_tables <<< "$preserved_table_list"
           preserved_counts() {
             local container="$1" database="$2" table rows
