@@ -103,7 +103,7 @@ def main() -> int:
                 raise RuntimeError("rehearsal database is not empty")
 
         alembic(BASELINE)
-        from app.db.models import Admin, Channel, LandingPage, OfflineConversion, TrafficMembership, TrafficVisit, uid
+        from app.db.models import Admin, Channel, LandingPage, TrafficMembership, TrafficVisit, uid
 
         before_columns = {column["name"] for column in inspect(engine).get_columns("offline_conversion_queue")}
         if before_columns & NEW_COLUMNS:
@@ -134,16 +134,33 @@ def main() -> int:
                 )
                 session.add_all([visit, membership])
                 session.flush()
-                session.execute(OfflineConversion.__table__.insert().values(
-                    id=uid(), visit_id=visit.id, membership_id=membership.id, target="YANDEX",
-                    goal="userDidSubscribe" if index % 2 == 0 else "userDidUnsubscribe",
-                    identifier_type=None, identifier_value=None, conversion_datetime=now,
-                    status=("linkage_failure" if index % 3 == 0 else "pending"),
-                    attempts=index % 4, next_retry_at=None, last_error=None, created_at=now,
-                    sent_at=None, metrica_upload_id=f"fixture-upload-{index}",
-                    metrica_upload_status=("LINKAGE_FAILURE" if index % 3 == 0 else "PROCESSING"),
-                    metrica_upload_checked_at=now,
-                ))
+                # Use raw INSERT so SQLAlchemy cannot inject Python-side defaults
+                # for candidate-only 0099 columns into the 0098 baseline schema.
+                session.execute(text("""
+                    INSERT INTO offline_conversion_queue (
+                        id, visit_id, membership_id, target, goal, identifier_type,
+                        identifier_value, conversion_datetime, status, attempts,
+                        next_retry_at, last_error, created_at, sent_at,
+                        metrica_upload_id, metrica_upload_status, metrica_upload_checked_at
+                    ) VALUES (
+                        :id, :visit_id, :membership_id, :target, :goal, :identifier_type,
+                        :identifier_value, :conversion_datetime, :status, :attempts,
+                        :next_retry_at, :last_error, :created_at, :sent_at,
+                        :metrica_upload_id, :metrica_upload_status, :metrica_upload_checked_at
+                    )
+                """), {
+                    "id": uid(), "visit_id": visit.id, "membership_id": membership.id,
+                    "target": "YANDEX",
+                    "goal": "userDidSubscribe" if index % 2 == 0 else "userDidUnsubscribe",
+                    "identifier_type": None, "identifier_value": None,
+                    "conversion_datetime": now,
+                    "status": "linkage_failure" if index % 3 == 0 else "pending",
+                    "attempts": index % 4, "next_retry_at": None, "last_error": None,
+                    "created_at": now, "sent_at": None,
+                    "metrica_upload_id": f"fixture-upload-{index}",
+                    "metrica_upload_status": "LINKAGE_FAILURE" if index % 3 == 0 else "PROCESSING",
+                    "metrica_upload_checked_at": now,
+                })
                 if index and index % 100 == 0:
                     session.flush()
             session.commit()
