@@ -198,7 +198,7 @@ jobs:
             tests/test_migration_rehearsal.py \
             tests/test_postgres_migration_rehearsal.py \
             tests/test_migration_release_contract.py \
-            tests/test_postgres_migration_rehearsal.py
+            tests/test_release_migration_safety.py
 
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
         with:
