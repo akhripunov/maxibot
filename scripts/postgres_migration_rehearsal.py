@@ -229,7 +229,10 @@ def main() -> int:
         if before_digest != after_digest or len(after_rows) != REHEARSAL_ROWS or version != TARGET:
             raise RuntimeError("0099 altered existing conversion data or did not reach the exact target head")
         if new_counter_values != 0 or index_signature != EXPECTED_INDEX_SIGNATURE:
-            raise RuntimeError("new-field defaults or exact polling index definition are invalid")
+            raise RuntimeError(
+                f"0099 new-field defaults or exact polling index definition are invalid: "
+                f"counter={new_counter_values}, index_signature={index_signature!r}"
+            )
 
         check_baseline_model(engine, REHEARSAL_ROWS)
         from app.db.models import OfflineConversion as CandidateOfflineConversion

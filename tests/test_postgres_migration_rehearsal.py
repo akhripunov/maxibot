@@ -86,3 +86,5 @@ def test_postgres_rehearsal_checks_exact_polling_index_definition_and_catalog_fl
     assert "i.indnatts" in SCRIPT and "i.indnkeyatts" in SCRIPT
     assert "i.indpred IS NULL" in SCRIPT and "i.indexprs IS NULL" in SCRIPT
     assert "index_signature != EXPECTED_INDEX_SIGNATURE" in SCRIPT
+    assert 'f"0099 new-field defaults or exact polling index definition are invalid: "' in SCRIPT
+    assert 'f"counter={new_counter_values}, index_signature={index_signature!r}"' in SCRIPT
