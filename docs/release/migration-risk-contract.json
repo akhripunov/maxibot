@@ -48,41 +48,157 @@
   "schema": {
     "source": {
       "required_columns": [
-        {"table": "offline_conversion_queue", "name": "id", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "visit_id", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "membership_id", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "target", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "goal", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "conversion_datetime", "data_type": "timestamp with time zone"},
-        {"table": "offline_conversion_queue", "name": "status", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "attempts", "data_type": "integer"},
-        {"table": "offline_conversion_queue", "name": "created_at", "data_type": "timestamp with time zone"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_id", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_status", "data_type": "character varying"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_checked_at", "data_type": "timestamp with time zone"}
+        {
+          "table": "offline_conversion_queue",
+          "name": "id",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "visit_id",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "membership_id",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "target",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "goal",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "conversion_datetime",
+          "data_type": "timestamp with time zone"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "status",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "attempts",
+          "data_type": "integer"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "created_at",
+          "data_type": "timestamp with time zone"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_id",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_status",
+          "data_type": "character varying"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_checked_at",
+          "data_type": "timestamp with time zone"
+        }
       ],
       "absent_columns": [
-        {"table": "offline_conversion_queue", "name": "metrica_upload_counter_id"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_observation_started_at"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_check_attempts"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_next_check_at"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_check_error"},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_recovered_at"}
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_counter_id"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_observation_started_at"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_check_attempts"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_next_check_at"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_check_error"
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_recovered_at"
+        }
       ],
-      "absent_indexes": ["ix_offline_conversion_queue_metrica_poll"],
-      "absent_constraints": []
+      "absent_indexes": [],
+      "absent_constraints": [],
+      "recoverable_indexes": [
+        {
+          "table": "offline_conversion_queue",
+          "name": "ix_offline_conversion_queue_metrica_poll"
+        }
+      ]
     },
     "target": {
       "columns": [
-        {"table": "offline_conversion_queue", "name": "metrica_upload_counter_id", "data_type": "character varying", "max_length": 32, "nullable": true},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_observation_started_at", "data_type": "timestamp with time zone", "nullable": true},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_check_attempts", "data_type": "integer", "nullable": false, "default_any": ["0", "0::integer"]},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_next_check_at", "data_type": "timestamp with time zone", "nullable": true},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_check_error", "data_type": "character varying", "max_length": 64, "nullable": true},
-        {"table": "offline_conversion_queue", "name": "metrica_upload_recovered_at", "data_type": "timestamp with time zone", "nullable": true}
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_counter_id",
+          "data_type": "character varying",
+          "max_length": 32,
+          "nullable": true
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_observation_started_at",
+          "data_type": "timestamp with time zone",
+          "nullable": true
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_check_attempts",
+          "data_type": "integer",
+          "nullable": false,
+          "default_any": [
+            "0",
+            "0::integer"
+          ]
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_next_check_at",
+          "data_type": "timestamp with time zone",
+          "nullable": true
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_check_error",
+          "data_type": "character varying",
+          "max_length": 64,
+          "nullable": true
+        },
+        {
+          "table": "offline_conversion_queue",
+          "name": "metrica_upload_recovered_at",
+          "data_type": "timestamp with time zone",
+          "nullable": true
+        }
       ],
       "indexes": [
-        {"table": "offline_conversion_queue", "name": "ix_offline_conversion_queue_metrica_poll", "definition": "CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)", "method": "btree", "unique": false, "valid": true, "ready": true}
+        {
+          "table": "offline_conversion_queue",
+          "name": "ix_offline_conversion_queue_metrica_poll",
+          "definition": "CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)",
+          "method": "btree",
+          "unique": false,
+          "valid": true,
+          "ready": true
+        }
       ],
       "constraints": []
     }
