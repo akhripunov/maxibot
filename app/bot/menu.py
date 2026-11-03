@@ -249,7 +249,13 @@ async def _send_exact_conversion(db: AsyncSession, conversion: OfflineConversion
             conversion.status = "uploaded"
             conversion.metrica_upload_id = str(upload_id)
             conversion.metrica_upload_status = str(uploading.get("status") or "UPLOADED").upper()
-            conversion.metrica_upload_checked_at = datetime.now(timezone.utc)
+            upload_started_at = datetime.now(timezone.utc)
+            conversion.metrica_upload_counter_id = str(counter_id)
+            conversion.metrica_upload_observation_started_at = upload_started_at
+            conversion.metrica_upload_check_attempts = 0
+            conversion.metrica_upload_checked_at = upload_started_at
+            conversion.metrica_upload_next_check_at = upload_started_at + timedelta(minutes=1)
+            conversion.metrica_upload_check_error = None
             conversion.attempts = int(conversion.attempts or 0) + 1
             conversion.last_error = None
             await db.commit()

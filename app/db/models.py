@@ -594,7 +594,17 @@ class OfflineConversion(Base):
     metrica_upload_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     metrica_upload_status: Mapped[Optional[str]] = mapped_column(String(32), index=True)
     metrica_upload_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    __table_args__ = (UniqueConstraint("visit_id", "membership_id", "target", "goal", name="uq_offline_conversion_visit_membership_target_goal"),)
+    # Immutable destination and bounded polling state for this particular upload.
+    metrica_upload_counter_id: Mapped[Optional[str]] = mapped_column(String(32))
+    metrica_upload_observation_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    metrica_upload_check_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    metrica_upload_next_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    metrica_upload_check_error: Mapped[Optional[str]] = mapped_column(String(64))
+    metrica_upload_recovered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("visit_id", "membership_id", "target", "goal", name="uq_offline_conversion_visit_membership_target_goal"),
+        Index("ix_offline_conversion_queue_metrica_poll", "status", "metrica_upload_next_check_at"),
+    )
 class BlockedUser(Base):
     __tablename__="blocked_users"
     id: Mapped[str]=mapped_column(String(36), primary_key=True, default=uid)
