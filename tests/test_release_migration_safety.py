@@ -52,4 +52,4 @@ def test_native_migration_apply_is_forward_only_and_follows_verified_backup():
     assert 'alembic upgrade "$migration_target"' in apply_script
     assert "alembic downgrade" not in apply_script
     assert '[[ "$expected_db_head" == "$migration_target" ]]' in apply_script
-    assert "MIGRATION_APPLY=SUCCESS" in apply_script
+    assert "MIGRATION_APPLY=PASS" in apply_script
