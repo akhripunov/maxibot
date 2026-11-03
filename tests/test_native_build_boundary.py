@@ -47,8 +47,13 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         baseline = deploy.split("- name: Verify exact main and read the current production baseline", 1)[1]
         baseline = baseline.split("- name: Verify exact GHCR image and Kamal configuration", 1)[0]
         self.assertNotIn("MAXIBOT_BACKUP_MAX_AGE_SECONDS", deploy)
-        self.assertNotIn("pg_restore", deploy)
         self.assertNotIn("native_restore_probe", deploy)
+        backup_start = deploy.index("- name: Create and restore-check a fresh database backup for migration 0099")
+        migration_start = deploy.index("- name: Apply or forward-resume 0099", backup_start)
+        migration_backup = deploy[backup_start:migration_start]
+        self.assertIn("if: steps.baseline.outputs.migration_required == 'true'", migration_backup)
+        self.assertIn("pg_restore --list", migration_backup)
+        self.assertNotIn("pg_restore", baseline)
         self.assertIn("PostgreSQL is not accepting connections", baseline)
         self.assertIn("Redis PING command failed", baseline)
         self.assertIn("Redis did not return PONG", baseline)
