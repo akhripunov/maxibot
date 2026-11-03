@@ -12,7 +12,7 @@ ROLE_REGISTRY = (ROOT / "docs/ROLE_REGISTRY.md").read_text()
 ARCHITECT_CONTEXT = (ROOT / "docs/ARCHITECT_SOL_CONTEXT_PACK.md").read_text()
 RELEASE_AUTH = (ROOT / "docs/RELEASE_AUTHORIZATION.md").read_text()
 RELEASE_AUTOMATION = (ROOT / "docs/RELEASE_AUTOMATION.md").read_text()
-DEPLOY_WORKFLOW = (ROOT / ".github/workflows/maxibot-deploy.yml").read_text()
+NATIVE_WORKFLOW = (ROOT / ".github/workflows/maxibot-native-release.yml").read_text()
 
 
 class AgentPolicyContractTests(unittest.TestCase):
@@ -121,12 +121,16 @@ class AgentPolicyContractTests(unittest.TestCase):
 
 
     def test_release_authorization_is_maxibot_scoped_and_apply_stays_gated(self) -> None:
-        lower = (AGENTS + RELEASE_AUTH + RELEASE_AUTOMATION + DEPLOY_WORKFLOW).lower()
+        lower = (AGENTS + RELEASE_AUTH + RELEASE_AUTOMATION + NATIVE_WORKFLOW).lower()
         self.assertIn("maxibot", lower)
-        self.assertIn("exact-sha", lower)
-        self.assertIn("task_scoped_auto", lower)
-        self.assertIn("ready_for_owner", lower)
-        self.assertIn("approve_production", lower)
+        self.assertIn("exact sha", lower)
+        self.assertIn("digest", lower)
+        self.assertIn("production", lower)
+        self.assertIn("environment", lower)
+        self.assertIn("rollback", lower)
+        self.assertNotIn("task_scoped_auto", lower)
+        self.assertNotIn("ready_for_owner", lower)
+        self.assertNotIn("approve_production", lower)
         self.assertIn("gpoint", AGENTS.lower())
         self.assertTrue("never apply gpoint release procedures or authorization to maxibot" in lower)
         self.assertTrue("or maxibot release procedures or authorization to gpoint" in lower)
