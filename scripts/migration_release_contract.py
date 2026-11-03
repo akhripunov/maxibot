@@ -266,7 +266,6 @@ def _validate_schema_contract(schema: dict) -> None:
                 or not isinstance(item["validated"], bool)):
             raise ValueError("migration schema target constraint postcondition is invalid")
     if not any(source[key] for key in ("required_columns", "absent_columns", "absent_indexes", "absent_constraints")) and not source.get("recoverable_indexes"):
-
         raise ValueError("migration schema contract must declare at least one source-state precondition")
     if not any(target[key] for key in ("columns", "indexes", "constraints")):
         raise ValueError("migration schema contract must declare at least one target-state postcondition")
