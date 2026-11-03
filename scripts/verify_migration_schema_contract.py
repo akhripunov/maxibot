@@ -55,15 +55,18 @@ def main() -> int:
     parser.add_argument("--print-query", action="store_true")
     parser.add_argument("--contract-b64")
     parser.add_argument("--snapshot-b64")
+    parser.add_argument("--snapshot-stdin", action="store_true")
     parser.add_argument("--mode", choices=("source", "target"))
     args = parser.parse_args()
     if args.print_query:
         print(SCHEMA_SNAPSHOT_SQL)
         return 0
-    if not all((args.contract_b64, args.snapshot_b64, args.mode)):
-        parser.error("contract-b64, snapshot-b64 and mode are required for validation")
+    if not args.contract_b64 or not args.mode:
+        parser.error("contract-b64 and mode are required for validation")
+    if (args.snapshot_b64 is None) == (not args.snapshot_stdin):
+        parser.error("provide exactly one of snapshot-b64 or snapshot-stdin")
     contract = json.loads(base64.b64decode(args.contract_b64, validate=True))
-    snapshot = json.loads(base64.b64decode(args.snapshot_b64, validate=True))
+    snapshot = json.loads(sys.stdin.read()) if args.snapshot_stdin else json.loads(base64.b64decode(args.snapshot_b64, validate=True))
     validate_schema_snapshot(contract, snapshot, args.mode)
     print(f"MIGRATION_SCHEMA_{args.mode.upper()}=PASS")
     return 0
