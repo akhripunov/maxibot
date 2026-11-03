@@ -23,7 +23,7 @@ TARGET = "0099_metrica_upload_reconciliation_v1"
 PRODUCTION_BASE_SHA = "eda64bd2d0118009853e4e06f0a9c888ad19fd5a"
 INDEX = "ix_offline_conversion_queue_metrica_poll"
 EXPECTED_INDEX_SIGNATURE = (
-    "t|t|f|btree|public|public|offline_conversion_queue|2|2|t|t|"
+    "true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|"
     "status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll "
     "ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)"
 )

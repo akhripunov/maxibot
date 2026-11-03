@@ -331,7 +331,7 @@ def test_0099_forward_resume_requires_exact_old_app_and_complete_target_schema_w
 
     assert '"$baseline_sha" == "$migration_baseline"' in baseline
     assert 'wc -l <<< "$partial_schema"' in baseline
-    assert '[[ "$partial_index" == "t|t|$expected_index_semantics" ]]' in baseline
+    assert '[[ "$partial_index" == "true|true|$expected_index_semantics" ]]' in baseline
     assert '"migration_resume=$migration_resume"' in baseline
     assert 'if [[ "$migration_resume" == false ]]; then' in migration
     assert '[[ "$expected_db_head" == 0098_durable_autopilot_execution_claim_v1 ]]' in migration
@@ -344,9 +344,9 @@ def test_0099_preflight_and_post_apply_validate_exact_polling_index_catalog_defi
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
     migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")["run"]
 
-    expected = "t|t|f|btree|public|public|offline_conversion_queue|2|2|t|t|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)"
+    expected = "true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)"
     assert expected in migration
-    assert "expected_index_semantics='f|btree|public|public|offline_conversion_queue" in baseline
+    assert "expected_index_semantics='false|btree|public|public|offline_conversion_queue" in baseline
     assert "[[ \"$actual_index\" == '" + expected + "' ]]" in migration
     for fragment in (
         "i.indisunique::text",
