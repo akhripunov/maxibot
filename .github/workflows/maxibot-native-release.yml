@@ -257,11 +257,13 @@ jobs:
           manifest="$(docker buildx imagetools inspect "$IMAGE")"
           grep -Eq "^Digest:[[:space:]]+$IMAGE_DIGEST$" <<< "$manifest"
           grep -Eq '^[[:space:]]+Platform:[[:space:]]+linux/amd64$' <<< "$manifest"
-          echo "MAXIBOT_BUILD_RUN_ID=$GITHUB_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
-          echo "MAXIBOT_BUILD_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
-          echo "MAXIBOT_BUILD_SHA=$CANDIDATE_SHA" >> "$GITHUB_STEP_SUMMARY"
-          printf 'NATIVE_RELEASE_BUILD: `%s` → `%s`\n' "$CANDIDATE_SHA" "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
-          echo 'MAXIBOT_GHCR_DIGEST_PLATFORM=PASS' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "MAXIBOT_BUILD_RUN_ID=$GITHUB_RUN_ID"
+            echo "MAXIBOT_BUILD_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT"
+            echo "MAXIBOT_BUILD_SHA=$CANDIDATE_SHA"
+            printf "NATIVE_RELEASE_BUILD: \`%s\` → \`%s\`\n" "$CANDIDATE_SHA" "$IMAGE"
+            echo 'MAXIBOT_GHCR_DIGEST_PLATFORM=PASS'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     if: >-
@@ -363,7 +365,7 @@ jobs:
             echo "IMAGE_TAG=$image_tag"
             echo "IMAGE_REF=$image_ref"
           } >> "$GITHUB_ENV"
-          printf 'BUILD_RUN=%s (attempt %s)\nIMAGE_TAG=`%s`\nIMMUTABLE_IMAGE=`%s`\n' \
+          printf "BUILD_RUN=%s (attempt %s)\nIMAGE_TAG=\`%s\`\nIMMUTABLE_IMAGE=\`%s\`\n" \
             "$BUILD_RUN_ID" "$build_attempt" "$image_tag" "$image_ref" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -621,23 +623,27 @@ jobs:
           else
             bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" || fail 'frozen-path guard rejected the candidate'
           fi
-          echo 'PRODUCTION_BASELINE=PASS' >> "$GITHUB_STEP_SUMMARY"
-          echo 'FROZEN_PATH_REGRESSION=PASS' >> "$GITHUB_STEP_SUMMARY"
-          echo "baseline_sha=$baseline_sha" >> "$GITHUB_OUTPUT"
-          echo "database_head=$database_head" >> "$GITHUB_OUTPUT"
-          echo "migration_required=$migration_required" >> "$GITHUB_OUTPUT"
-          echo "migration_resume=$migration_resume" >> "$GITHUB_OUTPUT"
-          echo "migration_rollback=$migration_rollback" >> "$GITHUB_OUTPUT"
-          if [[ "$migration_required" == true ]]; then
-            echo 'expected_database_head=0099_metrica_upload_reconciliation_v1' >> "$GITHUB_OUTPUT"
-          else
-            echo "expected_database_head=$database_head" >> "$GITHUB_OUTPUT"
-          fi
-          echo "old_db_id=$old_db_id" >> "$GITHUB_OUTPUT"
-          echo "old_redis_id=$old_redis_id" >> "$GITHUB_OUTPUT"
-          echo "old_db_volume=$old_db_volume" >> "$GITHUB_OUTPUT"
-          echo "old_redis_volume=$old_redis_volume" >> "$GITHUB_OUTPUT"
-          echo "old_uploads_volume=$old_uploads_volume" >> "$GITHUB_OUTPUT"
+          {
+            echo 'PRODUCTION_BASELINE=PASS'
+            echo 'FROZEN_PATH_REGRESSION=PASS'
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "baseline_sha=$baseline_sha"
+            echo "database_head=$database_head"
+            echo "migration_required=$migration_required"
+            echo "migration_resume=$migration_resume"
+            echo "migration_rollback=$migration_rollback"
+            if [[ "$migration_required" == true ]]; then
+              echo 'expected_database_head=0099_metrica_upload_reconciliation_v1'
+            else
+              echo "expected_database_head=$database_head"
+            fi
+            echo "old_db_id=$old_db_id"
+            echo "old_redis_id=$old_redis_id"
+            echo "old_db_volume=$old_db_volume"
+            echo "old_redis_volume=$old_redis_volume"
+            echo "old_uploads_volume=$old_uploads_volume"
+          } >> "$GITHUB_OUTPUT"
       - name: Verify exact GHCR image and Kamal configuration
         env:
           MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
@@ -802,10 +808,12 @@ jobs:
           )"
           IFS='|' read -r backup_path backup_sha backup_queue_rows backup_queue_sha <<< "$remote"
           [[ "$backup_sha" =~ ^[0-9a-f]{64}$ && "$backup_queue_rows" =~ ^[0-9]+$ && "$backup_queue_sha" =~ ^[0-9a-f]{64}$ ]]
-          echo "backup_sha=$backup_sha" >> "$GITHUB_OUTPUT"
-          echo "backup_path=$backup_path" >> "$GITHUB_OUTPUT"
-          echo "backup_queue_rows=$backup_queue_rows" >> "$GITHUB_OUTPUT"
-          echo "backup_queue_sha=$backup_queue_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "backup_sha=$backup_sha"
+            echo "backup_path=$backup_path"
+            echo "backup_queue_rows=$backup_queue_rows"
+            echo "backup_queue_sha=$backup_queue_sha"
+          } >> "$GITHUB_OUTPUT"
           printf 'ME-0099 fresh backup, archive validation and isolated restore: PASS; queue rows=%s, queue SHA256=%s, backup SHA256=%s\n' "$backup_queue_rows" "$backup_queue_sha" "$backup_sha" >> "$GITHUB_STEP_SUMMARY"
       - name: Apply or forward-resume 0099 from the exact immutable candidate image
         if: steps.baseline.outputs.migration_required == 'true'
