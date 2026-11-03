@@ -964,7 +964,6 @@ jobs:
           BACKUP_PATH: ${{ steps.migration_backup.outputs.backup_path }}
           BACKUP_SHA: ${{ steps.migration_backup.outputs.backup_sha }}
           BACKUP_QUEUE_ROWS: ${{ steps.migration_backup.outputs.backup_queue_rows }}
-          BACKUP_QUEUE_SHA: ${{ steps.migration_backup.outputs.backup_queue_sha }}
           BACKUP_PRESERVED_COUNTS: ${{ steps.migration_backup.outputs.backup_preserved_counts }}
           EXPECTED_DB_ID: ${{ steps.baseline.outputs.old_db_id }}
           EXPECTED_DB_VOLUME: ${{ steps.baseline.outputs.old_db_volume }}
@@ -980,7 +979,6 @@ jobs:
           [[ "$BACKUP_PATH" == /opt/maxibot/backups/maxibot-db-migration-$GITHUB_RUN_ID.dump ]]
           [[ "$BACKUP_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$BACKUP_QUEUE_ROWS" =~ ^[0-9]+$ ]]
-          [[ "$BACKUP_QUEUE_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$BACKUP_PRESERVED_COUNTS" =~ ^[A-Za-z0-9+/=]+$ ]]
           [[ "$EXPECTED_DB_ID" =~ ^[0-9a-f]{64}$ && -n "$EXPECTED_DB_VOLUME" ]]
           [[ "$EXPECTED_PRODUCTION_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -994,73 +992,109 @@ jobs:
             active_runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=$run_status&per_page=100")"
             jq -e --arg current "$GITHUB_RUN_ID" 'all(.workflow_runs[]; (.id | tostring) == $current or .head_branch != "main" or .event != "push" or ((.name | test("release|deploy|cutover|kamal";"i")) | not))' <<< "$active_runs" >/dev/null || { echo 'competing production release detected immediately before migration' >&2; exit 1; }
           done
+          safe_remote_failure_code() {
+            local error_file="$1" failure
+            failure="$(grep -E '^MIGRATION_APPLY=FAIL:[a-z0-9_-]+$' "$error_file" | tail -n 1 || true)"
+            [[ -n "$failure" ]] || failure='MIGRATION_APPLY=FAIL:remote-command-exit'
+            printf '%s' "$failure"
+          }
           remote_script="$RUNNER_TEMP/maxibot-migration-apply.sh"
           cat > "$remote_script" <<'REMOTE'
           set -euo pipefail
-          fail() { echo "MIGRATION_APPLY=FAIL:$1" >&2; exit 1; }
-          read -r registry_token
-          docker_config="$(mktemp -d)"
-          trap 'rm -rf -- "$docker_config"; rm -f -- "$0"' EXIT
-          export DOCKER_CONFIG="$docker_config"
-          printf '%s\n' "$registry_token" | docker login ghcr.io --username akhripunov --password-stdin >/dev/null
-          unset registry_token
-          sha="$1"; image_ref="$2"; expected_rows="$3"; expected_queue_sha="$4"; expected_backup="$5"; backup_sha="$6"; expected_db_id="$7"; expected_db_volume="$8"; expected_prod_sha="$9"; expected_db_head="${10}"; migration_resume="${11}"; migration_source="${12}"; migration_target="${13}"; expected_preserved_counts_b64="${14}"; schema_query_b64="${15}"
-          schema_query="$(printf '%s' "$schema_query_b64" | base64 -d)" || fail 'schema query decode failed'
-          db=maxibot-vps-db-1
-          api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
-          worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
-          [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$(docker inspect "$db" --format '{{.Id}}')" == "$expected_db_id" ]]
-          [[ "$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" == "$expected_db_volume" ]]
-          [[ -s "$expected_backup" ]]
-          [[ "$(sha256sum "$expected_backup" | awk '{print $1}')" == "$backup_sha" ]]
-          docker exec -i "$db" pg_restore --list < "$expected_backup" >/dev/null
-          api_sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')"
-          worker_sha="$(docker inspect "$worker" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p')"
-          [[ "$api_sha" == "$expected_prod_sha" && "$worker_sha" == "$expected_prod_sha" ]]
-          [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" == "$expected_db_head" ]]
-          [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" == "$expected_rows" ]]
-          queue_sha="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')"
-          [[ "$queue_sha" == "$expected_queue_sha" ]]
-          preserved_counts_from_contract="$(printf '%s' "$expected_preserved_counts_b64" | base64 -d)" || fail 'preserved table evidence cannot be decoded'
-          preserved_table_list="$(awk -F'|' 'NF == 2 {print $1}' <<< "$preserved_counts_from_contract")"
-          [[ -n "$preserved_table_list" && "$(awk -F'|' 'NF != 2 {bad=1} END {print bad+0}' <<< "$preserved_counts_from_contract")" == 0 ]]
-          preserved_counts() {
-            local table rows
-            while IFS= read -r table; do
-              [[ "$table" =~ ^[a-z_][a-z0-9_]*$ ]] || return 1
-              rows="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from public.\"$table\"")" || return 1
-              [[ "$rows" =~ ^[0-9]+$ ]] || return 1
-              printf '%s|%s\n' "$table" "$rows"
-            done <<< "$preserved_table_list"
+          fail() { printf 'MIGRATION_APPLY=FAIL:%s\n' "$1" >&2; exit 1; }
+          read -r registry_token || fail registry-token-input
+          [[ -n "$registry_token" ]] || fail registry-token-empty
+          docker_config="$(mktemp -d)" || fail docker-config-create
+          cleanup() {
+            local status=$?
+            trap - EXIT
+            rm -rf -- "$docker_config" >/dev/null 2>&1 || status=1
+            rm -f -- "$0" || status=1
+            exit "$status"
           }
-          [[ "$(preserved_counts)" == "$preserved_counts_from_contract" ]] || fail 'preserved-table baseline differs from the verified backup'
-          docker pull "$image_ref" >/dev/null
-          test "$(docker image inspect "$image_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$sha"
-          test "$(docker image inspect "$image_ref" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
-          docker image inspect "$image_ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fxq "$image_ref"
+          trap cleanup EXIT
+          export DOCKER_CONFIG="$docker_config"
+          printf '%s\n' "$registry_token" | docker login ghcr.io --username akhripunov --password-stdin >/dev/null 2>&1 || fail registry-login
+          unset registry_token
+          sha="$1"; image_ref="$2"; expected_rows="$3"; expected_backup="$4"; backup_sha="$5"; expected_db_id="$6"; expected_db_volume="$7"; expected_prod_sha="$8"; expected_db_head="$9"; migration_resume="${10}"; migration_source="${11}"; migration_target="${12}"; expected_preserved_counts_b64="${13}"; schema_query_b64="${14}"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail candidate-sha-format
+          [[ "$image_ref" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]] || fail immutable-image-reference
+          [[ "$expected_rows" =~ ^[0-9]+$ ]] || fail backup-row-count-format
+          [[ "$expected_backup" == /opt/maxibot/backups/maxibot-db-migration-*.dump ]] || fail backup-path-format
+          [[ "$backup_sha" =~ ^[0-9a-f]{64}$ ]] || fail backup-sha-format
+          [[ "$expected_db_id" =~ ^[0-9a-f]{64}$ && -n "$expected_db_volume" ]] || fail db-identity-format
+          [[ "$expected_prod_sha" =~ ^[0-9a-f]{40}$ ]] || fail production-sha-format
+          [[ "$expected_db_head" == "$migration_source" || "$expected_db_head" == "$migration_target" ]] || fail database-head-contract
+          [[ "$migration_resume" == true || "$migration_resume" == false ]] || fail migration-resume-contract
+          schema_query="$(printf '%s' "$schema_query_b64" | base64 -d)" || fail schema-query-decode
+          db=maxibot-vps-db-1
+          api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)" || fail api-query
+          worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)" || fail worker-query
+          [[ "$api" =~ ^[0-9a-f]{64}$ && "$worker" =~ ^[0-9a-f]{64}$ ]] || fail api-worker-cardinality
+          db_id="$(docker inspect "$db" --format '{{.Id}}')" || fail db-container-inspect
+          [[ "$db_id" == "$expected_db_id" ]] || fail db-container-identity
+          db_volume="$(docker inspect "$db" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" || fail db-volume-inspect
+          [[ "$db_volume" == "$expected_db_volume" ]] || fail db-volume-identity
+          [[ -s "$expected_backup" ]] || fail backup-missing
+          actual_backup_sha="$(sha256sum "$expected_backup" | awk '{print $1}')" || fail backup-sha-read
+          [[ "$actual_backup_sha" == "$backup_sha" ]] || fail backup-sha-mismatch
+          docker exec -i "$db" pg_restore --list < "$expected_backup" >/dev/null 2>&1 || fail backup-archive-invalid
+          api_sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')" || fail api-health-read
+          worker_sha="$(docker inspect "$worker" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^MAXIBOT_COMMIT_SHA=//p')" || fail worker-sha-read
+          [[ "$api_sha" == "$expected_prod_sha" && "$worker_sha" == "$expected_prod_sha" ]] || fail production-sha-drift
+          live_db_head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" || fail database-head-read
+          [[ "$live_db_head" == "$expected_db_head" ]] || fail database-head-drift
+          queue_rows_before="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" || fail queue-row-count-read
+          [[ "$queue_rows_before" =~ ^[0-9]+$ ]] || fail queue-row-count-format
+          preserved_counts_from_contract="$(printf '%s' "$expected_preserved_counts_b64" | base64 -d)" || fail preserved-table-contract-decode
+          [[ "$preserved_counts_from_contract" == "offline_conversion_queue|$expected_rows" ]] || fail preserved-table-contract-mismatch
+          queue_rows_non_decreasing() {
+            [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || return 2
+            (( $2 >= $1 ))
+          }
+          queue_rows_non_decreasing "$expected_rows" "$queue_rows_before" || fail queue-rows-below-backup
+          docker pull "$image_ref" >/dev/null 2>&1 || fail immutable-image-pull
+          image_revision="$(docker image inspect "$image_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" || fail image-revision-read
+          [[ "$image_revision" == "$sha" ]] || fail image-revision-mismatch
+          image_platform="$(docker image inspect "$image_ref" --format '{{.Os}}/{{.Architecture}}')" || fail image-platform-read
+          [[ "$image_platform" == linux/amd64 ]] || fail image-platform-mismatch
+          docker image inspect "$image_ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fxq "$image_ref" || fail image-digest-mismatch
           if [[ "$migration_resume" == false ]]; then
-            [[ "$expected_db_head" == "$migration_source" ]]
-            docker run --rm --network kamal --env-file /opt/maxibot/.env --env-file /opt/maxibot/secrets/mail_cloud.env \
-              -e MAX_RUN_POLLING=false "$image_ref" alembic upgrade "$migration_target"
+            [[ "$expected_db_head" == "$migration_source" ]] || fail migration-source-head
+            if ! docker run --rm --network kamal --env-file /opt/maxibot/.env --env-file /opt/maxibot/secrets/mail_cloud.env \
+              -e MAX_RUN_POLLING=false "$image_ref" alembic upgrade "$migration_target" >/dev/null 2>&1; then
+              fail alembic-upgrade
+            fi
           else
-            [[ "$expected_db_head" == "$migration_target" ]]
+            [[ "$expected_db_head" == "$migration_target" ]] || fail migration-resume-head
           fi
-          [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" == "$migration_target" ]]
-          [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" == "$expected_rows" ]]
-          queue_sha_after="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')"
-          [[ "$queue_sha_after" == "$expected_queue_sha" ]]
-          [[ "$(preserved_counts)" == "$preserved_counts_from_contract" ]] || fail 'preserved-table row counts changed during migration'
-          schema_snapshot="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "$schema_query")" || fail 'post-migration PostgreSQL schema catalog snapshot failed'
-          [[ -n "$schema_snapshot" ]] || fail 'post-migration schema catalog snapshot is empty'
+          target_db_head="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" || fail migrated-head-read
+          [[ "$target_db_head" == "$migration_target" ]] || fail migrated-head-mismatch
+          queue_rows_after="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" || fail queue-row-count-after-read
+          queue_rows_non_decreasing "$queue_rows_before" "$queue_rows_after" || fail queue-row-count-decreased
+          schema_snapshot="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "$schema_query")" || fail post-migration-schema-read
+          [[ -n "$schema_snapshot" ]] || fail post-migration-schema-empty
           printf 'MIGRATION_SCHEMA_SNAPSHOT_B64=%s\n' "$(printf '%s' "$schema_snapshot" | base64 | tr -d '\n')"
           REMOTE
           chmod 700 "$remote_script"
           scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$remote_script" "root@$PRODUCTION_HOST:/tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh"
-          remote_output="$(printf '%s\n' "$KAMAL_REGISTRY_PASSWORD" | ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "bash /tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh '$CANDIDATE_SHA' '$IMAGE_REF' '$BACKUP_QUEUE_ROWS' '$BACKUP_QUEUE_SHA' '$BACKUP_PATH' '$BACKUP_SHA' '$EXPECTED_DB_ID' '$EXPECTED_DB_VOLUME' '$EXPECTED_PRODUCTION_SHA' '$EXPECTED_DATABASE_HEAD' '$MIGRATION_RESUME' '$MIGRATION_SOURCE' '$MIGRATION_TARGET' '$BACKUP_PRESERVED_COUNTS' '$schema_query_b64'")"
+          remote_stdout="$RUNNER_TEMP/migration-apply.stdout"
+          remote_stderr="$RUNNER_TEMP/migration-apply.stderr"
+          set +e
+          printf '%s\n' "$KAMAL_REGISTRY_PASSWORD" | ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "bash /tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh '$CANDIDATE_SHA' '$IMAGE_REF' '$BACKUP_QUEUE_ROWS' '$BACKUP_PATH' '$BACKUP_SHA' '$EXPECTED_DB_ID' '$EXPECTED_DB_VOLUME' '$EXPECTED_PRODUCTION_SHA' '$EXPECTED_DATABASE_HEAD' '$MIGRATION_RESUME' '$MIGRATION_SOURCE' '$MIGRATION_TARGET' '$BACKUP_PRESERVED_COUNTS' '$schema_query_b64'" > "$remote_stdout" 2> "$remote_stderr"
+          remote_status=$?
+          set -e
           rm -f "$remote_script"
+          if (( remote_status != 0 )); then
+            safe_reason="$(safe_remote_failure_code "$remote_stderr")"
+            printf '%s\n' "$safe_reason" >&2
+            rm -f "$remote_stdout" "$remote_stderr"
+            exit 1
+          fi
+          remote_output="$(cat "$remote_stdout")" || { rm -f "$remote_stdout" "$remote_stderr"; echo 'MIGRATION_APPLY=FAIL:remote-output-read' >&2; exit 1; }
+          rm -f "$remote_stdout" "$remote_stderr"
           schema_snapshot_b64="$(sed -n 's/^MIGRATION_SCHEMA_SNAPSHOT_B64=//p' <<< "$remote_output" | tail -n 1)"
-          [[ "$schema_snapshot_b64" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo 'post-migration schema snapshot readback is missing' >&2; exit 1; }
+          [[ "$schema_snapshot_b64" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo 'MIGRATION_APPLY=FAIL:post-migration-schema-snapshot-missing' >&2; exit 1; }
           printf '%s' "$schema_snapshot_b64" | base64 -d | python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode target
           echo "MIGRATION_APPLY=PASS TARGET=$MIGRATION_TARGET" >> "$GITHUB_STEP_SUMMARY"
       - name: Record exact application Deployment after all preflight gates

@@ -280,7 +280,7 @@ def test_contract_migration_gate_runs_backup_restore_apply_before_kamal():
     assert 'if [[ "$migration_resume" == false ]]; then' in migration["run"]
     assert '[[ "$expected_db_head" == "$migration_target" ]]' in migration["run"]
     assert "BACKUP_PRESERVED_COUNTS" in migration.get("env", {})
-    assert "preserved-table row counts changed during migration" in migration["run"]
+    assert "queue_rows_non_decreasing" in migration["run"]
     assert names.index(backup["name"]) < names.index(migration["name"]) < names.index("Record exact application Deployment after all preflight gates")
     assert runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD") == "${{ steps.baseline.outputs.expected_database_head }}"
     assert "db_head == expected_db_head" in runtime["run"]
@@ -316,7 +316,9 @@ def test_0099_backup_and_database_identity_are_revalidated_immediately_before_mi
     assert '"$expected_rows"' in migration
     assert "pg_restore --list" in migration
     assert 'select count(*) from offline_conversion_queue' in migration
-    assert "expected_queue_sha" in migration and "queue_sha_after" in migration
+    assert "queue_rows_before" in migration and "queue_rows_after" in migration
+    assert "BACKUP_QUEUE_SHA" not in migration
+    assert "queue_sha_after" not in migration
     assert 'git/ref/heads/main' in migration
     assert "competing production release detected immediately before migration" in migration
 
@@ -752,3 +754,77 @@ def test_exported_postgres_snapshot_session_releases_cleanly_with_same_token(tmp
     assert result.returncode == 0, result.stderr
     assert "SNAPSHOT_SESSION=PASS" in result.stdout
 
+
+
+def test_live_migration_queue_gate_allows_concurrent_writes_but_rejects_row_loss():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    backup = next(step for step in steps if step.get("id") == "migration_backup")["run"]
+    migration = next(
+        step for step in steps
+        if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image"
+    )["run"]
+
+    assert "source_queue_sha" in backup and "restored_queue_sha" in backup
+    assert '[[ "$source_queue_sha" == "$restored_queue_sha" ]]' in backup
+    assert "queue_rows_non_decreasing()" in migration
+    assert "BACKUP_QUEUE_SHA" not in migration
+    assert "queue_sha_after" not in migration
+    assert "queue_rows_after" in migration and "queue_rows_before" in migration
+
+    helper = re.search(
+        r"(?m)^[ \\t]*queue_rows_non_decreasing\(\) \{\n(?:^[ \\t]+.*\n)+^[ \\t]*\}",
+        migration,
+    )
+    assert helper, "live queue monotonic-count helper is missing"
+    script = __import__("textwrap").dedent(helper.group())
+    cases = [("518", "518", 0), ("518", "519", 0), ("519", "518", 1), ("bad", "519", 2)]
+    for before, after, expected in cases:
+        result = subprocess.run(
+            ["bash", "-c", script + f'\nqueue_rows_non_decreasing "{before}" "{after}"'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == expected, (before, after, result.stderr)
+
+
+def test_failed_remote_migration_emits_only_safe_failure_codes(tmp_path):
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    migration = next(
+        step for step in steps
+        if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image"
+    )["run"]
+
+    assert "remote_status" in migration
+    assert "MIGRATION_APPLY=FAIL:remote-command-exit" in migration
+    assert "MIGRATION_APPLY=FAIL:[a-z0-9_-]+" in migration
+    helper = re.search(
+        r"(?m)^[ \\t]*safe_remote_failure_code\(\) \{\n(?:^[ \\t]+.*\n)+^[ \\t]*\}",
+        migration,
+    )
+    assert helper, "sanitized remote failure reporter is missing"
+    script = __import__("textwrap").dedent(helper.group())
+    secret = "do-not-print-this"
+    noisy = tmp_path / "remote.stderr"
+    noisy.write_text(f"warning {secret}\nMIGRATION_APPLY=FAIL:db-head-drift\nuser-data {secret}\n")
+    result = subprocess.run(
+        ["bash", "-c", script + f'\nsafe_remote_failure_code "{noisy}"'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "MIGRATION_APPLY=FAIL:db-head-drift"
+    assert secret not in result.stdout
+    noisy.write_text(f"unclassified detail {secret}\n")
+    result = subprocess.run(
+        ["bash", "-c", script + f'\nsafe_remote_failure_code "{noisy}"'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "MIGRATION_APPLY=FAIL:remote-command-exit"
+    assert secret not in result.stdout
