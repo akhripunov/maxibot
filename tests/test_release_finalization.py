@@ -327,8 +327,9 @@ def test_multiple_read_failures_charge_elapsed_once_from_entry_snapshot(tmp_path
     sha = git(repo, 'rev-parse', 'HEAD')
     git(repo, 'checkout', '--detach', sha)
 
+    # Keep enough headroom for hosted-runner command startup beyond the 3s retry waits.
     result, calls, spent = _run_finalization(
-        repo, sha, tmp_path, 'normal', read_scenario='tls_twice', budget_spent='1796')
+        repo, sha, tmp_path, 'normal', read_scenario='tls_twice', budget_spent='1790')
 
     assert result.returncode == 0, result.stderr
     assert calls.count('read') >= 4
