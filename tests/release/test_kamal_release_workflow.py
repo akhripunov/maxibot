@@ -256,6 +256,21 @@ def test_kamal_deploy_uses_runtime_baseline_and_scoped_0099_backup_restore_witho
     assert "Redis PING command failed" in baseline
     assert 'bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"' in baseline
     assert "--owner-approved-task ME-53" not in baseline
+    assert "candidate_python()" in baseline
+    assert 'docker run --rm --network none' in baseline
+    assert '--mount type=bind,src="$GITHUB_WORKSPACE",dst=/workspace,readonly' in baseline
+    assert '--workdir /workspace --entrypoint python "$IMAGE_REF" "$@"' in baseline
+    assert 'candidate_python scripts/verify_migration_schema_contract.py --print-query' in baseline
+    assert 'candidate_python scripts/migration_release_contract.py' in baseline
+    assert 'candidate_python scripts/verify_migration_schema_contract.py --contract-b64' in baseline
+    assert '| python scripts/verify_migration_schema_contract.py' not in baseline
+
+    migration_apply = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
+    assert "candidate_python()" in migration_apply
+    assert 'docker run --rm --network none' in migration_apply
+    assert 'candidate_python scripts/verify_migration_schema_contract.py --print-query' in migration_apply
+    assert 'candidate_python scripts/verify_migration_schema_contract.py --contract-b64' in migration_apply
+    assert '| python scripts/verify_migration_schema_contract.py' not in migration_apply
 
 
 def test_contract_migration_gate_runs_backup_restore_apply_before_kamal():
@@ -637,7 +652,7 @@ def test_schema_snapshot_is_streamed_to_verifier_stdin_in_both_production_checks
     workflow = WORKFLOW.read_text()
     streamed_calls = [
         line for line in workflow.splitlines()
-        if "base64 -d | python scripts/verify_migration_schema_contract.py" in line
+        if "base64 -d | candidate_python scripts/verify_migration_schema_contract.py" in line
     ]
 
     assert len(streamed_calls) == 2

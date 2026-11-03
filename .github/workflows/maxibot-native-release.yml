@@ -472,7 +472,12 @@ jobs:
           chmod 600 "$HOME/.ssh/config"
           echo "PRODUCTION_SSH=$RUNNER_TEMP/ssh/id_ed25519" >> "$GITHUB_ENV"
           echo "PRODUCTION_KNOWN_HOSTS_FILE=$RUNNER_TEMP/ssh/known_hosts" >> "$GITHUB_ENV"
-          schema_query_b64="$(python scripts/verify_migration_schema_contract.py --print-query | base64 -w0)"
+          candidate_python() {
+            docker run --rm --network none \
+              --mount type=bind,src="$GITHUB_WORKSPACE",dst=/workspace,readonly \
+              --workdir /workspace --entrypoint python "$IMAGE_REF" "$@"
+          }
+          schema_query_b64="$(candidate_python scripts/verify_migration_schema_contract.py --print-query | base64 -w0)"
           remote="$(ssh -i "$RUNNER_TEMP/ssh/id_ed25519" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" "root@$PRODUCTION_HOST" bash -s -- "$RELEASE_OPERATION" "$schema_query_b64" <<'REMOTE'
           set -euo pipefail
           release_operation="$1"
@@ -585,7 +590,7 @@ jobs:
           migration_target=
           migration_contract='{}'
           if [[ "$migration_rollback" != true ]] && ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- alembic app/db/models.py docker-compose.vps.yml; then
-            migration_contract="$(python scripts/migration_release_contract.py --base-sha "$baseline_sha" --head-sha "$CANDIDATE_SHA" --database-head "$database_head")" || fail 'migration risk contract or Alembic graph is invalid'
+            migration_contract="$(candidate_python scripts/migration_release_contract.py --base-sha "$baseline_sha" --head-sha "$CANDIDATE_SHA" --database-head "$database_head")" || fail 'migration risk contract or Alembic graph is invalid'
             migration_required="$(jq -r '.migration_required' <<< "$migration_contract")"
             migration_resume="$(jq -r '.migration_resume' <<< "$migration_contract")"
             migration_source="$(jq -r '.source_revision // empty' <<< "$migration_contract")"
@@ -601,7 +606,7 @@ jobs:
             schema_contract_b64="$(jq -c '.schema' <<< "$migration_contract" | base64 -w0)"
             schema_mode=source
             [[ "$migration_resume" != true ]] || schema_mode=target
-            schema_validation="$(printf '%s' "$schema_snapshot_b64" | base64 -d | python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode "$schema_mode" 2>&1)" || {
+            schema_validation="$(printf '%s' "$schema_snapshot_b64" | base64 -d | candidate_python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode "$schema_mode" 2>&1)" || {
               printf '%s\n' "$schema_validation" >&2
               fail "production schema contract mismatch: $schema_validation"
             }
@@ -1018,7 +1023,12 @@ jobs:
           [[ "$EXPECTED_DATABASE_HEAD" == "$MIGRATION_SOURCE" || "$EXPECTED_DATABASE_HEAD" == "$MIGRATION_TARGET" ]]
           [[ "$MIGRATION_RESUME" == true || "$MIGRATION_RESUME" == false ]]
           schema_contract_b64="$(jq -c '.schema' <<< "$MIGRATION_CONTRACT_JSON" | base64 -w0)"
-          schema_query_b64="$(python scripts/verify_migration_schema_contract.py --print-query | base64 -w0)"
+          candidate_python() {
+            docker run --rm --network none \
+              --mount type=bind,src="$GITHUB_WORKSPACE",dst=/workspace,readonly \
+              --workdir /workspace --entrypoint python "$IMAGE_REF" "$@"
+          }
+          schema_query_b64="$(candidate_python scripts/verify_migration_schema_contract.py --print-query | base64 -w0)"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           for run_status in queued in_progress; do
             active_runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=$run_status&per_page=100")"
@@ -1127,7 +1137,7 @@ jobs:
           rm -f "$remote_stdout" "$remote_stderr"
           schema_snapshot_b64="$(sed -n 's/^MIGRATION_SCHEMA_SNAPSHOT_B64=//p' <<< "$remote_output" | tail -n 1)"
           [[ "$schema_snapshot_b64" =~ ^[A-Za-z0-9+/=]+$ ]] || { echo 'MIGRATION_APPLY=FAIL:post-migration-schema-snapshot-missing' >&2; exit 1; }
-          printf '%s' "$schema_snapshot_b64" | base64 -d | python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode target
+          printf '%s' "$schema_snapshot_b64" | base64 -d | candidate_python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-stdin --mode target
           echo "MIGRATION_APPLY=PASS TARGET=$MIGRATION_TARGET" >> "$GITHUB_STEP_SUMMARY"
       - name: Record exact production Deployment after all preflight gates
         id: deployment
