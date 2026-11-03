@@ -189,7 +189,10 @@ def _validate_schema_contract(schema: dict) -> None:
         raise ValueError("migration schema contract must define exactly source and target states")
     source = schema["source"]
     target = schema["target"]
-    if (not isinstance(source, dict) or set(source) != {"required_columns", "absent_columns", "absent_indexes", "absent_constraints"}
+    source_required = {"required_columns", "absent_columns", "absent_indexes", "absent_constraints"}
+    source_optional = {"recoverable_indexes"}
+    if (not isinstance(source, dict) or not source_required <= set(source)
+            or set(source) - source_required - source_optional
             or not isinstance(target, dict) or set(target) != {"columns", "indexes", "constraints"}):
         raise ValueError("migration schema contract source/target fields are malformed")
     for key in ("required_columns", "absent_columns"):
@@ -229,6 +232,30 @@ def _validate_schema_contract(schema: dict) -> None:
             raise ValueError("migration schema target has an unsafe index identifier")
         if any(not isinstance(item[key], bool) for key in ("unique", "valid", "ready")):
             raise ValueError("migration schema target index flags must be boolean")
+        if item["valid"] is not True or item["ready"] is not True:
+            raise ValueError("migration schema target indexes must be valid and ready")
+    target_index_keys = [(item["table"], item["name"]) for item in target["indexes"]]
+    if len(target_index_keys) != len(set(target_index_keys)):
+        raise ValueError("migration schema target index postconditions contain duplicate identities")
+    recoverable_indexes = source.get("recoverable_indexes", [])
+    if not isinstance(recoverable_indexes, list):
+        raise ValueError("migration schema source recoverable_indexes must be a list")
+    recoverable_keys = []
+    for item in recoverable_indexes:
+        if not isinstance(item, dict) or set(item) != {"table", "name"}:
+            raise ValueError("migration schema source has a malformed recoverable index")
+        if not all(isinstance(item[key], str) and SQL_NAME_RE.fullmatch(item[key]) for key in ("table", "name")):
+            raise ValueError("migration schema source recoverable index has an unsafe identity")
+        key = (item["table"], item["name"])
+        if key not in target_index_keys:
+            raise ValueError("recoverable source index must match an exact target index postcondition")
+        recoverable_keys.append(key)
+    if len(recoverable_keys) != len(set(recoverable_keys)):
+        raise ValueError("migration schema source recoverable indexes contain duplicate identities")
+    absent_index_names = set(source["absent_indexes"])
+    recoverable_index_names = {name for _, name in recoverable_keys}
+    if absent_index_names & recoverable_index_names:
+        raise ValueError("source index cannot be both absent and recoverable")
     for item in target["constraints"]:
         required = {"table", "name", "type", "definition", "validated"}
         if not isinstance(item, dict) or set(item) != required:
@@ -238,7 +265,7 @@ def _validate_schema_contract(schema: dict) -> None:
                 or not isinstance(item["definition"], str) or not item["definition"]
                 or not isinstance(item["validated"], bool)):
             raise ValueError("migration schema target constraint postcondition is invalid")
-    if not any(source[key] for key in ("required_columns", "absent_columns", "absent_indexes", "absent_constraints")):
+    if not any(source[key] for key in ("required_columns", "absent_columns", "absent_indexes", "absent_constraints")) and not source.get("recoverable_indexes"):
         raise ValueError("migration schema contract must declare at least one source-state precondition")
     if not any(target[key] for key in ("columns", "indexes", "constraints")):
         raise ValueError("migration schema contract must declare at least one target-state postcondition")
@@ -287,6 +314,25 @@ def validate_schema_snapshot(schema: dict, snapshot: dict, mode: str) -> None:
         for name in schema["source"]["absent_indexes"]:
             if any(actual_name == name for _, actual_name in indexes):
                 raise ValueError(f"migration source schema already contains target index {name}")
+        target_indexes = {
+            (item["table"], item["name"]): item for item in schema["target"]["indexes"]
+        }
+        for expected in schema["source"].get("recoverable_indexes", []):
+            matches = [item for (_, name), item in indexes.items() if name == expected["name"]]
+            if len(matches) > 1:
+                raise ValueError(f"migration source schema has ambiguous recoverable index {expected['name']}")
+            if not matches:
+                continue
+            actual = matches[0]
+            target = target_indexes[(expected["table"], expected["name"])]
+            if actual.get("table") != expected["table"]:
+                raise ValueError(f"migration source schema recoverable index {expected['name']} is attached to the wrong table")
+            if any(actual.get(key) != target[key] for key in ("definition", "method", "unique")):
+                raise ValueError(f"migration source schema recoverable index {expected['name']} has incompatible catalog semantics")
+            if not isinstance(actual.get("valid"), bool) or not isinstance(actual.get("ready"), bool):
+                raise ValueError(f"migration source schema recoverable index {expected['name']} has malformed catalog flags")
+            if actual["valid"] and not actual["ready"]:
+                raise ValueError(f"migration source schema recoverable index {expected['name']} is valid but not ready")
         for name in schema["source"]["absent_constraints"]:
             if any(actual_name == name for _, actual_name in constraints):
                 raise ValueError(f"migration source schema already contains target constraint {name}")

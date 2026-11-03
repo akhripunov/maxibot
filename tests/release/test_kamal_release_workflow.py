@@ -619,3 +619,18 @@ def test_automatic_deploy_keeps_environment_serialization_and_single_apply():
     worker_applies = [step for step in deploy["steps"] if 'bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker' in step.get("run", "")]
     assert len(api_applies) == 1
     assert len(worker_applies) == 1
+
+
+def test_migration_contract_and_frozen_guard_share_exact_declared_baseline():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["tests"]["steps"]
+    contract = next(step for step in steps if step.get("id") == "migration_contract")
+    guard = next(step for step in steps if step.get("name") == "Run exact-candidate Frozen Path Guard")
+
+    assert "docs/release/migration-risk-contract.json" in contract["run"]
+    assert "source_application_sha" in contract["run"]
+    assert 'git merge-base --is-ancestor "$declared_source_sha" "$CANDIDATE_SHA"' in contract["run"]
+    assert 'print(f"validation_base_sha={sys.argv[2]}")' in contract["run"]
+    assert guard["env"]["MIGRATION_VALIDATION_BASE_SHA"] == "${{ steps.migration_contract.outputs.validation_base_sha }}"
+    assert 'base_sha="$MIGRATION_VALIDATION_BASE_SHA"' in guard["run"]
+    assert 'git merge-base "$CANDIDATE_SHA" "origin/$GITHUB_BASE_REF"' not in guard["run"]

@@ -18,6 +18,9 @@ from sqlalchemy.orm import Session
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.migration_release_contract import validate_schema_snapshot
+from scripts.verify_migration_schema_contract import SCHEMA_SNAPSHOT_SQL
+
 BASELINE = "0098_durable_autopilot_execution_claim_v1"
 TARGET = "0099_metrica_upload_reconciliation_v1"
 PRODUCTION_BASE_SHA = "eda64bd2d0118009853e4e06f0a9c888ad19fd5a"
@@ -36,6 +39,12 @@ NEW_COLUMNS = {
     "metrica_upload_recovered_at",
 }
 REHEARSAL_ROWS = 1000
+
+
+def validate_catalog_snapshot(engine, schema_contract: dict, mode: str) -> None:
+    with engine.connect() as connection:
+        snapshot = json.loads(connection.execute(text(SCHEMA_SNAPSHOT_SQL)).scalar_one())
+    validate_schema_snapshot(schema_contract, snapshot, mode)
 
 
 def row_digest(rows: list[tuple]) -> str:
@@ -103,6 +112,10 @@ def main() -> int:
                 raise RuntimeError("rehearsal database is not empty")
 
         alembic(BASELINE)
+        schema_contract = json.loads(
+            (REPO_ROOT / "docs/release/migration-risk-contract.json").read_text(encoding="utf-8")
+        )["schema"]
+        validate_catalog_snapshot(engine, schema_contract, "source")
         from app.db.models import Admin, Channel, LandingPage, TrafficMembership, TrafficVisit, uid
 
         before_columns = {column["name"] for column in inspect(engine).get_columns("offline_conversion_queue")}
@@ -186,6 +199,7 @@ def main() -> int:
                 raise RuntimeError(f"expected Alembic head {BASELINE}, got {before_head}")
 
         alembic(TARGET)
+        validate_catalog_snapshot(engine, schema_contract, "target")
         inspector = inspect(engine)
         after_columns = {column["name"] for column in inspector.get_columns("offline_conversion_queue")}
         indexes = {item["name"] for item in inspector.get_indexes("offline_conversion_queue")}

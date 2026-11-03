@@ -301,3 +301,72 @@ def test_changed_historical_alembic_revision_is_rejected_even_with_approved_path
         assert "changed Alembic revision files" in str(error)
     else:
         raise AssertionError("edited historical Alembic revision was accepted")
+
+
+def test_source_schema_allows_only_exact_recoverable_index_states():
+    schema = _contract()["schema"]
+    index = {
+        "table": "records",
+        "name": "ix_records_new_value",
+        "definition": "CREATE INDEX ix_records_new_value ON public.records USING btree (new_value)",
+        "method": "btree",
+        "unique": False,
+        "valid": True,
+        "ready": True,
+    }
+    schema["source"]["recoverable_indexes"] = [{"table": "records", "name": index["name"]}]
+    schema["target"]["indexes"] = [index]
+    source = {
+        "columns": [{"table": "records", "name": "id", "data_type": "bigint"}],
+        "indexes": [],
+        "constraints": [],
+    }
+
+    # A clean source has no index; a completed valid index or an interrupted
+    # concurrent build can be resumed by the migration's exact-index logic.
+    CONTRACT_MODULE.validate_schema_snapshot(schema, source, "source")
+    for valid, ready in ((True, True), (False, True), (False, False)):
+        observed = {**index, "valid": valid, "ready": ready}
+        CONTRACT_MODULE.validate_schema_snapshot(
+            schema, {**source, "indexes": [observed]}, "source"
+        )
+
+    invalid_states = (
+        {**index, "valid": True, "ready": False},
+        {**index, "definition": index["definition"] + " WHERE new_value IS NOT NULL"},
+        {**index, "method": "hash"},
+        {**index, "unique": True},
+        {**index, "table": "other_table"},
+    )
+    for observed in invalid_states:
+        try:
+            CONTRACT_MODULE.validate_schema_snapshot(
+                schema, {**source, "indexes": [observed]}, "source"
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("incompatible source catalog index was accepted")
+
+
+def test_target_index_contract_cannot_accept_invalid_or_unready_indexes():
+    for field in ("valid", "ready"):
+        contract = _contract()
+        contract["schema"]["target"]["indexes"] = [{
+            "table": "records",
+            "name": "ix_records_new_value",
+            "definition": "CREATE INDEX ix_records_new_value ON public.records USING btree (new_value)",
+            "method": "btree",
+            "unique": False,
+            "valid": True,
+            "ready": True,
+        }]
+        contract["schema"]["target"]["indexes"][0][field] = False
+        try:
+            CONTRACT_MODULE.evaluate_contract(
+                contract, contract["approved_paths"], "a" * 40, "0098_source", _graph()
+            )
+        except ValueError as error:
+            assert "valid and ready" in str(error)
+        else:
+            raise AssertionError(f"target index with {field}=false was accepted")
