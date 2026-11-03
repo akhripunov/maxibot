@@ -66,6 +66,7 @@ jobs:
       ADS_AUTOPILOT_ENABLED: 'false'
       ADS_WRITE_ACTIONS_ENABLED: 'false'
       BUNDLE_GEMFILE: Gemfile.kamal
+      RELEASE_MODE_TEST_DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -178,27 +179,6 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m pytest -q
-      - name: Run frozen attribution, security, data, and Worker regressions
-        run: |
-          python -m pytest -q \
-            tests/regression/test_mobile_max_handoff_contract.py \
-            tests/regression/test_single_poller_safety.py \
-            tests/test_traffic_deep_link.py \
-            tests/test_landing_ui_contract.py \
-            tests/test_update_payload.py \
-            tests/test_traffic_attribution.py \
-            tests/test_system_conversion_mapping.py \
-            tests/test_system_conversion_processor.py \
-            tests/test_bot_paid_conversion_dedupe.py \
-            tests/test_web_admin_passkey_contract.py \
-            tests/test_public_security_fixes.py \
-            tests/test_public_compose_security.py \
-            tests/test_worker_health.py \
-            tests/test_worker_health_collector.py \
-            tests/test_migration_rehearsal.py \
-            tests/test_postgres_migration_rehearsal.py \
-            tests/test_migration_release_contract.py \
-            tests/release/test_kamal_release_workflow.py
       - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
         with:
           ruby-version: '3.3.6'

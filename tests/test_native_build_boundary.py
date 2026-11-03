@@ -268,10 +268,17 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         self.assertNotIn('scripts/maxibot_impact_v3.py', self.source)
         self.assertNotIn('scripts/prepare_frozen_path_guard.py', self.source)
 
-    def test_critical_frozen_regressions_are_run_as_a_named_hosted_gate(self):
+    def test_full_pytest_suite_runs_once_and_collects_critical_regressions(self):
         if not (ROOT / 'pyproject.toml').exists():
             return
-        self.assertIn('Run frozen attribution, security, data, and Worker regressions', self.source)
+        workflow = yaml.load(self.source, Loader=yaml.BaseLoader)
+        test_runs = [
+            step.get("run", "")
+            for step in workflow["jobs"]["tests"]["steps"]
+            if "python -m pytest" in step.get("run", "")
+        ]
+        self.assertEqual(test_runs, ["python -m pytest -q"])
+        self.assertTrue((ROOT / "tests").is_dir())
         for contract in (
             'tests/regression/test_mobile_max_handoff_contract.py',
             'tests/regression/test_single_poller_safety.py',
@@ -290,17 +297,9 @@ class NativeBuildBoundaryTests(unittest.TestCase):
             'tests/test_migration_rehearsal.py',
             'tests/test_migration_release_contract.py',
             'tests/release/test_kamal_release_workflow.py',
+            'tests/release/test_release_modes_e2e.py',
         ):
-            self.assertIn(contract, self.source)
-
-    def test_frozen_regression_job_references_existing_test_files(self):
-        workflow = yaml.load(self.source, Loader=yaml.BaseLoader)
-        tests = workflow["jobs"]["tests"]["steps"]
-        regression_step = next(step for step in tests if step.get("name") == "Run frozen attribution, security, data, and Worker regressions")
-        for line in regression_step["run"].splitlines():
-            path = line.strip().rstrip("\\").strip()
-            if path.startswith("tests/"):
-                self.assertTrue((ROOT / path).is_file(), f"workflow regression path does not exist: {path}")
+            self.assertTrue((ROOT / contract).is_file(), f"critical regression is outside full-suite collection: {contract}")
 
     def test_maxibot_native_deploy_is_digest_bound_and_keeps_single_poller(self):
         if not (ROOT / 'pyproject.toml').exists():

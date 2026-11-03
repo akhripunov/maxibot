@@ -47,6 +47,15 @@ with exact source labels, SBOM and provenance. Deploy selects that successful
 Build by exact SHA and digest; it does not rebuild the image. The production
 Environment remains the source of runtime secrets and branch restrictions.
 
+Build intentionally runs for every `main` push, including documentation-only
+changes. The protected Deploy job determines app/schema actions from the live
+production SHA and database head, and a DB-only migration still needs the exact
+candidate image for its guarded migration path. Skipping Build before that
+baseline is known would require a separate production-aware pre-Build decision
+and a no-image Deploy branch. That adds a second decision path and weakens the
+simple exact-SHA artifact flow to save one build; Build is therefore not
+path-filtered.
+
 The workflow uses stock Kamal 2 for API and Worker. It preserves the API/Worker
 image identity, API polling off, one Worker/Poller, the 512 MiB Worker limit,
 PostgreSQL and Redis health, persistent volumes, migrations and runtime health.
@@ -65,17 +74,24 @@ automatic database downgrade or restore-over-production is permitted.
 
 ## Isolated release-mode acceptance
 
-The workflow decision tests exercise three isolated candidate diffs before any
-production release: (1) app-only: Tests and Build run, schema/backup are skipped,
-Kamal replaces API and Worker, then Runtime Verify runs; (2) DB-only: Tests and
-Build run, the authorized migration rehearsal and backup/restore gates precede
-Schema Apply, Kamal is skipped, and Runtime Verify confirms the existing API and
-Worker IDs/start times did not change; (3) app+DB: Tests and Build run, migration
-gates and Schema Apply precede Kamal API/Worker replacement and Runtime Verify.
-The exact step durations for an actual release are available from the native
-GitHub Actions step/job timestamps and summary; isolated unit tests do not claim
-production-stage timings. No synthetic production migration is run for this
-acceptance.
+The release classifier tests exercise four baseline-to-candidate diffs:
+app-only, DB-only, app+DB and infra-only. They verify the expected schema and
+Kamal decisions. The PostgreSQL rehearsal separately applies the real 0098→0099
+migration to an isolated PostgreSQL service with populated data, validates the
+schema and data digests, and checks compatibility with both baseline and
+candidate ORM models. The protected production Runtime Verify compares API and
+Worker container IDs and `StartedAt` when Kamal is skipped. The full pytest suite
+also contains `tests/release/test_release_modes_e2e.py`: on the hosted runner it
+applies the real migration to two disposable PostgreSQL databases and checks
+controlled API/Worker container IDs and `StartedAt` for DB-only, then verifies
+the App+DB container transition only after the target schema is reached. This
+is an isolated Docker integration check, not a Kamal CLI deployment; its hosted
+result is required before claiming the current candidate passed. No synthetic
+migration is applied to production.
+
+The exact step durations for an actual release are available from native GitHub
+Actions timestamps and summary; isolated unit tests do not claim production
+stage timings.
 
 Manual rollback is owner-authorized and uses the previous successful immutable
 GHCR image with stock Kamal. It requires proven application/schema compatibility
