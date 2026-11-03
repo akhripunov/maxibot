@@ -135,6 +135,14 @@ def test_backup_and_restore_use_private_credentials_and_isolated_restore():
     assert "LoadCredentialEncrypted" not in (ROOT / "deploy/backup/bunny-backup.conf.example").read_text()
 
 
+def test_daily_backup_timer_runs_at_0600_moscow_with_small_jitter():
+    timer = TIMER.read_text()
+
+    assert "OnCalendar=*-*-* 03:00:00 UTC" in timer
+    assert "RandomizedDelaySec=5min" in timer
+    assert "Persistent=true" in timer
+
+
 def test_secret_provisioning_never_overwrites_existing_credentials():
     source = PROVISIONER.read_text()
     assert 'if [[ -e "$destination" ]]' in source
