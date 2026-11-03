@@ -85,6 +85,12 @@ cleanup_restore_container() {
     if ! docker rm -f "$name" >/dev/null 2>&1; then
       log "ERROR: failed to remove isolated restore container" >&2
       cleanup_status=1
+    elif docker inspect "$name" >/dev/null 2>"$inspect_err"; then
+      log "ERROR: isolated restore container remains after removal" >&2
+      cleanup_status=1
+    elif ! grep -Fq 'No such object:' "$inspect_err"; then
+      log "ERROR: Docker could not verify isolated restore container removal" >&2
+      cleanup_status=1
     fi
   elif ! grep -Fq 'No such object:' "$inspect_err"; then
     # A missing container is benign; a daemon/API error is not absence.
@@ -98,6 +104,52 @@ cleanup_restore_container() {
 cleanup_sensitive_workdir() {
   [[ -z "$WORK_DIR" || ! -d "$WORK_DIR" ]] && return 0
   rm -rf -- "$WORK_DIR"
+}
+
+install_cleanup_traps() {
+  trap cleanup EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+}
+
+# SIGKILL cannot run Bash traps. At the next invocation, under the shared
+# systemd flock, remove only containers carrying our private label and private
+# workspaces created by this script. Docker enumeration/removal errors fail
+# closed so a partial cleanup is never reported as a successful run.
+cleanup_stale_resources() {
+  local ids_file dirs_file container_id stale_dir
+  [[ -d "$TEMP_ROOT" && ! -L "$TEMP_ROOT" ]] || fail "temporary root is unavailable or unsafe"
+
+  ids_file="$(mktemp "${TMPDIR:-/tmp}/maxibot-bunny-containers.XXXXXX")" || return 1
+  if ! docker ps --all --quiet --no-trunc --filter label=maxibot.bunny-backup=managed > "$ids_file"; then
+    rm -f -- "$ids_file"
+    fail "cannot enumerate stale Bunny backup containers"
+  fi
+  while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] || continue
+    [[ "$container_id" =~ ^[0-9a-f]{12,64}$ ]] || { rm -f -- "$ids_file"; fail "Docker returned an invalid managed container ID"; }
+    docker rm --force "$container_id" >/dev/null || { rm -f -- "$ids_file"; fail "cannot remove a stale Bunny backup container"; }
+  done < "$ids_file"
+  if ! docker ps --all --quiet --no-trunc --filter label=maxibot.bunny-backup=managed > "$ids_file"; then
+    rm -f -- "$ids_file"
+    fail "cannot verify stale Bunny backup container cleanup"
+  fi
+  [[ ! -s "$ids_file" ]] || { rm -f -- "$ids_file"; fail "a managed Bunny backup container remains after cleanup"; }
+  rm -f -- "$ids_file" || fail "cannot remove temporary Docker inventory"
+
+  dirs_file="$(mktemp "${TMPDIR:-/tmp}/maxibot-bunny-directories.XXXXXX")" || return 1
+  if ! find "$TEMP_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'maxibot-bunny.*' -uid "$(id -u)" -print0 > "$dirs_file"; then
+    rm -f -- "$dirs_file"
+    fail "cannot enumerate stale Bunny backup workspaces"
+  fi
+  while IFS= read -r -d '' stale_dir; do
+    [[ "$(dirname "$stale_dir")" == "$TEMP_ROOT" && "$(basename "$stale_dir")" == maxibot-bunny.* && -d "$stale_dir" && ! -L "$stale_dir" && -O "$stale_dir" ]] || {
+      rm -f -- "$dirs_file"
+      fail "stale Bunny workspace failed ownership checks"
+    }
+    rm -rf -- "$stale_dir" || { rm -f -- "$dirs_file"; fail "cannot remove a stale sensitive Bunny workspace"; }
+  done < "$dirs_file"
+  rm -f -- "$dirs_file" || fail "cannot remove temporary workspace inventory"
 }
 
 cleanup() {
@@ -210,7 +262,7 @@ run_backup() {
   local api_image_id
   api_image_id="$(docker inspect "$uploads_container" --format '{{.Image}}')" || fail "cannot inspect uploads volume consumer"
   [[ "$api_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "invalid uploads reader image identity"
-  uploads_bytes="$(docker run --rm --pull=never --network none --read-only \
+  uploads_bytes="$(docker run --rm --label maxibot.bunny-backup=managed --pull=never --network none --read-only \
     --mount "type=volume,source=$UPLOADS_VOLUME,target=/source,readonly" \
     --entrypoint python "$api_image_id" -c 'import os; print(sum(os.path.getsize(os.path.join(root, name)) for root, _, files in os.walk("/source") for name in files if not os.path.islink(os.path.join(root, name))))')" || fail "cannot measure uploads volume"
   [[ "$uploads_bytes" =~ ^[0-9]+$ ]] || fail "invalid uploads volume size"
@@ -225,7 +277,7 @@ run_backup() {
   chmod 600 "$globals_dump" "$db_dump"
   test -s "$globals_dump" && test -s "$db_dump" || fail "PostgreSQL backup output is empty"
   docker exec -i "$DB_CONTAINER" pg_restore --list < "$db_dump" >/dev/null || fail "PostgreSQL custom archive validation failed"
-  docker run --rm --pull=never --network none --read-only \
+  docker run --rm --label maxibot.bunny-backup=managed --pull=never --network none --read-only \
     --mount "type=volume,source=$UPLOADS_VOLUME,target=/source,readonly" \
     --entrypoint python "$api_image_id" -c 'import os,sys,tarfile; t=tarfile.open(fileobj=sys.stdout.buffer, mode="w|gz"); t.add("/source", arcname="uploads", recursive=True); t.close()' \
     > "$uploads_dump" || fail "uploads archive creation failed"
@@ -272,8 +324,8 @@ EOF
   aws_s3 s3 cp "$archive" "s3://$S3_BUCKET/$key" --only-show-errors \
     --metadata "sha256=$archive_sha,database-bytes=$db_bytes,uploads-bytes=$uploads_bytes,database-head=$db_head_before" || fail "Bunny S3 upload failed"
   verify_uploaded_archive "$key" "$archive" "$archive_sha" "$archive_size" || fail "Bunny S3 object readback/checksum verification failed"
-  log "PASS: encrypted Bunny backup uploaded and verified; key=$key; elapsed_seconds=$((SECONDS - START_SECONDS))"
   prune_expired_backups || fail "Bunny retention step failed; no local recovery copy was removed"
+  log "PASS: encrypted Bunny backup uploaded and verified; key=$key; elapsed_seconds=$((SECONDS - START_SECONDS))"
 }
 
 extract_manifest_value() {
@@ -391,7 +443,7 @@ PY
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"; restore_name="maxibot-bunny-restore-${stamp}-$$"
   [[ ! "$restore_name" =~ [^A-Za-z0-9_.-] ]] || fail "invalid isolated restore container name"
   RESTORE_CONTAINER="$restore_name"
-  docker run -d --name "$restore_name" --network none \
+  docker run -d --name "$restore_name" --label maxibot.bunny-backup=managed --network none \
     --mount "type=bind,source=$restore_data,target=/var/lib/postgresql/data" \
     -e POSTGRES_USER=restore_admin -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
     "$db_image" >/dev/null || fail "cannot start isolated PostgreSQL restore container"
@@ -424,16 +476,17 @@ PY
   )" || fail "cannot verify restored uploads size"
   [[ "$restored_uploads_bytes" == "$uploads_bytes" ]] || fail "restored uploads size mismatch"
   publish_restore_marker "$latest_key" "$expected_sha" || fail "cannot publish verified Bunny restore marker"
-  log "PASS: isolated Bunny S3 PostgreSQL and uploads restore; head=$restored_head; tables=$restored_tables; elapsed_seconds=$((SECONDS - START_SECONDS))"
   prune_expired_backups || fail "Bunny retention cleanup failed after restore drill"
+  log "PASS: isolated Bunny S3 PostgreSQL and uploads restore; head=$restored_head; tables=$restored_tables; elapsed_seconds=$((SECONDS - START_SECONDS))"
 }
 
 main() {
   [[ $# -eq 1 && ( "$1" == backup || "$1" == restore-drill ) ]] || fail "usage: maxibot-bunny-backup.sh {backup|restore-drill}"
   START_SECONDS=$SECONDS
+  install_cleanup_traps
   for command in aws age docker python3 tar sha256sum awk df; do require_command "$command"; done
+  cleanup_stale_resources
   validate_config
-  trap cleanup EXIT
   prepare_workspace
   if [[ "$1" == backup ]]; then run_backup; else
     [[ -r "$CREDENTIALS_DIRECTORY/backup-age-identity" ]] || fail "systemd age identity credential is unavailable"

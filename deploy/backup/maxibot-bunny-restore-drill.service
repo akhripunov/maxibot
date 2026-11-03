@@ -1,5 +1,7 @@
 [Unit]
 Description=Monthly isolated restore drill from MAXIBOT Bunny S3 backup
+StartLimitIntervalSec=1d
+StartLimitBurst=3
 [Service]
 Type=oneshot
 User=root
@@ -8,6 +10,8 @@ LoadCredentialEncrypted=bunny-s3:/etc/credstore.encrypted/maxibot-bunny-s3
 LoadCredentialEncrypted=backup-age-identity:/etc/credstore.encrypted/maxibot-backup-age-identity
 ExecStart=/usr/bin/flock --wait 18000 /run/lock/maxibot-bunny-backup.lock /usr/bin/timeout --signal=TERM --kill-after=60s 4h /usr/local/sbin/maxibot-bunny-backup restore-drill
 TimeoutStartSec=10h
+Restart=on-failure
+RestartSec=15min
 ProtectSystem=full
 ProtectHome=yes
 NoNewPrivileges=yes
