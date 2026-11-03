@@ -11,7 +11,10 @@ def _migration_steps():
     workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     backup = next(step for step in steps if step.get("id") == "migration_backup")
-    migration = next(step for step in steps if step.get("id") == "migration_apply")
+    migration = next(
+        step for step in steps
+        if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image"
+    )
     return steps, backup, migration
 
 
