@@ -15,6 +15,8 @@ MIGRATION_SPEC.loader.exec_module(MIGRATION_MODULE)
 
 def test_postgres_rehearsal_requires_real_postgresql_and_preserves_queue_rows():
     assert 'connection.dialect.name != "postgresql"' in SCRIPT
+    assert "REPO_ROOT = Path(__file__).resolve().parents[1]" in SCRIPT
+    assert "sys.path.insert(0, str(REPO_ROOT))" in SCRIPT
     assert 'alembic(BASELINE)' in SCRIPT and 'alembic(TARGET)' in SCRIPT
     assert 'before_digest != after_digest' in SCRIPT
     assert 'len(after_rows) != REHEARSAL_ROWS' in SCRIPT

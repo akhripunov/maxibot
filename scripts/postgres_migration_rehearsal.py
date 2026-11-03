@@ -15,6 +15,9 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
 BASELINE = "0098_durable_autopilot_execution_claim_v1"
 TARGET = "0099_metrica_upload_reconciliation_v1"
 PRODUCTION_BASE_SHA = "eda64bd2d0118009853e4e06f0a9c888ad19fd5a"
