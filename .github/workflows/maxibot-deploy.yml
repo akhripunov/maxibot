@@ -1,0 +1,328 @@
+name: MAXIBOT — Deploy
+run-name: MAXIBOT ${{ inputs.mode }} ${{ inputs.candidate }} by ${{ github.actor }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: 'Exact full SHA from a successful MAXIBOT — Prepare run'
+        required: true
+        type: string
+      target_migration:
+        description: 'Exact intended Alembic head supplied by Dev'
+        required: true
+        type: string
+      mode:
+        description: 'preflight is optional read-only diagnostics; production applies with exact-SHA approval; task-scoped-auto runs read-only preflight before apply using a durable one-shot owner record'
+        required: true
+        default: preflight
+        type: choice
+        options: [preflight, production, task-scoped-auto, publication-recovery]
+      approve_production:
+        description: 'I authorize this exact candidate and Alembic target on MAXIBOT production'
+        required: true
+        default: false
+        type: boolean
+
+      approve_worker_bootstrap:
+        description: 'Authorize first heartbeat adoption from legacy 206a1a1 only; no migrations; strict postdeploy required'
+        required: true
+        default: false
+        type: boolean
+
+      prepare_run_id:
+        description: 'Exact Prepare run dispatched by the trusted automatic controller; blank only for diagnostics/recovery'
+        required: false
+        type: string
+      prepare_run_attempt:
+        description: 'Exact Prepare attempt paired with prepare_run_id'
+        required: false
+        type: string
+      prepare_receipt_digest:
+        description: 'Exact GHCR Prepare OCI receipt digest selected by the trusted controller'
+        required: false
+        type: string
+      orchestrator_run_id:
+        description: 'Automatic release controller run; telemetry only'
+        required: false
+        type: string
+      task_authorization_id:
+        description: 'Durable TASK_SCOPED_AUTO authorization ID; required only for that mode'
+        required: false
+        type: string
+
+      reconciles_deploy_run_id:
+        description: 'Exact previous Deploy run whose failed publication is being reconciled (publication-recovery only)'
+        required: false
+        type: string
+      reconciles_deploy_run_attempt:
+        description: 'Exact previous Deploy attempt whose failed publication is being reconciled'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: maxibot-production-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    outputs:
+      candidate: ${{ steps.select.outputs.candidate }}
+      target_migration: ${{ steps.select.outputs.target_migration }}
+      prepare_receipt_tag: ${{ steps.select.outputs.prepare_receipt_tag }}
+      prepare_receipt_digest: ${{ steps.select.outputs.prepare_receipt_digest }}
+      image_repository: ${{ steps.select.outputs.image_repository }}
+      image_digest: ${{ steps.select.outputs.image_digest }}
+      image_config_digest: ${{ steps.select.outputs.image_config_digest }}
+      prepare_run_id: ${{ steps.select.outputs.prepare_run_id }}
+      prepare_run_attempt: ${{ steps.select.outputs.prepare_run_attempt }}
+      prepare_url: ${{ steps.select.outputs.prepare_url }}
+      orchestrator_run_id: ${{ steps.select.outputs.orchestrator_run_id }}
+      reconciles_deploy_run_id: ${{ steps.select.outputs.reconciles_deploy_run_id }}
+      reconciles_deploy_run_attempt: ${{ steps.select.outputs.reconciles_deploy_run_attempt }}
+      network_retry_budget_used_seconds: ${{ steps.select.outputs.network_retry_budget_used_seconds }}
+      task_authorization_id: ${{ steps.select.outputs.task_authorization_id }}
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      deployments: read
+    steps:
+      - name: Initialize shared retry budget
+        shell: bash
+        run: |
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '0\n' > "$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID"
+      - name: Checkout trusted main workflow source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Verify approval, current main and latest successful Prepare
+        id: select
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate }}
+          TARGET_MIGRATION: ${{ inputs.target_migration }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+          APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
+          PREPARE_RUN_ID: ${{ inputs.prepare_run_id }}
+          PREPARE_RUN_ATTEMPT: ${{ inputs.prepare_run_attempt }}
+          PREPARE_RECEIPT_DIGEST: ${{ inputs.prepare_receipt_digest }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          ORCHESTRATOR_RUN_ID: ${{ inputs.orchestrator_run_id }}
+          TASK_AUTHORIZATION_ID: ${{ inputs.task_authorization_id }}
+          RECONCILES_DEPLOY_RUN_ID: ${{ inputs.reconciles_deploy_run_id }}
+          RECONCILES_DEPLOY_RUN_ATTEMPT: ${{ inputs.reconciles_deploy_run_attempt }}
+        run: python3 scripts/validate_release_dispatch.py
+
+  deploy:
+    needs: validate
+    runs-on: [self-hosted, macOS, maxibot-production]
+    timeout-minutes: 75
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+      deployments: write
+    outputs:
+      preflight: ${{ steps.execute.outputs.preflight }}
+      status: ${{ steps.execute.outputs.status }}
+      execute_outcome: ${{ steps.execute.outcome }}
+      evidence_publication: ${{ steps.evidence.outcome }}
+      evidence_digest: ${{ steps.evidence.outputs.digest }}
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+      TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
+      PREPARE_RECEIPT_TAG: ${{ needs.validate.outputs.prepare_receipt_tag }}
+      PREPARE_RECEIPT_DIGEST: ${{ needs.validate.outputs.prepare_receipt_digest }}
+      IMAGE_REPOSITORY: ${{ needs.validate.outputs.image_repository }}
+      IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}
+      IMAGE_CONFIG_DIGEST: ${{ needs.validate.outputs.image_config_digest }}
+      PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
+      PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      APPROVE_PRODUCTION: ${{ inputs.approve_production }}
+      APPROVE_WORKER_BOOTSTRAP: ${{ inputs.approve_worker_bootstrap }}
+      RECONCILES_DEPLOY_RUN_ID: ${{ needs.validate.outputs.reconciles_deploy_run_id }}
+      RECONCILES_DEPLOY_RUN_ATTEMPT: ${{ needs.validate.outputs.reconciles_deploy_run_attempt }}
+      TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Set result evidence path
+        shell: bash
+        run: |
+          echo "RELEASE_RESULT=$RUNNER_TEMP/maxibot-release-result-$GITHUB_RUN_ID.json" >> "$GITHUB_ENV"
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '%s\n' '${{ needs.validate.outputs.network_retry_budget_used_seconds }}' > "$RUNNER_TEMP/maxibot-network-retry-budget-$GITHUB_RUN_ID"
+
+      - name: Configure writable persistent tool cache
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.cache/maxibot-release/toolcache"
+          echo "RUNNER_TOOL_CACHE=$HOME/.cache/maxibot-release/toolcache" >> "$GITHUB_ENV"
+
+      - name: Checkout the approved candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.validate.outputs.candidate }}
+          fetch-depth: 0
+
+      - name: Verify assigned runner before tools, bundle, or production checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_runner_readiness.py
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: 0.12.0
+          prune-cache: false
+
+      - name: Install portable Python 3.12.10
+        run: |
+          export UV_PYTHON_INSTALL_DIR="$RUNNER_TOOL_CACHE/maxibot-python/install"
+          export UV_PYTHON_BIN_DIR="$RUNNER_TOOL_CACHE/maxibot-python/bin"
+          uv python install 3.12.10
+          python_path="$(uv python find --managed-python 3.12.10)"
+          test -x "$python_path"
+          echo "MAXIBOT_PYTHON=$python_path" >> "$GITHUB_ENV"
+
+      - name: Verify Python runtime
+        run: '"$MAXIBOT_PYTHON" --version | grep -Fx "Python 3.12.10"'
+
+      - name: Recheck current main and Prepare provenance on the Mac
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: '"$MAXIBOT_PYTHON" scripts/validate_release_dispatch.py'
+
+      - name: Resolve and verify exact Prepare receipt from GHCR
+        id: receipt
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+          PREPARE_RUN_ID: ${{ needs.validate.outputs.prepare_run_id }}
+          PREPARE_RUN_ATTEMPT: ${{ needs.validate.outputs.prepare_run_attempt }}
+          PREPARE_RECEIPT_DIGEST: ${{ needs.validate.outputs.prepare_receipt_digest }}
+          ARTIFACT_DESTINATION: ${{ runner.temp }}/maxibot-prepared-image
+        run: '"$MAXIBOT_PYTHON" scripts/ghcr_prepare_cache.py'
+
+      - name: Verify exact candidate checkout is still clean
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Run production preflight and requested release mode
+        id: execute
+        env:
+          IMAGE_MANIFEST: ${{ runner.temp }}/maxibot-prepared-image/maxibot-image-manifest.json
+          IMAGE_RESULT: ${{ runner.temp }}/maxibot-prepared-image/maxibot-prepare-result.json
+          RELEASE_IMAGE_DIGEST: ${{ needs.validate.outputs.image_digest }}
+          RELEASE_IMAGE_REPOSITORY: ${{ needs.validate.outputs.image_repository }}
+          RELEASE_IMAGE_ID: ${{ needs.validate.outputs.image_config_digest }}
+          CACHE_PREVENTED_DOWNLOAD: NO
+          BUNDLE_DOWNLOAD_SECONDS: '0'
+          GITHUB_TOKEN: ${{ github.token }}
+          TASK_AUTHORIZATION_ID: ${{ needs.validate.outputs.task_authorization_id }}
+        run: '"$MAXIBOT_PYTHON" scripts/run_release_workflow.py'
+
+      - name: Set up ORAS for immutable Deploy evidence
+        if: always()
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.0.0
+        with:
+          version: 1.3.0
+
+      - name: Publish immutable Deploy evidence to GHCR and verify digest readback
+        id: evidence
+        if: always() && steps.execute.outcome != 'skipped'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RELEASE_RESULT: ${{ runner.temp }}/maxibot-release-result-${{ github.run_id }}.json
+        run: '"$MAXIBOT_PYTHON" scripts/ghcr_release_artifacts.py publish-evidence'
+
+  publish:
+    needs: [validate, deploy]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    concurrency:
+      group: maxibot-linear-release
+      cancel-in-progress: false
+    env:
+      CANDIDATE_SHA: ${{ needs.validate.outputs.candidate || inputs.candidate || github.sha }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+      TARGET_MIGRATION: ${{ needs.validate.outputs.target_migration }}
+    steps:
+      - name: Set publication evidence path
+        shell: bash
+        run: echo "RELEASE_RESULT=$RUNNER_TEMP/release-evidence/result.json" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+      - name: Measure release runner usage
+        id: telemetry
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEMETRY_RUN_IDS: ${{ github.run_id }},${{ needs.validate.outputs.prepare_run_id }},${{ needs.validate.outputs.orchestrator_run_id }}
+          CACHE_PREVENTED_DOWNLOAD: ${{ needs.deploy.outputs.cache_prevented_download || 'NO' }}
+        run: |
+          python3 scripts/release_telemetry.py
+          cat "$GITHUB_OUTPUT" >> "$GITHUB_ENV"
+      - name: Mark release telemetry unknown
+        if: always() && steps.telemetry.outcome != 'success'
+        shell: bash
+        run: |
+          {
+            echo 'GITHUB_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'GITHUB_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'SELF_HOSTED_JOB_COUNT=UNKNOWN'
+            echo 'SELF_HOSTED_RUNNER_SECONDS=UNKNOWN'
+            echo 'DUPLICATE_HOSTED_WORK_REMOVED=UNKNOWN'
+            echo 'CACHE_PREVENTED_DOWNLOAD=UNKNOWN'
+          } >> "$GITHUB_ENV"
+      - name: Read immutable GHCR evidence by exact digest
+        if: needs.deploy.outputs.status != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          DEPLOY_EVIDENCE_DIGEST: ${{ needs.deploy.outputs.evidence_digest }}
+          EVIDENCE_DESTINATION: ${{ runner.temp }}/release-evidence
+        run: python3 scripts/ghcr_release_artifacts.py read-evidence
+      - name: Publish preflight result to MAXIBOT Linear
+        if: always()
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          RELEASE_PHASE: preflight
+          RELEASE_STATUS: ${{ inputs.mode == 'preflight' && needs.deploy.outputs.preflight == 'PASS' && 'READY_FOR_OWNER' || (needs.deploy.outputs.preflight == 'PASS' && 'PASS' || (needs.deploy.outputs.execute_outcome == 'skipped' && 'BLOCKED' || 'FAILED')) }}
+        run: python3 scripts/publish_release_to_linear.py
+      - name: Publish production result to MAXIBOT Linear
+        if: always() && (inputs.mode == 'production' || inputs.mode == 'task-scoped-auto' || inputs.mode == 'publication-recovery') && needs.deploy.outputs.status != ''
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          RELEASE_PHASE: production
+          RELEASE_STATUS: ${{ needs.deploy.outputs.evidence_publication != 'success' && needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || (needs.deploy.outputs.execute_outcome == 'success' && needs.deploy.outputs.status || (needs.deploy.outputs.status == 'COMPLETE' && 'RECOVERY_REQUIRED' || needs.deploy.outputs.status || 'FAILED')) }}
+        run: python3 scripts/publish_release_to_linear.py

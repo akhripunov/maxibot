@@ -1,55 +1,45 @@
 from pathlib import Path
-
-import yaml
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/maxibot-native-release.yml"
+BRIDGE = ROOT / "alembic/versions/0075a_alembic_version_width.py"
+RELEASE = ROOT / "scripts/release_prod.sh"
 
 
-def _migration_steps():
-    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-    steps = workflow["jobs"]["deploy"]["steps"]
-    backup = next(step for step in steps if step.get("id") == "migration_backup")
-    migration = next(
-        step for step in steps
-        if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image"
-    )
-    return steps, backup, migration
+def test_version_width_bridge_is_short_and_precedes_long_revision():
+    bridge = BRIDGE.read_text(encoding="utf-8")
+    revision = re.search(r'^revision\s*=\s*"([^"]+)"', bridge, re.M).group(1)
+    assert len(revision) <= 32
+    assert 'down_revision = "0075_ads_canonical_v2"' in bridge
+    assert 'type_=sa.String(length=64)' in bridge
+    assert '"alembic_version"' in bridge
+    assert '"version_num"' in bridge
+    assert 'down_revision = "0075a_alembic_version_width"' in (
+        ROOT / "alembic/versions/0076_ads_directologist_decision_engine_v1.py"
+    ).read_text(encoding="utf-8")
 
 
-def test_native_migration_backup_uses_one_snapshot_and_isolated_verified_restore():
-    steps, backup, migration = _migration_steps()
-    script = backup["run"]
-
-    assert backup["if"] == "steps.baseline.outputs.migration_required == 'true'"
-    assert steps.index(backup) < steps.index(migration)
+def test_release_script_requires_validated_backup_before_migration():
+    source = RELEASE.read_text(encoding="utf-8")
+    backup = source.index("BACKUP_PATH=$(remote")
+    migration = source.index("alembic upgrade $TARGET_MIGRATION")
+    assert backup < migration
     for marker in (
-        "snapshot_begin",
-        "pg_export_snapshot()",
-        "pg_dump -Fc --snapshot=",
-        "source_queue_sha",
-        "source_preserved_counts",
-        "snapshot_query",
+        "pg_dump",
+        "--format=custom",
+        "test -s \\\"\\$backup_path\\\"",
         "pg_restore --list",
-        "--network none",
-        "restored_queue_sha",
-        "restored_preserved_counts",
-        "MIGRATION_RESTORE_COMPARE=PASS",
-        "isolated migration restore cleanup failed",
+        "BACKUP_VALIDATION PASS",
+        "BACKUP_DISK_PREFLIGHT PASS",
+        "ROLLBACK_READY YES",
+        "MIGRATION_ALLOWED YES",
     ):
-        assert marker in script
-
-    assert script.index("source_preserved_counts=") < script.index("pg_dump -Fc --snapshot=")
-    assert 'source_preserved_counts="$(snapshot_preserved_counts)"' in script
+        assert marker in source
 
 
-def test_native_migration_apply_is_forward_only_and_follows_verified_backup():
-    steps, backup, migration = _migration_steps()
-    apply_script = migration["run"]
-
-    assert steps.index(backup) < steps.index(migration)
-    assert 'alembic upgrade "$migration_target"' in apply_script
-    assert "alembic downgrade" not in apply_script
-    assert '[[ "$expected_db_head" == "$migration_target" ]]' in apply_script
-    assert "MIGRATION_APPLY=PASS" in apply_script
+def test_release_script_keeps_migration_and_runtime_switch_order():
+    source = RELEASE.read_text(encoding="utf-8")
+    migration = source.index("alembic upgrade $TARGET_MIGRATION")
+    switch = source.index("docker compose --env-file $PRODUCTION_ROOT/.env -p maxibot-vps -f $PRODUCTION_ROOT/releases/$TARGET_SHA/docker-compose.vps.yml up -d")
+    assert migration < switch

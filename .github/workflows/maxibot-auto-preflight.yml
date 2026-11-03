@@ -1,0 +1,49 @@
+name: MAXIBOT — Automatic release controller
+run-name: Auto release MAXIBOT ${{ github.event.workflow_run.head_sha }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: maxibot-auto-release
+  cancel-in-progress: false
+
+jobs:
+  dispatch-authorized-deploy:
+    # Retained for audit/recovery history only; Native Release is the sole deploy path.
+    if: ${{ false }}
+    runs-on: [self-hosted, macOS, maxibot-production]
+    # Native action download/setup happens before project retries are loaded.
+    # Reserve ten minutes for bootstrap in addition to the shared read budget.
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      actions: write
+      packages: read
+    steps:
+      - name: Initialize shared bounded controller network-read budget
+        shell: bash
+        run: |
+          echo "NETWORK_RETRY_BUDGET_STATE=$RUNNER_TEMP/maxibot-auto-release-network-budget-$GITHUB_RUN_ID" >> "$GITHUB_ENV"
+          printf '0\n' > "$RUNNER_TEMP/maxibot-auto-release-network-budget-$GITHUB_RUN_ID"
+      - name: Checkout trusted current main controller code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refs/heads/main
+          # Authorization scope proof walks ancestry from the production baseline.
+          fetch-depth: 0
+      - name: Verify assigned runner before controller/API work
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 scripts/release_runner_readiness.py
+      - name: Dispatch one authorized Deploy or leave exact-SHA approval required
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 scripts/release_orchestrator.py
