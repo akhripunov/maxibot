@@ -117,10 +117,61 @@ jobs:
           printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color .github/workflows/maxibot-native-release.yml
-      - name: Rehearse Alembic 0098 to 0099 on isolated PostgreSQL
+      - name: Validate the migration risk contract and Alembic graph
+        id: migration_contract
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            base_sha="$(git merge-base "$CANDIDATE_SHA" "origin/$GITHUB_BASE_REF")"
+          else
+            base_sha="$GITHUB_EVENT_BEFORE"
+          fi
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          contract="$(python scripts/migration_release_contract.py --base-sha "$base_sha" --head-sha "$CANDIDATE_SHA" --database-head "$(python -c 'import json; print(json.load(open("docs/release/migration-risk-contract.json"))["source_revision"])')")"
+          python - "$contract" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          contract=json.loads(sys.argv[1])
+          for name in ("migration_required", "migration_resume", "source_revision", "target_revision", "rehearsal_script", "task"):
+              print(f"{name}={str(contract.get(name, '')).lower() if isinstance(contract.get(name), bool) else contract.get(name, '')}")
+          print(f"frozen_paths={json.dumps(contract.get('frozen_paths', []), separators=(',', ':'))}")
+          print(f"preserved_tables={json.dumps(contract.get('preserved_tables', []), separators=(',', ':'))}")
+          PY
+      - name: Run exact-candidate Frozen Path Guard
+        env:
+          MIGRATION_REQUIRED: ${{ steps.migration_contract.outputs.migration_required }}
+          MIGRATION_TASK: ${{ steps.migration_contract.outputs.task }}
+          MIGRATION_FROZEN_PATHS: ${{ steps.migration_contract.outputs.frozen_paths }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            base_sha="$(git merge-base "$CANDIDATE_SHA" "origin/$GITHUB_BASE_REF")"
+          else
+            base_sha="$GITHUB_EVENT_BEFORE"
+          fi
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$MIGRATION_REQUIRED" == true ]]; then
+            [[ -n "$MIGRATION_TASK" ]]
+            mapfile -t frozen_paths < <(python -c 'import json,os; print("\n".join(json.loads(os.environ["MIGRATION_FROZEN_PATHS"])))')
+            [[ "${#frozen_paths[@]}" -gt 0 ]]
+            guard_args=(--base "$base_sha" --head "$CANDIDATE_SHA" --owner-approved-task "$MIGRATION_TASK")
+            for path in "${frozen_paths[@]}"; do guard_args+=(--owner-approved-path "$path"); done
+            bash scripts/frozen_path_guard.sh "${guard_args[@]}"
+          else
+            bash scripts/frozen_path_guard.sh --base "$base_sha" --head "$CANDIDATE_SHA"
+          fi
+      - name: Rehearse the authorized migration on isolated PostgreSQL
+        if: steps.migration_contract.outputs.migration_required == 'true'
         env:
           DATABASE_URL: postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/maxibot_rehearsal
-        run: python scripts/postgres_migration_rehearsal.py
+          REHEARSAL_SCRIPT: ${{ steps.migration_contract.outputs.rehearsal_script }}
+        run: python "$REHEARSAL_SCRIPT"
       - name: Run the complete exact-candidate MAXIBOT suite
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -494,17 +545,19 @@ jobs:
           # ROLLBACK_DEPLOYMENT_GATE_END
           migration_rollback=false
           if [[ "$RELEASE_OPERATION" == rollback ]]; then
-            if [[ "$database_head" == 0099_metrica_upload_reconciliation_v1 ]]; then
-              migration_baseline='eda64bd2d0118009853e4e06f0a9c888ad19fd5a'
-              current_release_sha="$baseline_sha"
-              [[ "$CANDIDATE_SHA" == "$migration_baseline" ]] || fail 'after migration 0099 only the exact 0098 production application SHA is an authorized rollback target'
+            rollback_contract="$(jq -c . docs/release/migration-risk-contract.json)" || fail 'migration rollback contract could not be read'
+            rollback_target="$(jq -r '.target_revision' <<< "$rollback_contract")"
+            rollback_source_sha="$(jq -r '.source_application_sha' <<< "$rollback_contract")"
+            rollback_app_sha="$(jq -r '.recovery.application_rollback_sha' <<< "$rollback_contract")"
+            if [[ "$database_head" == "$rollback_target" ]]; then
+              [[ "$CANDIDATE_SHA" == "$rollback_app_sha" && "$CANDIDATE_SHA" == "$rollback_source_sha" ]] || fail 'post-migration rollback target differs from the exact contract-authorized source application SHA'
               if [[ "$baseline_sha" == "$CANDIDATE_SHA" && "$worker_baseline_sha" == "$CANDIDATE_SHA" ]]; then
                 fail 'both API and Worker already run the requested rollback SHA'
               fi
-              [[ "$baseline_sha" == "$CANDIDATE_SHA" || "$baseline_sha" == "$current_release_sha" ]] || fail 'API source SHA is not the exact rollback target or current recorded release'
-              [[ "$worker_baseline_sha" == "$CANDIDATE_SHA" || "$worker_baseline_sha" == "$current_release_sha" ]] || fail 'Worker source SHA is not the exact rollback target or current recorded release'
+              [[ "$worker_baseline_sha" == "$CANDIDATE_SHA" || "$worker_baseline_sha" == "$baseline_sha" ]] || fail 'Worker source SHA is not the exact rollback target or current API release'
               migration_rollback=true
-              echo 'ME-0099_FORWARD_ONLY_DB_ROLLBACK_APP_ONLY=PASS' >> "$GITHUB_STEP_SUMMARY"
+              migration_contract="$rollback_contract"
+              echo 'MIGRATION_FORWARD_ONLY_DB_ROLLBACK_APP_ONLY=PASS' >> "$GITHUB_STEP_SUMMARY"
             else
               test "$baseline_sha" != "$CANDIDATE_SHA"
               git merge-base --is-ancestor "$CANDIDATE_SHA" "$baseline_sha"
@@ -514,39 +567,18 @@ jobs:
           fi
           migration_required=false
           migration_resume=false
+          migration_source=
+          migration_target=
+          migration_contract='{}'
           if [[ "$migration_rollback" != true ]] && ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- alembic app/db/models.py docker-compose.vps.yml; then
-            migration_baseline='eda64bd2d0118009853e4e06f0a9c888ad19fd5a'
-            migration_head='0098_durable_autopilot_execution_claim_v1'
-            migration_target='0099_metrica_upload_reconciliation_v1'
-            [[ "$baseline_sha" == "$migration_baseline" ]] || fail '0099 contract requires exact production application SHA eda64bd2d0118009853e4e06f0a9c888ad19fd5a'
-            case "$database_head" in
-              "$migration_head") migration_resume=false ;;
-              "$migration_target") migration_resume=true ;;
-              *) fail '0099 contract accepts only DB head 0098 for initial apply or exact 0099 for forward resume' ;;
-            esac
-            expected_migration_paths="$(printf '%s\n' \
-              .github/actionlint.yaml \
-              .github/workflows/maxibot-native-release.yml \
-              alembic/versions/0099_metrica_upload_reconciliation_v1.py \
-              app/bot/menu.py \
-              app/db/models.py \
-              app/integrations/yandex_metrica.py \
-              app/traffic/metrica_upload_tracker.py \
-              docs/release/metrica-0099-risk-contract.md \
-              scripts/postgres_migration_rehearsal.py \
-              tests/release/test_kamal_release_workflow.py \
-              tests/test_metrica_upload_tracker_reconciliation.py \
-              tests/test_postgres_migration_rehearsal.py \
-              tests/test_release_prod_tooling.py \
-              tests/test_yandex_metrica_upload_status_logging.py | LC_ALL=C sort)"
-            actual_migration_paths="$(git diff --name-only "$baseline_sha" "$CANDIDATE_SHA" | LC_ALL=C sort)" || fail 'cannot read exact 0099 candidate scope'
-            [[ "$actual_migration_paths" == "$expected_migration_paths" ]] || fail '0099 migration contract rejects an unexpected candidate path set'
-            grep -Fq 'OWNER-authorized for one release scope' docs/release/metrica-0099-risk-contract.md || fail '0099 owner risk contract record is missing'
-            grep -Fq '0098_durable_autopilot_execution_claim_v1' docs/release/metrica-0099-risk-contract.md || fail '0099 risk contract does not name its source DB head'
-            grep -Fq '0099_metrica_upload_reconciliation_v1' docs/release/metrica-0099-risk-contract.md || fail '0099 risk contract does not name its target head'
-            grep -Fq 'This is a process authorization and is not represented as a cryptographic OWNER signature.' docs/release/metrica-0099-risk-contract.md || fail '0099 risk contract misrepresents authorization evidence'
-            grep -Fqx 'revision = "0099_metrica_upload_reconciliation_v1"' alembic/versions/0099_metrica_upload_reconciliation_v1.py || fail 'authorized 0099 revision is missing'
-            grep -Fqx 'down_revision = "0098_durable_autopilot_execution_claim_v1"' alembic/versions/0099_metrica_upload_reconciliation_v1.py || fail 'authorized 0099 parent is missing'
+            migration_contract="$(python scripts/migration_release_contract.py --base-sha "$baseline_sha" --head-sha "$CANDIDATE_SHA" --database-head "$database_head")" || fail 'migration risk contract or Alembic graph is invalid'
+            migration_required="$(jq -r '.migration_required' <<< "$migration_contract")"
+            migration_resume="$(jq -r '.migration_resume' <<< "$migration_contract")"
+            migration_source="$(jq -r '.source_revision // empty' <<< "$migration_contract")"
+            migration_target="$(jq -r '.target_revision // empty' <<< "$migration_contract")"
+            if [[ "$migration_required" == true && "$migration_target" == 0099_metrica_upload_reconciliation_v1 ]]; then
+              grep -Fq 'OWNER-authorized for one release scope' docs/release/metrica-0099-risk-contract.md || fail '0099 owner risk contract record is missing'
+              grep -Fq 'This is a process authorization and is not represented as a cryptographic OWNER signature.' docs/release/metrica-0099-risk-contract.md || fail '0099 risk contract misrepresents authorization evidence'
             partial_schema="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -F '|' -v ON_ERROR_STOP=1 -c "select column_name,coalesce(character_maximum_length::text,''),data_type,is_nullable,coalesce(column_default,'') from information_schema.columns where table_schema='public' and table_name='offline_conversion_queue' and column_name in ('metrica_upload_counter_id','metrica_upload_observation_started_at','metrica_upload_check_attempts','metrica_upload_next_check_at','metrica_upload_check_error','metrica_upload_recovered_at') order by column_name")" || fail '0099 partial-schema read failed'
             while IFS='|' read -r name length data_type nullable default_value; do
               [[ -n "$name" ]] || continue
@@ -568,11 +600,12 @@ jobs:
               [[ "$(wc -l <<< "$partial_schema" | tr -d ' ')" == 6 ]] || fail '0099 forward resume requires all six exact reconciliation columns'
               [[ "$partial_index" == "true|true|$expected_index_semantics" ]] || fail '0099 forward resume requires the exact valid and ready polling index'
             fi
-            migration_required=true
+            fi
+            if [[ "$migration_required" == true ]]; then
+              echo 'MIGRATION_RISK_CONTRACT=PASS' >> "$GITHUB_STEP_SUMMARY"
+            fi
             if [[ "$migration_resume" == true ]]; then
-              echo 'ME-0099_FORWARD_RESUME_CONTRACT=PASS' >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo 'ME-0099_PATH_AND_BASELINE_CONTRACT=PASS' >> "$GITHUB_STEP_SUMMARY"
+              echo 'MIGRATION_FORWARD_RESUME=PASS' >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           if ! git diff --quiet "$baseline_sha" "$CANDIDATE_SHA" -- docs/frozen_paths.yaml scripts/frozen_path_guard.sh; then
@@ -613,13 +646,13 @@ jobs:
             echo "FROZEN_PATH_POLICY_TRANSITION=PASS ($policy_transition_label)" >> "$GITHUB_STEP_SUMMARY"
           fi
           if [[ "$migration_required" == true || "$migration_rollback" == true ]]; then
-            bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" \
-              --owner-approved-task ME-0099_METRICA_RECONCILIATION \
-              --owner-approved-path alembic/versions/0099_metrica_upload_reconciliation_v1.py \
-              --owner-approved-path app/db/models.py \
-              --owner-approved-path app/integrations/yandex_metrica.py \
-              --owner-approved-path app/traffic/metrica_upload_tracker.py \
-              --owner-approved-path app/bot/menu.py || fail 'frozen-path guard rejected the specifically authorized ME-0099 candidate'
+            if [[ "$migration_rollback" == true ]]; then migration_contract="$(jq -c . docs/release/migration-risk-contract.json)"; fi
+            frozen_task="$(jq -r '.task' <<< "$migration_contract")"
+            [[ -n "$frozen_task" && "$frozen_task" != null ]] || fail 'migration contract task is missing for frozen-path authorization'
+            mapfile -t owner_frozen_paths < <(jq -r '.frozen_paths[]' <<< "$migration_contract")
+            guard_args=(--base "$baseline_sha" --head "$CANDIDATE_SHA" --owner-approved-task "$frozen_task")
+            for path in "${owner_frozen_paths[@]}"; do guard_args+=(--owner-approved-path "$path"); done
+            bash scripts/frozen_path_guard.sh "${guard_args[@]}" || fail 'frozen-path guard rejected the contract-scoped migration candidate'
           else
             bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA" || fail 'frozen-path guard rejected the candidate'
           fi
@@ -633,8 +666,12 @@ jobs:
             echo "migration_required=$migration_required"
             echo "migration_resume=$migration_resume"
             echo "migration_rollback=$migration_rollback"
+            echo "migration_source=$migration_source"
+            echo "migration_target=$migration_target"
+            echo "migration_contract=$migration_contract"
+            echo "preserved_tables=$(jq -c '.preserved_tables // []' <<< "$migration_contract")"
             if [[ "$migration_required" == true ]]; then
-              echo 'expected_database_head=0099_metrica_upload_reconciliation_v1'
+              echo "expected_database_head=$migration_target"
             else
               echo "expected_database_head=$database_head"
             fi
@@ -720,7 +757,7 @@ jobs:
           print("ROLLBACK_RETAINED_IMAGE=PASS")
           PY
           fi
-      - name: Create and restore-check a fresh database backup for migration 0099
+      - name: Create and restore-check a fresh database backup for the approved migration
         id: migration_backup
         if: steps.baseline.outputs.migration_required == 'true'
         env:
@@ -728,15 +765,23 @@ jobs:
           EXPECTED_DB_VOLUME: ${{ steps.baseline.outputs.old_db_volume }}
           EXPECTED_PRODUCTION_SHA: ${{ steps.baseline.outputs.baseline_sha }}
           EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.database_head }}
+          PRESERVED_TABLES: ${{ steps.baseline.outputs.preserved_tables }}
+          MIGRATION_SOURCE: ${{ steps.baseline.outputs.migration_source }}
+          MIGRATION_TARGET: ${{ steps.baseline.outputs.migration_target }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_DB_ID" =~ ^[0-9a-f]{64}$ && -n "$EXPECTED_DB_VOLUME" ]]
           [[ "$EXPECTED_PRODUCTION_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$EXPECTED_DATABASE_HEAD" == 0098_durable_autopilot_execution_claim_v1 || "$EXPECTED_DATABASE_HEAD" == 0099_metrica_upload_reconciliation_v1 ]]
-          remote="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$GITHUB_RUN_ID" "$EXPECTED_DB_ID" "$EXPECTED_DB_VOLUME" "$EXPECTED_PRODUCTION_SHA" "$EXPECTED_DATABASE_HEAD" <<'REMOTE'
+          migration_source="$MIGRATION_SOURCE"
+          migration_target="$MIGRATION_TARGET"
+          [[ "$EXPECTED_DATABASE_HEAD" == "$migration_source" || "$EXPECTED_DATABASE_HEAD" == "$migration_target" ]]
+          preserved_tables_b64="$(printf '%s' "$PRESERVED_TABLES" | base64 -w0)"
+          remote="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" bash -s -- "$GITHUB_RUN_ID" "$EXPECTED_DB_ID" "$EXPECTED_DB_VOLUME" "$EXPECTED_PRODUCTION_SHA" "$EXPECTED_DATABASE_HEAD" "$preserved_tables_b64" <<'REMOTE'
           set -euo pipefail
+          fail() { echo "MIGRATION_BACKUP_RESTORE=FAIL:$1" >&2; exit 1; }
           run_id="$1"; expected_db_id="$2"; expected_db_volume="$3"; expected_prod_sha="$4"; expected_db_head="$5"
-          fail() { echo "ME-0099_BACKUP_RESTORE=FAIL:$1" >&2; exit 1; }
+          preserved_tables_json="$(printf '%s' "$6" | base64 -d)" || fail preserved-table-contract-decode
+          fail() { echo "MIGRATION_BACKUP_RESTORE=FAIL:$1" >&2; exit 1; }
           api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)" || fail api-query
           [[ "$api" =~ ^[0-9a-f]{64}$ ]] || fail api-cardinality
           actual_sha="$(docker exec "$api" python -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8000/health/ready",timeout=5))["commit_sha"])')" || fail api-health
@@ -752,7 +797,7 @@ jobs:
           [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" == "$expected_db_head" ]] || fail db-head-drift
           backup_dir=/opt/maxibot/backups
           install -d -m 700 "$backup_dir"
-          backup="$backup_dir/maxibot-db-metrica-0099-$run_id.dump"
+          backup="$backup_dir/maxibot-db-migration-$run_id.dump"
           [[ ! -e "$backup" ]] || fail backup-path-exists
           docker exec "$db" pg_dump -Fc -U maxibot -d maxibot > "$backup" || fail pg-dump
           chmod 600 "$backup"
@@ -765,10 +810,10 @@ jobs:
           data_bytes="$(du -sb "$db_data_dir" | awk '{print $1}')"; free_bytes="$(df -PB1 "$backup_dir" | awk 'NR == 2 {print $4}')"
           [[ "$data_bytes" =~ ^[0-9]+$ && "$free_bytes" =~ ^[0-9]+$ ]] || fail disk-capacity-read
           (( free_bytes >= data_bytes + backup_bytes + 1073741824 )) || fail insufficient-restore-space
-          restore_name="maxibot-metrica-0099-restore-$run_id"
+          restore_name="maxibot-migration-restore-$run_id"
           restore_ids="$(docker ps -aq --no-trunc --filter "name=^/$restore_name$")" || fail restore-container-query
           [[ -z "$restore_ids" ]] || fail restore-name-exists
-          restore_data="$(mktemp -d "$backup_dir/.metrica-0099-restore-$run_id.XXXXXX")" || fail restore-temp-dir
+          restore_data="$(mktemp -d "$backup_dir/.migration-restore-$run_id.XXXXXX")" || fail restore-temp-dir
           chmod 700 "$restore_data"
           cleanup() {
             result=$?; trap - EXIT HUP INT TERM; failed=0
@@ -778,7 +823,7 @@ jobs:
             elif [[ -n "$ids" ]]; then failed=1; fi
             docker info >/dev/null 2>&1 || failed=1
             if (( failed == 0 )) && [[ -d "$restore_data" ]]; then rm -rf -- "$restore_data" || failed=1; fi
-            if (( failed )); then echo 'ME-0099 isolated restore cleanup failed' >&2; result=1; fi
+            if (( failed )); then echo 'isolated migration restore cleanup failed' >&2; result=1; fi
             exit "$result"
           }
           trap cleanup EXIT
@@ -800,22 +845,37 @@ jobs:
           restored_rows="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" || fail restored-queue-count
           source_queue_sha="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail source-queue-checksum
           restored_queue_sha="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')" || fail restored-queue-checksum
+          preserved_table_list="$(python3 -c 'import json,re,sys; x=json.loads(sys.argv[1]); assert isinstance(x,list) and x and all(isinstance(v,str) and re.fullmatch(r"[a-z_][a-z0-9_]*",v) for v in x); print(\"\\n\".join(x))' "$preserved_tables_json")" || fail preserved-table-contract
+          mapfile -t preserved_tables <<< "$preserved_table_list"
+          preserved_counts() {
+            local container="$1" database="$2" table rows
+            for table in "${preserved_tables[@]}"; do
+              rows="$(docker exec "$container" psql -X -U maxibot -d "$database" -At -v ON_ERROR_STOP=1 -c "select count(*) from public.\"$table\"")" || return 1
+              [[ "$rows" =~ ^[0-9]+$ ]] || return 1
+              printf '%s|%s\n' "$table" "$rows"
+            done
+          }
+          source_preserved_counts="$(preserved_counts "$db" maxibot)" || fail preserved-source-counts
+          restored_preserved_counts="$(preserved_counts "$restore_name" maxibot_restore_probe)" || fail preserved-restore-counts
+          [[ "$source_preserved_counts" == "$restored_preserved_counts" ]] || fail preserved-table-restore-mismatch
           restored_head="$(docker exec "$restore_name" psql -X -U maxibot -d maxibot_restore_probe -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" || fail restored-head-read
           [[ "$source_tables" == "$restored_tables" && "$source_ext" == "$restored_ext" && "$source_rows" == "$restored_rows" && "$source_queue_sha" == "$restored_queue_sha" && "$restored_head" == "$expected_db_head" ]] || fail restore-verification-mismatch
           backup_sha="$(sha256sum "$backup" | awk '{print $1}')"
-          printf '%s|%s|%s|%s\n' "$backup" "$backup_sha" "$source_rows" "$source_queue_sha"
+          preserved_counts_b64="$(printf '%s' "$source_preserved_counts" | base64 -w0)"
+          printf '%s|%s|%s|%s|%s\n' "$backup" "$backup_sha" "$source_rows" "$source_queue_sha" "$preserved_counts_b64"
           REMOTE
           )"
-          IFS='|' read -r backup_path backup_sha backup_queue_rows backup_queue_sha <<< "$remote"
+          IFS='|' read -r backup_path backup_sha backup_queue_rows backup_queue_sha backup_preserved_counts <<< "$remote"
           [[ "$backup_sha" =~ ^[0-9a-f]{64}$ && "$backup_queue_rows" =~ ^[0-9]+$ && "$backup_queue_sha" =~ ^[0-9a-f]{64}$ ]]
           {
             echo "backup_sha=$backup_sha"
             echo "backup_path=$backup_path"
             echo "backup_queue_rows=$backup_queue_rows"
             echo "backup_queue_sha=$backup_queue_sha"
+            echo "backup_preserved_counts=$backup_preserved_counts"
           } >> "$GITHUB_OUTPUT"
-          printf 'ME-0099 fresh backup, archive validation and isolated restore: PASS; queue rows=%s, queue SHA256=%s, backup SHA256=%s\n' "$backup_queue_rows" "$backup_queue_sha" "$backup_sha" >> "$GITHUB_STEP_SUMMARY"
-      - name: Apply or forward-resume 0099 from the exact immutable candidate image
+          printf 'Migration backup, archive validation and isolated restore: PASS; queue rows=%s, queue SHA256=%s, backup SHA256=%s\n' "$backup_queue_rows" "$backup_queue_sha" "$backup_sha" >> "$GITHUB_STEP_SUMMARY"
+      - name: Apply or forward-resume the exact contract target from the immutable candidate image
         if: steps.baseline.outputs.migration_required == 'true'
         env:
           KAMAL_REGISTRY_PASSWORD: ${{ github.token }}
@@ -824,37 +884,43 @@ jobs:
           BACKUP_SHA: ${{ steps.migration_backup.outputs.backup_sha }}
           BACKUP_QUEUE_ROWS: ${{ steps.migration_backup.outputs.backup_queue_rows }}
           BACKUP_QUEUE_SHA: ${{ steps.migration_backup.outputs.backup_queue_sha }}
+          BACKUP_PRESERVED_COUNTS: ${{ steps.migration_backup.outputs.backup_preserved_counts }}
           EXPECTED_DB_ID: ${{ steps.baseline.outputs.old_db_id }}
           EXPECTED_DB_VOLUME: ${{ steps.baseline.outputs.old_db_volume }}
           EXPECTED_PRODUCTION_SHA: ${{ steps.baseline.outputs.baseline_sha }}
           EXPECTED_DATABASE_HEAD: ${{ steps.baseline.outputs.database_head }}
+          MIGRATION_SOURCE: ${{ steps.baseline.outputs.migration_source }}
+          MIGRATION_TARGET: ${{ steps.baseline.outputs.migration_target }}
           MIGRATION_RESUME: ${{ steps.baseline.outputs.migration_resume }}
         run: |
           set -euo pipefail
           [[ "$IMAGE_REF" =~ ^ghcr\.io/akhripunov/maxibot-vps-api@sha256:[0-9a-f]{64}$ ]]
-          [[ "$BACKUP_PATH" == /opt/maxibot/backups/maxibot-db-metrica-0099-$GITHUB_RUN_ID.dump ]]
+          [[ "$BACKUP_PATH" == /opt/maxibot/backups/maxibot-db-migration-$GITHUB_RUN_ID.dump ]]
           [[ "$BACKUP_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$BACKUP_QUEUE_ROWS" =~ ^[0-9]+$ ]]
           [[ "$BACKUP_QUEUE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$BACKUP_PRESERVED_COUNTS" =~ ^[A-Za-z0-9+/=]+$ ]]
           [[ "$EXPECTED_DB_ID" =~ ^[0-9a-f]{64}$ && -n "$EXPECTED_DB_VOLUME" ]]
           [[ "$EXPECTED_PRODUCTION_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$EXPECTED_DATABASE_HEAD" == 0098_durable_autopilot_execution_claim_v1 || "$EXPECTED_DATABASE_HEAD" == 0099_metrica_upload_reconciliation_v1 ]]
+          [[ "$MIGRATION_SOURCE" =~ ^[A-Za-z0-9_]{1,64}$ && "$MIGRATION_TARGET" =~ ^[A-Za-z0-9_]{1,64}$ ]]
+          [[ "$EXPECTED_DATABASE_HEAD" == "$MIGRATION_SOURCE" || "$EXPECTED_DATABASE_HEAD" == "$MIGRATION_TARGET" ]]
           [[ "$MIGRATION_RESUME" == true || "$MIGRATION_RESUME" == false ]]
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
           for run_status in queued in_progress; do
             active_runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=$run_status&per_page=100")"
-            jq -e --arg current "$GITHUB_RUN_ID" 'all(.workflow_runs[]; (.id | tostring) == $current or .head_branch != "main" or .event != "push" or ((.name | test("release|deploy|cutover|kamal";"i")) | not))' <<< "$active_runs" >/dev/null || { echo 'competing production release detected immediately before 0099 migration' >&2; exit 1; }
+            jq -e --arg current "$GITHUB_RUN_ID" 'all(.workflow_runs[]; (.id | tostring) == $current or .head_branch != "main" or .event != "push" or ((.name | test("release|deploy|cutover|kamal";"i")) | not))' <<< "$active_runs" >/dev/null || { echo 'competing production release detected immediately before migration' >&2; exit 1; }
           done
-          remote_script="$RUNNER_TEMP/maxibot-metrica-0099-apply.sh"
+          remote_script="$RUNNER_TEMP/maxibot-migration-apply.sh"
           cat > "$remote_script" <<'REMOTE'
           set -euo pipefail
+          fail() { echo "MIGRATION_APPLY=FAIL:$1" >&2; exit 1; }
           read -r registry_token
           docker_config="$(mktemp -d)"
           trap 'rm -rf -- "$docker_config"; rm -f -- "$0"' EXIT
           export DOCKER_CONFIG="$docker_config"
           printf '%s\n' "$registry_token" | docker login ghcr.io --username akhripunov --password-stdin >/dev/null
           unset registry_token
-          sha="$1"; image_ref="$2"; expected_rows="$3"; expected_queue_sha="$4"; expected_backup="$5"; backup_sha="$6"; expected_db_id="$7"; expected_db_volume="$8"; expected_prod_sha="$9"; expected_db_head="${10}"; migration_resume="${11}"
+          sha="$1"; image_ref="$2"; expected_rows="$3"; expected_queue_sha="$4"; expected_backup="$5"; backup_sha="$6"; expected_db_id="$7"; expected_db_volume="$8"; expected_prod_sha="$9"; expected_db_head="${10}"; migration_resume="${11}"; migration_source="${12}"; migration_target="${13}"; expected_preserved_counts_b64="${14}"
           db=maxibot-vps-db-1
           api="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=api)"
           worker="$(docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker)"
@@ -871,29 +937,45 @@ jobs:
           [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" == "$expected_rows" ]]
           queue_sha="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')"
           [[ "$queue_sha" == "$expected_queue_sha" ]]
+          preserved_counts_from_contract="$(printf '%s' "$expected_preserved_counts_b64" | base64 -d)" || fail 'preserved table evidence cannot be decoded'
+          preserved_table_list="$(awk -F'|' 'NF == 2 {print $1}' <<< "$preserved_counts_from_contract")"
+          [[ -n "$preserved_table_list" && "$(awk -F'|' 'NF != 2 {bad=1} END {print bad+0}' <<< "$preserved_counts_from_contract")" == 0 ]]
+          preserved_counts() {
+            local table rows
+            while IFS= read -r table; do
+              [[ "$table" =~ ^[a-z_][a-z0-9_]*$ ]] || return 1
+              rows="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select count(*) from public.\"$table\"")" || return 1
+              [[ "$rows" =~ ^[0-9]+$ ]] || return 1
+              printf '%s|%s\n' "$table" "$rows"
+            done <<< "$preserved_table_list"
+          }
+          [[ "$(preserved_counts)" == "$preserved_counts_from_contract" ]] || fail 'preserved-table baseline differs from the verified backup'
           docker pull "$image_ref" >/dev/null
           test "$(docker image inspect "$image_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$sha"
           test "$(docker image inspect "$image_ref" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
           docker image inspect "$image_ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -Fxq "$image_ref"
           if [[ "$migration_resume" == false ]]; then
-            [[ "$expected_db_head" == 0098_durable_autopilot_execution_claim_v1 ]]
+            [[ "$expected_db_head" == "$migration_source" ]]
             docker run --rm --network kamal --env-file /opt/maxibot/.env --env-file /opt/maxibot/secrets/mail_cloud.env \
-              -e MAX_RUN_POLLING=false "$image_ref" alembic upgrade 0099_metrica_upload_reconciliation_v1
+              -e MAX_RUN_POLLING=false "$image_ref" alembic upgrade "$migration_target"
           else
-            [[ "$expected_db_head" == 0099_metrica_upload_reconciliation_v1 ]]
+            [[ "$expected_db_head" == "$migration_target" ]]
           fi
-          [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" == 0099_metrica_upload_reconciliation_v1 ]]
+          [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select version_num from alembic_version')" == "$migration_target" ]]
           [[ "$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c 'select count(*) from offline_conversion_queue')" == "$expected_rows" ]]
           queue_sha_after="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "COPY (SELECT row_to_json(q)::text FROM offline_conversion_queue q ORDER BY id) TO STDOUT" | sha256sum | awk '{print $1}')"
           [[ "$queue_sha_after" == "$expected_queue_sha" ]]
+          [[ "$(preserved_counts)" == "$preserved_counts_from_contract" ]] || fail 'preserved-table row counts changed during migration'
           actual_index="$(docker exec "$db" psql -X -U maxibot -d maxibot -At -v ON_ERROR_STOP=1 -c "select concat_ws('|',i.indisvalid::text,i.indisready::text,i.indisunique::text,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts::text,i.indnkeyatts::text,(i.indpred is null)::text,(i.indexprs is null)::text,array_to_string(array_agg(coalesce(a.attname,'<expression>') order by k.ordinality),','),pg_get_indexdef(idx.oid)) from pg_class idx join pg_index i on i.indexrelid=idx.oid join pg_am am on am.oid=idx.relam join pg_namespace index_ns on index_ns.oid=idx.relnamespace join pg_class tbl on tbl.oid=i.indrelid join pg_namespace table_ns on table_ns.oid=tbl.relnamespace join unnest(i.indkey) with ordinality as k(attnum,ordinality) on true left join pg_attribute a on a.attrelid=tbl.oid and a.attnum=k.attnum where idx.relname='ix_offline_conversion_queue_metrica_poll' and index_ns.nspname='public' group by i.indisvalid,i.indisready,i.indisunique,am.amname,index_ns.nspname,table_ns.nspname,tbl.relname,i.indnatts,i.indnkeyatts,(i.indpred is null),(i.indexprs is null),idx.oid")" || fail 'exact polling index read failed after migration'
-          [[ "$actual_index" == 'true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)' ]] || fail 'polling index does not match the exact expected catalog definition'
+          if [[ "$migration_target" == 0099_metrica_upload_reconciliation_v1 ]]; then
+            [[ "$actual_index" == 'true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)' ]] || fail 'polling index does not match the exact expected catalog definition'
+          fi
           REMOTE
           chmod 700 "$remote_script"
-          scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$remote_script" "root@$PRODUCTION_HOST:/tmp/maxibot-metrica-0099-apply-$GITHUB_RUN_ID.sh"
-          printf '%s\n' "$KAMAL_REGISTRY_PASSWORD" | ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "bash /tmp/maxibot-metrica-0099-apply-$GITHUB_RUN_ID.sh '$CANDIDATE_SHA' '$IMAGE_REF' '$BACKUP_QUEUE_ROWS' '$BACKUP_QUEUE_SHA' '$BACKUP_PATH' '$BACKUP_SHA' '$EXPECTED_DB_ID' '$EXPECTED_DB_VOLUME' '$EXPECTED_PRODUCTION_SHA' '$EXPECTED_DATABASE_HEAD' '$MIGRATION_RESUME'"
+          scp -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "$remote_script" "root@$PRODUCTION_HOST:/tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh"
+          printf '%s\n' "$KAMAL_REGISTRY_PASSWORD" | ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "bash /tmp/maxibot-migration-apply-$GITHUB_RUN_ID.sh '$CANDIDATE_SHA' '$IMAGE_REF' '$BACKUP_QUEUE_ROWS' '$BACKUP_QUEUE_SHA' '$BACKUP_PATH' '$BACKUP_SHA' '$EXPECTED_DB_ID' '$EXPECTED_DB_VOLUME' '$EXPECTED_PRODUCTION_SHA' '$EXPECTED_DATABASE_HEAD' '$MIGRATION_RESUME' '$MIGRATION_SOURCE' '$MIGRATION_TARGET' '$BACKUP_PRESERVED_COUNTS'"
           rm -f "$remote_script"
-          echo 'ME-0099_MIGRATION_APPLY=PASS' >> "$GITHUB_STEP_SUMMARY"
+          echo "MIGRATION_APPLY=PASS TARGET=$MIGRATION_TARGET" >> "$GITHUB_STEP_SUMMARY"
       - name: Record exact application Deployment after all preflight gates
         id: deployment
         env:

@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "task": "ME-57",
+  "owner_authorization": {
+    "status": "OWNER_AUTHORIZED",
+    "reference": "ME-57: Metrica Reconciliation V1 + Migration 0099",
+    "risk_category": "additive_schema_forward_only"
+  },
+  "source_application_sha": "eda64bd2d0118009853e4e06f0a9c888ad19fd5a",
+  "source_revision": "0098_durable_autopilot_execution_claim_v1",
+  "target_revision": "0099_metrica_upload_reconciliation_v1",
+  "migration_paths": [
+    "alembic/versions/0099_metrica_upload_reconciliation_v1.py"
+  ],
+  "approved_paths": [
+    ".github/actionlint.yaml",
+    ".github/workflows/maxibot-native-release.yml",
+    "alembic/versions/0099_metrica_upload_reconciliation_v1.py",
+    "app/bot/menu.py",
+    "app/db/models.py",
+    "app/integrations/yandex_metrica.py",
+    "app/traffic/metrica_upload_tracker.py",
+    "docs/release/metrica-0099-risk-contract.md",
+    "docs/release/migration-risk-contract.json",
+    "scripts/migration_release_contract.py",
+    "scripts/postgres_migration_rehearsal.py",
+    "tests/release/test_kamal_release_workflow.py",
+    "tests/test_metrica_upload_tracker_reconciliation.py",
+    "tests/test_migration_release_contract.py",
+    "tests/test_native_build_boundary.py",
+    "tests/test_postgres_migration_rehearsal.py",
+    "tests/test_release_finalization.py",
+    "tests/test_release_prod_tooling.py",
+    "tests/test_yandex_metrica_upload_status_logging.py"
+  ],
+  "rehearsal_script": "scripts/postgres_migration_rehearsal.py",
+  "frozen_paths": [
+    "alembic/versions/0099_metrica_upload_reconciliation_v1.py",
+    "app/bot/menu.py",
+    "app/db/models.py",
+    "app/integrations/yandex_metrica.py",
+    "app/traffic/metrica_upload_tracker.py"
+  ],
+  "preserved_tables": [
+    "offline_conversion_queue"
+  ],
+  "resume_allowed": true,
+  "recovery": {
+    "database": "forward_only",
+    "application_rollback_sha": "eda64bd2d0118009853e4e06f0a9c888ad19fd5a"
+  }
+}

@@ -243,75 +243,68 @@ def test_kamal_deploy_uses_runtime_baseline_and_scoped_0099_backup_restore_witho
     assert "--owner-approved-task ME-53" not in baseline
 
 
-def test_0099_migration_gate_is_exact_baseline_scope_and_runs_before_kamal_apply():
+def test_contract_migration_gate_runs_backup_restore_apply_before_kamal():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    test_steps = workflow["jobs"]["tests"]["steps"]
+    contract_index = next(i for i, step in enumerate(test_steps) if step.get("id") == "migration_contract")
+    frozen_index = next(i for i, step in enumerate(test_steps) if step.get("name") == "Run exact-candidate Frozen Path Guard")
+    rehearsal_index = next(i for i, step in enumerate(test_steps) if step.get("name") == "Rehearse the authorized migration on isolated PostgreSQL")
+    frozen_guard = test_steps[frozen_index]
+    assert contract_index < frozen_index < rehearsal_index
+    assert "scripts/frozen_path_guard.sh" in frozen_guard["run"]
+    assert "MIGRATION_FROZEN_PATHS" in frozen_guard.get("env", {})
+    assert "--owner-approved-task" in frozen_guard["run"]
     steps = workflow["jobs"]["deploy"]["steps"]
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
     names = [step.get("name", "") for step in steps]
-    backup = next(step for step in steps if step.get("name") == "Create and restore-check a fresh database backup for migration 0099")
-    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")
+    backup = next(step for step in steps if step.get("name") == "Create and restore-check a fresh database backup for the approved migration")
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")
     runtime = next(step for step in steps if step.get("name") == "Verify runtime, network connectivity, and Worker heartbeat")
 
-    assert "eda64bd2d0118009853e4e06f0a9c888ad19fd5a" in baseline
-    assert "0098_durable_autopilot_execution_claim_v1" in baseline
-    assert "another MAXIBOT production release is queued or running" in baseline
-    assert "another production migration is active" in baseline
-    assert 'active_index_builds="$(docker exec "$db" psql' in baseline
-    assert "active index-build query failed" in baseline
-    assert '[[ "$active_index_builds" == 0 ]]' in baseline
-    assert "expected_migration_paths" in baseline and "actual_migration_paths" in baseline
-    assert 'case "$database_head" in' in baseline
-    assert '"$migration_head") migration_resume=false' in baseline
-    assert '"$migration_target") migration_resume=true' in baseline
-    assert '*) fail \'0099 contract accepts only DB head 0098 for initial apply or exact 0099 for forward resume\'' in baseline
-    assert "0099_metrica_upload_reconciliation_v1.py" in baseline
+    assert "migration_release_contract.py" in baseline
     assert "ordinary Kamal Deploy" not in baseline
-    assert "--owner-approved-task ME-0099_METRICA_RECONCILIATION" in baseline
-    assert "docker exec \"$db\" pg_dump -Fc" in backup["run"]
+    assert "docker-compose.vps.yml" in baseline
+    assert "MIGRATION_RISK_CONTRACT=PASS" in baseline
+    assert "source_revision" in baseline and "target_revision" in baseline
+    assert "preserved_tables" in baseline
+    assert "pg_dump -Fc" in backup["run"]
     assert "pg_restore --list" in backup["run"]
     assert "--network none" in backup["run"]
     assert "cleanup" in backup["run"]
-    assert "alembic upgrade 0099_metrica_upload_reconciliation_v1" in migration["run"]
+    assert "source_preserved_counts" in backup["run"] and "restored_preserved_counts" in backup["run"]
+    assert 'alembic upgrade "$migration_target"' in migration["run"]
     assert migration.get("env", {}).get("MIGRATION_RESUME") == "${{ steps.baseline.outputs.migration_resume }}"
     assert 'if [[ "$migration_resume" == false ]]; then' in migration["run"]
-    assert '[[ "$expected_db_head" == 0099_metrica_upload_reconciliation_v1 ]]' in migration["run"]
-    backup_run = backup["run"]
-    assert "EXPECTED_DATABASE_HEAD" in backup.get("env", {})
-    assert '"$restored_head" == "$expected_db_head"' in backup_run
-    assert "KAMAL_REGISTRY_PASSWORD" in migration.get("env", {})
+    assert '[[ "$expected_db_head" == "$migration_target" ]]' in migration["run"]
+    assert "BACKUP_PRESERVED_COUNTS" in migration.get("env", {})
+    assert "preserved-table row counts changed during migration" in migration["run"]
     assert names.index(backup["name"]) < names.index(migration["name"]) < names.index("Record exact application Deployment after all preflight gates")
-    assert "steps.baseline.outputs.expected_database_head" in runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD", "")
+    assert runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD") == "${{ steps.baseline.outputs.expected_database_head }}"
     assert "db_head == expected_db_head" in runtime["run"]
 
-
-def test_0099_post_migration_rollback_restores_only_exact_baseline_app_without_database_downgrade():
+def test_migration_rollback_is_contract_bound_and_database_forward_only():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
     runtime = next(step for step in steps if step.get("name") == "Verify runtime, network connectivity, and Worker heartbeat")
     rollback = next(step for step in steps if step.get("name") == "Deploy application with Kamal")["run"]
 
-    assert "release_operation=\"$1\"" in baseline
-    assert "release_operation\" != rollback" in baseline
-    assert 'database_head" == 0099_metrica_upload_reconciliation_v1' in baseline
-    assert 'CANDIDATE_SHA" == "$migration_baseline"' in baseline
-    assert "current_release_sha" in baseline
-    assert 'baseline_sha" == "$current_release_sha"' in baseline
-    assert 'worker_baseline_sha" == "$current_release_sha"' in baseline
-    assert "ME-0099_FORWARD_ONLY_DB_ROLLBACK_APP_ONLY=PASS" in baseline
-    assert "migration_required=false" in baseline
+    assert "release_operation=" in baseline
+    assert "migration-risk-contract.json" in baseline
+    assert "source_application_sha" in baseline
+    assert "application_rollback_sha" in baseline
+    assert "post-migration rollback target differs from the exact contract-authorized source application SHA" in baseline
+    assert "MIGRATION_FORWARD_ONLY_DB_ROLLBACK_APP_ONLY=PASS" in baseline
     assert 'if [[ "$migration_required" == true || "$migration_rollback" == true ]]; then' in baseline
-    assert "--owner-approved-task ME-0099_METRICA_RECONCILIATION" in baseline
-    assert "--owner-approved-path alembic/versions/0099_metrica_upload_reconciliation_v1.py" in baseline
+    assert "frozen_paths[]" in baseline
     assert runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD") == "${{ steps.baseline.outputs.expected_database_head }}"
     assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles api' in rollback
     assert "alembic downgrade" not in rollback
 
-
 def test_0099_backup_and_database_identity_are_revalidated_immediately_before_migration():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
-    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")["run"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
 
     assert '"$EXPECTED_DB_ID"' in migration
     assert '"$EXPECTED_DB_VOLUME"' in migration
@@ -322,29 +315,30 @@ def test_0099_backup_and_database_identity_are_revalidated_immediately_before_mi
     assert 'select count(*) from offline_conversion_queue' in migration
     assert "expected_queue_sha" in migration and "queue_sha_after" in migration
     assert 'git/ref/heads/main' in migration
-    assert "competing production release detected immediately before 0099 migration" in migration
+    assert "competing production release detected immediately before migration" in migration
 
 
 def test_0099_forward_resume_requires_exact_old_app_and_complete_target_schema_without_reapplying_ddl():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
-    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")["run"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
 
-    assert '"$baseline_sha" == "$migration_baseline"' in baseline
+    assert "migration_release_contract.py" in baseline
     assert 'wc -l <<< "$partial_schema"' in baseline
     assert '[[ "$partial_index" == "true|true|$expected_index_semantics" ]]' in baseline
     assert '"migration_resume=$migration_resume"' in baseline
     assert 'if [[ "$migration_resume" == false ]]; then' in migration
-    assert '[[ "$expected_db_head" == 0098_durable_autopilot_execution_claim_v1 ]]' in migration
-    assert '[[ "$expected_db_head" == 0099_metrica_upload_reconciliation_v1 ]]' in migration
+    assert '[[ "$expected_db_head" == "$migration_source" ]]' in migration
+    assert '[[ "$expected_db_head" == "$migration_target" ]]' in migration
+    assert 'alembic upgrade "$migration_target"' in migration
 
 
 def test_0099_preflight_and_post_apply_validate_exact_polling_index_catalog_definition():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
-    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")["run"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")["run"]
 
     expected = "true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|status,metrica_upload_next_check_at|CREATE INDEX ix_offline_conversion_queue_metrica_poll ON public.offline_conversion_queue USING btree (status, metrica_upload_next_check_at)"
     assert expected in migration
