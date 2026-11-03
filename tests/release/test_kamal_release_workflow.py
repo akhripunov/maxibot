@@ -74,6 +74,18 @@ def test_tests_job_loads_pinned_kamal_config_with_synthetic_secret_without_deplo
     assert workflow["jobs"]["build"]["needs"] == "tests"
 
 
+def test_tests_job_runs_checksum_pinned_actionlint_before_build():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    tests = workflow["jobs"]["tests"]
+    step = next(step for step in tests["steps"] if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
+
+    assert "actionlint_1.7.12_linux_amd64.tar.gz" in step["run"]
+    assert "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" in step["run"]
+    assert "sha256sum --check --strict" in step["run"]
+    assert '"$RUNNER_TEMP/actionlint" -color' in step["run"]
+    assert workflow["jobs"]["build"]["needs"] == "tests"
+
+
 def test_every_normal_deploy_kamal_step_creates_private_secrets_file_and_cleans_it():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     deploy = workflow["jobs"]["deploy"]
@@ -194,7 +206,7 @@ def test_kamal_deploy_verifies_only_api_worker_and_preserves_safety_invariants()
     assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles worker' in deploy
 
 
-def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_restore_or_caddy():
+def test_kamal_deploy_uses_runtime_baseline_and_scoped_0099_backup_restore_without_caddy():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     steps = workflow["jobs"]["deploy"]["steps"]
     deploy_script = "\n".join(step.get("run", "") for step in steps)
@@ -211,9 +223,12 @@ def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_rest
     assert "alembic_version" in baseline
     assert "old_db_volume" in baseline and "old_redis_volume" in baseline and "old_uploads_volume" in baseline
     assert "MAXIBOT_BACKUP_MAX_AGE_SECONDS" not in deploy_script
-    assert "pg_restore" not in deploy_script
-    assert "native_restore_probe" not in deploy_script
-    assert "maxibot-native-restore" not in deploy_script
+    assert "pg_dump -Fc" in deploy_script
+    assert "pg_restore --list" in deploy_script
+    assert "source_queue_sha" in deploy_script and "restored_queue_sha" in deploy_script
+    assert "source-table-inventory" in deploy_script
+    assert "--network none" in deploy_script
+    assert "0099_metrica_upload_reconciliation_v1" in deploy_script
     assert "caddy" not in deploy_script.lower()
     assert "maxibot-vps-https-1" not in deploy_script
     assert "BASELINE_MODE" not in kamal_config
@@ -224,6 +239,103 @@ def test_ordinary_kamal_deploy_uses_runtime_baseline_without_cutover_backup_rest
     assert "Redis PING command failed" in baseline
     assert 'bash scripts/frozen_path_guard.sh --base "$baseline_sha" --head "$CANDIDATE_SHA"' in baseline
     assert "--owner-approved-task ME-53" not in baseline
+
+
+def test_0099_migration_gate_is_exact_baseline_scope_and_runs_before_kamal_apply():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    names = [step.get("name", "") for step in steps]
+    backup = next(step for step in steps if step.get("name") == "Create and restore-check a fresh database backup for migration 0099")
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")
+    runtime = next(step for step in steps if step.get("name") == "Verify runtime, network connectivity, and Worker heartbeat")
+
+    assert "eda64bd2d0118009853e4e06f0a9c888ad19fd5a" in baseline
+    assert "0098_durable_autopilot_execution_claim_v1" in baseline
+    assert "another MAXIBOT production release is queued or running" in baseline
+    assert "another production migration is active" in baseline
+    assert 'active_index_builds="$(docker exec "$db" psql' in baseline
+    assert "active index-build query failed" in baseline
+    assert '[[ "$active_index_builds" == 0 ]]' in baseline
+    assert "expected_migration_paths" in baseline and "actual_migration_paths" in baseline
+    assert 'case "$database_head" in' in baseline
+    assert '"$migration_head") migration_resume=false' in baseline
+    assert '"$migration_target") migration_resume=true' in baseline
+    assert '*) fail \'0099 contract accepts only DB head 0098 for initial apply or exact 0099 for forward resume\'' in baseline
+    assert "0099_metrica_upload_reconciliation_v1.py" in baseline
+    assert "ordinary Kamal Deploy" not in baseline
+    assert "--owner-approved-task ME-0099_METRICA_RECONCILIATION" in baseline
+    assert "docker exec \"$db\" pg_dump -Fc" in backup["run"]
+    assert "pg_restore --list" in backup["run"]
+    assert "--network none" in backup["run"]
+    assert "cleanup" in backup["run"]
+    assert "alembic upgrade 0099_metrica_upload_reconciliation_v1" in migration["run"]
+    assert migration.get("env", {}).get("MIGRATION_RESUME") == "${{ steps.baseline.outputs.migration_resume }}"
+    assert 'if [[ "$migration_resume" == false ]]; then' in migration["run"]
+    assert '[[ "$expected_db_head" == 0099_metrica_upload_reconciliation_v1 ]]' in migration["run"]
+    backup_run = backup["run"]
+    assert "EXPECTED_DATABASE_HEAD" in backup.get("env", {})
+    assert '"$restored_head" == "$expected_db_head"' in backup_run
+    assert "KAMAL_REGISTRY_PASSWORD" in migration.get("env", {})
+    assert names.index(backup["name"]) < names.index(migration["name"]) < names.index("Record exact application Deployment after all preflight gates")
+    assert "steps.baseline.outputs.expected_database_head" in runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD", "")
+    assert "db_head == expected_db_head" in runtime["run"]
+
+
+def test_0099_post_migration_rollback_restores_only_exact_baseline_app_without_database_downgrade():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    runtime = next(step for step in steps if step.get("name") == "Verify runtime, network connectivity, and Worker heartbeat")
+    rollback = next(step for step in steps if step.get("name") == "Deploy application with Kamal")["run"]
+
+    assert "release_operation=\"$1\"" in baseline
+    assert "release_operation\" != rollback" in baseline
+    assert 'database_head" == 0099_metrica_upload_reconciliation_v1' in baseline
+    assert 'CANDIDATE_SHA" == "$migration_baseline"' in baseline
+    assert "current_release_sha" in baseline
+    assert 'baseline_sha" == "$current_release_sha"' in baseline
+    assert 'worker_baseline_sha" == "$current_release_sha"' in baseline
+    assert "ME-0099_FORWARD_ONLY_DB_ROLLBACK_APP_ONLY=PASS" in baseline
+    assert "migration_required=false" in baseline
+    assert 'if [[ "$migration_required" == true || "$migration_rollback" == true ]]; then' in baseline
+    assert "--owner-approved-task ME-0099_METRICA_RECONCILIATION" in baseline
+    assert "--owner-approved-path alembic/versions/0099_metrica_upload_reconciliation_v1.py" in baseline
+    assert runtime.get("env", {}).get("EXPECTED_DATABASE_HEAD") == "${{ steps.baseline.outputs.expected_database_head }}"
+    assert 'bundle exec kamal rollback "$IMAGE_VERSION" --roles api' in rollback
+    assert "alembic downgrade" not in rollback
+
+
+def test_0099_backup_and_database_identity_are_revalidated_immediately_before_migration():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")["run"]
+
+    assert '"$EXPECTED_DB_ID"' in migration
+    assert '"$EXPECTED_DB_VOLUME"' in migration
+    assert '"$expected_backup"' in migration
+    assert '"$backup_sha"' in migration
+    assert '"$expected_rows"' in migration
+    assert "pg_restore --list" in migration
+    assert 'select count(*) from offline_conversion_queue' in migration
+    assert "expected_queue_sha" in migration and "queue_sha_after" in migration
+    assert 'git/ref/heads/main' in migration
+    assert "competing production release detected immediately before 0099 migration" in migration
+
+
+def test_0099_forward_resume_requires_exact_old_app_and_complete_target_schema_without_reapplying_ddl():
+    workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["deploy"]["steps"]
+    baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    migration = next(step for step in steps if step.get("name") == "Apply or forward-resume 0099 from the exact immutable candidate image")["run"]
+
+    assert '"$baseline_sha" == "$migration_baseline"' in baseline
+    assert 'wc -l <<< "$partial_schema"' in baseline
+    assert '[[ "$partial_index" == t\\|t\\|status,metrica_upload_next_check_at ]]' in baseline
+    assert '"migration_resume=$migration_resume"' in baseline
+    assert 'if [[ "$migration_resume" == false ]]; then' in migration
+    assert '[[ "$expected_db_head" == 0098_durable_autopilot_execution_claim_v1 ]]' in migration
+    assert '[[ "$expected_db_head" == 0099_metrica_upload_reconciliation_v1 ]]' in migration
 
 
 def test_ordinary_kamal_release_keeps_backup_restore_separate_from_normal_deploy():
@@ -255,7 +367,12 @@ def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
 def test_normal_kamal_selection_provides_exact_inspect_ids_and_rejects_docker_failures(ids,status,ok):
     workflow=yaml.load(WORKFLOW.read_text(),Loader=yaml.BaseLoader)
     steps=workflow['jobs']['deploy']['steps']
-    runs=[s['run'] for s in steps if 'run' in s and 'mapfile -t apis' in s['run'] or 'run' in s and 'api="$(docker ps ' in s['run']]
+    required_names={
+        'Verify exact main and read the current production baseline',
+        'Verify exact GHCR image and Kamal configuration',
+        'Verify runtime, network connectivity, and Worker heartbeat',
+    }
+    runs=[s['run'] for s in steps if s.get('name') in required_names]
     assert len(runs)==3
     for run in runs:
         blocks=re.findall(r'api="\$\(docker ps [^\n]+\n\s*worker="\$\(docker ps [^\n]+\n\s*\[\[ [^\n]+',run)
