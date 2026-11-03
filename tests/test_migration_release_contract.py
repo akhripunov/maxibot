@@ -34,8 +34,17 @@ def _contract(source_sha="a" * 40):
         "rehearsal_script": "scripts/postgres_migration_rehearsal.py",
         "preserved_tables": ["offline_conversion_queue"],
         "schema": {
-            "source": {"required_columns": [], "absent_columns": [], "absent_indexes": [], "absent_constraints": []},
-            "target": {"columns": [], "indexes": [], "constraints": []},
+            "source": {
+                "required_columns": [{"table": "records", "name": "id", "data_type": "bigint"}],
+                "absent_columns": [{"table": "records", "name": "new_value"}],
+                "absent_indexes": [],
+                "absent_constraints": [],
+            },
+            "target": {
+                "columns": [{"table": "records", "name": "new_value", "data_type": "text", "nullable": True}],
+                "indexes": [],
+                "constraints": [],
+            },
         },
         "resume_allowed": True,
         "recovery": {"database": "forward_only", "application_rollback_sha": source_sha},
@@ -65,6 +74,23 @@ def test_authorized_migration_is_derived_from_the_linear_alembic_graph():
     assert result["source_revision"] == "0098_source"
     assert result["target_revision"] == "0099_target"
     assert result["migration_paths"] == ["alembic/versions/0099_target.py"]
+
+
+def test_migration_contract_rejects_empty_source_or_target_schema_postconditions():
+    for replace_schema in (
+        lambda schema: schema.update(source={"required_columns": [], "absent_columns": [], "absent_indexes": [], "absent_constraints": []}),
+        lambda schema: schema.update(target={"columns": [], "indexes": [], "constraints": []}),
+    ):
+        contract = _contract()
+        replace_schema(contract["schema"])
+        try:
+            CONTRACT_MODULE.evaluate_contract(
+                contract, contract["approved_paths"], "a" * 40, "0098_source", _graph()
+            )
+        except ValueError as error:
+            assert "schema" in str(error)
+        else:
+            raise AssertionError("migration with an empty schema contract was accepted")
 
 
 def test_synthetic_0100_uses_the_same_graph_and_contract_mechanism():
