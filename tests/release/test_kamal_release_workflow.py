@@ -49,6 +49,7 @@ def test_kamal_release_automatically_deploys_main_after_tests_and_build():
 def test_tests_job_loads_pinned_kamal_config_with_synthetic_secret_without_deploy_access():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     tests = workflow["jobs"]["tests"]
+    assert tests["runs-on"] == "ubuntu-24.04"
     setup = next(step for step in tests["steps"] if step.get("uses", "").startswith("ruby/setup-ruby@"))
     verify = next(step for step in tests["steps"] if step.get("name") == "Load Kamal config with synthetic registry secret")
 
