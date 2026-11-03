@@ -370,3 +370,49 @@ def test_target_index_contract_cannot_accept_invalid_or_unready_indexes():
             assert "valid and ready" in str(error)
         else:
             raise AssertionError(f"target index with {field}=false was accepted")
+
+
+
+def test_schema_contract_verifier_accepts_snapshot_larger_than_exec_argument_limit():
+    import base64
+    import json
+    import sys
+
+    contract = json.loads(
+        (ROOT / "docs/release/migration-risk-contract.json").read_text(encoding="utf-8")
+    )["schema"]
+    snapshot = {
+        "columns": [
+            {
+                "table": item["table"],
+                "name": item["name"],
+                "data_type": item["data_type"],
+            }
+            for item in contract["source"]["required_columns"]
+        ] + [
+            {"table": "snapshot_padding", "name": f"column_{index:05d}", "data_type": "text"}
+            for index in range(50000)
+        ],
+        "indexes": [],
+        "constraints": [],
+    }
+    payload = json.dumps(snapshot)
+    assert len(payload.encode("utf-8")) > 2_097_152
+    encoded_contract = base64.b64encode(json.dumps(contract).encode("utf-8")).decode("ascii")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/verify_migration_schema_contract.py"),
+            "--contract-b64",
+            encoded_contract,
+            "--snapshot-stdin",
+            "--mode",
+            "source",
+        ],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "MIGRATION_SCHEMA_SOURCE=PASS" in result.stdout
