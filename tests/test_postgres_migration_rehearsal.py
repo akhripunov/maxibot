@@ -89,3 +89,10 @@ def test_postgres_rehearsal_checks_exact_polling_index_definition_and_catalog_fl
     assert '"true|true|false|btree|public|public|offline_conversion_queue|2|2|true|true|"' in SCRIPT
     assert 'f"0099 new-field defaults or exact polling index definition are invalid: "' in SCRIPT
     assert 'f"counter={new_counter_values}, index_signature={index_signature!r}"' in SCRIPT
+
+
+def test_postgres_rehearsal_executes_the_shared_source_and_target_catalog_contract():
+    assert "validate_schema_snapshot" in SCRIPT
+    assert 'validate_catalog_snapshot(engine, schema_contract, "source")' in SCRIPT
+    assert 'validate_catalog_snapshot(engine, schema_contract, "target")' in SCRIPT
+    assert "SCHEMA_SNAPSHOT_SQL" in SCRIPT
