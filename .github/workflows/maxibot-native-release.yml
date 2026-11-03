@@ -593,10 +593,10 @@ jobs:
             schema_mode=source
             [[ "$migration_resume" != true ]] || schema_mode=target
             schema_validation="$(python scripts/verify_migration_schema_contract.py --contract-b64 "$schema_contract_b64" --snapshot-b64 "$schema_snapshot_b64" --mode "$schema_mode" 2>&1)" || {
-              printf '%s\\n' "$schema_validation" >&2
+              printf '%s\n' "$schema_validation" >&2
               fail "production schema contract mismatch: $schema_validation"
             }
-            printf '%s\\n' "$schema_validation" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$schema_validation" >> "$GITHUB_STEP_SUMMARY"
             echo "MIGRATION_SCHEMA_${schema_mode^^}=PASS" >> "$GITHUB_STEP_SUMMARY"
             if [[ "$migration_required" == true ]]; then
               echo 'MIGRATION_RISK_CONTRACT=PASS' >> "$GITHUB_STEP_SUMMARY"
