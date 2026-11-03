@@ -576,6 +576,14 @@ jobs:
             migration_resume="$(jq -r '.migration_resume' <<< "$migration_contract")"
             migration_source="$(jq -r '.source_revision // empty' <<< "$migration_contract")"
             migration_target="$(jq -r '.target_revision // empty' <<< "$migration_contract")"
+            if [[ "$migration_required" == true && "$RELEASE_OPERATION" != rollback ]]; then
+              python - "$GITHUB_REF" "$GITHUB_ACTOR" "$GITHUB_REPOSITORY_OWNER" <<'PY' || fail 'production migration requires owner publication on protected main'
+          import sys
+          from scripts.migration_release_contract import validate_owner_main_publication
+          validate_owner_main_publication(*sys.argv[1:])
+          PY
+              echo 'MIGRATION_OWNER_MAIN_PUBLICATION=PASS' >> "$GITHUB_STEP_SUMMARY"
+            fi
             if [[ "$migration_required" == true && "$migration_target" == 0099_metrica_upload_reconciliation_v1 ]]; then
               grep -Fq 'OWNER-authorized for one release scope' docs/release/metrica-0099-risk-contract.md || fail '0099 owner risk contract record is missing'
               grep -Fq 'This is a process authorization and is not represented as a cryptographic OWNER signature.' docs/release/metrica-0099-risk-contract.md || fail '0099 risk contract misrepresents authorization evidence'

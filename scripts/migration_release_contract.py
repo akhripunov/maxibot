@@ -141,8 +141,11 @@ def evaluate_contract(
     frozen_paths = contract["frozen_paths"]
     if not isinstance(frozen_paths, list) or len(frozen_paths) != len(set(frozen_paths)) or not set(frozen_paths) <= set(approved):
         raise ValueError("migration contract frozen paths must be unique paths inside the approved candidate scope")
-    if not set(chain) <= set(changed) or CONTRACT_PATH not in changed:
-        raise ValueError("migration candidate must include its declared Alembic path and risk contract")
+    changed_migration_paths = sorted(path for path in changed if path.startswith("alembic/versions/"))
+    if changed_migration_paths != sorted(chain):
+        raise ValueError("changed Alembic revision files must exactly match the authorized source-to-target chain")
+    if CONTRACT_PATH not in changed:
+        raise ValueError("migration candidate must include its declared risk contract")
     rehearsal_script = contract["rehearsal_script"]
     if not isinstance(rehearsal_script, str) or rehearsal_script not in changed or not rehearsal_script.startswith("scripts/"):
         raise ValueError("migration rehearsal script must be an approved candidate path")
@@ -177,6 +180,12 @@ def evaluate_contract(
         "preserved_tables": tables,
         "task": contract["task"],
     }
+
+
+def validate_owner_main_publication(ref: str, actor: str, repository_owner: str) -> None:
+    """Bind production migration authorization to the owner publishing protected main."""
+    if ref != "refs/heads/main" or not actor or actor.casefold() != repository_owner.casefold():
+        raise ValueError("production migration requires the repository owner to publish the exact contract on protected main")
 
 
 def _git_paths(base: str, head: str) -> list[str]:

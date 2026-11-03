@@ -184,3 +184,32 @@ def test_contract_requires_safe_recovery_and_rejects_compose_or_alembic_config_o
             pass
         else:
             raise AssertionError(f"unscoped migration infrastructure change was accepted: {path}")
+
+
+def test_owner_authorization_requires_owner_publication_on_protected_main():
+    validate = CONTRACT_MODULE.validate_owner_main_publication
+    validate("refs/heads/main", "akhripunov", "akhripunov")
+    for ref, actor, owner in (
+        ("refs/pull/62/merge", "akhripunov", "akhripunov"),
+        ("refs/heads/main", "contributor", "akhripunov"),
+    ):
+        try:
+            validate(ref, actor, owner)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("candidate-declared authorization was accepted without owner main publication")
+
+
+def test_changed_historical_alembic_revision_is_rejected_even_with_approved_paths():
+    contract = _contract()
+    changed = [*contract["approved_paths"], "alembic/versions/0098_source.py"]
+    contract["approved_paths"] = changed
+    try:
+        CONTRACT_MODULE.evaluate_contract(
+            contract, changed, "a" * 40, "0098_source", _graph()
+        )
+    except ValueError as error:
+        assert "changed Alembic revision files" in str(error)
+    else:
+        raise AssertionError("edited historical Alembic revision was accepted")

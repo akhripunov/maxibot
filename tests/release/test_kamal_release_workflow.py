@@ -256,6 +256,8 @@ def test_contract_migration_gate_runs_backup_restore_apply_before_kamal():
     assert "--owner-approved-task" in frozen_guard["run"]
     steps = workflow["jobs"]["deploy"]["steps"]
     baseline = next(step for step in steps if step.get("id") == "baseline")["run"]
+    assert "validate_owner_main_publication" in baseline
+    assert "MIGRATION_OWNER_MAIN_PUBLICATION=PASS" in baseline
     names = [step.get("name", "") for step in steps]
     backup = next(step for step in steps if step.get("name") == "Create and restore-check a fresh database backup for the approved migration")
     migration = next(step for step in steps if step.get("name") == "Apply or forward-resume the exact contract target from the immutable candidate image")

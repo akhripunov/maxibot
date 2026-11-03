@@ -48,8 +48,8 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         baseline = baseline.split("- name: Verify exact GHCR image and Kamal configuration", 1)[0]
         self.assertNotIn("MAXIBOT_BACKUP_MAX_AGE_SECONDS", deploy)
         self.assertNotIn("native_restore_probe", deploy)
-        backup_start = deploy.index("- name: Create and restore-check a fresh database backup for migration 0099")
-        migration_start = deploy.index("- name: Apply or forward-resume 0099", backup_start)
+        backup_start = deploy.index("- name: Create and restore-check a fresh database backup for the approved migration")
+        migration_start = deploy.index("- name: Apply or forward-resume the exact contract target", backup_start)
         migration_backup = deploy[backup_start:migration_start]
         self.assertIn("if: steps.baseline.outputs.migration_required == 'true'", migration_backup)
         self.assertIn("pg_restore --list", migration_backup)
