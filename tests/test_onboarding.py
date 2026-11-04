@@ -38,7 +38,7 @@ def test_home_and_channel_list_have_separate_bot_navigation():
     assert '("🤖 Мои боты", "my_bots")' in MENU
     bots_screen = MENU[MENU.index('if screen == "my_bots":'):MENU.index('if screen == "connect_bot_intro":')]
     channels_screen = MENU[MENU.index('if screen == "promotion":'):MENU.index('if screen == "promotion_connect":')]
-    assert 'f"custom_bot:{bot.id}"' in bots_screen
+    assert 'f"custom_bot:{bot.id}"' not in bots_screen
     assert '"promotion_maxibot"' in bots_screen
     assert '"connect_bot"' in bots_screen
     assert '"connect_bot"' not in channels_screen

@@ -2877,10 +2877,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             if len(display_name) > 32:
                 display_name = f"{display_name[:29].rstrip()}..."
             label = f"{display_name} · {username}" if display_name else username
-            rows.append([
-                (f"{icon} {label}", f"promotion_bot:{bot.id}"),
-                ("⚙️ Управление", f"custom_bot:{bot.id}"),
-            ])
+            rows.append([(f"{icon} {label}", f"promotion_bot:{bot.id}")])
         if not bot_rows:
             return ("🤖 Мои боты\n\n"
                     "Подключите собственного MAX-бота со своим названием, аватаром и оформлением.\n\n"

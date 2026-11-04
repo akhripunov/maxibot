@@ -234,7 +234,7 @@ def test_connected_bots_are_listed_only_in_my_bots_without_reusing_channel_rows(
     promotion = MENU[MENU.index('if screen == "promotion":'):MENU.index('if screen == "promotion_connect":')]
     bots = MENU[MENU.index('if screen == "my_bots":'):MENU.index('if screen == "connect_bot_intro":')]
     assert "select(BotConnection)" in bots
-    assert 'f"custom_bot:{bot.id}"' in bots
+    assert 'f"custom_bot:{bot.id}"' not in bots
     assert 'f"promotion_channel:{channel.id}"' in promotion
     assert "select(BotConnection)" not in promotion
     assert '"connect_bot"' not in promotion
