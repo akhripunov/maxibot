@@ -24,6 +24,10 @@ def pairs(keyboard):
     return [(button["text"], button["callback_data"]) for row in keyboard for button in row]
 
 
+def callback_values(keyboard):
+    return [button["callback_data"] for row in keyboard for button in row if "callback_data" in button]
+
+
 async def add_bot(db, owner, *, bot_id, name, username):
     bot = BotConnection(
         id=bot_id,
@@ -108,7 +112,8 @@ async def test_user_with_only_bots_does_not_show_them_as_channels(db, monkeypatc
     assert "Подключение канала" in channel_text
     assert pairs(channel_keyboard) == [("⬅️ Назад", "home")]
     assert pairs(bots_keyboard) == [
-        ("🟡 Only bot · @onlybot", f"custom_bot:{bot.id}"),
+        ("🟡 Only bot · @onlybot", f"promotion_bot:{bot.id}"),
+        ("⚙️ Управление", f"custom_bot:{bot.id}"),
         ("🤖 Добавить бота", "connect_bot"),
         ("⬅️ Главное меню", "home"),
     ]
@@ -128,8 +133,10 @@ async def test_my_bots_lists_all_owned_bots_and_owner_only_system_bot(db, monkey
     _, keyboard = await menu.render_screen(db, owner, "my_bots")
     assert pairs(keyboard) == [
         ("🤖 MAXIBOT", "promotion_maxibot"),
-        ("🟡 Agata · @agata", f"custom_bot:{own_a.id}"),
-        ("🟡 Support · @support", f"custom_bot:{own_b.id}"),
+        ("🟡 Agata · @agata", f"promotion_bot:{own_a.id}"),
+        ("⚙️ Управление", f"custom_bot:{own_a.id}"),
+        ("🟡 Support · @support", f"promotion_bot:{own_b.id}"),
+        ("⚙️ Управление", f"custom_bot:{own_b.id}"),
         ("🤖 Добавить бота", "connect_bot"),
         ("⬅️ Главное меню", "home"),
     ]
@@ -145,7 +152,7 @@ async def test_owner_keeps_system_bot_when_there_are_no_customer_bots(db, monkey
 
     text, keyboard = await menu.render_screen(db, owner, "my_bots")
 
-    assert "пока нет подключённых ботов" in text.lower()
+    assert "пока нет подключённых пользовательских ботов" in text.lower()
     assert pairs(keyboard) == [
         ("🤖 MAXIBOT", "promotion_maxibot"),
         ("🤖 Добавить бота", "connect_bot"),
@@ -207,6 +214,69 @@ async def test_bot_management_render_is_owner_scoped(db):
 
     assert text == "Бот не найден."
     assert pairs(keyboard) == [("⬅️ Назад", "my_bots")]
+
+
+@pytest.mark.asyncio
+async def test_my_bots_keeps_promotion_and_management_paths_for_owned_bot(db):
+    owner = Admin(external_id="owner")
+    db.add(owner)
+    await db.flush()
+    bot = await add_bot(db, owner, bot_id="agata", name="Agata", username="@agata")
+
+    _, list_keyboard = await menu.render_screen(db, owner, "my_bots")
+    promotion_text, promotion_keyboard = await menu.render_screen(db, owner, f"promotion_bot:{bot.id}")
+    management_text, management_keyboard = await menu.render_screen(db, owner, f"custom_bot:{bot.id}")
+
+    assert pairs(list_keyboard)[:2] == [
+        ("🟡 Agata · @agata", f"promotion_bot:{bot.id}"),
+        ("⚙️ Управление", f"custom_bot:{bot.id}"),
+    ]
+    assert promotion_text.startswith("📣 Продвижение")
+    assert [callback for _, callback in pairs(promotion_keyboard)] == [
+        f"promotion_bot_yandex:{bot.id}", f"ads_bot:{bot.id}",
+        f"promotion_bot_analytics:{bot.id}", "my_bots",
+    ]
+    assert management_text.startswith("🤖 Управление ботом")
+    assert f"custom_bot_delete:{bot.id}" in callback_values(management_keyboard)
+    assert "my_bots" in callback_values(management_keyboard)
+
+
+@pytest.mark.asyncio
+async def test_promotion_bot_callback_from_old_message_still_opens_promotion():
+    class Repo:
+        def __init__(self):
+            self.rendered = []
+
+        async def bot_owned(self, user_id, bot_id):
+            return user_id == "owner" and bot_id == "agata"
+
+        async def render(self, user_id, screen, channel_id=None):
+            self.rendered.append((user_id, screen, channel_id))
+            return "promotion screen", [], None, []
+
+        async def service_message_id(self, user_id):
+            return None
+
+    class Client:
+        async def answer_callback(self, callback_id, message=None, **kwargs):
+            pass
+
+    runtime = MaxBotRuntime.__new__(MaxBotRuntime)
+    runtime.repo = Repo()
+    runtime.client = Client()
+    runtime._recent_callback_ids = {}
+    rendered = []
+
+    async def render(user_id, screen, *args, **kwargs):
+        rendered.append((user_id, screen))
+
+    runtime._render = render
+    await runtime._callback(MaxUpdate(
+        "message_callback", user_id="owner", callback_id="cb-promo",
+        button_payload="promotion_bot:agata",
+    ))
+
+    assert rendered == [("owner", "promotion_bot:agata")]
 
 
 @pytest.mark.asyncio
