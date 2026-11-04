@@ -713,6 +713,9 @@ class MaxBotRuntime:
             screen, channel_id = "channels", None
         elif action == "promotion":
             screen, channel_id = "promotion", None
+        elif action in {"my_bots", "bots"}:
+            screen, channel_id = "my_bots", None
+            await self.repo.set_custom_bot_state(user_id, None)
         elif action == "owner_admin":
             screen, channel_id = "owner_admin", None
         elif action == "promotion_maxibot":
@@ -900,7 +903,7 @@ class MaxBotRuntime:
         # MAX callback responses can replace exactly the message whose button
         # was pressed.  Prefer this for navigation; editing a separately
         # stored message id leaves an old keyboard visible in some clients.
-        navigation = action in {"home", "channels", "promotion", "promotion_maxibot", "promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}
+        navigation = action in {"home", "channels", "promotion", "my_bots", "bots", "promotion_maxibot", "promotion_maxibot_landing", "promotion_maxibot_yandex", "promotion_maxibot_analytics", "promotion_maxibot_settings"}
         navigation = navigation or action.startswith(("channel:", "settings:", "promotion_channel:", "promotion_landing:", "subscription:", "ads:"))
         if navigation and update.callback_id:
             await self._navigation_callback(update, str(user_id), action)
@@ -968,7 +971,7 @@ class MaxBotRuntime:
         callback_message_id = update.message.external_message_id if update.message else ""
         current_message_id = await self.repo.service_message_id(user_id)
         action = update.button_payload or "home"
-        navigation_action = action in {"promotion", "connect_channel", "owner_admin", "owner_clients", "ads_storage"} or action.startswith(("promotion_", "subscription", "free_trial", "channels", "channel:", "settings:", "channel_admin_", "ads"))
+        navigation_action = action in {"promotion", "my_bots", "bots", "connect_channel", "owner_admin", "owner_clients", "ads_storage"} or action.startswith(("promotion_", "subscription", "free_trial", "channels", "channel:", "settings:", "channel_admin_", "ads"))
         if callback_message_id and current_message_id and callback_message_id != current_message_id and not navigation_action:
             logger.info("MAX stale callback ignored")
             return
@@ -1398,11 +1401,10 @@ class MaxBotRuntime:
             await self._render(user_id, "custom_bot_help")
         elif action == "bots":
             await self.repo.set_custom_bot_state(user_id, None)
-            # Bots are listed only in the unified promotion screen.
-            await self._render(user_id, "promotion")
+            await self._render(user_id, "my_bots")
         elif action == "my_bots":
             await self.repo.set_custom_bot_state(user_id, None)
-            await self._render(user_id, "promotion")
+            await self._render(user_id, "my_bots")
         elif action.startswith("custom_bot_texts:") or action.startswith("custom_bot_dialogs:") or action.startswith("custom_bot_stats:"):
             bot_id = action.split(":", 1)[1]
             if await self.repo.bot_owned(user_id, bot_id):
@@ -1594,7 +1596,7 @@ class MaxBotRuntime:
             await self.repo.reset_template(user_id, channel_id, template_type)
             await self._render(user_id, f"settings:{channel_id}", channel_id)
         else:
-            if action.startswith("channel:") or action in {"home", "channels", "bots"}:
+            if action.startswith("channel:") or action in {"home", "channels", "bots", "my_bots"}:
                 # The regular admin screens share one service message.  Only
                 # the temporary messages-feed controls need to be closed
                 # before navigating home; deleting the current service panel

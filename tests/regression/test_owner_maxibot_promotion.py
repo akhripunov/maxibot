@@ -8,10 +8,13 @@ OAUTH = Path("app/integrations/yandex_oauth.py").read_text()
 METRICA = Path("app/integrations/yandex_metrica.py").read_text()
 
 
-def test_system_maxibot_is_an_owner_only_row_in_promotion_list():
+def test_system_maxibot_is_an_owner_only_row_in_my_bots_list():
     assert "def is_maxibot_owner(admin: Admin)" in MENU
-    assert 'if not channels and not is_maxibot_owner(admin):' in MENU
-    assert 'rows.append([("🤖 MAXIBOT", "promotion_maxibot")])' in MENU
+    bots = MENU[MENU.index('if screen == "my_bots":'):MENU.index('if screen == "connect_bot_intro":')]
+    channels = MENU[MENU.index('if screen == "promotion":'):MENU.index('if screen == "promotion_connect":')]
+    assert 'rows = [[("🤖 MAXIBOT", "promotion_maxibot")]] if is_maxibot_owner(admin) else []' in bots
+    assert '"promotion_maxibot"' not in channels
+    assert '"promotion_bot:"' not in channels
     assert 'owner_id = (settings.maxibot_owner_user_id or "").strip()' in MENU
 
 
@@ -22,13 +25,14 @@ def test_system_maxibot_screen_is_owner_gated_without_public_channel_shortcut():
     assert 'if not is_maxibot_owner(admin):' in screen
     assert 'render_bot_promotion(target)' in screen
     assert '"🌐 MAX-канал"' not in screen
-    assert '"promotion"' in screen
-    assert '("⬅️ Назад", "promotion")' in MENU
+    bot_template = MENU[MENU.index('def render_bot_promotion'):MENU.index('async def traffic_stats', MENU.index('def render_bot_promotion'))]
+    assert '("⬅️ Назад", "my_bots")' in bot_template
 
 
 def test_system_maxibot_callback_is_first_class_navigation():
     assert 'action == "promotion_maxibot"' in RUNTIME
     assert '"promotion_maxibot"' in RUNTIME
+    assert 'action in {"my_bots", "bots"}' in RUNTIME
 
 
 def test_system_maxibot_has_separate_channel_like_sections():
@@ -226,12 +230,14 @@ def test_official_channel_connect_queues_only_the_system_bot_branch_goal():
     assert "result.get(\"status\") in {\"created\", \"updated\", \"duplicate\"}" in RUNTIME
 
 
-def test_connected_bots_are_listed_in_promotion_without_reusing_channel_rows():
+def test_connected_bots_are_listed_only_in_my_bots_without_reusing_channel_rows():
     promotion = MENU[MENU.index('if screen == "promotion":'):MENU.index('if screen == "promotion_connect":')]
-    assert "select(BotConnection)" in promotion
-    assert 'f"promotion_bot:{bot.id}"' in promotion
-    assert 'f"🤖 {bot.display_name or bot.username}"' in promotion
+    bots = MENU[MENU.index('if screen == "my_bots":'):MENU.index('if screen == "connect_bot_intro":')]
+    assert "select(BotConnection)" in bots
+    assert 'f"custom_bot:{bot.id}"' in bots
     assert 'f"promotion_channel:{channel.id}"' in promotion
+    assert "select(BotConnection)" not in promotion
+    assert '"connect_bot"' not in promotion
 
 
 def test_bot_promotion_is_owner_scoped_and_keeps_system_and_channel_scopes_separate():

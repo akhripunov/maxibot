@@ -120,6 +120,7 @@ def test_main_menu_order_and_channel_setup_copy():
     expected = [
         '("📢 Подключить канал", "connect_channel")',
         '("📚 Мои каналы", "promotion")',
+        '("🤖 Мои боты", "my_bots")',
         '("ℹ️ О сервисе", "about")',
     ]
     section = menu[menu.index('return menu_text(len(channels)'):menu.index('if screen == "connect_channel"')]
@@ -203,15 +204,17 @@ def test_channel_add_buttons_have_exact_label_and_legacy_callbacks():
     assert "➕ Добавить ещё" not in menu
 
 
-def test_my_bots_button_is_only_on_promotion_list_after_channel_connect_button():
+def test_my_bots_button_is_in_home_and_promotion_contains_only_channels():
     menu = Path("app/bot/menu.py").read_text()
     home = menu[menu.index('return menu_text(len(channels)'):menu.index('if screen == "connect_channel"')]
     promotion = menu[menu.index('if screen == "promotion":'):menu.index('if screen == "promotion_connect":')]
-    assert '("🤖 Мои боты", "my_bots")' not in home
-    assert promotion.index('(\"📣 Подключить ещё канал\"') < promotion.index('(\"🤖 Добавить бота\"')
-    assert '("🤖 Добавить бота", "connect_bot")' in promotion
-    assert '("⬅️ Главное меню", "home")' in promotion
-
+    bots = menu[menu.index('if screen == "my_bots":'):menu.index('if screen == "connect_bot_intro":')]
+    assert home.index('(\"📚 Мои каналы\", \"promotion\")') < home.index('(\"🤖 Мои боты\", \"my_bots\")')
+    assert '(\"🤖 Мои боты\", \"my_bots\")' in home
+    assert '(\"🤖 Добавить бота\", \"connect_bot\")' in bots
+    assert '\"connect_bot\"' not in promotion
+    assert '\"promotion_bot:\"' not in promotion
+    assert '(\"⬅️ Главное меню\", \"home\")' in promotion
 
 def test_promotion_channel_rows_show_only_the_channel_name():
     menu = Path("app/bot/menu.py").read_text()

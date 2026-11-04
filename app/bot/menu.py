@@ -1381,7 +1381,7 @@ def render_bot_promotion(target: BotPromotionTarget) -> tuple[str, list[list[dic
             ("🔗 Яндекс.Директ ✅" if target.yandex_value else "🔗 Яндекс.Директ ⚠️ не подключен", target.yandex_action),
             ("🤖 AI Продвижение", target.ai_action),
             ("📊 Аналитика", target.analytics_action),
-            ("⬅️ Назад", "promotion"),
+            ("⬅️ Назад", "my_bots"),
         ),
     )
 
@@ -1466,14 +1466,11 @@ def official_bot_added_channel(chat: dict, initiator_user_id: str | None) -> dic
 async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id: str | None = None) -> tuple[str, list[list[dict]]]:
     channels = (await db.scalars(select(Channel).where(Channel.admin_id == admin.id).order_by(Channel.title))).all()
     if screen == "home":
-        # The current project has no persisted custom-bot entity yet; the
-        # existing "Мои боты" screen therefore has zero connected bots.
-        # Keep this count isolated so a future bot repository can replace
-        # only this value without changing the home UI.
         connected_bots = int(await db.scalar(select(func.count(BotConnection.id)).where(BotConnection.owner_admin_id == admin.id)) or 0)
         return menu_text(len(channels), connected_bots), buttons(
             ("📢 Подключить канал", "connect_channel"),
             ("📚 Мои каналы", "promotion"),
+            ("🤖 Мои боты", "my_bots"),
             ("💳 Моя подписка", "subscription"),
             ("ℹ️ О сервисе", "about"),
         )
@@ -1654,20 +1651,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if not channels and not is_maxibot_owner(admin):
             return channel_connection_instructions(), buttons(("⬅️ Назад", "home"))
         rows = [[(channel.title, f"promotion_channel:{channel.id}")] for channel in channels]
-        if is_maxibot_owner(admin):
-            rows.append([("🤖 MAXIBOT", "promotion_maxibot")])
-        bot_rows = (await db.scalars(
-            select(BotConnection)
-            .where(BotConnection.owner_admin_id == admin.id)
-            .order_by(BotConnection.display_name)
-        )).all()
-        rows.extend([
-            [(f"🤖 {bot.display_name or bot.username}", f"promotion_bot:{bot.id}")]
-            for bot in bot_rows
-        ])
         rows.extend([
             [("📣 Подключить ещё канал", "promotion_connect")],
-            [("🤖 Добавить бота", "connect_bot")],
             [("⬅️ Главное меню", "home")],
         ])
         return promotion_intro_text(), buttons(*rows)
@@ -1903,7 +1888,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             target = profile.target_url if profile and profile.target_url else MAXIBOT_CHANNEL_URL
             enabled = "включена" if profile and profile.enabled else "не включена"
             body = f"⚙️ Настройки продвижения\n\n🤖 MAXIBOT\n\nTarget: {target}\nСистемная конфигурация: {enabled}\n\nОбычные Channel/TrafficProfile не используются."
-        return (body, buttons(("⬅️ MAXIBOT", "promotion_maxibot"), ("⬅️ Продвижение", "promotion")))
+        return (body, buttons(("⬅️ MAXIBOT", "promotion_maxibot"), ("⬅️ Мои боты", "my_bots")))
     if screen.startswith("promotion_bot:"):
         bot_id = screen.split(":", 1)[1]
         target = await _bot_promotion_target(db, admin, bot_id)
@@ -1928,7 +1913,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                     f"📢 Перешли в MAX: {stats['to_channel']}\n"
                     f"✅ Подписалось с рекламы за всё время: +{stats['lifetime_ads_subscribed']}\n"
                     f"⛔️ Отписалось с рекламы за всё время: -{stats['lifetime_ads_unsubscribed']}",
-                    buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
+                    buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Мои боты", "my_bots")))
         labels = {
             "promotion_bot_landing": ("📄 Лендинг", "Лендинг для этого бота ещё не настроен."),
             "promotion_bot_yandex": ("", yandex_connection_instructions()),
@@ -1944,7 +1929,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                  [{"text": "⬅️ Назад", "callback_data": f"promotion_bot:{bot.id}"}]],
             )
         return (f"{title}\n\n🤖 {bot.display_name or bot.username}\n\n{detail}",
-                buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Продвижение", "promotion")))
+                buttons(("⬅️ Бот", f"promotion_bot:{bot.id}"), ("⬅️ Мои боты", "my_bots")))
     if screen.startswith((
         "promotion_channel:",
         "promotion_landing:", "promotion_analytics:",
@@ -2883,20 +2868,8 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         # `my_bots` screen and should no longer be rendered.
         return await render_screen(db, admin, "my_bots")
     if screen == "my_bots":
-        # The separate bot list is retired. Connected bots are shown only in
-        # the unified Мои каналы screen.
-        return await render_screen(db, admin, "promotion")
         bot_rows = (await db.scalars(select(BotConnection).where(BotConnection.owner_admin_id == admin.id).order_by(BotConnection.display_name))).all()
-        if not bot_rows:
-            return ("🤖 Мои боты\n\n"
-                    "Подключите собственного MAX-бота со своим названием, аватаром и оформлением.\n\n"
-                    "Пользователи будут писать именно вашему боту, а все их сообщения будут приходить вам прямо в этот же бот. Отвечать можно там же — без перехода в MAXIBOT.\n\n"
-                    "Такой бот можно использовать для обратной связи, поддержки клиентов, приёма вопросов и обращений.\n\n"
-                    "MAXIBOT работает в фоне и обеспечивает доставку сообщений между вами и пользователями.\n\n"
-                    "ℹ️ Важно: создать собственного бота в MAX могут юридические лица, ИП и самозанятые — резиденты РФ.\n\n"
-                    "У вас пока нет подключённых ботов.",
-                    buttons(("➕ Подключить своего бота", "connect_bot"), ("⬅️ Назад", "home")))
-        rows = []
+        rows = [[("🤖 MAXIBOT", "promotion_maxibot")]] if is_maxibot_owner(admin) else []
         for bot in bot_rows:
             icon = "🟢" if bot.status == "ACTIVE" else "⚫" if bot.status == "DISABLED" else "🔴" if bot.status in ("ERROR", "INVALID_TOKEN") else "🟡"
             username = f"@{bot.username.lstrip('@')}"
@@ -2905,7 +2878,16 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 display_name = f"{display_name[:29].rstrip()}..."
             label = f"{display_name} · {username}" if display_name else username
             rows.append([(f"{icon} {label}", f"custom_bot:{bot.id}")])
-        rows.extend([[("➕ Добавить бота", "connect_bot")], [("⬅️ Назад", "home")]])
+        if not bot_rows:
+            return ("🤖 Мои боты\n\n"
+                    "Подключите собственного MAX-бота со своим названием, аватаром и оформлением.\n\n"
+                    "Пользователи будут писать именно вашему боту, а все их сообщения будут приходить вам прямо в этот же бот. Отвечать можно там же — без перехода в MAXIBOT.\n\n"
+                    "Такой бот можно использовать для обратной связи, поддержки клиентов, приёма вопросов и обращений.\n\n"
+                    "MAXIBOT работает в фоне и обеспечивает доставку сообщений между вами и пользователями.\n\n"
+                    "ℹ️ Важно: создать собственного бота в MAX могут юридические лица, ИП и самозанятые — резиденты РФ.\n\n"
+                    "У вас пока нет подключённых ботов.",
+                    buttons(*rows, ("🤖 Добавить бота", "connect_bot"), ("⬅️ Главное меню", "home")))
+        rows.extend([[("🤖 Добавить бота", "connect_bot")], [("⬅️ Главное меню", "home")]])
         return ("🤖 Мои боты\n\nВыберите бота для управления:", buttons(*rows))
     if screen == "connect_bot_intro":
         return ("🤖 Мои боты\n\n"
@@ -2914,7 +2896,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 "Такой бот можно использовать для обратной связи, поддержки клиентов, приёма вопросов и обращений.\n\n"
                 "MAXIBOT работает в фоне и обеспечивает доставку сообщений между вами и пользователями.\n\n"
                 "ℹ️ Важно: создать собственного бота в MAX могут юридические лица, ИП и самозанятые — резиденты РФ.",
-                buttons(("✅ Продолжить подключение", "custom_bot_token"), ("⬅️ Назад", "promotion")))
+                buttons(("✅ Продолжить подключение", "custom_bot_token"), ("⬅️ Мои боты", "my_bots")))
     if screen == "connect_bot":
         return ("🤖 Добавить своего бота\n\n"
                 "Перейдите на MAX для бизнеса — business.max.ru\n"
@@ -2960,12 +2942,12 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
     if screen == "custom_bot_activation_error":
         return ("❌ Не удалось автоматически подключить бота.\n\n"
                 "Попробуйте повторить подключение позже. Если ошибка повторится, обратитесь в поддержку.",
-                buttons(("📢 Мои каналы", "promotion")))
+                buttons(("🤖 Мои боты", "my_bots")))
     if screen.startswith("custom_bot_active:"):
         bot_id = screen.split(":", 1)[1]
         bot = await db.scalar(select(BotConnection).where(BotConnection.id == bot_id, BotConnection.owner_admin_id == admin.id))
         if not bot: return "Бот не найден.", buttons(("⬅️ Назад", "my_bots"))
-        return (f"✅ Бот подключён\n\n🤖 {bot.display_name}\n@{bot.username}\n\nВаш бот готов к работе.\n\n🔗 Ссылка для пользователей:\nhttps://max.ru/{bot.username.lstrip('@')}", buttons(("📢 Мои каналы", "promotion")))
+        return (f"✅ Бот подключён\n\n🤖 {bot.display_name}\n@{bot.username}\n\nВаш бот готов к работе.\n\n🔗 Ссылка для пользователей:\nhttps://max.ru/{bot.username.lstrip('@')}", buttons(("🤖 Мои боты", "my_bots")))
     if screen.startswith("custom_bot:"):
         bot_id = screen.split(":", 1)[1]
         bot = await db.scalar(select(BotConnection).where(BotConnection.id == bot_id, BotConnection.owner_admin_id == admin.id))

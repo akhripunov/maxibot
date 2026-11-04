@@ -29,14 +29,20 @@ def test_onboarding_screen_is_text_only():
     assert 'screen == "connect_channel"' in MENU
 
 
-def test_bots_overview_is_a_direct_alias_to_my_bots():
-    assert 'return await render_screen(db, admin, "promotion")' in MENU
-    assert 'await self._render(user_id, "promotion")' in RUNTIME
+def test_bots_overview_alias_opens_the_separate_bot_list():
+    assert 'return await render_screen(db, admin, "my_bots")' in MENU
+    assert 'await self._render(user_id, "my_bots")' in RUNTIME
 
 
-def test_connected_bots_have_no_separate_list_screen():
-    assert 'Connected bots are shown only in' in MENU
-    assert '("🤖 Мои боты", "my_bots")' not in MENU
+def test_home_and_channel_list_have_separate_bot_navigation():
+    assert '("🤖 Мои боты", "my_bots")' in MENU
+    bots_screen = MENU[MENU.index('if screen == "my_bots":'):MENU.index('if screen == "connect_bot_intro":')]
+    channels_screen = MENU[MENU.index('if screen == "promotion":'):MENU.index('if screen == "promotion_connect":')]
+    assert 'f"custom_bot:{bot.id}"' in bots_screen
+    assert '"promotion_maxibot"' in bots_screen
+    assert '"connect_bot"' in bots_screen
+    assert '"connect_bot"' not in channels_screen
+    assert '"promotion_bot:"' not in channels_screen
 
 
 def test_channel_and_bot_yandex_buttons_show_connection_status():
@@ -49,6 +55,7 @@ def test_add_bot_shows_intro_before_instruction():
     assert 'if screen == "connect_bot_intro":' in MENU
     assert 'buttons(("✅ Продолжить подключение", "custom_bot_token")' in MENU
     assert 'if screen == "connect_bot":' in MENU
+    assert 'buttons(("✅ Продолжить подключение", "custom_bot_token"), ("⬅️ Мои боты", "my_bots"))' in MENU
 
 
 def test_continue_bot_connection_acks_immediately_and_keeps_original_token_screen():

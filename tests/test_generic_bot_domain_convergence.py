@@ -26,15 +26,15 @@ def test_system_profile_is_compatibility_storage_not_canonical_promotion_lookup(
     assert 'select(SystemPromotionProfile)' not in MAIN
 
 
-def test_one_shared_bot_promotion_renderer_and_no_new_top_level_navigation():
+def test_one_shared_bot_promotion_renderer_and_separate_top_level_navigation():
     assert MENU.count('def render_bot_promotion(') == 1
     assert 'render_bot_promotion(target)' in MENU
     assert 'if screen.startswith("promotion_bot:")' in MENU
     assert 'if screen in {"promotion_maxibot", "promotion_bot:system"}' in MENU
-    assert '"🤖 Мои боты", "my_bots"' not in MENU
+    assert '"🤖 Мои боты", "my_bots"' in MENU
     home = MENU[MENU.index('if screen == "home":'):MENU.index('if screen == "ads_storage":')]
     assert '"📚 Мои каналы", "promotion"' in home
-    assert '"my_bots"' not in home
+    assert home.index('"📚 Мои каналы", "promotion"') < home.index('"🤖 Мои боты", "my_bots"')
 
 
 def test_bot_promotion_is_bot_scoped_and_channel_domain_is_not_used_as_fallback():
