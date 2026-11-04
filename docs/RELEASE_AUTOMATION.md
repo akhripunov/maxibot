@@ -10,26 +10,38 @@ the automatically measured GitHub Actions duration after push.
 1. Check current exact `origin/main` SHA, worktree status, diff scope and
    active conflicting releases once. Respect OWNER authorization: a push
    to `main` triggers production, including documentation-only pushes.
-2. Read only task-relevant policy. On an actual GitHub/GHCR transport, DNS,
+2. Read only task-relevant policy once; reuse it while its content and task
+   scope are unchanged. On an actual GitHub/GHCR transport, DNS,
    TLS, authentication, authorization or permission error, read the current
    [Linear «GitHub доступ»](https://linear.app/bestuzhev/document/github-dostup-7970682d1b80)
    and follow its applicable diagnostic steps. Successful access needs no
-   runbook read. Use `docs/ORCHESTRATION_PROTOCOL.md` FAST only for plain,
-   non-policy docs with no executable/protected impact;
-   `AGENTS.md`, release policy, CI/Kamal and other protected paths are FULL.
+   runbook read. Under the current MAXIBOT rule, FAST is limited to narrow
+   non-policy documentation. Executable changes use FULL; a bounded ordinary
+   code FAST category is only a proposal and requires OWNER approval before it
+   becomes active. Reuse exact checks recorded in the existing SHA-bound DEV
+   handoff when source, tests, dependencies, tools and conditions still match;
+   do not rerun the full local suite just because DevOps received the same
+   clean candidate. `AGENTS.md`, policy, security, attribution, DB/migrations,
+   release/CI/Kamal, Worker/Poller/runtime and other protected paths use FULL.
 3. Make minimal changes in an isolated worktree or branch if the current Mac
    checkout is stale/dirty. Never overwrite unrelated changes.
-4. Run applicable scoped local checks; leave full hosted Tests/Build and all
-   production gates intact. Do not duplicate the full local suite for
-   unaffected non-policy docs unless a current policy explicitly requires it.
+4. Run applicable scoped local checks. The hosted full Tests, Build/GHCR and
+   every production gate remain mandatory. Reuse a local check only when the
+   exact candidate tree, relevant tests, dependencies, tools and conditions
+   match; a new SHA still crosses hosted CI. DEV transfers the existing
+   SHA-bound handoff JSON and checker result; DevOps validates it against the
+   live main and production diff rather than generating a duplicate handoff.
 5. Use one existing authorized Git/GitHub publication path. On ambiguous API
    timeout, first read back commit SHA / branch ref / Actions run; never
    blindly retry writes. Publish to `main` only when production-triggering
    release is authorized, otherwise create a branch/PR.
-6. Measure each pre-push checkpoint: task received (or NOT_VERIFIED),
-   preflight complete, edit complete, checks complete, commit created, push
-   confirmed by remote SHA, Actions run created. Do not equate commit date
-   with push date. Report objective waits/failures separately.
+6. For requested timing, record UTC `TASK_START → CODE_READY → PREPUSH_START →
+   PREPUSH_PASS → FIRST_PUSH → PR_READY`. `FIRST_PUSH` is confirmed by remote
+   branch readback; `PR_READY` is the opened PR with exact base/head, scoped
+   diff and required checks started. Record PR check completion, merge and
+   Actions start separately. Mark unavailable times `NOT_VERIFIED`; do not use
+   commit date as push time. Separate editing, pre-push, queue/wait and hosted
+   CI durations.
 
 Goal: reduce unnecessary pre-push work while retaining approval, frozen,
 security, CI, GHCR and Kamal runtime gates. The prior 2–4 minute pre-push
@@ -55,6 +67,51 @@ baseline is known would require a separate production-aware pre-Build decision
 and a no-image Deploy branch. That adds a second decision path and weakens the
 simple exact-SHA artifact flow to save one build; Build is therefore not
 path-filtered.
+
+### PR Tests reuse gate
+
+The `tests` job remains mandatory for both PRs and every `main` push. Its one
+full `python -m pytest -q` pass includes release-specific and migration
+regressions. PR results are not reused on `main` yet: the active repository
+ruleset read on 2026-11-04 protects `main` from deletion and non-fast-forward
+only; it does not require PRs or successful status checks. The GitHub App could
+not read classic branch-protection details (403), so no additional checks are
+assumed. Until OWNER configures and enforces required PR/status checks, a direct
+push can reach `main`; skipping its full suite would make PR CI an untrusted
+condition. Keep the full main Tests job.
+
+After the branch rule exists, reuse still must verify the exact merged PR/run,
+completed non-skipped mandatory test jobs, matching tree, allowed merge
+ancestry/base, unchanged test environment and all independent release-specific
+guards. Any missing or mismatched proof falls back to the full suite. A tree
+match alone is insufficient.
+
+### Production concurrency and reconciliation
+
+Concurrency is attached only to the production `deploy` job, not the workflow
+or PR tests/build. PRs therefore run independently of a Deploy.
+`cancel-in-progress: false` protects an active Apply and `queue: max` retains up
+to 100 pending Deploy jobs. GitHub's queue is bounded and ordering is not
+guaranteed, so each job rechecks that its SHA is still current `main` after it
+gets the slot and again immediately before Kamal Apply; a newer `main` already
+present at either gate makes the queued candidate fail before the next mutation.
+A push arriving after an Apply has begun remains serialized behind it and runs
+its own cumulative release. Every `main` push still runs Tests and Build. The
+current-main candidate's production baseline step compares
+the complete live-runtime-to-candidate delta, including prior commits. Thus a
+reordered or superseded candidate cannot replace the newest state; it is
+rejected as stale, and the current candidate's own run remains eligible.
+If the 100-pending limit is exceeded, GitHub marks an excess run cancelled;
+that is a visible release blocker, not success. Reconcile read-only and rerun
+only the current exact-SHA deploy attempt after the group drains. A failed,
+cancelled or uncertain Apply also requires readback/reconciliation before any
+mutation; do not infer success from the queue or rerun blindly.
+
+The repository pins actionlint 1.7.12, which predates GitHub's documented
+`concurrency.queue` field. Its CI invocation ignores only that exact obsolete
+unexpected-key diagnostic; workflow regression tests assert the complete
+production concurrency block (`group`, `cancel-in-progress: false`, and
+`queue: max`). All other actionlint findings remain blocking.
 
 The workflow uses stock Kamal 2 for API and Worker. It preserves the API/Worker
 image identity, API polling off, one Worker/Poller, the 512 MiB Worker limit,
@@ -109,11 +166,25 @@ successful upload command.
 
 ## Failure handling and evidence
 
-GitHub Actions logs and summaries are the release execution record; GitHub
-Deployments record the exact application SHA and final status. Kamal health and
-runtime checks provide container-level evidence. A failed step blocks all later
-mutation. After an uncertain API write or production Apply, first read back the
-exact run/ref/deployment and reconcile live runtime; never blindly repeat it.
+GitHub Actions summaries and the Linear Release Journal use the same fields:
+`workflow_sha`, `candidate_sha`, `actual_runtime_api_sha`,
+`actual_runtime_worker_sha`, `build_run_id`, `image_digest`,
+`app_deploy_required`, `schema_action`, and `runtime_verify_status`. The GitHub
+Deployment `sha` (`ref`) identifies the runtime API SHA expected after the
+operation: candidate SHA when API deploy runs, verified baseline API SHA when
+it is skipped. Its payload separately records workflow/candidate SHA,
+immutable digest, Build run ID, expected API/Worker SHA, app/schema actions and
+`runtime_verify_status=PENDING`. After successful Runtime Verify, the final
+Deployment status description and Actions summary record actual API/Worker
+SHA and `runtime_verify_status=PASS`; failure records actual SHAs as
+`NOT_VERIFIED` and the failed run status. Linear journal rows should copy these
+values rather than treating a configuration-only workflow SHA as a new runtime
+application.
+
+Kamal health and runtime checks provide container-level evidence. A failed
+step blocks all later mutation. After an uncertain API write or production
+Apply, first read back the exact run/ref/deployment and reconcile live runtime;
+never blindly repeat it.
 
 Record exact SHA, run IDs, image digest, migration state, Kamal result, Runtime
 Verify and any separate user/device smoke in the existing Release Journal and

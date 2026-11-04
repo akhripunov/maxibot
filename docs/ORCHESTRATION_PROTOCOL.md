@@ -33,10 +33,9 @@ real blockers, or mandatory independent validation. Existing roles must not be
 involved ceremonially. Narrow direct specialist handoffs are allowed.
 
 DEV remains the single window and task-state owner, but need not relay every narrow specialist message. QA is advisory for release readiness.
-SYSADMIN is not mandatory for every deployment;
-deterministic automated infrastructure guards are preferred for routine
-releases, with human SYSADMIN involvement reserved for infrastructure risks,
-incidents, secrets/runtime injection, or blockers.
+SYSADMIN is not part of the ordinary Native First V3 release sequence.
+Involve SYSADMIN for infrastructure changes, incidents, secrets/runtime
+injection or an operational blocker that needs that role's authority.
 
 ## MASTER TASK contract
 
@@ -74,23 +73,63 @@ frozen-path protection and applicable QA gates apply in BOTH modes. Never
 shorten or bypass a production safety gate. Open the current GitHub access
 diagnostic runbook only when an actual GitHub/GHCR access error needs diagnosis.
 
-- **FAST — narrow non-policy docs-only changes:** after verifying the actual
-  diff has no application, test, workflow, `AGENTS.md`, release policy,
-  security, secrets, migration, infrastructure or frozen/shared-dependency paths,
-  record HEAD/status and changed paths once; perform `git diff --check` plus
-  relevant Markdown/link checks; rely on the required hosted Tests/Build before
-  automatic Deploy after an OWNER-authorized `main` push. Do not run a duplicate
-  local full Python suite only for an unaffected plain-document change when
-  the applicable task rules allow relying on hosted CI.
-- **FULL — executable or protected changes:** changes affecting application,
-  tests, frozen BOT/CHANNEL behavior, `AGENTS.md`, policy or release docs,
-  CI/Kamal, credentials, security, ADS/provider writes, Alembic/DB or runtime
-  require their existing applicable tests, independent review/authorization
-  and exact-SHA safety gates. Classify from actual changed paths and semantic
-  impact; an apparently small change is not automatically FAST.
+- **FAST — narrow non-policy documentation only:** after verifying that the
+  diff contains no executable code, tests, `AGENTS.md`, release policy,
+  security, secrets, migration, infrastructure or frozen/shared paths, perform
+  `git diff --check` and relevant Markdown/link checks. Do not run the full
+  local suite only for an unaffected plain-document change when task rules allow
+  relying on hosted CI.
+- **FULL — executable or protected changes:** application code, tests, CI,
+  release tooling/policy, security/authentication, credentials, DB/Alembic,
+  frozen BOT/CHANNEL and attribution paths, Worker/Poller, runtime or provider
+  writes use all existing applicable local and independent checks. The exact
+  classification follows actual diff and behavior; small code changes are not
+  FAST under the current rule.
+- **FAST policy proposal — not active:** a future bounded category could cover
+  one ordinary product component and its focused tests when evidence proves no
+  critical/shared contract impact. It still requires targeted checks and hosted
+  full CI. This proposal does not change today's docs-only FAST boundary; OWNER
+  approval is required before enabling it.
+- **FULL — protected or high-risk changes:** security/authentication,
+  credentials/secrets, DB/Alembic/migration/data, frozen BOT/CHANNEL and
+  attribution/conversion paths, shared cross-component contracts,
+  Worker/Poller lifecycle, runtime,
+  release policy/authorization, release infrastructure, `AGENTS.md`, CI/Kamal or
+  provider writes require their existing full applicable checks, reviews and
+  exact-SHA safety gates. Classify by actual diff and behavior, not filename or
+  size. FAST never reduces a gate required by task or release policy.
+- **Reuse exact evidence:** reuse completed local checks only when candidate
+  tree, relevant test files, dependency lockfiles, tool versions and conditions
+  are identical. A code/test/dependency edit invalidates affected evidence. A
+  new SHA still requires the mandatory hosted CI boundary; do not reuse PR CI as
+  proof for a different candidate. Review a given exact diff once unless it
+  changes or a required independent review applies.
+- **DEV → DevOps handoff:** use the existing SHA-bound JSON and
+  `~/.codex/bin/gpoint-check-handoff.py`; do not create another handoff document
+  or validator. Its fields map as follows: `issue` is task ID,
+  `base_commit_sha` / `local_commit_sha` are base/candidate SHA,
+  `scope_included` is changed paths, and `test_evidence` records executed tests,
+  PASS and candidate SHA. Put explicit `review_result`, `frozen_path_impact`,
+  `migration_impact` and `release_infrastructure_impact` values in
+  `risk_assessment`. Impact values must be `NONE` or `CHANGED`; review must be
+  `PASS` or `NOT_REQUIRED`. `NOT_VERIFIED`, missing or duplicate fields fail
+  closed. Add evidence when an impact is `CHANGED`. Missing fields mean the
+  handoff is incomplete.
+  `handoff_status` is the existing checker result, not an additional field or
+  document.
+  `HANDOFF_GATE=PASS` supplies structural provenance, not proof of code quality
+  or truthful test execution. DevOps independently confirms current
+  `origin/main`, exact candidate ancestry, clean checkout, full production-to-
+  candidate diff, changed paths and evidence identity. Missing/mismatched
+  handoff, stale base or unrelated changes fail closed before PR. If the SHA,
+  relevant source/tests, dependencies and conditions match, DevOps reuses the
+  local results and runs only distinct required checks; hosted full CI remains
+  mandatory after publication.
 - **No ceremony:** read only relevant canonical context, not an entire
   historical archive; don't repeat unchanged baseline, long tests, or QA
   without a state/scope change or a required gate. One primary agent by default.
+  Batch independent read-only checks; keep dependent steps and mutations
+  sequential.
   On an actual GitHub/GHCR access error, read the live diagnostic runbook once
   for that incident. Repeated instances of the same unchanged error do not
   trigger repeated Linear reads.
@@ -98,12 +137,18 @@ diagnostic runbook only when an actual GitHub/GHCR access error needs diagnosis.
   never reset/stash/overwrite another worker's changes. Use an isolated
   worktree/branch or the existing scoped GitHub connector. On ambiguous write
   or timeout read back exact remote SHA and Actions runs before retrying.
+  If a managed worktree's shared Git metadata rejects writing `FETCH_HEAD`,
+  classify it as a local workspace permission error, not a GitHub outage; don't
+  retry the same fetch there. Read the ref through the authorized connector or,
+  when Git objects are needed, fetch once into a writable isolated clone.
   No force push, new tokens, reviewer bypass or manual Deploy to save time.
-- **Time evidence:** record task start when actually observable (otherwise
-  `NOT_VERIFIED`), preflight done, edit done, local checks done, commit done,
-  remote push readback and GitHub run creation; use UTC timestamps and record
-  retry/network delays. Distinguish commit timestamp from actual push, and
-  do not claim a precise owner-request-to-push duration without its timestamp.
+- **Time evidence:** when measuring a task, record UTC `TASK_START`,
+  `CODE_READY`, `PREPUSH_START`, `PREPUSH_PASS`, `FIRST_PUSH`, and `PR_READY`.
+  `FIRST_PUSH` is the confirmed feature-branch push; `PR_READY` means the PR
+  has the intended base/head and scoped diff, with required checks started.
+  Record remote readback, PR/check completion and main merge separately. Mark
+  unavailable timestamps `NOT_VERIFIED`; never substitute commit time for push
+  time. Report editing, pre-push work, queue/wait, and hosted CI separately.
 
 ## GitHub/GHCR access diagnostics on failure
 
@@ -327,12 +372,11 @@ ARCHITECT / ARCHITECT SOL → DEV → QA → DEV
 ```
 
 `QA = NO_GO` returns findings directly to DEV; DEV fixes only the reported
-issue and resubmits to QA. After `QA = GO`, the gated sequence is:
-
-```text
-QA → DEV → SYSADMIN predeploy → DEV deploy → SYSADMIN postdeploy
-  → DEV final report → ARCHITECT / ARCHITECT SOL / OWNER
-```
+issue and resubmits to QA. After `QA = GO`, DEV proceeds through the single
+Native First V3 workflow when the task has the required authorization. A
+SYSADMIN handoff is added only for a separately scoped infrastructure change,
+incident or operational risk that requires SYSADMIN; it is not a routine
+predeploy or postdeploy stage.
 
 DEV may route a routine candidate directly to QA and receive its verdict, while
 QA remains independent and returns its validation verdict. Commit, deployment, and release actions remain subject to canonical repository and OWNER gates.
@@ -356,7 +400,8 @@ The canonical QA contract is defined by [QA_ROLE.md](../QA_ROLE.md),
 [scripts/qa_check.sh](../scripts/qa_check.sh). Do not create a parallel QA
 protocol, registry, release format, or regression framework.
 
-After implementation, the required flow for applicable code/runtime work is:
+For applicable code/runtime changes, the ordinary implementation and
+independent validation flow is:
 
 ```text
 IMPLEMENTER SELF-TEST
@@ -376,7 +421,12 @@ including separate app, PostgreSQL, volumes, `.env.staging`, ports, static,
 unit, integration, regression, build, health, and E2E checks.
 
 QA returns `GO`, `NO_GO`, `NOT_RUN`, or `TIMEOUT` as advisory information and
-does not authorize a production release. The active Native Release workflow
+does not authorize a production release. For an ordinary release, DEV prepares
+the exact scoped candidate and, with applicable authorization, the single
+Native First V3 workflow performs hosted Tests → Build/GHCR → Kamal Deploy →
+Runtime Verify. There is no routine SYSADMIN predeploy/postdeploy handoff.
+SYSADMIN steps apply only to separately scoped infrastructure changes or
+incidents; they do not replace the workflow gates. The active Native Release workflow
 enforces exact SHA, hosted tests, immutable GHCR digest, `linux/amd64`, image
 source labels, frozen-path guard, migration rehearsal/backup/restore when
 applicable, Kamal deployment and post-deploy health/SHA readback. Do not use

@@ -25,7 +25,9 @@ def test_kamal_release_automatically_deploys_main_after_tests_and_build():
     assert workflow["on"]["workflow_dispatch"]["inputs"]["candidate"]["required"] == "true"
     assert workflow["on"]["workflow_dispatch"]["inputs"]["build_run_id"]["required"] == "true"
     assert workflow["on"]["workflow_dispatch"]["inputs"]["image_digest"]["required"] == "true"
-    assert workflow["concurrency"]["cancel-in-progress"] == "false"
+    assert "concurrency" not in workflow
+    assert workflow["jobs"]["deploy"]["concurrency"]["cancel-in-progress"] == "false"
+    assert workflow["jobs"]["deploy"]["concurrency"]["queue"] == "max"
     assert list(workflow["jobs"]) == ["tests", "build", "deploy"]
     assert workflow["jobs"]["build"]["needs"] == "tests"
     assert "workflow_dispatch" not in workflow["jobs"]["build"]["if"]
@@ -346,12 +348,12 @@ def test_migration_schema_verification_is_contract_driven_and_not_revision_speci
     assert "0099" not in WORKFLOW.read_text()
 
 
-def test_pinned_actionlint_validates_the_active_native_workflow_without_suppressions():
+def test_pinned_actionlint_validates_the_active_workflow_with_only_queue_schema_compatibility():
     workflow = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     tests = workflow["jobs"]["tests"]["steps"]
     actionlint = next(step for step in tests if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
-    assert 'actionlint" -color .github/workflows/maxibot-native-release.yml' in actionlint["run"]
-    assert "-ignore" not in actionlint["run"]
+    assert 'actionlint" -color -ignore ' in actionlint["run"]
+    assert '-ignore \'^unexpected key "queue" for "concurrency" section\\.\'' in actionlint["run"]
 
 
 def test_kamal_config_uses_kamal_proxy_and_existing_data_network():
@@ -469,18 +471,51 @@ def test_deployment_identity_and_status_are_exact_and_fail_closed(tmp_path):
     deploy=doc['jobs']['deploy']
     assert deploy['environment']['deployment']=='false'
     create=next(s for s in deploy['steps'] if s.get('id')=='deployment')
-    assert 'ref:$ref' in create['run'] and '"$CANDIDATE_SHA"' in create['run']
-    assert 'image:$digest' in create['run'] and '"$IMAGE_REF"' in create['run']
+    assert 'ref:$ref' in create['run'] and '"$DEPLOYMENT_REF"' in create['run']
+    assert 'image_digest:$digest' in create['run'] and '"$image_digest"' in create['run']
+    assert 'candidate_sha:$candidate_sha' in create['run']
+    assert 'workflow_sha:$workflow_sha' in create['run']
+    assert 'build_run_id:$build' in create['run']
+    assert 'runtime_verify_status:"PENDING"' in create['run']
+    assert 'BUILD_RUN_ID: ${{ inputs.build_run_id }}' not in create.get('env', {})
+    assert 'github.run_id || inputs.build_run_id' in deploy['env']['BUILD_RUN_ID']
+    assert 'steps.baseline.outputs.app_deploy_required' in create['env']['DEPLOYMENT_REF']
+    assert 'steps.baseline.outputs.baseline_sha' in create['env']['DEPLOYMENT_REF']
+    assert 'steps.baseline.outputs.worker_baseline_sha' in create['env']['EXPECTED_RUNTIME_WORKER_SHA']
+    assert 'steps.runtime_verify.outputs.actual_runtime_api_sha' in deploy['steps'][-1]['env']['ACTUAL_RUNTIME_API_SHA']
+    assert 'steps.runtime_verify.outputs.actual_runtime_worker_sha' in deploy['steps'][-1]['env']['ACTUAL_RUNTIME_WORKER_SHA']
+    verify=next(s for s in deploy['steps'] if s.get('id')=='runtime_verify')
+    assert 'actual_runtime_api_sha=$EXPECTED_RUNTIME_SHA' in verify['run']
+    assert 'actual_runtime_worker_sha=$EXPECTED_WORKER_SHA' in verify['run']
+    assert 'api_sha="${ACTUAL_RUNTIME_API_SHA:-NOT_VERIFIED}"' in deploy['steps'][-1]['run']
+    assert 'worker_sha="${ACTUAL_RUNTIME_WORKER_SHA:-NOT_VERIFIED}"' in deploy['steps'][-1]['run']
+    assert 'runtime_verify_status=$verify_status' in deploy['steps'][-1]['run']
+    assert 'workflow_sha=$GITHUB_SHA' in deploy['steps'][-1]['run']
+    assert 'candidate_sha=$CANDIDATE_SHA' in deploy['steps'][-1]['run']
+    assert 'app_deploy_required=$APP_DEPLOY_REQUIRED' in deploy['steps'][-1]['run']
+    assert 'schema_action=$SCHEMA_ACTION' in deploy['steps'][-1]['run']
     result=deploy['steps'][-1]
     assert result['if']=="always() && steps.deployment.outputs.id != ''"
     gh=tmp_path/'gh'; output=tmp_path/'arguments'
     gh.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n')
     gh.chmod(0o700)
-    env={**os.environ,'PATH':str(tmp_path)+os.pathsep+os.environ['PATH'],'CAPTURE':str(output),'DEPLOYMENT_ID':'123','RELEASE_OPERATION':'rollback','CANDIDATE_SHA':'a'*40,'GITHUB_REPOSITORY':'akhripunov/maxibot','GITHUB_SERVER_URL':'https://github.com','GITHUB_RUN_ID':'456'}
+    env={**os.environ,'PATH':str(tmp_path)+os.pathsep+os.environ['PATH'],'CAPTURE':str(output),'GITHUB_STEP_SUMMARY':str(tmp_path/'summary.md'),'DEPLOYMENT_ID':'123','RELEASE_OPERATION':'rollback','CANDIDATE_SHA':'a'*40,'GITHUB_SHA':'b'*40,'BUILD_RUN_ID':'789','IMAGE_REF':'ghcr.io/akhripunov/maxibot-vps-api@sha256:'+'c'*64,'APP_DEPLOY_REQUIRED':'true','SCHEMA_ACTION':'SKIP','GITHUB_REPOSITORY':'akhripunov/maxibot','GITHUB_SERVER_URL':'https://github.com','GITHUB_RUN_ID':'456','RUNTIME_VERIFY_RESULT':'success','ACTUAL_RUNTIME_API_SHA':'a'*40,'ACTUAL_RUNTIME_WORKER_SHA':'a'*40}
     for status in ['success','failure','cancelled','skipped']:
         subprocess.run(['bash','-euo','pipefail','-c',result['run']],env={**env,'JOB_RESULT':status},check=True)
         args=output.read_text().splitlines()
         assert ('state=success' if status=='success' else 'state=failure') in args
+    summary=(tmp_path/'summary.md').read_text()
+    for field in ('workflow_sha=', 'candidate_sha=', 'actual_runtime_api_sha=', 'actual_runtime_worker_sha=', 'build_run_id=789', 'image_digest=sha256:', 'app_deploy_required=true', 'schema_action=SKIP', 'runtime_verify_status=PASS'):
+        assert field in summary
+    malformed = subprocess.run(
+        ['bash','-euo','pipefail','-c',result['run']],
+        env={**env,'JOB_RESULT':'success','ACTUAL_RUNTIME_API_SHA':'invalid'},
+        check=False,
+    )
+    assert malformed.returncode != 0
+    args=output.read_text().splitlines()
+    assert 'state=failure' in args
+    assert 'description=runtime_verify=NOT_VERIFIED api=NOT_VERIFIED worker=NOT_VERIFIED' in args
 
 
 def test_worker_observation_covers_one_primary_poll_timeout_and_recovery_cycle():
@@ -580,8 +615,10 @@ def test_automatic_deploy_keeps_environment_serialization_and_single_apply():
     document = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
     deploy = document["jobs"]["deploy"]
     assert deploy["environment"]["name"] == "production"
-    assert document["concurrency"]["group"] == "maxibot-production-release"
-    assert document["concurrency"]["cancel-in-progress"] == "false"
+    assert "concurrency" not in document
+    assert deploy["concurrency"]["group"] == "maxibot-production-apply"
+    assert deploy["concurrency"]["cancel-in-progress"] == "false"
+    assert deploy["concurrency"]["queue"] == "max"
     assert deploy["needs"] == ["tests", "build"]
     assert "needs.build.result == 'success'" in deploy["if"]
     assert "inputs.operation == 'rollback'" in deploy["if"]
@@ -590,6 +627,89 @@ def test_automatic_deploy_keeps_environment_serialization_and_single_apply():
     worker_applies = [step for step in deploy["steps"] if 'bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker' in step.get("run", "")]
     assert len(api_applies) == 1
     assert len(worker_applies) == 1
+
+
+def test_actionlint_queue_compatibility_ignore_is_narrow_and_queue_is_validated():
+    document = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    deploy = document["jobs"]["deploy"]
+    assert deploy["concurrency"] == {
+        "group": "maxibot-production-apply",
+        "cancel-in-progress": "false",
+        "queue": "max",
+    }
+    lint_step = next(step for step in document["jobs"]["tests"]["steps"] if step.get("name") == "Validate GitHub Actions workflows with pinned actionlint")
+    command = lint_step["run"]
+    assert "actionlint_1.7.12" in command
+    assert "-ignore '^unexpected key \"queue\" for \"concurrency\" section\\.'" in command
+
+
+def test_main_tests_and_build_stay_mandatory_while_deploy_lock_isolated_from_prs():
+    document = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    tests = document["jobs"]["tests"]
+    build = document["jobs"]["build"]
+    deploy = document["jobs"]["deploy"]
+    assert "github.event_name == 'pull_request'" in tests["if"]
+    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in tests["if"]
+    pytest_steps = [step for step in tests["steps"] if "python -m pytest" in step.get("run", "")]
+    assert [step["run"] for step in pytest_steps] == ["python -m pytest -q"]
+    assert "if" not in pytest_steps[0]
+    assert "github.event_name == 'push'" in build["if"]
+    assert "refs/heads/main" in build["if"]
+    assert "needs.tests.result == 'success'" in deploy["if"]
+    assert "needs.build.result == 'success'" in deploy["if"]
+    assert "concurrency" not in tests and "concurrency" not in build
+    assert deploy["concurrency"]["cancel-in-progress"] == "false"
+    assert deploy["concurrency"]["queue"] == "max"
+    select = next(step for step in deploy["steps"] if step.get("name") == "Select and verify the exact-SHA build image")
+    assert 'gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha' in select["run"]
+    assert 'test "$BUILD_RUN_ID" = "$GITHUB_RUN_ID"' in select["run"]
+    kamal = next(step for step in deploy["steps"] if step.get("name") == "Deploy application with Kamal")
+    assert kamal["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert 'current_main="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"' in kamal["run"]
+    assert 'refusing Kamal Apply' in kamal["run"]
+
+
+def test_stale_queued_main_run_fails_before_build_read_or_production_actions(tmp_path):
+    document = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
+    select = next(
+        step for step in document["jobs"]["deploy"]["steps"]
+        if step.get("name") == "Select and verify the exact-SHA build image"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    call_log = tmp_path / "gh-calls.txt"
+    gh = fake_bin / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n'
+        'case "$*" in *git/ref/heads/main*) printf "%s\\n" "$CURRENT_MAIN" ;; *) exit 91 ;; esac\n',
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    candidate = "a" * 40
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", select["run"]],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "GH_CALL_LOG": str(call_log),
+            "CURRENT_MAIN": "b" * 40,
+            "RELEASE_OPERATION": "deploy",
+            "CANDIDATE_SHA": candidate,
+            "GITHUB_SHA": candidate,
+            "BUILD_RUN_ID": "12345",
+            "APPROVED_DIGEST": "sha256:" + "c" * 64,
+            "GITHUB_REPOSITORY": "akhripunov/maxibot",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "STALE_MAIN_CANDIDATE" in result.stderr
+    assert call_log.read_text(encoding="utf-8").splitlines() == [
+        "api repos/akhripunov/maxibot/git/ref/heads/main --jq .object.sha",
+    ]
 
 
 def test_migration_contract_and_frozen_guard_share_exact_declared_baseline():

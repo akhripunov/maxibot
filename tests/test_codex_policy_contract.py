@@ -16,6 +16,70 @@ DEPLOY_WORKFLOW = (ROOT / ".github/workflows/maxibot-native-release.yml").read_t
 
 
 class AgentPolicyContractTests(unittest.TestCase):
+    def test_fast_pre_push_remains_docs_only_until_owner_approves_code_scope(self) -> None:
+        fast = " ".join(ORCHESTRATION.split("- **FAST", 1)[1].split("- **FULL", 1)[0].lower().split())
+        full = " ".join(ORCHESTRATION.split("- **FULL", 1)[1].split("- **No ceremony", 1)[0].lower().split())
+        for phrase in ("documentation only", "hosted", "full"):
+            self.assertIn(phrase, fast)
+        for phrase in (
+            "db",
+            "migration",
+            "frozen",
+            "security",
+            "secrets",
+            "release infrastructure",
+        ):
+            self.assertIn(phrase, full)
+        self.assertIn("identical", ORCHESTRATION.lower())
+        self.assertIn("do not run the full local suite", fast)
+        self.assertIn("application code", full)
+        self.assertIn("fast policy proposal — not active", ORCHESTRATION.lower())
+        self.assertIn("owner\n  approval is required before enabling it", ORCHESTRATION.lower())
+        self.assertIn("reuse completed local checks", ORCHESTRATION.lower())
+        self.assertIn("local workspace permission error", ORCHESTRATION.lower())
+        self.assertIn("fetch once into a writable isolated clone", ORCHESTRATION.lower())
+        self.assertIn("hosted", RELEASE_AUTOMATION.lower())
+
+    def test_requested_pre_push_benchmark_records_distinct_checkpoints(self) -> None:
+        for checkpoint in (
+            "TASK_START",
+            "CODE_READY",
+            "PREPUSH_START",
+            "PREPUSH_PASS",
+            "FIRST_PUSH",
+            "PR_READY",
+        ):
+            self.assertIn(checkpoint, RELEASE_AUTOMATION)
+
+    def test_devops_reuses_existing_sha_bound_handoff_and_fails_closed(self) -> None:
+        for field in (
+            "base_commit_sha",
+            "local_commit_sha",
+            "scope_included",
+            "test_evidence",
+            "risk_assessment",
+        ):
+            self.assertIn(field, ORCHESTRATION)
+        for impact in (
+            "review_result",
+            "frozen_path_impact",
+            "migration_impact",
+            "release_infrastructure_impact",
+        ):
+            self.assertIn(impact, ORCHESTRATION)
+        self.assertIn("gpoint-check-handoff.py", ORCHESTRATION)
+        self.assertIn("HANDOFF_GATE=PASS", ORCHESTRATION)
+        self.assertIn("A code/test/dependency edit invalidates", ORCHESTRATION)
+        self.assertIn("new SHA still requires", ORCHESTRATION)
+        self.assertIn("`origin/main`", ORCHESTRATION)
+        self.assertIn("exact candidate ancestry", ORCHESTRATION)
+        self.assertIn("Missing/mismatched\n  handoff", ORCHESTRATION)
+        self.assertIn("stale base", ORCHESTRATION)
+        self.assertIn("unrelated changes fail closed", ORCHESTRATION)
+        self.assertIn("full production-to-\n  candidate diff", ORCHESTRATION)
+        self.assertIn("only distinct required checks", ORCHESTRATION)
+        self.assertIn("hosted full CI remains\n  mandatory", ORCHESTRATION)
+
     def test_architect_is_external_chatgpt_and_dev_owns_approved_execution(self) -> None:
         self.assertIn("ARCHITECT / ARCHITECT SOL", ROLE_REGISTRY)
         self.assertIn("external ChatGPT project architect", ROLE_REGISTRY)
@@ -154,7 +218,7 @@ class AgentPolicyContractTests(unittest.TestCase):
         runbook_url = "https://linear.app/bestuzhev/document/github-dostup-7970682d1b80"
         for content in access_docs:
             self.assertIn(runbook_url, content)
-        self.assertIn("Healthy access does not require that Linear read", " ".join(AGENTS.split()))
+        self.assertIn("Healthy GitHub access does not require a runbook read", " ".join(AGENTS.split()))
         self.assertIn("Normal successful GitHub/GHCR access does not require", ORCHESTRATION)
         self.assertIn(
             "Successful GitHub, GHCR, Git CLI, and GitHub Actions operations do not require reading",

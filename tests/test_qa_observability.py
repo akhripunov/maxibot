@@ -121,3 +121,53 @@ def test_local_qa_ingest_uses_one_secure_client_server_token_source():
     assert 'QA_RESULT_INGEST_TOKEN: "${QA_RESULT_INGEST_TOKEN:?' in compose
     assert "must be provided securely" in compose
     assert "QA_RESULT_INGEST_TOKEN" in compose
+
+
+def test_qa_runner_executes_one_full_pytest_pass_and_partitions_junit_counts(tmp_path):
+    script = (ROOT / "scripts/qa_check.sh").read_text(encoding="utf-8")
+    assert script.count("run_tests full tests -q") == 1
+    assert "run_tests integration" not in script
+    assert "run_tests regression" not in script
+    assert "JUnit category totals do not match pytest totals" in script
+
+    function = script.split("classify_test_suites() {\n", 1)[1].split("\n}\n\nrun_static", 1)[0]
+    xml = tmp_path / "full.xml"
+    xml.write_text(
+        '<testsuites tests="5" failures="1" skipped="1"><testsuite tests="5">'
+        '<testcase classname="tests.test_basic" file="tests/test_basic.py" time="0.1"/>'
+        '<testcase classname="tests.test_demo_flows" file="tests/test_demo_flows.py" time="0.2">'
+        '<failure/></testcase>'
+        '<testcase classname="tests.regression.test_guard" file="tests/regression/test_guard.py" time="0.3">'
+        '<skipped/></testcase>'
+        '<testcase classname="tests.smoke.test_smoke" file="tests/smoke/test_smoke.py" time="0.5"/>'
+        '<testcase classname="tests.e2e.test_flow" file="tests/e2e/test_flow.py" time="0.4"/>'
+        '</testsuite></testsuites>',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", f"classify_test_suites() {{\n{function}\n}}\nclassify_test_suites \"$1\"", "qa-test", str(xml)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip().split() == [
+        "1", "0", "0", "100", "2", "1", "0", "600", "2", "0", "1", "800",
+    ]
+
+
+def test_qa_runner_rejects_unclassifiable_junit_cases(tmp_path):
+    script = (ROOT / "scripts/qa_check.sh").read_text(encoding="utf-8")
+    function = script.split("classify_test_suites() {\n", 1)[1].split("\n}\n\nrun_static", 1)[0]
+    xml = tmp_path / "unknown.xml"
+    xml.write_text(
+        '<testsuites tests="1"><testsuite tests="1">'
+        '<testcase classname="outside.project.test" time="0.1"/>'
+        '</testsuite></testsuites>',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", f"classify_test_suites() {{\n{function}\n}}\nclassify_test_suites \"$1\"", "qa-test", str(xml)],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0

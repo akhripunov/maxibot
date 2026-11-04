@@ -305,7 +305,7 @@ class NativeBuildBoundaryTests(unittest.TestCase):
         if not (ROOT / 'pyproject.toml').exists():
             return
         self.assertIn("environment:\n      name: production", self.source)
-        self.assertIn("group: maxibot-production-release", self.source)
+        self.assertIn("group: maxibot-production-apply", self.source)
         self.assertIn("needs.build.outputs.image_digest", self.source)
         self.assertIn("|| inputs.image_digest }}", self.source)
         self.assertIn("BUILD_IMAGE_VERSION: ${{ github.event_name == 'push'", self.source)
