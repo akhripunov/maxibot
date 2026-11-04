@@ -31,9 +31,6 @@ on:
 
 permissions:
   contents: read
-concurrency:
-  group: maxibot-production-release
-  cancel-in-progress: false
 env:
   CANDIDATE_SHA: ${{ github.event_name == 'push' && github.sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.candidate }}
   PYTHONDONTWRITEBYTECODE: '1'
@@ -117,7 +114,9 @@ jobs:
             --output "$archive"
           printf '%s  %s\n' 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
-          "$RUNNER_TEMP/actionlint" -color .github/workflows/maxibot-native-release.yml
+          # actionlint 1.7.12 predates GitHub's documented concurrency.queue key.
+          # The workflow regression test validates queue=max and cancel-in-progress=false.
+          "$RUNNER_TEMP/actionlint" -color -ignore '^unexpected key "queue" for "concurrency" section\.' .github/workflows/maxibot-native-release.yml
       - name: Validate the migration risk contract and Alembic graph
         id: migration_contract
         env:
@@ -311,6 +310,10 @@ jobs:
       - build
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    concurrency:
+      group: maxibot-production-apply
+      cancel-in-progress: false
+      queue: max
     environment:
       name: production
       deployment: false
@@ -345,7 +348,11 @@ jobs:
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$APPROVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [[ "$current_main" != "$GITHUB_SHA" ]]; then
+            echo "STALE_MAIN_CANDIDATE: queued=$GITHUB_SHA current_main=$current_main; newest main workflow must reconcile the cumulative production diff" >&2
+            exit 1
+          fi
           build_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID")"
           if [[ "$RELEASE_OPERATION" == deploy ]]; then
             test "$GITHUB_EVENT_NAME" = push
@@ -1123,14 +1130,23 @@ jobs:
         id: deployment
         env:
           GH_TOKEN: ${{ github.token }}
-          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          DEPLOYMENT_REF: ${{ steps.baseline.outputs.app_deploy_required == 'true' && env.CANDIDATE_SHA || steps.baseline.outputs.baseline_sha }}
+          EXPECTED_RUNTIME_API_SHA: ${{ steps.baseline.outputs.app_deploy_required == 'true' && env.CANDIDATE_SHA || steps.baseline.outputs.baseline_sha }}
+          EXPECTED_RUNTIME_WORKER_SHA: ${{ steps.baseline.outputs.app_deploy_required == 'true' && env.CANDIDATE_SHA || steps.baseline.outputs.worker_baseline_sha }}
           APP_DEPLOY_REQUIRED: ${{ steps.baseline.outputs.app_deploy_required }}
           SCHEMA_ACTION: ${{ steps.baseline.outputs.migration_required == 'true' && 'APPLY' || 'SKIP' }}
         run: |
           set -euo pipefail
-          jq -n --arg ref "$CANDIDATE_SHA" --arg digest "$IMAGE_REF" --arg operation "$RELEASE_OPERATION" --arg workflow_sha "$GITHUB_SHA" --arg build "$BUILD_RUN_ID" \
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$DEPLOYMENT_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_RUNTIME_API_SHA" =~ ^[0-9a-f]{40}$ && "$EXPECTED_RUNTIME_WORKER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          image_digest="${IMAGE_REF##*@}"
+          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -n --arg ref "$DEPLOYMENT_REF" --arg digest "$image_digest" --arg operation "$RELEASE_OPERATION" \
+            --arg workflow_sha "$GITHUB_SHA" --arg candidate_sha "$CANDIDATE_SHA" --arg build "$BUILD_RUN_ID" \
+            --arg expected_api_sha "$EXPECTED_RUNTIME_API_SHA" --arg expected_worker_sha "$EXPECTED_RUNTIME_WORKER_SHA" \
             --arg app_deploy "$APP_DEPLOY_REQUIRED" --arg schema_action "$SCHEMA_ACTION" \
-            '{ref:$ref,environment:"production",auto_merge:false,required_contexts:[],payload:{image:$digest,operation:$operation,workflow_sha:$workflow_sha,build_run_id:$build,app_deploy_required:$app_deploy,schema_action:$schema_action}}' > "$RUNNER_TEMP/deployment.json"
+            '{ref:$ref,environment:"production",auto_merge:false,required_contexts:[],payload:{workflow_sha:$workflow_sha,candidate_sha:$candidate_sha,operation:$operation,build_run_id:$build,image_digest:$digest,app_deploy_required:$app_deploy,schema_action:$schema_action,expected_runtime_api_sha:$expected_api_sha,expected_runtime_worker_sha:$expected_worker_sha,actual_runtime_api_sha:"NOT_VERIFIED",actual_runtime_worker_sha:"NOT_VERIFIED",runtime_verify_status:"PENDING"}}' > "$RUNNER_TEMP/deployment.json"
           deployment_id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input "$RUNNER_TEMP/deployment.json" --jq .id)"
           [[ "$deployment_id" =~ ^[0-9]+$ ]]
           echo "id=$deployment_id" >> "$GITHUB_OUTPUT"
@@ -1139,8 +1155,17 @@ jobs:
         if: steps.baseline.outputs.app_deploy_required == 'true'
         env:
           MAXIBOT_COMMIT_SHA: ${{ env.CANDIDATE_SHA }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          current_main="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" || {
+            echo 'PRODUCTION_APPLY=FAIL:main-read-before-kamal' >&2
+            exit 1
+          }
+          if [[ "$current_main" != "$GITHUB_SHA" ]]; then
+            echo "STALE_MAIN_CANDIDATE: queued=$GITHUB_SHA current_main=$current_main; refusing Kamal Apply" >&2
+            exit 1
+          fi
           install -d -m 700 .kamal
           umask 077
           trap 'rm -f .kamal/secrets' EXIT
@@ -1191,6 +1216,7 @@ jobs:
             bundle exec kamal deploy --skip-push --version "$IMAGE_VERSION" --roles worker
           fi
       - name: Verify runtime, network connectivity, and Worker heartbeat
+        id: runtime_verify
         env:
           APP_DEPLOY_REQUIRED: ${{ steps.baseline.outputs.app_deploy_required }}
           EXPECTED_RUNTIME_SHA: ${{ steps.baseline.outputs.app_deploy_required == 'true' && env.CANDIDATE_SHA || steps.baseline.outputs.baseline_sha }}
@@ -1205,6 +1231,7 @@ jobs:
           EXPECTED_DB_VOLUME: ${{ steps.baseline.outputs.old_db_volume }}
           EXPECTED_REDIS_VOLUME: ${{ steps.baseline.outputs.old_redis_volume }}
           EXPECTED_UPLOADS_VOLUME: ${{ steps.baseline.outputs.old_uploads_volume }}
+          SCHEMA_ACTION: ${{ steps.baseline.outputs.migration_required == 'true' && 'APPLY' || 'SKIP' }}
         run: |
           set -euo pipefail
           curl --silent --show-error --fail --retry 10 --retry-all-errors --retry-delay 2 https://api.maxibot.pro/health/live >/dev/null
@@ -1289,6 +1316,11 @@ jobs:
           worker_id="$(ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "docker ps -q --no-trunc --filter label=service=maxibot --filter label=role=worker")"
           [[ "$worker_id" =~ ^[0-9a-f]{64}$ ]]
           ssh -i "$PRODUCTION_SSH" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$PRODUCTION_KNOWN_HOSTS_FILE" "root@$PRODUCTION_HOST" "python3 /tmp/maxibot-worker-health-$GITHUB_RUN_ID.py --container '$worker_id' --interval 60 --max-age 90 --expected-release '$EXPECTED_WORKER_SHA'"
+          {
+            echo "actual_runtime_api_sha=$EXPECTED_RUNTIME_SHA"
+            echo "actual_runtime_worker_sha=$EXPECTED_WORKER_SHA"
+            echo 'runtime_verify_status=PASS'
+          } >> "$GITHUB_OUTPUT"
           echo 'MAXIBOT_KAMAL_DEPLOY_VERIFY=PASS' >> "$GITHUB_STEP_SUMMARY"
       - name: Record the actual verified application result
         if: always() && steps.deployment.outputs.id != ''
@@ -1296,13 +1328,48 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
           JOB_RESULT: ${{ job.status }}
+          ACTUAL_RUNTIME_API_SHA: ${{ steps.runtime_verify.outputs.actual_runtime_api_sha }}
+          ACTUAL_RUNTIME_WORKER_SHA: ${{ steps.runtime_verify.outputs.actual_runtime_worker_sha }}
+          RUNTIME_VERIFY_RESULT: ${{ steps.runtime_verify.outcome }}
+          APP_DEPLOY_REQUIRED: ${{ steps.baseline.outputs.app_deploy_required }}
+          SCHEMA_ACTION: ${{ steps.baseline.outputs.migration_required == 'true' && 'APPLY' || 'SKIP' }}
         run: |
           set -euo pipefail
           [[ "$DEPLOYMENT_ID" =~ ^[0-9]+$ ]]
           state=failure
-          if [[ "$JOB_RESULT" == success ]]; then state=success; fi
+          verify_status=NOT_VERIFIED
+          if [[ "$RUNTIME_VERIFY_RESULT" == success ]]; then verify_status=PASS; fi
+          if [[ "$RUNTIME_VERIFY_RESULT" == failure ]]; then verify_status=FAIL; fi
+          if [[ "$JOB_RESULT" == success && "$RUNTIME_VERIFY_RESULT" == success ]]; then state=success; fi
+          api_sha="${ACTUAL_RUNTIME_API_SHA:-NOT_VERIFIED}"
+          worker_sha="${ACTUAL_RUNTIME_WORKER_SHA:-NOT_VERIFIED}"
+          runtime_identity_valid=true
+          if [[ "$state" == success ]]; then
+            if [[ ! "$api_sha" =~ ^[0-9a-f]{40}$ || ! "$worker_sha" =~ ^[0-9a-f]{40}$ ]]; then
+              state=failure
+              verify_status=NOT_VERIFIED
+              runtime_identity_valid=false
+              api_sha=NOT_VERIFIED
+              worker_sha=NOT_VERIFIED
+            fi
+          else
+            api_sha=NOT_VERIFIED
+            worker_sha=NOT_VERIFIED
+          fi
+          {
+            echo "workflow_sha=$GITHUB_SHA"
+            echo "candidate_sha=$CANDIDATE_SHA"
+            echo "actual_runtime_api_sha=$api_sha"
+            echo "actual_runtime_worker_sha=$worker_sha"
+            echo "build_run_id=$BUILD_RUN_ID"
+            echo "image_digest=${IMAGE_REF##*@}"
+            echo "app_deploy_required=$APP_DEPLOY_REQUIRED"
+            echo "schema_action=$SCHEMA_ACTION"
+            echo "runtime_verify_status=$verify_status"
+          } >> "$GITHUB_STEP_SUMMARY"
           gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
             -f state="$state" -f environment=production -f environment_url=https://api.maxibot.pro \
             -f log_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            -f description="$RELEASE_OPERATION $CANDIDATE_SHA runtime Verify: $JOB_RESULT" >/dev/null
+            -f description="runtime_verify=$verify_status api=$api_sha worker=$worker_sha" >/dev/null
+          [[ "$runtime_identity_valid" == true ]]
 

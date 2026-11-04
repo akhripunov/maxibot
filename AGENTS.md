@@ -4,15 +4,15 @@ For ordinary, OWNER-authorized production releases the executable source of trut
 
 **Important:** every `main` push, including docs and `AGENTS.md`, can trigger a real production deployment. Do not push implementation-only or instruction-only changes to `main` without OWNER release authorization for that scope. A branch/PR is safe for review and must not be mistaken for a production release. GitHub CI and protected production safety gates remain mandatory; no bypass to save time. Historical ME-51, V2/V5, Compose and Mac-runner instructions below are archive, NOT the ordinary release procedure.
 
-**Pre-push speed:** use the scope-based FAST/FULL decision in
-`docs/ORCHESTRATION_PROTOCOL.md` and the timing checklist in
-`docs/RELEASE_AUTOMATION.md`. Do not load old release archives, relaunch
-completed checks, or invoke ceremonial subagents for an unaffected path. Open
-the current GitHub access runbook only when an actual GitHub/GHCR transport,
-DNS, TLS, authentication or permission error needs diagnosis. Healthy access
-does not require that Linear read. Check exact remote SHA when a write or
-release task requires it, preserve existing worktrees, and apply required gates
-for changed paths.
+**Pre-push speed:** apply the current FAST/FULL boundary in
+`docs/ORCHESTRATION_PROTOCOL.md`. FAST remains limited to narrow non-policy
+documentation; executable changes use FULL until OWNER approves a policy
+change. Hosted full CI and all release gates remain mandatory. Reuse local
+evidence only for the exact candidate, dependencies and conditions. Use the
+existing SHA-bound DEV handoff; DevOps validates its provenance and complete
+release diff without creating a duplicate handoff or rerunning unchanged
+checks. Record timing with `docs/RELEASE_AUTOMATION.md`. Healthy GitHub access
+does not require a runbook read; retrieve it only for an actual access error.
 
 ---
 

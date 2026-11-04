@@ -6,7 +6,7 @@ Run the single entry point:
 ./scripts/qa_check.sh
 ```
 
-The runner executes static checks, unit tests, integration tests, the full regression baseline, Docker build, staging health, and staging E2E in that order. It records `QA_VERDICT` for information. Deterministic test, build, staging, and E2E failures still stop the run. Independent/manual QA findings may produce `NO_GO`, which is advisory for prospective candidate release readiness.
+The runner executes static checks, one full pytest collection with a JUnit report, Docker build, staging health, and staging E2E in that order. The report partitions that single test pass into disjoint categories: regression/release/smoke paths, the existing integration files plus `tests/integration/` and `tests/e2e/`, and the remaining tests as unit. Every collected test executes once; per-category duration is summed pytest case time, while total QA duration is wall-clock time. It records `QA_VERDICT` for information. Deterministic test, build, staging, and E2E failures still stop the run. Independent/manual QA findings may produce `NO_GO`, which is advisory for prospective candidate release readiness.
 
 The QA runner never deploys production. Production releases use the protected Native Release workflow and Kamal. Extra arguments are rejected so QA cannot become an alternate deployment engine. Configure `QA_STAGING_URL` and `QA_STAGING_E2E_CMD` to make staging mandatory. For local Docker Desktop on macOS, use the isolated staging stack:
 

@@ -428,17 +428,107 @@ EOF
   return "$rc"
 }
 
+classify_test_suites() {
+  local xml="$1"
+  "${QA_PYTHON:-python3}" - "$xml" <<'PY'
+import pathlib
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+groups = {
+    "unit": [0, 0, 0, 0],
+    "integration": [0, 0, 0, 0],
+    "regression": [0, 0, 0, 0],
+}
+integration_files = {
+    "tests/test_demo_flows.py",
+    "tests/test_scenarios.py",
+    "tests/test_yandex_oauth.py",
+    "tests/test_yandex_metrica.py",
+}
+cases = list(root.iter("testcase"))
+if not cases:
+    raise SystemExit("JUnit report contains no test cases")
+
+for case in cases:
+    path = case.get("file", "").replace("\\", "/")
+    if path.startswith("./"):
+        path = path[2:]
+    if not path:
+        module = case.get("classname", "").replace("::", ".").split(".")
+        if module and module[0] == "tests":
+            for index, part in enumerate(module[1:], 1):
+                if part.startswith("test_"):
+                    path = "/".join(module[:index + 1]) + ".py"
+                    break
+    if path.startswith(("tests/regression/", "tests/release/", "tests/smoke/")):
+        group = "regression"
+    elif path in integration_files or path.startswith("tests/e2e/") or path.startswith("tests/integration/"):
+        group = "integration"
+    elif path.startswith("tests/"):
+        group = "unit"
+    else:
+        raise SystemExit("cannot classify JUnit test case path: " + (path or "<missing>"))
+    row = groups[group]
+    row[0] += 1
+    row[1] += sum(child.tag.rsplit("}", 1)[-1] in {"failure", "error"} for child in case)
+    row[2] += sum(child.tag.rsplit("}", 1)[-1] == "skipped" for child in case)
+    row[3] += int(float(case.get("time", "0")) * 1000)
+
+print(" ".join(str(value) for name in ("unit", "integration", "regression") for value in groups[name]))
+PY
+}
+
 run_static || fail_gate
 if [ "${QA_LOCAL_DOCKER:-0}" = "1" ]; then
   if ! command -v docker >/dev/null 2>&1 || ! docker_build >"$LOG_DIR/build.log" 2>&1; then BUILD="FAIL"; fail_gate; fi
   BUILD="PASS"; IMAGE_BUILT=1
 fi
-run_tests unit tests -q || { UNIT="FAIL"; fail_gate; }
-UNIT="PASS"
-run_tests integration tests/test_demo_flows.py tests/test_scenarios.py tests/test_yandex_oauth.py tests/test_yandex_metrica.py || { INTEGRATION="FAIL"; fail_gate; }
-INTEGRATION="PASS"
-run_tests regression tests tests/regression || { REGRESSION="FAIL"; fail_gate; }
-REGRESSION="PASS"
+full_suite_rc=0
+run_tests full tests -q || full_suite_rc=$?
+if [ ! -s "$LOG_DIR/full.xml" ]; then
+  UNIT="FAIL"; INTEGRATION="FAIL"; REGRESSION="FAIL"
+  echo "full pytest run did not produce a JUnit report" >&2
+  fail_gate
+fi
+suite_counts="$(classify_test_suites "$LOG_DIR/full.xml")" || {
+  UNIT="FAIL"; INTEGRATION="FAIL"; REGRESSION="FAIL"
+  echo "full pytest JUnit report could not be partitioned safely" >&2
+  fail_gate
+}
+read -r UNIT_TESTS UNIT_FAILED UNIT_SKIPPED UNIT_DURATION_MS \
+  INTEGRATION_TESTS INTEGRATION_FAILED INTEGRATION_SKIPPED INTEGRATION_DURATION_MS \
+  REGRESSION_TESTS REGRESSION_FAILED REGRESSION_SKIPPED REGRESSION_DURATION_MS <<EOF
+$suite_counts
+EOF
+UNIT_PASSED=$((UNIT_TESTS-UNIT_FAILED-UNIT_SKIPPED))
+INTEGRATION_PASSED=$((INTEGRATION_TESTS-INTEGRATION_FAILED-INTEGRATION_SKIPPED))
+REGRESSION_PASSED=$((REGRESSION_TESTS-REGRESSION_FAILED-REGRESSION_SKIPPED))
+UNIT="PASS"; INTEGRATION="PASS"; REGRESSION="PASS"
+if (( UNIT_TESTS == 0 || INTEGRATION_TESTS == 0 || REGRESSION_TESTS == 0 )); then
+  echo "full pytest report is missing a required suite category" >&2
+  UNIT="FAIL"; INTEGRATION="FAIL"; REGRESSION="FAIL"
+  fail_gate
+fi
+if (( UNIT_TESTS + INTEGRATION_TESTS + REGRESSION_TESTS != TOTAL_TESTS ||
+      UNIT_FAILED + INTEGRATION_FAILED + REGRESSION_FAILED != FAILED ||
+      UNIT_SKIPPED + INTEGRATION_SKIPPED + REGRESSION_SKIPPED != SKIPPED )); then
+  echo "JUnit category totals do not match pytest totals: tests=$TOTAL_TESTS failures=$FAILED skipped=$SKIPPED" >&2
+  UNIT="FAIL"; INTEGRATION="FAIL"; REGRESSION="FAIL"
+  fail_gate
+fi
+if (( full_suite_rc != 0 || FAILED > 0 )); then
+  if (( full_suite_rc != 0 && FAILED == 0 )); then
+    echo "pytest failed without a classifiable test failure; suite categories are unverified" >&2
+    UNIT="FAIL"; INTEGRATION="FAIL"; REGRESSION="FAIL"
+  else
+    (( UNIT_FAILED == 0 )) || UNIT="FAIL"
+    (( INTEGRATION_FAILED == 0 )) || INTEGRATION="FAIL"
+    (( REGRESSION_FAILED == 0 )) || REGRESSION="FAIL"
+  fi
+  fail_gate
+fi
 EXECUTED_CASES="$AUTOMATED_CASES"
 PASSED_CASES="$AUTOMATED_CASES"
 
