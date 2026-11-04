@@ -113,7 +113,6 @@ async def test_user_with_only_bots_does_not_show_them_as_channels(db, monkeypatc
     assert pairs(channel_keyboard) == [("⬅️ Назад", "home")]
     assert pairs(bots_keyboard) == [
         ("🟡 Only bot · @onlybot", f"promotion_bot:{bot.id}"),
-        ("⚙️ Управление", f"custom_bot:{bot.id}"),
         ("🤖 Добавить бота", "connect_bot"),
         ("⬅️ Главное меню", "home"),
     ]
@@ -134,9 +133,7 @@ async def test_my_bots_lists_all_owned_bots_and_owner_only_system_bot(db, monkey
     assert pairs(keyboard) == [
         ("🤖 MAXIBOT", "promotion_maxibot"),
         ("🟡 Agata · @agata", f"promotion_bot:{own_a.id}"),
-        ("⚙️ Управление", f"custom_bot:{own_a.id}"),
         ("🟡 Support · @support", f"promotion_bot:{own_b.id}"),
-        ("⚙️ Управление", f"custom_bot:{own_b.id}"),
         ("🤖 Добавить бота", "connect_bot"),
         ("⬅️ Главное меню", "home"),
     ]
@@ -227,10 +224,12 @@ async def test_my_bots_keeps_promotion_and_management_paths_for_owned_bot(db):
     promotion_text, promotion_keyboard = await menu.render_screen(db, owner, f"promotion_bot:{bot.id}")
     management_text, management_keyboard = await menu.render_screen(db, owner, f"custom_bot:{bot.id}")
 
-    assert pairs(list_keyboard)[:2] == [
+    assert pairs(list_keyboard) == [
         ("🟡 Agata · @agata", f"promotion_bot:{bot.id}"),
-        ("⚙️ Управление", f"custom_bot:{bot.id}"),
+        ("🤖 Добавить бота", "connect_bot"),
+        ("⬅️ Главное меню", "home"),
     ]
+    assert all(label != "⚙️ Управление" for label, _ in pairs(list_keyboard))
     assert promotion_text.startswith("📣 Продвижение")
     assert [callback for _, callback in pairs(promotion_keyboard)] == [
         f"promotion_bot_yandex:{bot.id}", f"ads_bot:{bot.id}",
