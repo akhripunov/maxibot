@@ -11,7 +11,7 @@ def test_connection_flow_fetches_chat_and_persists_private_link():
 def test_bot_added_sync_is_channel_scoped_and_read_only():
     source = Path("app/bot/runtime.py").read_text()
     assert 'await self.client.get_chat(update.chat_id)' in source
-    assert 'connect_channel_from_bot_added(update.chat_id' in source
+    assert 'connect_channel_from_bot_added(channel_external_id, payload)' in source
     assert 'CHAT_UPDATE' not in source
 
 

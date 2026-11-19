@@ -29,7 +29,9 @@ def test_home_media_is_temporarily_disabled_for_all_screens():
 def test_promotion_connect_uses_short_exact_copy_only_on_connect_screen():
     source = Path("app/bot/menu.py").read_text()
     assert "def promotion_connect_text()" in source
-    assert 'return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))' in source
+    screen = source.split('if screen == "promotion_connect":', 1)[1].split('if screen == "subscription":', 1)[0]
+    assert 'return promotion_connect_text(), buttons(' in screen
+    assert '"channel_recheck"' in screen
     assert "Добавьте MAXIBOT в канал — после этого он" in source
     assert "автоматически появится в списке продвижения." in source
     assert 'if screen == "promotion":' in source
@@ -49,13 +51,6 @@ def test_custom_bot_refresh_state_reaches_token_probe_and_result_screens():
     assert 'custom_bot_error' in runtime
     assert 'async def update_custom_bot_token' in menu
 
-def test_valid_bot_added_without_owner_proof_is_accepted():
-    source = Path("app/bot/menu.py").read_text()
-    assert 'str(chat_type or "").lower() != "channel"' in source
-    assert '"owner_user_id": str(initiator_user_id)' in source
-    assert '"target_url": str(link)' in source
-
-
 def test_existing_owner_conflict_is_rejected():
     source = Path("app/bot/menu.py").read_text()
     assert '"channel_owned_by_another_admin"' in source
@@ -63,26 +58,16 @@ def test_existing_owner_conflict_is_rejected():
 
 def test_non_channel_payload_is_rejected():
     source = Path("app/bot/menu.py").read_text()
-    section = source[source.index("def official_bot_added_channel"):source.index("class MenuRepository")]
+    section = source[source.index("def official_channel_roles"):source.index("def official_bot_added_channel")]
     assert 'chat_type = chat.get("chat_type") or chat.get("type")' in section
 
 
-def test_missing_or_invalid_official_link_fails_closed():
-    source = Path("app/bot/menu.py").read_text()
-    section = source[source.index("def official_bot_added_channel"):source.index("class MenuRepository")]
-    assert 'if not valid_max_target(link):' in section
-
-
 def test_safe_bot_added_diagnostics_cover_owner_and_link_contract():
-    source = Path("app/bot/menu.py").read_text()
     runtime = Path("app/bot/runtime.py").read_text()
-    assert "def official_bot_added_diagnostics" in source
-    assert '"owner_matches_initiator"' in source
-    assert '"link_valid"' in source
-    assert "MAX_CHANNEL_AUTO_CONNECT_DIAGNOSTICS" in runtime
-    assert "initiator_is_owner" in runtime
-    assert "get_admins(update.chat_id)" in runtime
-    assert "admin_read_status = exc.status_code" in runtime
+    log_format = next(line for line in runtime.splitlines() if '"MAX_CHANNEL_AUTO_CONNECT_DIAGNOSTICS' in line)
+    assert "chat_owner_present=%s" in log_format
+    assert "link_present=%s" in log_format
+    assert "chat_id=" not in log_format
 
 
 def test_application_flow_is_idempotent_and_does_not_rebind_conflicts():
@@ -92,7 +77,7 @@ def test_application_flow_is_idempotent_and_does_not_rebind_conflicts():
     assert '"channel_owned_by_another_admin"' in source
     assert '"status": "duplicate"' in source
     assert "if not channel.bot_connection_id" in source
-    assert "connect_channel_from_bot_added(update.chat_id, update.user_id, chat)" in runtime
+    assert "self._connect_primary_channel(update.chat_id)" in runtime
     assert 'raw.get("type") == "channel"' in runtime
 
 

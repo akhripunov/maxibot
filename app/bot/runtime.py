@@ -13,7 +13,10 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.bot.menu import MenuRepository, is_maxibot_owner, official_bot_added_diagnostics, _fresh_campaign_provider_state
+from app.bot.menu import (
+    MenuRepository, _fresh_campaign_provider_state, is_maxibot_owner, official_bot_added_channel, official_channel_roles,
+    support_button,
+)
 from app.db.models import Admin, AdsAiOutcome, AdsAiRun, AdsCampaign, AdsRecommendation, BotPromotionProfile, Channel, Conversation, MaxPollingCheckpoint, Message, SubscriptionOrder
 from app.domain.services import default_welcome, render_channel_welcome_message, normalize_channel_sent
 from app.core.config import settings
@@ -950,8 +953,21 @@ class MaxBotRuntime:
         if action.startswith("inbox_bind:"):
             await self._bind_inbox_from_callback(update, action.split(":", 1)[1])
             return
+        if action == "channel_recheck":
+            await self.client.send_message(
+                str(user_id),
+                "Если у вас есть числовой ID канала, отправьте его командой /connect_channel в этом диалоге. "
+                "Например: /connect_channel -123456789.\n\n"
+                "Если ID неизвестен, напишите в поддержку и укажите название канала "
+                "и примерное время добавления MAXIBOT.",
+                [[support_button()]],
+            )
+            return
         if action.startswith("channel_admin_done:"):
-            await self._channel_admin_done(str(user_id), action.split(":", 1)[1])
+            callback = (update.raw or {}).get("callback")
+            actor = callback.get("user") if isinstance(callback, dict) else None
+            if isinstance(actor, dict) and actor.get("user_id"):
+                await self._channel_admin_done(str(actor["user_id"]), action.split(":", 1)[1])
             return
         if action.startswith("channel_admin_cancel:"):
             await self.client.send_message(str(user_id), "❌ Подключение канала отменено.")
@@ -2013,38 +2029,64 @@ class MaxBotRuntime:
         except Exception:
             logger.exception("MAX live native feed delivery failed")
 
-    async def _channel_admin_done(self, owner_id: str, channel_external_id: str) -> None:
-        """Finish channel onboarding after the owner grants admin rights."""
+    async def _connect_primary_channel(
+        self, channel_external_id: str, expected_owner_id: str | None = None,
+    ) -> dict:
+        chat = await self.client.get_chat(channel_external_id)
         try:
-            chat = await self.client.get_chat(channel_external_id)
             admins = await self.client.get_admins(channel_external_id)
-            bot_profile = await self.client.get_me()
-        except Exception:
-            await self.client.send_message(owner_id, "⚠️ Не удалось проверить права бота. Попробуйте нажать «Готово» ещё раз.")
-            return
-        bot_id = bot_profile.get("user_id") or bot_profile.get("id") if isinstance(bot_profile, dict) else None
-        members = admins.get("members", []) if isinstance(admins, dict) else []
-        is_admin = bool(bot_id) and any(
-            isinstance(member, dict) and str(member.get("user_id") or member.get("id")) == str(bot_id)
-            for member in members
-        ) if isinstance(members, list) else False
-        if not is_admin:
-            await self.client.send_message(
-                owner_id,
-                "⚠️ Бот всё ещё не является администратором.\n\n"
-                "Назначьте MAXIBOT администратором канала и нажмите «Готово» ещё раз.",
-                [[
-                    {"text": "✅ Готово", "callback_data": f"channel_admin_done:{channel_external_id}"},
-                    {"text": "❌ Отмена", "callback_data": f"channel_admin_cancel:{channel_external_id}"},
-                ]],
-            )
-            return
-        result = await self.repo.connect_channel_from_bot_added(channel_external_id, owner_id, chat)
+        except MaxApiError as exc:
+            if exc.status_code != 403:
+                raise
+            # MAX restricts this endpoint to bot administrators. The initial
+            # subscriber event can arrive before that permission is granted.
+            owner = chat.get("owner_id") if isinstance(chat, dict) else None
+            if expected_owner_id is None and type(owner) is int and owner > 0 and (
+                chat.get("chat_type") or chat.get("type")
+            ) == "channel":
+                return {"status": "needs_admin", "owner_user_id": str(owner)}
+            raise
+        bot_profile = await self.client.get_me()
+        bot_id = bot_profile.get("user_id") if isinstance(bot_profile, dict) else None
+        payload = official_bot_added_channel(chat, expected_owner_id, admins=admins, bot_user_id=bot_id)
+        logger.info(
+            "MAX_CHANNEL_AUTO_CONNECT_DIAGNOSTICS verified=%s chat_owner_present=%s link_present=%s recheck=%s",
+            bool(payload), isinstance(chat, dict) and chat.get("owner_id") is not None,
+            isinstance(chat, dict) and chat.get("link") is not None, expected_owner_id is not None,
+        )
+        if not payload:
+            if expected_owner_id is None:
+                owner_id, bot_is_admin = official_channel_roles(chat, admins, bot_id)
+                if owner_id and not bot_is_admin:
+                    return {"status": "needs_admin", "owner_user_id": owner_id}
+            return {"status": "rejected", "reason": "official_channel_verification_failed"}
+        result = await self.repo.connect_channel_from_bot_added(channel_external_id, payload)
+        if result.get("status") in {"created", "updated", "duplicate"}:
+            owner_id = payload["owner_user_id"]
+            result["owner_user_id"] = owner_id
+            if expected_owner_id is None:
+                conversion = await self.repo.queue_system_channel_connected(owner_id)
+                logger.info("SYSTEM_CHANNEL_CONNECTED_CONVERSION status=%s", conversion)
+        return result
+
+    async def _channel_admin_done(self, owner_id: str, channel_external_id: str) -> None:
+        """Check an already-added bot at the authenticated channel owner's request."""
+        result = {}
+        if re.fullmatch(r"-?[1-9][0-9]{0,18}", channel_external_id) and -(2**63) <= int(channel_external_id) < 2**63:
+            try:
+                result = await self._connect_primary_channel(channel_external_id, expected_owner_id=owner_id)
+            except MaxApiError as exc:
+                logger.info("MAX_CHANNEL_RECHECK_API_ERROR status=%s", exc.status_code)
         if result.get("status") in {"created", "updated", "duplicate"}:
             await self.client.send_message(owner_id, f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.")
             await self._render(owner_id, "channels")
         else:
-            await self.client.send_message(owner_id, "⚠️ Не удалось завершить подключение канала. Попробуйте ещё раз.")
+            await self.client.send_message(
+                owner_id,
+                "⚠️ Не удалось подтвердить подключение. Проверьте ID канала, "
+                "что вы вошли как его владелец и что MAXIBOT назначен администратором. Затем повторите проверку.",
+                [[{"text": "🔄 Проверить подключение", "callback_data": "channel_recheck"}]],
+            )
 
     async def _bot_added(self, update: MaxUpdate):
         if not update.chat_id or update.bot_connection_id:
@@ -2069,74 +2111,26 @@ class MaxBotRuntime:
                 await self.repo.mark_max_channel_removed(update.chat_id, update.user_id)
                 logger.info("MAX bot removed from channel chat_id=%s", update.chat_id)
                 return
+            if update.update_type != "bot_added":
+                return
             try:
-                chat = await self.client.get_chat(update.chat_id)
-                admin_read_status = 200
-                try:
-                    admins = await self.client.get_admins(update.chat_id)
-                except MaxApiError as exc:
-                    # Admin listing is diagnostic only.  A 403 must not turn
-                    # the fail-closed channel validation into a sync error.
-                    admins = {}
-                    admin_read_status = exc.status_code
-                admin_members = admins.get("members", []) if isinstance(admins, dict) else []
-                try:
-                    bot_profile = await self.client.get_me()
-                except Exception:
-                    bot_profile = {}
-                primary_bot_id = bot_profile.get("user_id") or bot_profile.get("id") if isinstance(bot_profile, dict) else None
-                bot_is_admin = any(
-                    isinstance(member, dict)
-                    and str(member.get("user_id") or member.get("id")) == str(primary_bot_id)
-                    for member in admin_members
-                ) if isinstance(admin_members, list) and primary_bot_id else False
-                initiator_in_admins = any(
-                    isinstance(member, dict)
-                    and str(member.get("user_id") or member.get("id")) == str(update.user_id)
-                    for member in admin_members
-                ) if isinstance(admin_members, list) else False
-                initiator_is_owner = any(
-                    isinstance(member, dict)
-                    and str(member.get("user_id") or member.get("id")) == str(update.user_id)
-                    and bool(member.get("is_owner"))
-                    for member in admin_members
-                ) if isinstance(admin_members, list) else False
-                facts = official_bot_added_diagnostics(chat, update.user_id)
-                facts.update({
-                    "admins_read": isinstance(admin_members, list),
-                    "admins_read_status": admin_read_status,
-                    "admin_count": len(admin_members) if isinstance(admin_members, list) else None,
-                    "initiator_in_admins": initiator_in_admins,
-                    "initiator_is_owner": initiator_is_owner,
-                })
-                logger.warning(
-                    "MAX_CHANNEL_AUTO_CONNECT_DIAGNOSTICS chat_id=%s facts=%s",
-                    update.chat_id,
-                    facts,
-                )
-                result = await self.repo.connect_channel_from_bot_added(update.chat_id, update.user_id, chat)
-                logger.warning("MAX_CHANNEL_AUTO_CONNECT status=%s reason=%s",
-                               result.get("status"), result.get("reason"))
-                if result.get("status") in {"created", "updated", "duplicate"} and update.user_id:
-                    system_conversion_status = await self.repo.queue_system_channel_connected(str(update.user_id))
-                    logger.info("SYSTEM_CHANNEL_CONNECTED_CONVERSION status=%s", system_conversion_status)
-                if result.get("status") in {"created", "updated", "duplicate"} and update.user_id:
-                    if admin_read_status == 200 and not bot_is_admin:
-                        await self.client.send_message(
-                            str(update.user_id),
-                            "⚠️ Бот добавлен, но не является администратором.\n\n"
-                            "Пожалуйста, назначьте MAXIBOT администратором канала и нажмите «Готово».",
-                            [[
-                                {"text": "✅ Готово", "callback_data": f"channel_admin_done:{update.chat_id}"},
-                                {"text": "❌ Отмена", "callback_data": f"channel_admin_cancel:{update.chat_id}"},
-                            ]],
-                        )
-                        return
+                result = await self._connect_primary_channel(update.chat_id)
+                logger.info("MAX_CHANNEL_AUTO_CONNECT status=%s reason=%s", result.get("status"), result.get("reason"))
+                if result.get("status") == "needs_admin":
                     await self.client.send_message(
-                        str(update.user_id),
-                        f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.",
+                        result["owner_user_id"],
+                        "⚠️ Бот добавлен, но не является администратором. "
+                        "Назначьте MAXIBOT администратором канала и нажмите «Проверить подключение».",
+                        [[{"text": "🔄 Проверить подключение", "callback_data": f"channel_admin_done:{update.chat_id}"}]],
                     )
-                    await self._render(str(update.user_id), "channels")
+                elif result.get("status") in {"created", "updated"}:
+                    owner_id = result["owner_user_id"]
+                    await self.client.send_message(
+                        owner_id, f"✅ Канал «{result.get('title') or 'MAX'}» подключён к MAXIBOT.",
+                    )
+                    await self._render(owner_id, "channels")
+            except MaxApiError as exc:
+                logger.info("MAX_CHANNEL_SYNC_API_ERROR status=%s", exc.status_code)
             except Exception:
                 logger.exception("MAX_CHANNEL_SYNC_FAILED")
             return
@@ -2257,6 +2251,10 @@ class MaxBotRuntime:
             return
         normalized_text = (message.text or "").strip().lower()
         actor_id = self._event_user_id(update)
+        command = normalized_text.split(maxsplit=1)
+        if command and command[0] == "/connect_channel" and message.recipient_id and message.sender_id:
+            await self._channel_admin_done(message.sender_id, command[1] if len(command) == 2 else "")
+            return
         if self._is_start_command(normalized_text):
             logger.warning("MAX start command handled")
             await self._start(update)

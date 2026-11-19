@@ -110,7 +110,7 @@ async def test_user_with_only_bots_does_not_show_them_as_channels(db, monkeypatc
     _, bots_keyboard = await menu.render_screen(db, user, "my_bots")
 
     assert "Подключение канала" in channel_text
-    assert pairs(channel_keyboard) == [("⬅️ Назад", "home")]
+    assert pairs(channel_keyboard) == [("🔄 Проверить подключение", "channel_recheck"), ("⬅️ Назад", "home")]
     assert pairs(bots_keyboard) == [
         ("🟡 Only bot · @onlybot", f"promotion_bot:{bot.id}"),
         ("🤖 Добавить бота", "connect_bot"),

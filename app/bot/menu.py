@@ -12,7 +12,7 @@ import socket
 import secrets
 from zoneinfo import ZoneInfo
 from urllib.parse import quote, unquote
-from sqlalchemy import delete, exists, func, insert, select
+from sqlalchemy import delete, exists, func, insert, select, text as sql_text
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1390,74 +1390,63 @@ async def traffic_stats(db: AsyncSession, channel_id: str) -> dict[str, int | fl
     return await traffic_stats_for_channels(db, [channel_id])
 
 
-def official_bot_added_diagnostics(chat: dict, initiator_user_id: str | None) -> dict[str, object]:
-    """Return safe validation facts for a primary ``bot_added`` response.
-
-    This intentionally contains no raw owner ID or URL.  It is used for
-    production diagnostics when the fail-closed contract rejects metadata.
-    """
-    if not isinstance(chat, dict):
-        return {
-            "chat_is_dict": False,
-            "chat_type": None,
-            "owner_present": False,
-            "owner_type": None,
-            "initiator_present": bool(initiator_user_id),
-            "owner_matches_initiator": False,
-            "link_present": False,
-            "link_type": None,
-            "link_valid": False,
-        }
-    chat_type = chat.get("chat_type") or chat.get("type")
-    owner = chat.get("owner_id") or chat.get("owner_user_id")
-    if isinstance(owner, dict):
-        owner = owner.get("user_id") or owner.get("id")
-    if owner is None and isinstance(chat.get("owner"), dict):
-        owner = chat["owner"].get("user_id") or chat["owner"].get("id")
-    if owner is None and isinstance(chat.get("owner"), (str, int)):
-        owner = chat.get("owner")
-    link = chat.get("link")
-    return {
-        "chat_is_dict": True,
-        "chat_type": str(chat_type or "").lower() or None,
-        "owner_present": owner is not None,
-        "owner_type": type(owner).__name__ if owner is not None else None,
-        "initiator_present": bool(initiator_user_id),
-        "owner_matches_initiator": bool(owner and initiator_user_id and str(owner) == str(initiator_user_id)),
-        "link_present": bool(link),
-        "link_type": type(link).__name__ if link is not None else None,
-        "link_valid": bool(valid_max_target(link)),
-    }
-
-
-def official_bot_added_channel(chat: dict, initiator_user_id: str | None) -> dict | None:
-    """Validate the official channel metadata used by ``bot_added``.
-
-    ``bot_added.user`` is the authorized connector signal for this flow. MAX
-    does not guarantee ``owner_id`` for private channels. The link is accepted
-    only from the official chat response; user-provided URLs never enter this
-    flow.
-    """
-    if not isinstance(chat, dict) or not initiator_user_id:
-        return None
+def official_channel_roles(chat: dict, admins: dict, bot_user_id: str | int | None) -> tuple[str | None, bool]:
+    """Resolve an unambiguous channel owner and whether the primary bot is an admin."""
+    if not isinstance(chat, dict) or not bot_user_id or not isinstance(admins, dict):
+        return None, False
     chat_type = chat.get("chat_type") or chat.get("type")
     if str(chat_type or "").lower() != "channel":
+        return None, False
+    members = admins.get("members")
+    if not isinstance(members, list):
+        return None, False
+    owners = {
+        str(member["user_id"]) for member in members
+        if isinstance(member, dict) and member.get("is_owner") is True
+        and member.get("is_bot") is not True
+        and str(member.get("user_id", "")).isascii() and str(member.get("user_id", "")).isdigit()
+    }
+    if len(owners) != 1:
+        return None, False
+    owner_id = owners.pop()
+    chat_owner_id = chat.get("owner_id")
+    if owner_id in {"0", str(bot_user_id)} or (chat_owner_id is not None and str(chat_owner_id) != owner_id):
+        return None, False
+    bot_is_admin = any(
+        isinstance(member, dict) and member.get("is_admin") is True
+        and str(member.get("user_id")) == str(bot_user_id)
+        for member in members
+    )
+    return owner_id, bot_is_admin
+
+
+def official_bot_added_channel(
+    chat: dict, expected_owner_id: str | None, *, admins: dict, bot_user_id: str | int | None,
+) -> dict | None:
+    """Validate a primary channel using official MAX chat and admin responses."""
+    owner_id, bot_is_admin = official_channel_roles(chat, admins, bot_user_id)
+    if not owner_id or not bot_is_admin:
+        return None
+    if expected_owner_id is not None and str(expected_owner_id) != owner_id:
         return None
     link = chat.get("link")
-    if not valid_max_target(link):
-        return None
+    if link is not None:
+        try:
+            if not isinstance(link, str) or not valid_max_target(link):
+                return None
+        except ValueError:
+            return None
     return {
-        "owner_user_id": str(initiator_user_id),
+        "owner_user_id": owner_id,
         "title": str(chat.get("title") or chat.get("name") or "Канал MAX"),
         "avatar_url": chat.get("icon") if isinstance(chat.get("icon"), str) else None,
-        "target_url": str(link),
-        "is_public": bool(chat.get("is_public", chat.get("public", False))),
+        "target_url": link,
         "metadata": json.dumps({
             "title": chat.get("title") or chat.get("name"),
             "icon_present": bool(chat.get("icon")),
             "is_public": bool(chat.get("is_public", chat.get("public", False))),
-            "link_present": True,
-            "owner_id_present": bool(chat.get("owner_id") or chat.get("owner_user_id") or chat.get("owner")),
+            "link_present": link is not None,
+            "owner_id_present": chat.get("owner_id") is not None,
             "participants_count": chat.get("participants_count") if isinstance(chat.get("participants_count"), int) else None,
         }, ensure_ascii=False),
     }
@@ -1646,10 +1635,14 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
             buttons(("📢 Подключить канал", "connect_channel"), ("💎 О сервисе", "about")),
         )
     if screen == "connect_channel":
-        return channel_connection_instructions(), buttons(("⬅️ Главное меню", "home"))
+        return channel_connection_instructions(), buttons(
+            ("🔄 Проверить подключение", "channel_recheck"), ("⬅️ Главное меню", "home"),
+        )
     if screen == "promotion":
         if not channels and not is_maxibot_owner(admin):
-            return channel_connection_instructions(), buttons(("⬅️ Назад", "home"))
+            return channel_connection_instructions(), buttons(
+                ("🔄 Проверить подключение", "channel_recheck"), ("⬅️ Назад", "home"),
+            )
         rows = [[(channel.title, f"promotion_channel:{channel.id}")] for channel in channels]
         rows.extend([
             [("📣 Подключить ещё канал", "promotion_connect")],
@@ -1657,7 +1650,9 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         ])
         return promotion_intro_text(), buttons(*rows)
     if screen == "promotion_connect":
-        return promotion_connect_text(), buttons(("⬅️ Назад", "promotion"))
+        return promotion_connect_text(), buttons(
+            ("🔄 Проверить подключение", "channel_recheck"), ("⬅️ Назад", "promotion"),
+        )
     if screen == "subscription":
         channel_count = await db.scalar(select(func.count(Channel.id)).where(Channel.admin_id == admin.id)) or 0
         bot_count = await db.scalar(select(func.count(BotConnection.id)).where(
@@ -2000,7 +1995,7 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
                 channel.title,
                 yandex_value,
                 counter_id,
-                public_landing_url(landing.public_id) if landing else None,
+                public_landing_url(landing.public_id) if landing and profile and valid_max_target(profile.target_url) else None,
                 channel.daily_reports_enabled,
                 admin.subscription_expires_at,
             ),
@@ -2412,10 +2407,14 @@ async def render_screen(db: AsyncSession, admin: Admin, screen: str, channel_id:
         if not landing:
             return (f"📄 Лендинг\n\nДля канала «{channel.title}» лендинг ещё не создан.\nОткройте раздел ещё раз после создания лендинга.",
                     buttons(("⬅️ Назад", f"promotion_channel:{channel.id}")))
-        url = public_landing_url(landing.public_id)
         profile = await db.scalar(select(TrafficProfile).where(TrafficProfile.channel_id == selected_id))
-        target_hint = "✅ Цель перехода настроена." if profile and profile.target_url else "⚠️ Ссылка закрытого MAX-канала пока не настроена."
-        return (f"📄 Лендинг\n\n📢 {channel.title}\n🟢 Активен\n\n🔗 {url}\n\n{target_hint}",
+        if not profile or not valid_max_target(profile.target_url):
+            return (f"📄 Лендинг\n\n📢 {channel.title}\n\n"
+                    "⚠️ Рекламная ссылка станет доступна после получения ссылки на канал от MAX.",
+                    buttons(("⚙️ Настроить", f"promotion_settings:{channel.id}"),
+                            ("⬅️ Назад", f"promotion_channel:{channel.id}")))
+        url = public_landing_url(landing.public_id)
+        return (f"📄 Лендинг\n\n📢 {channel.title}\n🟢 Активен\n\n🔗 {url}\n\n✅ Цель перехода настроена.",
                 [[{"text": "🌐 Открыть лендинг", "type": "link", "url": url}],
                  [{"text": "⚙️ Настроить", "callback_data": f"promotion_settings:{channel.id}"}],
                  [{"text": "⬅️ Назад", "callback_data": f"promotion_channel:{channel.id}"}]])
@@ -3496,17 +3495,14 @@ class MenuRepository:
         async with self.session_factory() as db:
             return await resolve_channel_promotion_entitlement(db, admin_external_id, channel_id)
 
-    async def connect_channel_from_bot_added(self, channel_external_id: str,
-                                             initiator_user_id: str | None,
-                                             chat: dict) -> dict:
-        """Create or refresh an owner-scoped channel from PRIMARY bot_added."""
-        payload = official_bot_added_channel(chat, initiator_user_id)
-        if not channel_external_id:
-            return {"status": "rejected", "reason": "missing_chat_id"}
-        if not payload:
-            return {"status": "rejected", "reason": "official_channel_owner_or_link_check_failed"}
+    async def connect_channel_from_bot_added(self, channel_external_id: str, payload: dict) -> dict:
+        """Create or refresh a primary channel after verification against MAX."""
         owner_id = payload["owner_user_id"]
         async with self.session_factory() as db:
+            if db.get_bind().dialect.name == "postgresql":
+                # Serialize first insert as well as refresh when no row exists to lock yet.
+                await db.execute(sql_text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+                                 {"scope": f"maxibot:primary-channel:{channel_external_id}"})
             channel = await db.scalar(select(Channel).where(Channel.external_id == str(channel_external_id)).with_for_update())
             admin = await db.scalar(select(Admin).where(Admin.external_id == owner_id))
             if channel:
@@ -3536,7 +3532,7 @@ class MenuRepository:
                         attribution_window_hours=settings.traffic_attribution_window_hours,
                         conversion_policy=settings.traffic_conversion_policy,
                     ))
-                else:
+                elif payload["target_url"] is not None:
                     profile.target_url = payload["target_url"]
                 landing = await db.scalar(select(LandingPage).where(
                     LandingPage.channel_id == channel.id, LandingPage.is_active.is_(True),
@@ -3557,9 +3553,15 @@ class MenuRepository:
                 return {"status": "duplicate" if was_connected and landing else "updated", "channel_id": channel.id, "title": channel.title}
 
             if not admin:
-                admin = Admin(external_id=owner_id)
-                db.add(admin)
-                await db.flush()
+                if db.get_bind().dialect.name == "postgresql":
+                    await db.execute(postgres_insert(Admin).values(external_id=owner_id).on_conflict_do_nothing(
+                        index_elements=[Admin.external_id],
+                    ))
+                    admin = await db.scalar(select(Admin).where(Admin.external_id == owner_id))
+                else:
+                    admin = Admin(external_id=owner_id)
+                    db.add(admin)
+                    await db.flush()
             registry = await db.scalar(select(ChannelSlugRegistry).where(
                 ChannelSlugRegistry.max_channel_external_id == str(channel_external_id)
             ))
